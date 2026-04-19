@@ -341,7 +341,8 @@ app.get('/api/users/me', verifyToken, async (req, res) => {
     }
 });
 
-// 6. Update User Profileapp.put('/api/users/me', verifyToken, async (req, res) => {
+// 6. Update User Profile
+app.put('/api/users/me', verifyToken, async (req, res) => {
     try {
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
 
