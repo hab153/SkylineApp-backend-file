@@ -129,28 +129,22 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        const clientUrl = process.env.CLIENT_URL;
-
-        if (!clientUrl || clientUrl.includes('localhost')) {
-            console.error("ERROR: CLIENT_URL in .env is set to localhost.");
-            return res.status(400).json({ 
-                message: 'Payment configuration error: CLIENT_URL must be a public HTTPS URL.' 
-            });
-        }
-
-        // Clean URL to prevent double slashes
-        const cleanClientUrl = clientUrl.endsWith('/') ? clientUrl.slice(0, -1) : clientUrl;
+        // HARDCODE YOUR VERCEL URL HERE FOR TESTING
+        // Replace 'skyline-frontend-files-acnm' with your actual Vercel project name if different
+        const vercelUrl = 'https://skyline-frontend-files-acnm.vercel.app'; 
 
         const amount = 10; // $10 for Pro Plan
         const currency = "USD"; 
         const email = user.email;
         const fullName = user.fullName || user.username;        
         const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
         const payload = {
             tx_ref: txRef,
             amount: amount,
             currency: currency,
-            redirect_url: `${cleanClientUrl}/payment-success`,
+            // Use the hardcoded URL directly
+            redirect_url: `${vercelUrl}/payment-success`,
             customer: {
                 email: email,
                 phonenumber: user.phone || "08012345678",
@@ -185,7 +179,6 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     }
 });
 
-// ════════════════════════════════════════════
 //  PROTECTED API ROUTES
 // ════════════════════════════════════════════
 
