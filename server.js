@@ -86,27 +86,23 @@ const checkDailyLimit = async (req, res, next) => {
 //  FLUTTERWAVE PAYMENT ROUTES
 // ════════════════════════════════════════════
 
+// 1. Initialize Payment Route
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        // Get the Client URL from .env
-        // IMPORTANT: This MUST be a public URL (e.g., https://your-app.com or https://ngrok-url)
-        // It CANNOT be http://localhost:3000
         const clientUrl = process.env.CLIENT_URL;
 
-        if (!clientUrl || clientUrl.includes('localhost')) {            console.error("ERROR: CLIENT_URL in .env is set to localhost. Flutterwave cannot redirect to localhost.");
-            console.error("Please use Ngrok (https://ngrok.com) to get a public URL for testing, or deploy your frontend.");
+        if (!clientUrl || clientUrl.includes('localhost')) {
+            console.error("ERROR: CLIENT_URL in .env is set to localhost.");
             return res.status(400).json({ 
-                message: 'Payment configuration error: CLIENT_URL must be a public HTTPS URL, not localhost.' 
+                message: 'Payment configuration error: CLIENT_URL must be a public HTTPS URL.' 
             });
         }
 
-        // Define payment details
-        const amount = 10; // $10 for Pro Plan (Change currency if needed, e.g., NGN, KES)
+        const amount = 10; // $10 for Pro Plan
         const currency = "USD"; 
-        
         const email = user.email;
         const fullName = user.fullName || user.username;        
         const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
@@ -115,17 +111,16 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             tx_ref: txRef,
             amount: amount,
             currency: currency,
-            // Use the public URL from .env
             redirect_url: `${clientUrl}/payment-success`,
             customer: {
                 email: email,
-                phonenumber: user.phone || "08012345678", // Optional field
+                phonenumber: user.phone || "08012345678",
                 name: fullName,
             },
             customizations: {
                 title: 'Skyline AA-1 Pro Plan',
                 description: 'Monthly Subscription for Unlimited Access',
-                logo: 'https://your-logo-url.com/logo.png', // Optional
+                logo: 'https://your-logo-url.com/logo.png',
             },
             meta: {
                 userId: user._id.toString(),
@@ -133,7 +128,6 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             }
         };
 
-        // Call Flutterwave API
         const response = await axios.post(`${process.env.FLUTTERWAVE_BASE_URL}/payments`, payload, {
             headers: {
                 Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
@@ -149,6 +143,43 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     } catch (error) {
         console.error('Flutterwave Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Server Error initializing payment' });
+    }
+});
+
+// 2. Webhook Endpoint (Flutterwave calls this when payment is successful)
+// Note: We use express.raw to get the raw body for signature verification
+app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['verif-hash'];
+    const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
+
+    // Verify signature (Security Check)
+    if (sig !== secretHash) {
+        return res.status(401).send('Unauthorized');
+    }
+
+    try {
+        const payload = JSON.parse(req.body.toString());
+        
+        // Check if payment was successful
+        if (payload.event === 'charge.completed' && payload.data.status === 'successful') {
+            const userId = payload.data.meta.userId; // Retrieve userId from meta
+            
+            console.log(`Payment Successful for User ID: ${userId}`);
+
+            // Update User to Pro Plan in Database
+            await User.findByIdAndUpdate(userId, {
+                subscriptionTier: 'pro',
+                subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+            });
+            
+            console.log(`User ${userId} upgraded to Pro via Webhook.`);
+        }
+
+        res.status(200).send('Webhook received');
+
+    } catch (error) {
+        console.error('Webhook Error:', error);
+        res.status(500).send('Webhook failed');
     }
 });
 
