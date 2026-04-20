@@ -24,61 +24,130 @@ const app = express();
 app.use(cors());
 
 // ════════════════════════════════════════════
-//  WEBHOOK ROUTE (DEBUG MODE ENABLED)
+//  CHECK SUBSCRIPTION EXPIRY MIDDLEWARE
+// ════════════════════════════════════════════
+const checkSubscriptionExpiry = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        
+        // Check if pro subscription has expired
+        if (user.subscriptionTier === 'pro' && user.subscriptionEndDate) {
+            const now = new Date();
+            const endDate = new Date(user.subscriptionEndDate);
+            
+            if (now > endDate) {
+                // Auto-downgrade to free
+                user.subscriptionTier = 'free';
+                user.subscriptionEndDate = null;
+                await user.save();
+                console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
+            }
+        }
+        
+        next();
+    } catch (err) {
+        console.error('Error checking subscription expiry:', err);
+        next();
+    }
+};
+
+// ════════════════════════════════════════════
+//  WEBHOOK ROUTE - FIXED FOR FLUTTERWAVE TEST MODE
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    // FIX 2: Confirm webhook is hitting your server
     console.log("🔥 Webhook hit!");
     
     const sig = req.headers['verif-hash'];
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
     
-    // FIX 1: Debug mode - log signatures
     console.log("SIG:", sig);
     console.log("ENV HASH:", secretHash);
     
-    // FIX 1: TEMP - allow webhook even if hash fails for debugging
+    // Verify signature (Security Check)
     if (secretHash && sig !== secretHash) {
-        console.log("⚠️ Hash mismatch - but continuing for debugging");
-        // return res.status(401).send('Unauthorized'); // Commented for debugging
+        console.log("⚠️ Hash mismatch - check your FLUTTERWAVE_SECRET_HASH");
+        return res.status(401).send('Unauthorized');
     }
 
     try {
         const payload = JSON.parse(req.body.toString());
         console.log("📦 Webhook Payload Received:", JSON.stringify(payload, null, 2));
         
-        // Check if payment was successful
-        if (payload.event === 'charge.completed' && payload.data.status === 'successful') {
-            // FIX 3: Check userId is coming correctly
-            console.log("META:", payload.data.meta);
+        // FIX 1: Handle Flutterwave test mode payload structure
+        // In test mode, payload has direct 'status' field, not nested in event/data
+        if (payload.status === 'successful') {
+            console.log("✅ Payment successful (detected from direct status field)");
             
-            const userId = payload.data.meta?.userId;
+            // Get txRef from payload (test mode uses txRef, not tx_ref)
+            const txRef = payload.txRef || payload.tx_ref;
             
-            if (!userId) {
-                console.error("❌ No userId found in webhook payload!");
-                return res.status(400).send('Missing userId');
+            if (!txRef) {
+                console.error("❌ No txRef found in webhook payload!");
+                return res.status(400).send('Missing txRef');
             }
             
-            console.log(`✅ Payment Successful for User ID: ${userId}`);
-
+            console.log(`🔍 Looking for user with txRef: ${txRef}`);
+            
+            // FIX 2: Find user by lastTxRef (saved during payment creation)
+            const user = await User.findOne({ lastTxRef: txRef });
+            
+            if (!user) {
+                console.error(`❌ User not found for txRef: ${txRef}`);
+                return res.status(404).send("User not found");
+            }
+            
+            console.log(`✅ Found user: ${user._id} (${user.email})`);
+            
             // Update User to Pro Plan in Database
             const updatedUser = await User.findByIdAndUpdate(
-                userId, 
+                user._id, 
                 {
                     subscriptionTier: 'pro',
-                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                    lastTxRef: null // Clear after use
                 },
                 { new: true }
             );
             
-            if (updatedUser) {
-                console.log(`✅ User ${userId} upgraded to Pro via Webhook.`);
-                console.log(`📅 Subscription ends: ${updatedUser.subscriptionEndDate}`);
-            } else {
-                console.error(`❌ User ${userId} not found in database!`);
+            console.log(`🎉 User ${user._id} upgraded to Pro via Webhook!`);
+            console.log(`📅 Subscription ends: ${updatedUser.subscriptionEndDate}`);
+            
+        } else if (payload.event === 'charge.completed' && payload.data?.status === 'successful') {
+            // Fallback for live mode payload structure
+            console.log("✅ Payment successful (detected from event/data structure)");
+            
+            const txRef = payload.data.tx_ref;
+            const userId = payload.data.meta?.userId;
+            
+            if (userId) {
+                // If userId is directly available
+                const updatedUser = await User.findByIdAndUpdate(
+                    userId, 
+                    {
+                        subscriptionTier: 'pro',
+                        subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                    },
+                    { new: true }
+                );
+                
+                if (updatedUser) {
+                    console.log(`🎉 User ${userId} upgraded to Pro via Webhook!`);
+                }
+            } else if (txRef) {
+                // Fallback to txRef lookup
+                const user = await User.findOne({ lastTxRef: txRef });
+                if (user) {
+                    await User.findByIdAndUpdate(user._id, {
+                        subscriptionTier: 'pro',
+                        subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                        lastTxRef: null
+                    });
+                    console.log(`🎉 User ${user._id} upgraded to Pro via Webhook (txRef fallback)!`);
+                }
             }
         } else {
-            console.log(`ℹ️ Webhook event: ${payload.event}, status: ${payload.data?.status}`);
+            console.log(`ℹ️ Webhook received but payment not successful. Status: ${payload.status || 'unknown'}`);
         }
 
         res.status(200).send('Webhook received');
@@ -133,7 +202,8 @@ const checkDailyLimit = async (req, res, next) => {
         const now = new Date();
         const todayStr = now.toDateString();
         
-        if (!user.usage.lastCallDate || user.usage.lastCallDate.toDateString() !== todayStr) {
+        if (!user.usage?.lastCallDate || user.usage.lastCallDate.toDateString() !== todayStr) {
+            if (!user.usage) user.usage = {};
             user.usage.dailyCallCount = 0;
             user.usage.lastCallDate = now;
             await user.save();
@@ -160,7 +230,7 @@ const checkDailyLimit = async (req, res, next) => {
 //  FLUTTERWAVE PAYMENT ROUTES
 // ════════════════════════════════════════════
 
-// FIX 4: Add fallback verification route (VERY IMPORTANT)
+// Manual verification route (fallback)
 app.get('/api/verify-payment/:tx_ref', async (req, res) => {
     try {
         const tx_ref = req.params.tx_ref;
@@ -181,10 +251,19 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
         console.log(`📊 Verification response status: ${data.status}`);
 
         if (data.status === "successful") {
-            const userId = data.meta?.userId;
+            // Try to get userId from meta first
+            let userId = data.meta?.userId;
+            
+            // If no userId in meta, try to find by txRef
+            if (!userId) {
+                const user = await User.findOne({ lastTxRef: tx_ref });
+                if (user) {
+                    userId = user._id;
+                }
+            }
             
             if (!userId) {
-                console.error("❌ No userId in verification response");
+                console.error("❌ No userId found in verification response and no user found by txRef");
                 return res.status(400).json({ success: false, message: "No userId found" });
             }
             
@@ -195,6 +274,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                 {
                     subscriptionTier: 'pro',
                     subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                    lastTxRef: null // Clear after use
                 },
                 { new: true }
             );
@@ -216,22 +296,25 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
     }
 });
 
-// 1. Initialize Payment Route (UPDATED with tx_ref in redirect URL)
+// Initialize Payment Route (UPDATED - saves txRef to user)
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        // HARDCODE YOUR VERCEL URL HERE FOR TESTING
-        const vercelUrl = 'https://new-version-v9zw.vercel.app'; 
+        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-oesx.vercel.app'; 
 
-        const amount = 10; // $10 for Pro Plan
+        const amount = 10;
         const currency = "USD"; 
         const email = user.email;
         const fullName = user.fullName || user.username;        
-        const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-        // FIX 5: Include tx_ref in redirect URL
+        // FIX 2: Save txRef to user BEFORE creating payment
+        user.lastTxRef = txRef;
+        await user.save();
+        console.log(`💾 Saved txRef ${txRef} to user ${user._id}`);
+
         const payload = {
             tx_ref: txRef,
             amount: amount,
@@ -276,11 +359,11 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  PROTECTED API ROUTES (Keep all your existing routes)
+//  PROTECTED API ROUTES (WITH EXPIRY CHECK)
 // ════════════════════════════════════════════
 
 // 1. Get All Chat Sessions
-app.get('/api/sessions', verifyToken, async (req, res) => {
+app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
@@ -301,7 +384,7 @@ app.get('/api/sessions', verifyToken, async (req, res) => {
 });
 
 // 2. Get Messages for a Specific Session
-app.get('/api/history/:sessionId', verifyToken, async (req, res) => {
+app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const messages = await Message.find({
             userId: req.userId,
@@ -313,8 +396,8 @@ app.get('/api/history/:sessionId', verifyToken, async (req, res) => {
     }
 });
 
-// 3. Conversational Chat Route (QUEUED + LIMITED)
-app.post('/api/chat', verifyToken, checkDailyLimit, async (req, res) => {
+// 3. Conversational Chat Route
+app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { message, history, sessionId } = req.body;
     const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
@@ -359,8 +442,8 @@ app.post('/api/chat', verifyToken, checkDailyLimit, async (req, res) => {
     }
 });
 
-// 4. Analyze Dream & Generate Squibb-Style Plan (QUEUED + LIMITED)
-app.post('/api/dreams/analyze', verifyToken, checkDailyLimit, async (req, res) => {
+// 4. Analyze Dream & Generate Squibb-Style Plan
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { dream, sessionId } = req.body;
     const userId = req.userId;
 
@@ -404,8 +487,8 @@ app.post('/api/dreams/analyze', verifyToken, checkDailyLimit, async (req, res) =
     }
 });
 
-// 4b. Refine an existing plan (QUEUED + LIMITED)
-app.post('/api/dreams/refine', verifyToken, checkDailyLimit, async (req, res) => {
+// 4b. Refine an existing plan
+app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
 
@@ -451,8 +534,8 @@ app.post('/api/dreams/refine', verifyToken, checkDailyLimit, async (req, res) =>
     }
 });
 
-// 5. Get User Profile
-app.get('/api/users/me', verifyToken, async (req, res) => {
+// 5. Get User Profile (with expiry check)
+app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const user = await User.findById(req.userId).select('-password');
         if (!user) return res.status(404).json({ message: 'User not found' });
@@ -464,7 +547,7 @@ app.get('/api/users/me', verifyToken, async (req, res) => {
 });
 
 // 6. Update User Profile
-app.put('/api/users/me', verifyToken, async (req, res) => {
+app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
 
@@ -523,7 +606,7 @@ app.delete('/api/users/me', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  ADMIN LAYER ROUTES (Keep all your existing admin routes)
+//  ADMIN LAYER ROUTES
 // ════════════════════════════════════════════
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
@@ -697,6 +780,35 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
+
+// Scheduled expiry check (runs daily at midnight)
+const scheduleExpiryCheck = async () => {
+    try {
+        const now = new Date();
+        const result = await User.updateMany(
+            {
+                subscriptionTier: 'pro',
+                subscriptionEndDate: { $lt: now }
+            },
+            {
+                subscriptionTier: 'free',
+                subscriptionEndDate: null
+            }
+        );
+        
+        if (result.modifiedCount > 0) {
+            console.log(`🔄 Downgraded ${result.modifiedCount} expired pro users`);
+        }
+    } catch (err) {
+        console.error('Error in expiry check:', err);
+    }
+};
+
+// Run expiry check on startup and every 24 hours
+setTimeout(() => {
+    scheduleExpiryCheck();
+    setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000);
+}, 5000);
 
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
