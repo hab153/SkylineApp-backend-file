@@ -47,8 +47,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         
         next();
     } catch (err) {
-        console.error('Error checking subscription expiry:', err);
-        next();
+        console.error('Error checking subscription expiry:', err);        next();
     }
 };
 
@@ -75,11 +74,9 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         console.log("📦 Webhook Payload Received:", JSON.stringify(payload, null, 2));
         
         // FIX 1: Handle Flutterwave test mode payload structure
-        // In test mode, payload has direct 'status' field, not nested in event/data
         if (payload.status === 'successful') {
             console.log("✅ Payment successful (detected from direct status field)");
             
-            // Get txRef from payload (test mode uses txRef, not tx_ref)
             const txRef = payload.txRef || payload.tx_ref;
             
             if (!txRef) {
@@ -99,8 +96,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             
             console.log(`✅ Found user: ${user._id} (${user.email})`);
             
-            // Update User to Pro Plan in Database
-            const updatedUser = await User.findByIdAndUpdate(
+            // Update User to Pro Plan in Database            const updatedUser = await User.findByIdAndUpdate(
                 user._id, 
                 {
                     subscriptionTier: 'pro',
@@ -121,7 +117,6 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             const userId = payload.data.meta?.userId;
             
             if (userId) {
-                // If userId is directly available
                 const updatedUser = await User.findByIdAndUpdate(
                     userId, 
                     {
@@ -135,7 +130,6 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
                     console.log(`🎉 User ${userId} upgraded to Pro via Webhook!`);
                 }
             } else if (txRef) {
-                // Fallback to txRef lookup
                 const user = await User.findOne({ lastTxRef: txRef });
                 if (user) {
                     await User.findByIdAndUpdate(user._id, {
@@ -151,7 +145,6 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         }
 
         res.status(200).send('Webhook received');
-
     } catch (error) {
         console.error('❌ Webhook Error:', error);
         res.status(500).send('Webhook failed');
@@ -188,37 +181,41 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-// ── Daily Usage Limit Middleware (UPDATED FOR PRO USERS) ──
+// ── Daily Usage Limit Middleware (UPDATED: 80 for Pro, 4 for Free) ──
 const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        // SKIP LIMITS FOR PRO USERS
-        if (user.subscriptionTier === 'pro') {
-            return next();
-        }
+        // DEFINE LIMITS
+        const FREE_LIMIT = 4;       // Free users get 4 calls/day
+        const PRO_LIMIT = 80;       // Pro users get 80 calls/day
 
-        const now = new Date();
-        const todayStr = now.toDateString();
+        // Determine which limit applies to this user
+        const limit = user.subscriptionTier === 'pro' ? PRO_LIMIT : FREE_LIMIT;
+
+        const now = new Date();        const todayStr = now.toDateString();
         
-        if (!user.usage?.lastCallDate || user.usage.lastCallDate.toDateString() !== todayStr) {
+        // Reset count if it's a new day
+        if (!user.usage.lastCallDate || user.usage.lastCallDate.toDateString() !== todayStr) {
             if (!user.usage) user.usage = {};
             user.usage.dailyCallCount = 0;
             user.usage.lastCallDate = now;
             await user.save();
         }
 
-        if (user.usage.dailyCallCount >= 4) {
+        // Check if limit is reached
+        if (user.usage.dailyCallCount >= limit) {
             return res.status(429).json({ 
-                message: 'Daily limit reached. You have used all 4 free calls for today. Please come back tomorrow or Upgrade to Pro.' 
+                message: `Daily limit reached. You have used ${limit} calls today. Please come back tomorrow or upgrade your plan.` 
             });
         }
 
+        // Increment count and save
         user.usage.dailyCallCount += 1;
         await user.save();
 
-        next();
+        next(); // Allow the request to proceed
 
     } catch (err) {
         console.error('Error checking daily limit:', err);
@@ -246,15 +243,12 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
             }
         );
 
-        const data = response.data.data;
-        
+        const data = response.data.data;        
         console.log(`📊 Verification response status: ${data.status}`);
 
         if (data.status === "successful") {
-            // Try to get userId from meta first
             let userId = data.meta?.userId;
             
-            // If no userId in meta, try to find by txRef
             if (!userId) {
                 const user = await User.findOne({ lastTxRef: tx_ref });
                 if (user) {
@@ -274,7 +268,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                 {
                     subscriptionTier: 'pro',
                     subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-                    lastTxRef: null // Clear after use
+                    lastTxRef: null
                 },
                 { new: true }
             );
@@ -298,8 +292,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
 
 // Initialize Payment Route (UPDATED - saves txRef to user)
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
-    try {
-        const user = await User.findById(req.userId);
+    try {        const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         const vercelUrl = process.env.VERCEL_URL || 'https://new-version-oesx.vercel.app'; 
@@ -310,7 +303,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         const fullName = user.fullName || user.username;        
         const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-        // FIX 2: Save txRef to user BEFORE creating payment
+        // Save txRef to user BEFORE creating payment
         user.lastTxRef = txRef;
         await user.save();
         console.log(`💾 Saved txRef ${txRef} to user ${user._id}`);
@@ -348,8 +341,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         if (response.data.status === 'success') {
             console.log(`✅ Payment link created for user ${user._id}`);
             res.json({ link: response.data.data.link, tx_ref: txRef });
-        } else {
-            console.error('❌ Failed to initialize payment:', response.data);
+        } else {            console.error('❌ Failed to initialize payment:', response.data);
             res.status(400).json({ message: 'Failed to initialize payment', error: response.data });
         }
     } catch (error) {
@@ -398,8 +390,7 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
 
 // 3. Conversational Chat Route
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { message, history, sessionId } = req.body;
-    const userId = req.userId;
+    const { message, history, sessionId } = req.body;    const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
 
     const currentSessionId = sessionId || uuidv4();
@@ -448,7 +439,6 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
     const userId = req.userId;
 
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
-
     const currentSessionId = sessionId || uuidv4();    
     try {
         await new Message({
@@ -498,8 +488,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
         });
     }
 
-    const currentSessionId = sessionId || uuidv4();    
-    try {
+    const currentSessionId = sessionId || uuidv4();        try {
         await new Message({
             userId,
             sessionId: currentSessionId,
@@ -548,8 +537,7 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 
 // 6. Update User Profile
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
-        const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
+    try {        const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
 
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
@@ -599,7 +587,6 @@ app.put('/api/auth/change-email', verifyToken, changeEmail);
 
 // 9. Verify Age
 app.put('/api/users/verify-age', verifyToken, verifyAge);
-
 // 10. Delete Account
 app.delete('/api/users/me', verifyToken, async (req, res) => {
     await deleteAccount(req, res);
@@ -648,7 +635,6 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);        
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-
         await User.findByIdAndDelete(req.params.id);
         res.json({ message: 'User deleted' });
     } catch (err) {
@@ -698,8 +684,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
         const newMessage = new Message({
             userId: req.params.id,
-            sessionId: 'admin-direct-message', 
-            role: 'ai', 
+            sessionId: 'admin-direct-message',             role: 'ai', 
             content: `[ADMIN MESSAGE]: ${messageContent}`,
             title: 'Direct Message from Admin'
         });
@@ -748,7 +733,6 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });    
     }
 });
-
 // ════════════════════════════════════════════
 //  NOTIFICATION ROUTES (USER)
 // ════════════════════════════════════════════
@@ -798,8 +782,7 @@ const scheduleExpiryCheck = async () => {
         
         if (result.modifiedCount > 0) {
             console.log(`🔄 Downgraded ${result.modifiedCount} expired pro users`);
-        }
-    } catch (err) {
+        }    } catch (err) {
         console.error('Error in expiry check:', err);
     }
 };
