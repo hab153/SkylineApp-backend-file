@@ -137,7 +137,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 
         // HARDCODE YOUR VERCEL URL HERE FOR TESTING
         // Replace 'new-version-oesx' with your actual Vercel project name if different
-        const vercelUrl = 'https://new-version-oesx.vercel.app'; 
+        const vercelUrl = 'https://new-version-m2e3.vercel.app'; 
 
         const amount = 10; // $10 for Pro Plan
         const currency = "USD"; 
