@@ -96,7 +96,8 @@ const checkDailyLimit = async (req, res, next) => {
 
         // SKIP LIMITS FOR PRO USERS
         if (user.subscriptionTier === 'pro') {
-            return next(); // Allow request without checking count        }
+            return next(); // Allow request without checking count        
+        }
 
         const now = new Date();
         const todayStr = now.toDateString();
