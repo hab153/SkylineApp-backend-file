@@ -97,7 +97,7 @@ const checkDailyLimit = async (req, res, next) => {
         // SKIP LIMITS FOR PRO USERS
         if (user.subscriptionTier === 'pro') {
             return next(); // Allow request without checking count        
-        }
+}
 
         const now = new Date();
         const todayStr = now.toDateString();
@@ -137,7 +137,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 
         // HARDCODE YOUR VERCEL URL HERE FOR TESTING
         // Replace 'new-version-oesx' with your actual Vercel project name if different
-        const vercelUrl = 'https://new-version-m2e3.vercel.app'; 
+        const vercelUrl = 'https://new-version-4npf.vercel.app'; 
 
         const amount = 10; // $10 for Pro Plan
         const currency = "USD"; 
