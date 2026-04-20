@@ -53,19 +53,16 @@ const UserSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
-    // Layer 2 Answers (Hashed)
     adminAns_dish: { type: String, default: null },
     adminAns_pn: { type: String, default: null },
     adminAns_mum: { type: String, default: null },
     adminAns_dm: { type: String, default: null },
-    
-    // Layer 3 Answers (Hashed)
     adminAns_dad: { type: String, default: null },
     adminAns_friend: { type: String, default: null },
     adminAns_enemy: { type: String, default: null },
     adminAns_app: { type: String, default: null },
 
-    // --- USAGE LIMITING FIELDS (New) ---
+    // --- USAGE LIMITING FIELDS ---
     usage: {
         dailyCallCount: {
             type: Number,
@@ -75,6 +72,17 @@ const UserSchema = new mongoose.Schema({
             type: Date,
             default: null
         }
+    },
+
+    // --- SUBSCRIPTION FIELDS (NEW) ---
+    subscriptionTier: {
+        type: String,
+        enum: ['free', 'pro'],
+        default: 'free'
+    },
+    subscriptionEndDate: {
+        type: Date,
+        default: null
     },
 
     createdAt: {
