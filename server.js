@@ -96,7 +96,8 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             
             console.log(`✅ Found user: ${user._id} (${user.email})`);
             
-            // Update User to Pro Plan in Database            const updatedUser = await User.findByIdAndUpdate(
+            // Update User to Pro Plan in Database            
+            const updatedUser = await User.findByIdAndUpdate(
                 user._id, 
                 {
                     subscriptionTier: 'pro',
