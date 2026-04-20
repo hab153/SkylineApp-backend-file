@@ -131,7 +131,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 
         // HARDCODE YOUR VERCEL URL HERE FOR TESTING
         // Replace 'skyline-frontend-files-acnm' with your actual Vercel project name if different
-        const vercelUrl = 'https://skyline-frontend-files-acnm.vercel.app'; 
+        const vercelUrl = 'https://new-version-oesx.vercel.app'; 
 
         const amount = 10; // $10 for Pro Plan
         const currency = "USD"; 
