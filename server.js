@@ -144,7 +144,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             amount: amount,
             currency: currency,
             // Use the hardcoded URL directly
-            redirect_url: `${vercelUrl}/payment-success`,
+            redirect_url: `${vercelUrl}/payment-success.html`,
             customer: {
                 email: email,
                 phonenumber: user.phone || "08012345678",
@@ -346,6 +346,7 @@ app.post('/api/dreams/refine', verifyToken, checkDailyLimit, async (req, res) =>
         }).save();
 
         res.json({ plan, audit, sessionId: currentSessionId });
+
 
     } catch (error) {
         console.error('Plan refinement error:', error);
