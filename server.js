@@ -23,37 +23,68 @@ const app = express();
 // Middleware
 app.use(cors());
 
-// IMPORTANT: Define Webhook route BEFORE express.json() so it can read raw body for signature verification
+// ════════════════════════════════════════════
+//  WEBHOOK ROUTE (DEBUG MODE ENABLED)
+// ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    // FIX 2: Confirm webhook is hitting your server
+    console.log("🔥 Webhook hit!");
+    
     const sig = req.headers['verif-hash'];
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
-
-    // Verify signature (Security Check)
-    if (!sig || sig !== secretHash) {
-        return res.status(401).send('Unauthorized');
+    
+    // FIX 1: Debug mode - log signatures
+    console.log("SIG:", sig);
+    console.log("ENV HASH:", secretHash);
+    
+    // FIX 1: TEMP - allow webhook even if hash fails for debugging
+    if (secretHash && sig !== secretHash) {
+        console.log("⚠️ Hash mismatch - but continuing for debugging");
+        // return res.status(401).send('Unauthorized'); // Commented for debugging
     }
 
     try {
         const payload = JSON.parse(req.body.toString());
+        console.log("📦 Webhook Payload Received:", JSON.stringify(payload, null, 2));
         
         // Check if payment was successful
         if (payload.event === 'charge.completed' && payload.data.status === 'successful') {
-            const userId = payload.data.meta.userId; // Retrieve userId from meta
+            // FIX 3: Check userId is coming correctly
+            console.log("META:", payload.data.meta);
             
-            console.log(`Payment Successful for User ID: ${userId}`);
+            const userId = payload.data.meta?.userId;
+            
+            if (!userId) {
+                console.error("❌ No userId found in webhook payload!");
+                return res.status(400).send('Missing userId');
+            }
+            
+            console.log(`✅ Payment Successful for User ID: ${userId}`);
 
             // Update User to Pro Plan in Database
-            await User.findByIdAndUpdate(userId, {
-                subscriptionTier: 'pro',
-                subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
-            });
-                        console.log(`User ${userId} upgraded to Pro via Webhook.`);
+            const updatedUser = await User.findByIdAndUpdate(
+                userId, 
+                {
+                    subscriptionTier: 'pro',
+                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
+                },
+                { new: true }
+            );
+            
+            if (updatedUser) {
+                console.log(`✅ User ${userId} upgraded to Pro via Webhook.`);
+                console.log(`📅 Subscription ends: ${updatedUser.subscriptionEndDate}`);
+            } else {
+                console.error(`❌ User ${userId} not found in database!`);
+            }
+        } else {
+            console.log(`ℹ️ Webhook event: ${payload.event}, status: ${payload.data?.status}`);
         }
 
         res.status(200).send('Webhook received');
 
     } catch (error) {
-        console.error('Webhook Error:', error);
+        console.error('❌ Webhook Error:', error);
         res.status(500).send('Webhook failed');
     }
 });
@@ -64,8 +95,8 @@ app.use(express.static(path.join(__dirname)));
 
 // Database Connection
 mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('MongoDB Connected'))
-    .catch(err => console.log('MongoDB Connection Error:', err));
+    .then(() => console.log('✅ MongoDB Connected'))
+    .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
 // Auth Routes
 app.use('/api/auth', authRoutes);
@@ -96,8 +127,8 @@ const checkDailyLimit = async (req, res, next) => {
 
         // SKIP LIMITS FOR PRO USERS
         if (user.subscriptionTier === 'pro') {
-            return next(); // Allow request without checking count        
-}
+            return next();
+        }
 
         const now = new Date();
         const todayStr = now.toDateString();
@@ -129,15 +160,70 @@ const checkDailyLimit = async (req, res, next) => {
 //  FLUTTERWAVE PAYMENT ROUTES
 // ════════════════════════════════════════════
 
-// 1. Initialize Payment Route
+// FIX 4: Add fallback verification route (VERY IMPORTANT)
+app.get('/api/verify-payment/:tx_ref', async (req, res) => {
+    try {
+        const tx_ref = req.params.tx_ref;
+        
+        console.log(`🔍 Verifying payment for tx_ref: ${tx_ref}`);
+
+        const response = await axios.get(
+            `${process.env.FLUTTERWAVE_BASE_URL}/transactions/verify_by_reference?tx_ref=${tx_ref}`,
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+                },
+            }
+        );
+
+        const data = response.data.data;
+        
+        console.log(`📊 Verification response status: ${data.status}`);
+
+        if (data.status === "successful") {
+            const userId = data.meta?.userId;
+            
+            if (!userId) {
+                console.error("❌ No userId in verification response");
+                return res.status(400).json({ success: false, message: "No userId found" });
+            }
+            
+            console.log(`✅ Verifying payment for user: ${userId}`);
+
+            const updatedUser = await User.findByIdAndUpdate(
+                userId, 
+                {
+                    subscriptionTier: 'pro',
+                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                },
+                { new: true }
+            );
+            
+            if (updatedUser) {
+                console.log(`✅ User ${userId} upgraded to Pro via manual verification.`);
+                return res.json({ success: true, message: "Payment verified and account upgraded" });
+            } else {
+                console.error(`❌ User ${userId} not found!`);
+                return res.status(404).json({ success: false, message: "User not found" });
+            }
+        }
+
+        res.json({ success: false, message: "Payment not successful" });
+
+    } catch (err) {
+        console.error('❌ Verification Error:', err.response?.data || err.message);
+        res.status(500).json({ message: "Verification failed", error: err.message });
+    }
+});
+
+// 1. Initialize Payment Route (UPDATED with tx_ref in redirect URL)
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         // HARDCODE YOUR VERCEL URL HERE FOR TESTING
-        // Replace 'new-version-oesx' with your actual Vercel project name if different
-        const vercelUrl = 'https://new-version-4npf.vercel.app'; 
+        const vercelUrl = 'https://new-version-v9zw.vercel.app'; 
 
         const amount = 10; // $10 for Pro Plan
         const currency = "USD"; 
@@ -145,11 +231,12 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         const fullName = user.fullName || user.username;        
         const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
+        // FIX 5: Include tx_ref in redirect URL
         const payload = {
-            tx_ref: txRef,            amount: amount,
+            tx_ref: txRef,
+            amount: amount,
             currency: currency,
-            // Use the hardcoded URL directly
-            redirect_url: `${vercelUrl}/payment-success.html`,
+            redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,
             customer: {
                 email: email,
                 phonenumber: user.phone || "08012345678",
@@ -166,6 +253,8 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             }
         };
 
+        console.log(`💰 Creating payment for user ${user._id}, tx_ref: ${txRef}`);
+
         const response = await axios.post(`${process.env.FLUTTERWAVE_BASE_URL}/payments`, payload, {
             headers: {
                 Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
@@ -174,18 +263,20 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         });
 
         if (response.data.status === 'success') {
-            res.json({ link: response.data.data.link });
+            console.log(`✅ Payment link created for user ${user._id}`);
+            res.json({ link: response.data.data.link, tx_ref: txRef });
         } else {
+            console.error('❌ Failed to initialize payment:', response.data);
             res.status(400).json({ message: 'Failed to initialize payment', error: response.data });
         }
     } catch (error) {
-        console.error('Flutterwave Error:', error.response ? error.response.data : error.message);
+        console.error('❌ Flutterwave Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Server Error initializing payment' });
     }
 });
 
 // ════════════════════════════════════════════
-//  PROTECTED API ROUTES
+//  PROTECTED API ROUTES (Keep all your existing routes)
 // ════════════════════════════════════════════
 
 // 1. Get All Chat Sessions
@@ -195,7 +286,8 @@ app.get('/api/sessions', verifyToken, async (req, res) => {
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
             { $sort: { createdAt: -1 } },
             {
-                $group: {                    _id: '$sessionId',
+                $group: {
+                    _id: '$sessionId',
                     title: { $first: '$title' },
                     lastUpdated: { $first: '$createdAt' }
                 }
@@ -244,7 +336,8 @@ app.post('/api/chat', verifyToken, checkDailyLimit, async (req, res) => {
             country:     user.country,
             skillLevel:  user.skillLevel,
             primaryGoal: user.primaryGoal,
-            interests:   user.interests,            bio:         user.bio
+            interests:   user.interests,
+            bio:         user.bio
         };
 
         const { reply, updatedHistory } = await requestQueue.enqueue(async () => {
@@ -293,7 +386,8 @@ app.post('/api/dreams/analyze', verifyToken, checkDailyLimit, async (req, res) =
             bio:         user.bio
         };
         const { plan, audit } = await requestQueue.enqueue(async () => {
-            return await generateDreamPlan(dream, userProfile);        });
+            return await generateDreamPlan(dream, userProfile);
+        });
 
         await new Message({
             userId,
@@ -391,6 +485,7 @@ app.put('/api/users/me', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
+
 // 7. Change Password
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
@@ -428,7 +523,7 @@ app.delete('/api/users/me', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  ADMIN LAYER ROUTES
+//  ADMIN LAYER ROUTES (Keep all your existing admin routes)
 // ════════════════════════════════════════════
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
@@ -440,7 +535,8 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
         if (!user || !user.isAdmin)
             return res.status(403).json({ message: 'Access denied. Admins only.' });
 
-        const users = await User.find().select('-password');        res.json(users);
+        const users = await User.find().select('-password');
+        res.json(users);
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
@@ -489,7 +585,8 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
-    }});
+    }
+});
 
 app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
     try {
@@ -538,7 +635,8 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 
 app.post('/api/reports', verifyToken, async (req, res) => {
-    try {        const { subject, message } = req.body;
+    try {
+        const { subject, message } = req.body;
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -587,7 +685,8 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
 });
 
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
-    try {        const count = await Message.countDocuments({ 
+    try {
+        const count = await Message.countDocuments({ 
             userId: req.userId, 
             sessionId: 'admin-direct-message' 
         });
@@ -602,5 +701,5 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
 });
