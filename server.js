@@ -88,15 +88,20 @@ const verifyToken = (req, res, next) => {
     }
 };
 
-// ── Daily Usage Limit Middleware (4 Calls Per Day) ──
+// ── Daily Usage Limit Middleware (UPDATED FOR PRO USERS) ──
 const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
+        // SKIP LIMITS FOR PRO USERS
+        if (user.subscriptionTier === 'pro') {
+            return next(); // Allow request without checking count        }
+
         const now = new Date();
         const todayStr = now.toDateString();
-                if (!user.usage.lastCallDate || user.usage.lastCallDate.toDateString() !== todayStr) {
+        
+        if (!user.usage.lastCallDate || user.usage.lastCallDate.toDateString() !== todayStr) {
             user.usage.dailyCallCount = 0;
             user.usage.lastCallDate = now;
             await user.save();
@@ -104,7 +109,7 @@ const checkDailyLimit = async (req, res, next) => {
 
         if (user.usage.dailyCallCount >= 4) {
             return res.status(429).json({ 
-                message: 'Daily limit reached. You have used all 4 free calls for today. Please come back tomorrow.' 
+                message: 'Daily limit reached. You have used all 4 free calls for today. Please come back tomorrow or Upgrade to Pro.' 
             });
         }
 
@@ -130,7 +135,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         // HARDCODE YOUR VERCEL URL HERE FOR TESTING
-        // Replace 'skyline-frontend-files-acnm' with your actual Vercel project name if different
+        // Replace 'new-version-oesx' with your actual Vercel project name if different
         const vercelUrl = 'https://new-version-oesx.vercel.app'; 
 
         const amount = 10; // $10 for Pro Plan
@@ -140,8 +145,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         const txRef = `skyline_pro_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
 
         const payload = {
-            tx_ref: txRef,
-            amount: amount,
+            tx_ref: txRef,            amount: amount,
             currency: currency,
             // Use the hardcoded URL directly
             redirect_url: `${vercelUrl}/payment-success.html`,
@@ -179,6 +183,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     }
 });
 
+// ════════════════════════════════════════════
 //  PROTECTED API ROUTES
 // ════════════════════════════════════════════
 
@@ -187,9 +192,9 @@ app.get('/api/sessions', verifyToken, async (req, res) => {
     try {        
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
-            { $sort: { createdAt: -1 } },            {
-                $group: {
-                    _id: '$sessionId',
+            { $sort: { createdAt: -1 } },
+            {
+                $group: {                    _id: '$sessionId',
                     title: { $first: '$title' },
                     lastUpdated: { $first: '$createdAt' }
                 }
@@ -236,9 +241,9 @@ app.post('/api/chat', verifyToken, checkDailyLimit, async (req, res) => {
         const userProfile = {
             fullName:    user.fullName,
             country:     user.country,
-            skillLevel:  user.skillLevel,            primaryGoal: user.primaryGoal,
-            interests:   user.interests,
-            bio:         user.bio
+            skillLevel:  user.skillLevel,
+            primaryGoal: user.primaryGoal,
+            interests:   user.interests,            bio:         user.bio
         };
 
         const { reply, updatedHistory } = await requestQueue.enqueue(async () => {
@@ -287,8 +292,7 @@ app.post('/api/dreams/analyze', verifyToken, checkDailyLimit, async (req, res) =
             bio:         user.bio
         };
         const { plan, audit } = await requestQueue.enqueue(async () => {
-            return await generateDreamPlan(dream, userProfile);
-        });
+            return await generateDreamPlan(dream, userProfile);        });
 
         await new Message({
             userId,
@@ -337,7 +341,6 @@ app.post('/api/dreams/refine', verifyToken, checkDailyLimit, async (req, res) =>
         const { plan, audit } = await requestQueue.enqueue(async () => {
             return await refinePlan(originalPlan, followUpAnswer, dreamDescription, userProfile);
         });
-
         await new Message({
             userId,
             sessionId: currentSessionId,
@@ -346,7 +349,6 @@ app.post('/api/dreams/refine', verifyToken, checkDailyLimit, async (req, res) =>
         }).save();
 
         res.json({ plan, audit, sessionId: currentSessionId });
-
 
     } catch (error) {
         console.error('Plan refinement error:', error);
@@ -384,10 +386,10 @@ app.put('/api/users/me', verifyToken, async (req, res) => {
         await user.save();
         res.json(user);
     } catch (err) {
-        console.error(err.message);        res.status(500).json({ message: 'Server Error' });
+        console.error(err.message);
+        res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // 7. Change Password
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
@@ -433,11 +435,11 @@ app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
 
 app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
-        const user = await User.findById(req.userId);        if (!user || !user.isAdmin)
+        const user = await User.findById(req.userId);
+        if (!user || !user.isAdmin)
             return res.status(403).json({ message: 'Access denied. Admins only.' });
 
-        const users = await User.find().select('-password');
-        res.json(users);
+        const users = await User.find().select('-password');        res.json(users);
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
@@ -482,11 +484,11 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
 
         const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
-        res.json({ user: targetUser, history: messages });    } catch (err) {
+        res.json({ user: targetUser, history: messages });
+    } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
-    }
-});
+    }});
 
 app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
     try {
@@ -531,11 +533,11 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  REPORT ROUTES// ════════════════════════════════════════════
+//  REPORT ROUTES
+// ════════════════════════════════════════════
 
 app.post('/api/reports', verifyToken, async (req, res) => {
-    try {
-        const { subject, message } = req.body;
+    try {        const { subject, message } = req.body;
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -580,11 +582,11 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error fetching notifications' });
-    }});
+    }
+});
 
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
-    try {
-        const count = await Message.countDocuments({ 
+    try {        const count = await Message.countDocuments({ 
             userId: req.userId, 
             sessionId: 'admin-direct-message' 
         });
