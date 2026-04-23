@@ -214,7 +214,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
 
-        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-oesx.vercel.app'; 
+        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-pah9.vercel.app'; 
         const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Save txRef to user BEFORE creating payment
