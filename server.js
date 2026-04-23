@@ -47,8 +47,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
                 user.subscriptionEndDate = null;
                 await user.save();
                 console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
-            }        }
-        
+            }        }        
         next();
     } catch (err) {
         console.error('Error checking subscription expiry:', err);
@@ -97,8 +96,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             // Infer plan from txRef if meta is missing (Safety Net)
             if (!planType) {
                 if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
-                else planType = 'free';
-            }
+                else planType = 'free';            }
 
             const user = await User.findOne({ lastTxRef: txRef });
             
@@ -147,24 +145,23 @@ const verifyToken = (req, res, next) => {
 
     try {        const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);
-        req.userId = decoded.user.id;
-        next();
+        req.userId = decoded.user.id;        next();
     } catch (err) {
         console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });        
     }
 };
 
-// ── Daily Usage Limit Middleware (UPDATED FOR 3 TIERS) ──
+// ── Daily Usage Limit Middleware (UPDATED LIMITS: GO 18, PRO 40) ──
 const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        // DEFINE LIMITS BASED ON NEW PLANS
+        // DEFINE NEW LIMITS
         let limit = 4; // Free Limit
-        if (user.subscriptionTier === 'go') limit = 22; // GO Plan: 22 requests
-        if (user.subscriptionTier === 'pro') limit = 35; // PRO Plan: 35 requests
+        if (user.subscriptionTier === 'go') limit = 18; // GO Plan: 18 requests
+        if (user.subscriptionTier === 'pro') limit = 40; // PRO Plan: 40 requests
 
         const now = new Date();
         const todayStr = now.toDateString();
@@ -196,9 +193,8 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 // ════════════════════════════════════════════
-//  FLUTTERWAVE PAYMENT ROUTES (UPDATED PRICES: GO $8, PRO $13)
+//  FLUTTERWAVE PAYMENT ROUTES (UPDATED PRICES: GO $9, PRO $20)
 // ════════════════════════════════════════════
-
 // Manual verification route (fallback)
 app.get('/api/verify-payment/:tx_ref', async (req, res) => {
     try {
@@ -247,8 +243,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                     lastTxRef: null
                 },
                 { new: true }
-            );
-            
+            );            
             if (updatedUser) {
                 console.log(`✅ User ${userId} upgraded to ${planType.toUpperCase()} via manual verification.`);
                 return res.json({ success: true, message: "Payment verified and account upgraded" });
@@ -266,7 +261,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
     }
 });
 
-// Initialize Payment Route (UPDATED - handles GO and PRO)
+// Initialize Payment Route (UPDATED PRICES)
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
@@ -277,10 +272,10 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         let planName = '';
 
         if (planType === 'go') {
-            amount = 8;
+            amount = 9; // NEW PRICE FOR GO
             planName = 'Skyline AA-1 GO Plan';
         } else if (planType === 'pro') {
-            amount = 13;
+            amount = 20; // NEW PRICE FOR PRO
             planName = 'Skyline AA-1 PRO Plan';
         } else {
             return res.status(400).json({ message: 'Invalid plan type' });
@@ -297,8 +292,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             tx_ref: txRef,
             amount: amount,
             currency: "USD", 
-            redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,
-            customer: {
+            redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,            customer: {
                 email: user.email,
                 phonenumber: user.phone || "08012345678",
                 name: user.fullName || user.username,
@@ -347,7 +341,6 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
-
     try {
         await new Message({
             userId,
@@ -397,8 +390,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     } catch (error) {
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
-    }
-});
+    }});
 
 // ════════════════════════════════════════════
 //  OTHER PROTECTED API ROUTES (WITH EXPIRY CHECK)
@@ -447,8 +439,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
     try {
         await new Message({
             userId,
-            sessionId: currentSessionId,
-            role: 'user',
+            sessionId: currentSessionId,            role: 'user',
             content: dream,
             title: dream.substring(0, 30) + '...'
         }).save();
@@ -497,8 +488,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             userId,
             sessionId: currentSessionId,
             role: 'user',
-            content: followUpAnswer
-        }).save();
+            content: followUpAnswer        }).save();
 
         const user = await User.findById(userId);
         const userProfile = {
@@ -547,8 +537,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (fullName)       user.fullName       = fullName;
-        if (primaryGoal)    user.primaryGoal    = primaryGoal;
-        if (skillLevel)     user.skillLevel     = skillLevel;
+        if (primaryGoal)    user.primaryGoal    = primaryGoal;        if (skillLevel)     user.skillLevel     = skillLevel;
         if (interests)      user.interests      = interests;
         if (country)        user.country        = country;
         if (bio)            user.bio            = bio;
@@ -586,7 +575,8 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     }
 });
 
-// 8. Change Emailapp.put('/api/auth/change-email', verifyToken, changeEmail);
+// 8. Change Email
+app.put('/api/auth/change-email', verifyToken, changeEmail);
 
 // 9. Verify Age
 app.put('/api/users/verify-age', verifyToken, verifyAge);
@@ -596,8 +586,7 @@ app.delete('/api/users/me', verifyToken, async (req, res) => {
     await deleteAccount(req, res);
 });
 
-// ════════════════════════════════════════════
-//  ADMIN LAYER ROUTES
+// ════════════════════════════════════════════//  ADMIN LAYER ROUTES
 // ════════════════════════════════════════════
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
@@ -646,8 +635,7 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    try {
 });
 
 app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
+    try {        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
@@ -696,8 +684,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
 
         res.json({ message: 'Message sent successfully' });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server Error' });
+        console.error(err);        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -746,8 +733,7 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
             userId: req.userId,             
             sessionId: 'admin-direct-message' 
         }).sort({ createdAt: -1 });
-        
-        res.json(notifications);
+                res.json(notifications);
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error fetching notifications' });
@@ -796,8 +782,7 @@ setTimeout(() => {
     setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000);
 }, 5000);
 
-// ════════════════════════════════════════════
-const PORT = process.env.PORT || 5001;
+// ════════════════════════════════════════════const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
