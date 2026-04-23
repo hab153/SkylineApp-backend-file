@@ -57,7 +57,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
 };
 
 // ════════════════════════════════════════════
-//  WEBHOOK ROUTE - UPDATED FOR 3 TIERS (FREE, GO, PRO)
+//  WEBHOOK ROUTE - FIXED TO READ PLAN FROM TX_REF
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     console.log("🔥 Webhook hit!");
@@ -74,32 +74,41 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
     try {
         const payload = JSON.parse(req.body.toString());
         
-        // Handle both Test and Live mode structures
-        let txRef, planType, status;
+        let txRef, status;
         
+        // Handle different payload structures (Test vs Live)
         if (payload.status) {
             // Test Mode / Direct Status
             status = payload.status;
             txRef = payload.txRef || payload.tx_ref;
-            planType = payload.meta?.plan;
         } else if (payload.event === 'charge.completed') {
             // Live Mode Event
             status = payload.data?.status;
             txRef = payload.data?.tx_ref;
-            planType = payload.data?.meta?.plan;
         }
 
         if (status === 'successful') {
-            console.log(`✅ Payment successful for txRef: ${txRef}, Plan: ${planType}`);
+            console.log(`✅ Payment successful for txRef: ${txRef}`);
             
             if (!txRef) return res.status(400).send('Missing txRef');
             
+            // --- THE FIX: EXTRACT PLAN FROM TX_REF ---
+            // We named our refs: skyline_go_... or skyline_pro_...
+            let planType = 'free'; // Default fallback
+            if (txRef.includes('_go_')) {
+                planType = 'go';            } else if (txRef.includes('_pro_')) {
+                planType = 'pro';
+            }
+            
+            console.log(`🔍 Inferred Plan Type from txRef: ${planType}`);
+
             // Find user by txRef
             const user = await User.findOne({ lastTxRef: txRef });
-                        if (user) {
+            
+            if (user) {
                 const endDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
                 
-                // Update User with the specific PLAN TYPE (go or pro)
+                // Update User with the inferred plan
                 await User.findByIdAndUpdate(user._id, {
                     subscriptionPlan: planType, 
                     subscriptionEndDate: endDate,
@@ -137,7 +146,6 @@ app.use('/api/auth', authRoutes);
 const verifyToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-
     if (!token) return res.status(403).json({ message: 'No token provided' });
 
     try {
@@ -145,7 +153,8 @@ const verifyToken = (req, res, next) => {
         const decoded = jwt.verify(token, secret);
         req.userId = decoded.user.id;
         next();
-    } catch (err) {        console.error('Token Verification Failed:', err.message);
+    } catch (err) {
+        console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });        
     }
 };
@@ -185,8 +194,7 @@ const checkDailyLimit = async (req, res, next) => {
 
         next(); // Allow the request to proceed
 
-    } catch (err) {
-        console.error('Error checking daily limit:', err);
+    } catch (err) {        console.error('Error checking daily limit:', err);
         res.status(500).json({ message: 'Server Error checking usage limits' });
     }
 };
@@ -215,6 +223,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         }
 
         const vercelUrl = process.env.VERCEL_URL || 'https://new-version-pah9.vercel.app'; 
+        // Ensure txRef contains the plan type for webhook inference
         const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Save txRef to user BEFORE creating payment
@@ -234,16 +243,16 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             },
             customizations: {
                 title: planName,
-                description: 'Monthly Subscription',
-                logo: 'https://your-logo-url.com/logo.png',
+                description: 'Monthly Subscription',                logo: 'https://your-logo-url.com/logo.png',
             },
             meta: {
                 userId: user._id.toString(),
-                plan: planType // Important: tells webhook which plan to activate
+                plan: planType // Still send meta for good measure
             }
         };
 
-        const response = await axios.post(`${process.env.FLUTTERWAVE_BASE_URL}/payments`, payload, {            headers: {
+        const response = await axios.post(`${process.env.FLUTTERWAVE_BASE_URL}/payments`, payload, {
+            headers: {
                 Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
                 'Content-Type': 'application/json',
             },
@@ -283,7 +292,6 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         }).save();
 
         let aiReply, updatedHistory;
-
         // ROUTE TO CORRECT AI FILE BASED ON PLAN
         if (plan === 'free') {
             console.log("🟢 Routing to Free AI");
@@ -292,7 +300,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             updatedHistory = result.updatedHistory;
         } 
         else if (plan === 'go') {
-            console.log("🟡 Routing to Go AI");            const result = await goAI.generateGoResponse(message, history || [], user);
+            console.log("🟡 Routing to Go AI");
+            const result = await goAI.generateGoResponse(message, history || [], user);
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } 
@@ -332,8 +341,7 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
     try {        
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
-            { $sort: { createdAt: -1 } },
-            {
+            { $sort: { createdAt: -1 } },            {
                 $group: {
                     _id: '$sessionId',
                     title: { $first: '$title' },
@@ -341,7 +349,8 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
                 }
             },
             { $sort: { lastUpdated: -1 } }
-        ]);        res.json(sessions);
+        ]);
+        res.json(sessions);
     } catch (error) {
         res.status(500).json({ message: 'Server Error fetching sessions' });
     }
@@ -381,8 +390,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
             fullName:    user.fullName,
             country:     user.country,
             skillLevel:  user.skillLevel,            
-            primaryGoal: user.primaryGoal,
-            interests:   user.interests,
+            primaryGoal: user.primaryGoal,            interests:   user.interests,
             bio:         user.bio
         };
         const { plan, audit } = await requestQueue.enqueue(async () => {
@@ -390,7 +398,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         });
 
         await new Message({
-            userId,            sessionId: currentSessionId,
+            userId,
+            sessionId: currentSessionId,
             role: 'ai',
             content: JSON.stringify(plan)
         }).save();
@@ -430,8 +439,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             skillLevel:  user.skillLevel,
             primaryGoal: user.primaryGoal,            
             interests:   user.interests,
-            bio:         user.bio
-        };
+            bio:         user.bio        };
         const { plan, audit } = await requestQueue.enqueue(async () => {
             return await refinePlan(originalPlan, followUpAnswer, dreamDescription, userProfile);
         });
@@ -439,7 +447,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: JSON.stringify(plan)        }).save();
+            content: JSON.stringify(plan)
+        }).save();
 
         res.json({ plan, audit, sessionId: currentSessionId });
 
@@ -479,8 +488,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         await user.save();
         res.json(user);
     } catch (err) {
-        console.error(err.message);
-        res.status(500).json({ message: 'Server Error' });
+        console.error(err.message);        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -488,7 +496,8 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
 
-    try {        let user = await User.findById(req.userId);
+    try {
+        let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         const isMatch = await bcrypt.compare(currentPassword, user.password);
@@ -528,8 +537,7 @@ app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
 
 app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
-        const user = await User.findById(req.userId);
-        if (!user || !user.isAdmin)
+        const user = await User.findById(req.userId);        if (!user || !user.isAdmin)
             return res.status(403).json({ message: 'Access denied. Admins only.' });
 
         const users = await User.find().select('-password');
@@ -537,7 +545,8 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
-    }});
+    }
+});
 
 app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
     try {
@@ -577,8 +586,7 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
 
         const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, history: messages });
-    } catch (err) {
-        console.error(err);
+    } catch (err) {        console.error(err);
         res.status(500).json({ message: 'Server Error' });
     }
 });
@@ -627,7 +635,6 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 //  REPORT ROUTES
 // ════════════════════════════════════════════
-
 app.post('/api/reports', verifyToken, async (req, res) => {
     try {
         const { subject, message } = req.body;
@@ -635,7 +642,8 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         const newReport = new Report({
-            userId: req.userId,            username: user.username,
+            userId: req.userId,
+            username: user.username,
             subject,
             message
         });
@@ -676,7 +684,6 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error fetching notifications' });
     }
 });
-
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
     try {
         const count = await Message.countDocuments({ 
@@ -684,7 +691,8 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
             sessionId: 'admin-direct-message' 
         });
         
-        res.json({ count });    } catch (err) {
+        res.json({ count });
+    } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error counting notifications' });
     }
