@@ -47,7 +47,6 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-
     // --- ADMIN SECURITY FIELDS ---
     isAdmin: {
         type: Boolean,
@@ -74,10 +73,10 @@ const UserSchema = new mongoose.Schema({
         }
     },
 
-    // --- SUBSCRIPTION FIELDS ---
+    // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
     subscriptionTier: {
         type: String,
-        enum: ['free', 'pro'],
+        enum: ['free', 'go', 'pro'], // Added 'go'
         default: 'free'
     },
     subscriptionEndDate: {
@@ -97,8 +96,7 @@ const UserSchema = new mongoose.Schema({
         txRef: { type: String, required: true },
         amount: { type: Number, required: true },
         currency: { type: String, default: 'USD' },
-        status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },
-        paidAt: { type: Date, default: Date.now },
+        status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },        paidAt: { type: Date, default: Date.now },
         subscriptionEndDate: { type: Date }
     }],
 
@@ -147,8 +145,7 @@ UserSchema.methods.downgradeIfExpired = async function() {
 UserSchema.methods.upgradeToPro = async function(days = 30) {
     this.subscriptionTier = 'pro';
     this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-    await this.save();
-    return this;
+    await this.save();    return this;
 };
 
 // Method to add payment record
