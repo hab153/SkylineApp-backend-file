@@ -296,7 +296,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     try {        const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-oesx.vercel.app'; 
+        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-l8c2.vercel.app'; 
 
         const amount = 10;
         const currency = "USD"; 
