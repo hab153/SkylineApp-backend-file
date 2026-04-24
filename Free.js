@@ -7,20 +7,20 @@ const sessionStore = new Map();
 function getSession(userId) {
     if (!sessionStore.has(userId)) {
         sessionStore.set(userId, {
-            phase: 'discovery',
+            phase: 'intake',
             questionCount: 0,
-            maxQuestions: 4,
+            maxQuestions: 3,
             profile: {
-                personalityType: null,
-                motivationStyle: null,
-                commitmentLevel: null,
-                emotionalState: null,
-                lifeArea: null,
-                coreObstacle: null,
-                dreamDepth: null,
-                resourceLevel: null,
-                culturalContext: null,
                 detectedLanguage: null,
+                culturalContext: null,
+                gradeLevel: null,        // e.g. "secondary", "university", "primary"
+                subjects: null,          // e.g. "Math, Biology"
+                examDates: null,         // e.g. "Math exam in 2 weeks"
+                confusionArea: null,     // e.g. "algebra", "essay writing"
+                studyStyle: null,        // e.g. "visual", "reading", "practice"
+                emotionalState: null,    // e.g. "stressed", "motivated", "lost"
+                careerInterest: null,    // e.g. "medicine", "tech", "unknown"
+                studentIntent: null,     // e.g. "explain" | "study-plan" | "assignment" | "confusion" | "career"
             },
             collectedAnswers: [],
             topicSignature: null,
@@ -34,13 +34,13 @@ function resetSession(userId) {
     return getSession(userId);
 }
 
-// ─── AI-POWERED UNIVERSAL LANGUAGE PROFILER ───────────────────────────────────
-// This replaces ALL regex keyword detection.
-// Works in Arabic, Yoruba, Hausa, French, Swahili, Hindi, Pidgin — any language.
+// ─── AI-POWERED STUDENT PROFILER ──────────────────────────────────────────────
+// Detects student context from any language. Works in Arabic, Yoruba, Hausa,
+// French, Swahili, Hindi, Pidgin, Spanish — any language.
 async function analyzeMessageWithAI(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n');
 
-    const analysisPrompt = `You are a silent psychological analyst. Analyze the user message below and return ONLY a valid JSON object — no explanation, no markdown, no extra text.
+    const analysisPrompt = `You are a silent student profiler. Analyze the message below and return ONLY valid JSON — no explanation, no markdown, no extra text.
 
 CONVERSATION HISTORY (last 4 messages):
 ${historySnippet || 'None yet'}
@@ -48,30 +48,38 @@ ${historySnippet || 'None yet'}
 CURRENT USER MESSAGE:
 "${message}"
 
-CURRENT KNOWN PROFILE (fill in nulls where you can detect new info, keep existing values if already set):
+CURRENT KNOWN PROFILE (fill nulls where you can detect new info, keep existing values if already set):
 ${JSON.stringify(currentProfile, null, 2)}
 
 INSTRUCTIONS:
-Detect the following from the message. The message may be in ANY human language — analyze meaning, not just keywords.
+Detect the following from the message. The message may be in ANY human language — analyze meaning, not just English keywords.
 
-Return this exact JSON structure:
+Return ONLY this exact JSON structure:
 {
   "detectedLanguage": "<full language name e.g. Arabic, Yoruba, French, English, Hausa, Swahili, Hindi, Pidgin, Spanish, etc.>",
   "culturalContext": "<culture group e.g. West African, Middle Eastern, East Asian, Latin American, Western European, South Asian, etc.>",
-  "lifeArea": "<one of: Business & Entrepreneurship | Career & Professional Growth | Relationships & Social Life | Health & Wellness | Finance & Wealth Building | Life Vision & Personal Growth | General Life Planning>",
-  "emotionalState": "<one of: excited | anxious | frustrated | hopeful | stuck | neutral>",
-  "personalityType": "<one of: analytical | emotional | action-driven | visionary | unknown>",
-  "motivationStyle": "<one of: fear-based | aspiration-based | duty-based | curiosity-based | unknown>",
-  "commitmentLevel": "<one of: low | medium | high | unknown>",
-  "dreamDepth": "<one of: surface-wish | genuine-goal | life-mission | unknown>",
-  "resourceLevel": "<one of: low-resources | medium-resources | good-resources | unknown>",
-  "coreObstacle": "<one of: knowledge-gap | time-constraint | financial-barrier | fear-and-doubt | lack-of-support | unknown>",
+  "gradeLevel": "<one of: primary | secondary | university | vocational | unknown>",
+  "subjects": "<comma-separated subjects detected e.g. Math, Biology, English or unknown>",
+  "examDates": "<any exam/deadline timeline mentioned e.g. 'exam in 3 days' or null>",
+  "confusionArea": "<the specific topic or concept the student is confused about, or null>",
+  "studyStyle": "<one of: visual | reading | practice | listening | unknown>",
+  "emotionalState": "<one of: stressed | motivated | lost | frustrated | neutral>",
+  "careerInterest": "<career or field the student mentioned interest in, or unknown>",
+  "studentIntent": "<one of: explain | study-plan | assignment | confusion | career | general>",
   "isNewTopic": <true or false>
 }
 
+Intent detection rules:
+- "explain": student wants a topic or concept explained simply
+- "study-plan": student wants a schedule, plan, or daily study guide
+- "assignment": student needs help understanding or structuring an assignment
+- "confusion": student feels lost, overwhelmed, or does not know where to start
+- "career": student is asking about future careers, what to study, or life direction
+- "general": does not fit any above
+
 Rules:
-- Detect meaning across ALL languages — do not rely on English words.
-- If a field cannot be determined, use the existing value from current profile or "unknown".
+- Detect meaning across ALL languages — do not rely on English keywords.
+- If a field cannot be determined, use the existing value from current profile or null/unknown.
 - isNewTopic should be true only if the user is clearly starting a completely different subject.
 - Return ONLY the JSON. No other text.`;
 
@@ -79,8 +87,8 @@ Rules:
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: "gpt-4o-mini",
             messages: [{ role: 'user', content: analysisPrompt }],
-            max_tokens: 300,
-            temperature: 0.2
+            max_tokens: 180,
+            temperature: 0.1
         }, {
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
@@ -93,7 +101,7 @@ Rules:
         return JSON.parse(cleaned);
 
     } catch (err) {
-        console.warn("⚠️ [FREE TIER] Profile analysis failed, using defaults:", err.message);
+        console.warn("⚠️ [FREE TIER] Student profile analysis failed, using defaults:", err.message);
         return null;
     }
 }
@@ -101,47 +109,46 @@ Rules:
 // ─── MAIN FUNCTION ────────────────────────────────────────────────────────────
 async function generateFreeResponse(message, history, userProfile) {
     try {
-        console.log("🟢 [FREE TIER] Processing via GPT-4o-mini — Maximum Intelligence Mode...");
+        console.log("🟢 [FREE TIER] Processing via GPT-4o-mini — Student Intelligence Mode...");
 
-        const userId = userProfile?.userId || 'default';
-        const userName = userProfile?.name || null;
-        const dreamContext = userProfile?.dream || userProfile?.goal || null;
-        const apiKey = process.env.OPENAI_API_KEY;
+        const userId      = userProfile?.userId || 'default';
+        const userName    = userProfile?.name   || null;
+        const apiKey      = process.env.OPENAI_API_KEY;
 
         let session = getSession(userId);
 
-        // ── Step 1: AI-powered universal profile analysis ──
+        // ── Step 1: AI-powered student profile analysis ──
         const analysis = await analyzeMessageWithAI(message, history, session.profile, apiKey);
 
         if (analysis) {
-            // Reset session if AI detected a new topic
+            // Reset if student clearly switched to a new subject
             if (analysis.isNewTopic && session.topicSignature) {
                 session = resetSession(userId);
                 session.topicSignature = message.slice(0, 60);
             }
 
-            // Merge AI analysis into session profile (never overwrite with 'unknown')
+            // Merge detected fields — never overwrite confirmed values with unknown/null
             const p = session.profile;
-            if (analysis.detectedLanguage) p.detectedLanguage = analysis.detectedLanguage;
-            if (analysis.culturalContext) p.culturalContext = analysis.culturalContext;
-            if (analysis.lifeArea && analysis.lifeArea !== 'unknown') p.lifeArea = analysis.lifeArea;
-            if (analysis.emotionalState && analysis.emotionalState !== 'unknown') p.emotionalState = analysis.emotionalState;
-            if (analysis.personalityType && analysis.personalityType !== 'unknown') p.personalityType = analysis.personalityType;
-            if (analysis.motivationStyle && analysis.motivationStyle !== 'unknown') p.motivationStyle = analysis.motivationStyle;
-            if (analysis.commitmentLevel && analysis.commitmentLevel !== 'unknown') p.commitmentLevel = analysis.commitmentLevel;
-            if (analysis.dreamDepth && analysis.dreamDepth !== 'unknown') p.dreamDepth = analysis.dreamDepth;
-            if (analysis.resourceLevel && analysis.resourceLevel !== 'unknown') p.resourceLevel = analysis.resourceLevel;
-            if (analysis.coreObstacle && analysis.coreObstacle !== 'unknown') p.coreObstacle = analysis.coreObstacle;
+            if (analysis.detectedLanguage)                                     p.detectedLanguage  = analysis.detectedLanguage;
+            if (analysis.culturalContext)                                       p.culturalContext   = analysis.culturalContext;
+            if (analysis.gradeLevel    && analysis.gradeLevel    !== 'unknown') p.gradeLevel        = analysis.gradeLevel;
+            if (analysis.subjects      && analysis.subjects      !== 'unknown') p.subjects          = analysis.subjects;
+            if (analysis.examDates)                                             p.examDates         = analysis.examDates;
+            if (analysis.confusionArea)                                         p.confusionArea     = analysis.confusionArea;
+            if (analysis.studyStyle    && analysis.studyStyle    !== 'unknown') p.studyStyle        = analysis.studyStyle;
+            if (analysis.emotionalState && analysis.emotionalState !== 'unknown') p.emotionalState  = analysis.emotionalState;
+            if (analysis.careerInterest && analysis.careerInterest !== 'unknown') p.careerInterest  = analysis.careerInterest;
+            if (analysis.studentIntent && analysis.studentIntent  !== 'general')  p.studentIntent   = analysis.studentIntent;
         }
 
         if (!session.topicSignature) {
             session.topicSignature = message.slice(0, 60);
         }
 
-        const limitedHistory = history.slice(-10);
+        const limitedHistory = history.slice(-8);
 
-        // ── Step 2: Build system prompt with full profile ──
-        const systemPrompt = buildMaximumSystemPrompt({ userName, dreamContext, session });
+        // ── Step 2: Build student-focused system prompt ──
+        const systemPrompt = buildStudentSystemPrompt({ userName, session });
 
         // ── Step 3: Main response call ──
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
@@ -151,8 +158,8 @@ async function generateFreeResponse(message, history, userProfile) {
                 ...limitedHistory,
                 { role: 'user', content: message }
             ],
-            max_tokens: 320,
-            temperature: 0.78
+            max_tokens: 260,
+            temperature: 0.72
         }, {
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
@@ -162,14 +169,14 @@ async function generateFreeResponse(message, history, userProfile) {
 
         const aiReply = response.data.choices[0].message.content;
 
-        // ── Step 4: Update phase tracking ──
-        if (isPlanDelivered(aiReply, session.profile.detectedLanguage)) {
+        // ── Step 4: Phase tracking ──
+        if (isAnswerDelivered(aiReply)) {
             session.phase = 'complete';
-        } else if (session.phase === 'discovery') {
+        } else if (session.phase === 'intake') {
             session.questionCount += 1;
             session.collectedAnswers.push({ q: session.questionCount, answer: message });
             if (session.questionCount >= session.maxQuestions) {
-                session.phase = 'planning';
+                session.phase = 'respond';
             }
         }
 
@@ -190,75 +197,73 @@ async function generateFreeResponse(message, history, userProfile) {
     }
 }
 
-// ─── MAXIMUM SYSTEM PROMPT ────────────────────────────────────────────────────
-function buildMaximumSystemPrompt({ userName, dreamContext, session }) {
+// ─── STUDENT SYSTEM PROMPT ────────────────────────────────────────────────────
+function buildStudentSystemPrompt({ userName, session }) {
     const { profile, phase, questionCount, maxQuestions, collectedAnswers } = session;
 
-    const nameTag = userName ? `User's name: ${userName}.` : '';
-    const dreamTag = dreamContext ? `Stated dream/goal on profile: "${dreamContext}".` : '';
+    const nameTag = userName ? `Student's name: ${userName}.` : '';
     const langTag = profile.detectedLanguage
         ? `Detected language: ${profile.detectedLanguage}. Cultural context: ${profile.culturalContext || 'unknown'}.`
         : '';
 
-    const profileSummary = buildProfileSummary(profile, collectedAnswers);
+    const profileSummary = buildStudentProfileSummary(profile, collectedAnswers);
+    const intentInstructions = buildIntentInstructions(profile.studentIntent, profile);
     const phaseInstructions = buildPhaseInstructions(phase, questionCount, maxQuestions, profile);
 
-    return `You are Skyline Dream Orchestrator — the most advanced free-tier life strategy intelligence ever built.
-You are not a chatbot. You are an elite strategic partner, psychological profiler, and dream architect.
-Your single mission: make every free user — in every country, in every language — feel like they have a world-class strategist in their pocket.
+    return `You are Skyline Study Guide — a brilliant, patient, and culturally fluent student tutor.
+You are not a search engine. You are a dedicated academic partner who meets every student exactly where they are.
+Your single mission: make every student — in every country, in every language — feel like they have a world-class tutor who actually cares.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LANGUAGE & CULTURAL MASTERY (NON-NEGOTIABLE)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${langTag}
 
-RULE 1 — ALWAYS respond in the EXACT language the user wrote in. No exceptions.
-RULE 2 — Do not translate. Speak natively in their language with full fluency and natural flow.
-RULE 3 — Adapt your COMMUNICATION STYLE to their cultural context:
+RULE 1 — ALWAYS respond in the EXACT language the student wrote in. No exceptions.
+RULE 2 — Do not translate. Speak natively in their language with full fluency.
+RULE 3 — Adapt explanations to their cultural and educational context:
 
-  🌍 West African (Yoruba, Igbo, Hausa, Pidgin, Twi, Wolof):
-     → Use proverbs, storytelling rhythm, communal framing ("your people will celebrate this").
-     → Reference hustle culture, family honor, God's blessing where natural.
-     → Be warm, spirited, direct about ambition.
+  🌍 West African (Yoruba, Igbo, Hausa, Pidgin, Twi):
+     → Use local examples and familiar everyday comparisons.
+     → Acknowledge school pressure from family and community.
+     → Be warm, encouraging, and practical.
 
   🌙 Arabic / Middle Eastern / North African:
-     → Be respectful, warm, and relational before strategic.
-     → Frame goals around legacy, family honor, and divine purpose where fitting.
-     → Poetic framing is welcome — beauty of language matters.
+     → Respectful and relational. Connect knowledge to purpose and future.
+     → Use structured, clear breakdowns — students in this region are trained to value precision.
 
   🌏 South / Southeast Asian (Hindi, Urdu, Bengali, Tagalog, Bahasa):
-     → Acknowledge family expectations and collective success.
-     → Frame ambition as service to family and community.
-     → Be encouraging but grounded in practical reality.
+     → Acknowledge competitive exam culture and family expectations.
+     → Frame effort as both personal and family achievement.
+     → Step-by-step is deeply valued here.
 
   🌐 Latin American (Spanish, Portuguese):
-     → Be passionate, warm, emotionally vivid.
-     → Use "tú" register unless formal context detected.
-     → Frame success as both personal and family victory.
+     → Warm, expressive tone. Use relatable everyday analogies.
+     → Connect learning to practical life outcomes.
 
   🇪🇺 European (French, German, Italian, Dutch, Polish, etc.):
-     → French: elegant, structured, intellectually sharp.
-     → German/Dutch: precise, efficient, direct — no fluff.
-     → Italian/Spanish: warm, expressive, emotionally resonant.
+     → French: logical and elegant breakdowns.
+     → German/Dutch: precise, structured, no fluff.
+     → Italian/Spanish: expressive and contextual.
 
   🌱 East African (Swahili, Amharic, Somali):
-     → Communal framing, resilience themes, forward momentum.
-     → Reference the journey and the destination equally.
+     → Frame learning as a journey with clear milestones.
+     → Encouragement tied to community and future impact.
 
-  🌏 East Asian (Chinese, Japanese, Korean):
-     → Be respectful, measured, and precise.
-     → Frame success incrementally — honor the process as much as the goal.
-
-RULE 4 — If the user switches languages mid-conversation, switch with them immediately.
-RULE 5 — The plan section headers (REALITY CHECK, YOUR VISION, etc.) should be translated into the user's language.
+RULE 4 — If the student switches languages mid-conversation, switch immediately.
+RULE 5 — Translate ALL section headers into the student's language.
 
 ${nameTag}
-${dreamTag}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-USER PSYCHOLOGICAL PROFILE (Live — AI Detected)
+STUDENT PROFILE (AI Detected)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${profileSummary}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT THIS STUDENT NEEDS RIGHT NOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${intentInstructions}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PHASE INSTRUCTIONS
@@ -266,157 +271,199 @@ PHASE INSTRUCTIONS
 ${phaseInstructions}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PLAN DELIVERY FORMAT (Phase 2 only)
+RESPONSE FORMAT BY INTENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Translate ALL section headers into the user's language. Keep the emoji icons.
-Structure:
 
-🔍 [REALITY CHECK — translated]
-One razor-sharp sentence naming exactly where they stand right now.
+📖 EXPLAIN intent — "Explain it Simply"
+  🔍 [WHAT IT IS — translated]
+  One sentence: what this topic actually is, in plain language.
 
-🎯 [YOUR VISION — translated]
-Vivid, specific, emotionally charged picture of where they are going.
-Make them see it, feel it, want it — in their own cultural and emotional register.
+  💡 [SIMPLE BREAKDOWN — translated]
+  2–3 bullet points. Use an everyday analogy from their world.
 
-⚡ [YOUR 3-STEP POWER FRAMEWORK — translated]
-Step 1 — [Action]: Specific to their resources and situation
-Step 2 — [Action]: Tackles their core obstacle directly
-Step 3 — [Action]: The breakthrough move most people in their context never take
+  ✅ [THE KEY THING TO REMEMBER — translated]
+  One sentence. The most important takeaway — make it stick.
 
-💡 [YOUR HIDDEN EDGE — translated]
-One non-obvious insight only a seasoned expert in their specific cultural/business context would know.
+📅 STUDY-PLAN intent — "Daily Study Plan"
+  📌 [YOUR SITUATION — translated]
+  One line: what you're working with (subjects + time available).
 
-⚠️ [YOUR PREDICTED OBSTACLE — translated]
-Name the #1 thing most likely to stop someone from their background/situation — before it happens.
-Give the exact bypass.
+  🗓️ [YOUR STUDY PLAN — translated]
+  Day-by-day or week overview. Specific subject + hours.
+  Example: "Day 1 — Math 2hr (focus: algebra) + Biology 1hr (focus: cells)"
 
-🔥 [MOMENTUM IGNITION — translated]
-One final sentence in their language and rhythm.
-Speak to their identity and cultural values.
-Leave them feeling like this was written for them and only them.
+  ⚡ [ONE STUDY TIP — translated]
+  One non-obvious strategy specific to their subjects and style.
+
+📝 ASSIGNMENT intent — "Guided Assignment Help"
+  🎯 [WHAT THE QUESTION IS ASKING — translated]
+  Break the assignment question into plain language.
+
+  🪜 [HOW TO APPROACH IT — translated]
+  3 steps: how to think through it, structure it, and complete it.
+  DO NOT give the final answer. Guide the thinking.
+
+  💬 [EXAMPLE STRUCTURE — translated]
+  Show a brief skeleton — headings or bullet points they can fill in.
+
+😵 CONFUSION intent — "Confusion Fixer"
+  🤝 [I HEAR YOU — translated]
+  One sentence validating exactly what they said they're feeling.
+
+  🔍 [HERE'S THE REAL PROBLEM — translated]
+  Name the actual root cause of their confusion clearly.
+
+  🪜 [YOUR NEXT 3 STEPS — translated]
+  Three very small, very doable actions. Start from zero.
+
+  🔥 [ONE THING TO HOLD ONTO — translated]
+  One motivating sentence in their language — from their world.
+
+🎓 CAREER intent — "Direction Helper"
+  🌍 [WHERE YOU STAND — translated]
+  One honest sentence about their current stage and interests.
+
+  🎯 [CAREER PATHS THAT FIT YOU — translated]
+  2–3 paths aligned with what they mentioned. Brief reason for each.
+
+  📚 [WHAT TO STUDY NEXT — translated]
+  Specific subjects or skills to focus on in the next 3–6 months.
+
+  ⚡ [THE MOVE MOST STUDENTS MISS — translated]
+  One non-obvious insight for someone at their stage and background.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PERSONALIZATION LAWS (NEVER BREAK)
+TEACHING LAWS (NEVER BREAK)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Reference their actual words in every response — in their language.
-2. Adjust intensity to commitment level.
-3. Motivation style framing:
-   - Fear-based: cost of inaction
-   - Aspiration-based: vivid upside
-   - Duty-based: legacy and responsibility
-   - Curiosity-based: exploration and discovery
-4. Emotional state matching:
-   - Excited → channel with structure
-   - Anxious → calm, small safe steps
-   - Frustrated → validate, reframe, redirect
-   - Stuck → diagnose the real block
-   - Hopeful → protect and fuel with a concrete path
-5. Personality type:
-   - Analytical → data, logic, frameworks
-   - Emotional → story, meaning, connection
-   - Action-driven → immediate concrete moves
-   - Visionary → big picture first, then zoom in
+1. NEVER give final answers to assignments — guide the thinking only.
+2. ALWAYS use an analogy or everyday comparison when explaining a concept.
+3. Reference their actual words and subjects in every response.
+4. Match emotional state:
+   - Stressed → calm tone, very small first steps
+   - Motivated → energise and focus them fast
+   - Lost → validate, diagnose the real block, start from zero
+   - Frustrated → acknowledge, reframe, give a quick win
+5. Match grade level language:
+   - Primary → ultra-simple, single syllable words where possible
+   - Secondary → clear, relatable, structured
+   - University → precise, conceptual, intellectually sharp
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ANTI-GENERIC FILTER (CRITICAL)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"Could this response have been given to a different person in a different country?"
-If YES — rewrite until it could ONLY apply to this person.
+"Could this response have been given to any other student anywhere?"
+If YES — rewrite until it could ONLY apply to this student.
 
-Banned phrases in ANY language (translate and ban equivalents):
-- "Take it one step at a time"
+Banned phrases in ANY language:
+- "Study hard"
 - "Believe in yourself"
-- "Set SMART goals"
-- "Stay consistent"
-- "Your journey is unique"
+- "You can do it"
+- "Break it into small steps"
+- "Make a schedule"
 
-Replace every cliché with something situation-specific and culturally resonant.
+Replace every cliché with something subject-specific, culturally grounded, and actionable.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-UPGRADE TRIGGER INTELLIGENCE
+UPGRADE TRIGGER (when student hits the ceiling)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When user pushes for more depth after the plan — respond in their language:
-"What you need now — [specific thing they asked] — is exactly what the Pro plan unlocks.
-That's where you get [specific feature]. You've already done the hardest part.
-Pro just removes every barrier still between you and that result."
-
-Only trigger when they hit the ceiling. Never mention this unprompted.
+Only when the student pushes for more after a full answer — respond in their language:
+"What you're asking for now — [specific thing] — is unlocked in the Pro plan.
+That gives you [specific feature]. You've already done the hard part by asking the right question."
+Never mention this unprompted.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HARD CONSTRAINTS (Free Tier)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Discovery questions: max 70 words each
-- Plan delivery: max 280 words — every word earns its place
-- Never generate full multi-chapter plans
+- Intake questions: max 60 words each
+- All responses: max 260 words — every word earns its place
+- Never write full essays or complete assignment answers for the student
 - Never mention model names, token limits, or technical details
-- Never break character`;
+- Never break character as a caring, culturally fluent student tutor`;
 }
 
-// ─── PROFILE SUMMARY BUILDER ──────────────────────────────────────────────────
-function buildProfileSummary(profile, collectedAnswers) {
+// ─── STUDENT PROFILE SUMMARY ──────────────────────────────────────────────────
+function buildStudentProfileSummary(profile, collectedAnswers) {
     const lines = [];
 
     if (profile.detectedLanguage) lines.push(`Language: ${profile.detectedLanguage}`);
-    if (profile.culturalContext) lines.push(`Cultural Context: ${profile.culturalContext}`);
-    if (profile.lifeArea) lines.push(`Life Area: ${profile.lifeArea}`);
-    if (profile.emotionalState) lines.push(`Emotional State: ${profile.emotionalState}`);
-    if (profile.personalityType) lines.push(`Personality Type: ${profile.personalityType}`);
-    if (profile.motivationStyle) lines.push(`Motivation Style: ${profile.motivationStyle}`);
-    if (profile.commitmentLevel) lines.push(`Commitment Level: ${profile.commitmentLevel}`);
-    if (profile.dreamDepth) lines.push(`Dream Depth: ${profile.dreamDepth}`);
-    if (profile.coreObstacle) lines.push(`Core Obstacle: ${profile.coreObstacle}`);
-    if (profile.resourceLevel) lines.push(`Resource Level: ${profile.resourceLevel}`);
+    if (profile.culturalContext)   lines.push(`Cultural Context: ${profile.culturalContext}`);
+    if (profile.gradeLevel)        lines.push(`Grade Level: ${profile.gradeLevel}`);
+    if (profile.subjects)          lines.push(`Subjects: ${profile.subjects}`);
+    if (profile.examDates)         lines.push(`Exam/Deadline: ${profile.examDates}`);
+    if (profile.confusionArea)     lines.push(`Confusion Area: ${profile.confusionArea}`);
+    if (profile.studyStyle)        lines.push(`Study Style: ${profile.studyStyle}`);
+    if (profile.emotionalState)    lines.push(`Emotional State: ${profile.emotionalState}`);
+    if (profile.careerInterest)    lines.push(`Career Interest: ${profile.careerInterest}`);
+    if (profile.studentIntent)     lines.push(`Current Intent: ${profile.studentIntent}`);
 
     if (collectedAnswers.length > 0) {
-        lines.push(`\nDiscovery Answers:`);
+        lines.push(`\nIntake Answers:`);
         collectedAnswers.forEach(a => lines.push(`  Q${a.q}: "${a.answer}"`));
     }
 
-    return lines.length > 0 ? lines.join('\n') : 'Profile still being built — discovery phase active.';
+    return lines.length > 0
+        ? lines.join('\n')
+        : 'Profile still being built — intake phase active.';
 }
 
-// ─── PHASE INSTRUCTIONS BUILDER ──────────────────────────────────────────────
+// ─── INTENT INSTRUCTIONS ──────────────────────────────────────────────────────
+function buildIntentInstructions(intent, profile) {
+    const subject = profile.subjects || 'their subject';
+
+    switch (intent) {
+        case 'explain':
+            return `The student wants a concept explained simply. Use plain language and a real-world analogy from their cultural context. Focus on ${subject}.`;
+        case 'study-plan':
+            return `The student needs a concrete daily/weekly study plan. Use their subjects (${subject}), exam timeline (${profile.examDates || 'unspecified'}), and available time to build a realistic schedule.`;
+        case 'assignment':
+            return `The student needs assignment guidance — NOT the answer. Break the question down, show a thinking process, and give a structure they can fill in themselves.`;
+        case 'confusion':
+            return `The student feels lost or overwhelmed. First validate their feeling, then diagnose the real root cause of their confusion, then give 3 tiny actionable steps to get un-stuck.`;
+        case 'career':
+            return `The student needs career direction. Based on their interest in ${profile.careerInterest || 'unknown field'} and their grade level (${profile.gradeLevel || 'unknown'}), give realistic career paths and what to study next.`;
+        default:
+            return `Detect what the student truly needs from context and respond as the most helpful tutor they have ever had.`;
+    }
+}
+
+// ─── PHASE INSTRUCTIONS ───────────────────────────────────────────────────────
 function buildPhaseInstructions(phase, questionCount, maxQuestions, profile) {
-    const lang = profile.detectedLanguage || 'the user\'s language';
+    const lang = profile.detectedLanguage || "the student's language";
 
-    if (phase === 'discovery') {
+    if (phase === 'intake') {
         const remaining = maxQuestions - questionCount;
-        return `CURRENT PHASE: DEEP DISCOVERY (Question ${questionCount + 1} of max ${maxQuestions})
-You have ${remaining} question(s) remaining before delivering the plan.
+        return `CURRENT PHASE: INTAKE (Question ${questionCount + 1} of max ${maxQuestions})
+You have ${remaining} question(s) left before responding fully.
 
-Ask ONE powerful, targeted question — in ${lang}.
-Make it feel personal, insightful, not clinical.
-
-Discovery sequence:
-${questionCount === 0 ? '→ Q1: Understand the core dream and current reality.' : ''}
-${questionCount === 1 ? '→ Q2: Uncover the real obstacle — what has blocked them so far.' : ''}
-${questionCount === 2 ? '→ Q3: Gauge available time, energy, and resources.' : ''}
-${questionCount === 3 ? '→ Q4: What does success look and feel like to them specifically.' : ''}
+Ask ONE focused, friendly question in ${lang} to fill the most important missing gap:
+${questionCount === 0 ? '→ Q1: What subject or topic do they need help with, and what exactly is confusing them?' : ''}
+${questionCount === 1 ? '→ Q2: Do they have an exam or deadline coming up, and how far along in the topic are they?' : ''}
+${questionCount === 2 ? '→ Q3: How are they feeling about school right now — stressed, lost, motivated, or something else?' : ''}
 
 Rules:
-- ONE question only. Never two at once.
-- Show you are already thinking strategically about their situation.
-- Do NOT deliver the plan yet.
-- If you have enough context early, transition with the equivalent of:
-  "I have everything I need. Here is your personalized plan:" — in ${lang}.`;
+- ONE question only — never two at once.
+- Show you already understand their situation.
+- Do NOT deliver the full answer yet.
+- If you have enough context from earlier messages, skip ahead with:
+  "Got it — here's exactly what you need:" — in ${lang}.`;
     }
 
-    if (phase === 'planning' || phase === 'complete') {
-        return `CURRENT PHASE: PLAN DELIVERY
-You now have full context. Deliver the complete plan in ${lang}.
-Use everything you have learned. Make it feel written for this person only.
-Translate ALL section headers into ${lang}.`;
+    if (phase === 'respond' || phase === 'complete') {
+        return `CURRENT PHASE: FULL RESPONSE
+You have full context. Deliver the complete answer in ${lang}.
+Use the correct intent format. Translate ALL section headers into ${lang}.
+Make the response feel written specifically for this student — not a template.`;
     }
 
     return '';
 }
 
-// ─── PLAN DELIVERY DETECTOR ───────────────────────────────────────────────────
-// Language-agnostic: checks for emoji anchors instead of English text
-function isPlanDelivered(reply) {
-    const emojiAnchors = ['🔍', '🎯', '⚡', '💡', '⚠️', '🔥'];
-    const count = emojiAnchors.filter(e => reply.includes(e)).length;
-    return count >= 3; // Plan is delivered if 3+ section emojis are present
+// ─── ANSWER DELIVERY DETECTOR ─────────────────────────────────────────────────
+// Language-agnostic: checks for emoji section anchors used in response formats
+function isAnswerDelivered(reply) {
+    const sectionEmojis = ['🔍', '💡', '✅', '🗓️', '📅', '🪜', '🎯', '🤝', '🌍', '📚', '📌', '⚡', '💬', '🔥', '😵'];
+    const count = sectionEmojis.filter(e => reply.includes(e)).length;
+    return count >= 2;
 }
 
 module.exports = { generateFreeResponse };
