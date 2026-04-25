@@ -2,7 +2,8 @@
 const axios = require('axios');
 
 /**
- * Analyzes an image using GPT-4o-mini and returns a text description.
+ * Analyzes an image using GPT-4o-mini and returns a concise but detailed text description.
+ * Optimized for cost and speed.
  * @param {Buffer} imageBuffer - The resized image buffer.
  * @returns {Promise<string>} - The detailed text description of the image.
  */
@@ -19,7 +20,7 @@ async function analyzeImage(imageBuffer) {
                     content: [
                         { 
                             type: "text", 
-                            text: "Describe this image in full detail. If it is a drawing, sketch, diagram, or chart, describe every element, color, shape, text, and potential meaning. If it is a photo, describe the scene, objects, people, actions, and context thoroughly. Be precise and objective." 
+                            text: "Describe this image precisely. Include key objects, colors, text, and context. If it's a diagram or sketch, explain its structure and meaning. Keep the description under 150 words." 
                         },
                         {
                             type: "image_url",
@@ -30,7 +31,7 @@ async function analyzeImage(imageBuffer) {
                     ]
                 }
             ],
-            max_tokens: 500
+            max_tokens: 250 // Reduced from 500 to save cost
         }, {
             headers: {
                 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
