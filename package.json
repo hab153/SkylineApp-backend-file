@@ -1,7 +1,7 @@
 {
   "name": "skyline-aa1-backend",
-  "version": "1.0.0",
-  "description": "Skyline AA-1 AI Backend with Simon Squibb Logic",
+  "version": "1.1.0",
+  "description": "Skyline AA-1 AI Backend with image analysis, OCR, and business intelligence system",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -12,7 +12,10 @@
     "business-plan",
     "simon-squibb",
     "flutterwave",
-    "mongodb"
+    "mongodb",
+    "image-ai",
+    "ocr",
+    "education-ai"
   ],
   "author": "Habeebullah",
   "license": "ISC",
@@ -27,9 +30,15 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.0.3",
     "openai": "^4.20.1",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+
+    // ✅ FIX FOR YOUR ERROR
+    "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
