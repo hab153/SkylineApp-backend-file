@@ -47,7 +47,8 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    // --- ADMIN SECURITY FIELDS ---    isAdmin: {
+    // --- ADMIN SECURITY FIELDS ---    
+    isAdmin: {
         type: Boolean,
         default: false
     },
