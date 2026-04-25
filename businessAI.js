@@ -34,7 +34,7 @@ class StudentSession {
     
     // Feature 4: Revision Engine Data
     this.revisionSchedule = null;
-    this.lastRevisionReminder: null;
+    this.lastRevisionReminder = null;
     this.spacedRepetitionQueue = []; // topics due for review
     
     // Feature 6: Multi-Subject Planner
