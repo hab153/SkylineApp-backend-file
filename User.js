@@ -97,7 +97,8 @@ const UserSchema = new mongoose.Schema({
         index: true  // Add index for faster lookups
     },
     
-    // Optional: Track payment history    paymentHistory: [{
+    // Optional: Track payment history    
+    paymentHistory: [{
         txRef: { type: String, required: true },
         amount: { type: Number, required: true },        currency: { type: String, default: 'USD' },
         status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },        paidAt: { type: Date, default: Date.now },
