@@ -47,8 +47,7 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    // --- ADMIN SECURITY FIELDS ---    
-    isAdmin: {
+    // --- ADMIN SECURITY FIELDS ---        isAdmin: {
         type: Boolean,
         default: false
     },
@@ -73,7 +72,10 @@ const UserSchema = new mongoose.Schema({
         },
         // ADDED FOR IMAGE UPLOAD LIMITS:
         dailyImageCount: { type: Number, default: 0 },
-        lastImageUploadDate: { type: Date, default: null }
+        lastImageUploadDate: { type: Date, default: null },
+        // ADDED FOR FILE UPLOAD LIMITS:
+        dailyFileCount: { type: Number, default: 0 },
+        lastFileUploadDate: { type: Date, default: null }
     },
 
     // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
@@ -94,8 +96,7 @@ const UserSchema = new mongoose.Schema({
         index: true  // Add index for faster lookups
     },
     
-    // Optional: Track payment history
-    paymentHistory: [{
+    // Optional: Track payment history    paymentHistory: [{
         txRef: { type: String, required: true },
         amount: { type: Number, required: true },        currency: { type: String, default: 'USD' },
         status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },        paidAt: { type: Date, default: Date.now },
@@ -144,8 +145,7 @@ UserSchema.methods.downgradeIfExpired = async function() {
 };
 
 // Method to upgrade to pro
-UserSchema.methods.upgradeToPro = async function(days = 30) {
-    this.subscriptionTier = 'pro';
+UserSchema.methods.upgradeToPro = async function(days = 30) {    this.subscriptionTier = 'pro';
     this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);    await this.save();    return this;
 };
 
