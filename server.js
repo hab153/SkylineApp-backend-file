@@ -51,7 +51,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
                 user.subscriptionEndDate = null;
                 await user.save();
                 console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
-            }        }        
+            }
+        }        
         next();
     } catch (err) {
         console.error('Error checking subscription expiry:', err);
@@ -95,11 +96,13 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         if (status === 'successful') {
             console.log(`✅ Payment successful for txRef: ${txRef}`);
             
-            if (!txRef) return res.status(400).send('Missing txRef');
-                        // Infer plan from txRef if meta is missing (Safety Net)
+            if (!txRef) return res.status(400).send('Missing txRef');            
+            // Infer plan from txRef if meta is missing (Safety Net)
             if (!planType) {
-                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
-                else planType = 'free';            }
+                if (txRef.includes('_go_')) planType = 'go';
+                else if (txRef.includes('_pro_')) planType = 'pro';
+                else planType = 'free';
+            }
 
             const user = await User.findOne({ lastTxRef: txRef });
             
@@ -143,11 +146,12 @@ app.use('/api/auth', authRoutes);
 const verifyToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-
     if (!token) return res.status(403).json({ message: 'No token provided' });
-    try {        const secret = process.env.JWT_SECRET || 'secretkey';
+    try {
+        const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);
-        req.userId = decoded.user.id;        next();
+        req.userId = decoded.user.id;
+        next();
     } catch (err) {
         console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });        
@@ -190,12 +194,12 @@ const checkDailyLimit = async (req, res, next) => {
         next(); // Allow the request to proceed
 
     } catch (err) {
-        console.error('Error checking daily limit:', err);
-        res.status(500).json({ message: 'Server Error checking usage limits' });
+        console.error('Error checking daily limit:', err);        res.status(500).json({ message: 'Server Error checking usage limits' });
     }
 };
+
 // ════════════════════════════════════════════
-//  IMAGE UPLOAD & ANALYSIS ROUTE (NEW)
+//  IMAGE UPLOAD & ANALYSIS ROUTE (UPDATED FOR TEXT + IMAGE)
 // ════════════════════════════════════════════
 
 // Configure Multer to store files in memory (buffer)
@@ -239,28 +243,39 @@ app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, r
         user.usage.dailyImageCount += 1;
         await user.save();
 
-        // --- PROCESS IMAGE ---
-        console.log("🖼️ Resizing image...");
+        // --- PROCESS IMAGE ---        console.log("🖼️ Resizing image...");
         const resizedBuffer = await resizeImage(req.file.buffer);
 
-        console.log("🧠 Analyzing image with GPT-4o-mini...");        const imageDescription = await analyzeImage(resizedBuffer);
+        console.log("🧠 Analyzing image with GPT-4o-mini...");
+        const imageDescription = await analyzeImage(resizedBuffer);
 
         console.log("✅ Image Analysis Complete. Routing to AI Model...");
         
+        // --- GET USER'S TEXT MESSAGE ---
+        // Multer puts text fields in req.body when using memoryStorage
+        const userMessage = req.body.message || ""; 
+
+        // --- CREATE COMBINED PROMPT ---
+        // This ensures the AI knows BOTH what is in the image AND what the user asked
+        let finalPrompt = `[Image Analysis]: ${imageDescription}\n\n`;
+        
+        if (userMessage && userMessage.trim().length > 0) {
+            finalPrompt += `[User Question]: ${userMessage}\n\nINSTRUCTION: Answer the user's question based on the image content.`;
+        } else {
+            finalPrompt += `INSTRUCTION: The user uploaded this image without a specific question. Please describe it briefly and ask how you can help.`;
+        }
+
         // --- ROUTE TO CORRECT AI FILE BASED ON PLAN ---
         const plan = user.subscriptionTier || 'free';
         let aiReply;
         let updatedHistory = [];
 
-        // We simulate a chat message with the image description
-        const imagePrompt = `[Image Analysis]: ${imageDescription}\n\nThe user has uploaded an image. Please respond to the content of this image directly.`;
-
         if (plan === 'free') {
-            const result = await freeAI.generateFreeResponse(imagePrompt, [], user);
+            const result = await freeAI.generateFreeResponse(finalPrompt, [], user);
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
-            const result = await goAI.generateGoResponse(imagePrompt, [], user);
+            const result = await goAI.generateGoResponse(finalPrompt, [], user);
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else {
@@ -270,15 +285,17 @@ app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, r
                 primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio
             };
             const result = await requestQueue.enqueue(async () => {
-                return await chat(imagePrompt, [], userProfile);
+                return await chat(finalPrompt, [], userProfile);
             });
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
 
         // Save the interaction to history
-        const sessionId = uuidv4();
-        await new Message({ userId: user._id, sessionId, role: 'user', content: 'Uploaded an image' }).save();
+        const sessionId = uuidv4();        // Save what the user actually typed (or just "Uploaded an image" if empty)
+        const savedUserContent = userMessage ? userMessage : "Uploaded an image";
+        
+        await new Message({ userId: user._id, sessionId, role: 'user', content: savedUserContent }).save();
         await new Message({ userId: user._id, sessionId, role: 'ai', content: aiReply }).save();
 
         res.json({ 
@@ -293,6 +310,7 @@ app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, r
         res.status(500).json({ message: 'Server Error processing image' });
     }
 });
+
 // ════════════════════════════════════════════
 //  FLUTTERWAVE PAYMENT ROUTES (UPDATED PRICES: GO $9, PRO $20)
 // ════════════════════════════════════════════
@@ -323,8 +341,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                 if (user) {
                     userId = user._id;
                 }
-            }
-            
+            }            
             if (!userId) {
                 console.error("❌ No userId found in verification response and no user found by txRef");
                 return res.status(400).json({ success: false, message: "No userId found" });
@@ -340,8 +357,10 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
             const updatedUser = await User.findByIdAndUpdate(
                 userId, 
                 {
-                    subscriptionTier: planType,                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-                    lastTxRef: null                },
+                    subscriptionTier: planType,
+                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+                    lastTxRef: null
+                },
                 { new: true }
             );            
             if (updatedUser) {
@@ -371,8 +390,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         let amount = 0;
         let planName = '';
 
-        if (planType === 'go') {
-            amount = 9; // NEW PRICE FOR GO
+        if (planType === 'go') {            amount = 9; // NEW PRICE FOR GO
             planName = 'Skyline AA-1 GO Plan';
         } else if (planType === 'pro') {
             amount = 20; // NEW PRICE FOR PRO
@@ -390,8 +408,10 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         console.log(`💾 Saved txRef ${txRef} to user ${user._id} for plan ${planType}`);
         const payload = {
             tx_ref: txRef,
-            amount: amount,            currency: "USD", 
-            redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,            customer: {
+            amount: amount,
+            currency: "USD", 
+            redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,
+            customer: {
                 email: user.email,
                 phonenumber: user.phone || "08012345678",
                 name: user.fullName || user.username,
@@ -419,8 +439,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         if (response.data.status === 'success') {
             console.log(`✅ Payment link created for user ${user._id}`);
             res.json({ link: response.data.data.link, tx_ref: txRef });
-        } else {
-            console.error('❌ Failed to initialize payment:', response.data);
+        } else {            console.error('❌ Failed to initialize payment:', response.data);
             res.status(400).json({ message: 'Failed to initialize payment', error: response.data });
         }
     } catch (error) {
@@ -434,12 +453,14 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { message, history, sessionId } = req.body;    const userId = req.userId;
+    const { message, history, sessionId } = req.body;
+    const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
 
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
-    const plan = user.subscriptionTier || 'free';    try {
+    const plan = user.subscriptionTier || 'free';
+    try {
         await new Message({
             userId,
             sessionId: currentSessionId,
@@ -467,8 +488,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             // PRO PLAN uses BusinessAI (Existing Logic)
             console.log("🔴 Routing to Pro/Business AI");
             const userProfile = {
-                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio
+                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio
             };
             const result = await requestQueue.enqueue(async () => {
                 return await chat(message, history || [], userProfile);
@@ -481,14 +501,17 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: aiReply        }).save();
+            content: aiReply
+        }).save();
 
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
 
     } catch (error) {
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
-    }});
+    }
+});
+
 // ════════════════════════════════════════════
 //  OTHER PROTECTED API ROUTES (WITH EXPIRY CHECK)
 // ════════════════════════════════════════════
@@ -514,8 +537,7 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
     }
 });
 
-// 2. Get Messages for a Specific Session
-app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (req, res) => {
+// 2. Get Messages for a Specific Sessionapp.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const messages = await Message.find({
             userId: req.userId,
@@ -528,7 +550,8 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
 });
 
 // 3. Analyze Dream & Generate Squibb-Style Plan
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { dream, sessionId } = req.body;
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
+    const { dream, sessionId } = req.body;
     const userId = req.userId;
 
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
@@ -536,8 +559,10 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
     try {
         await new Message({
             userId,
-            sessionId: currentSessionId,            role: 'user',
-            content: dream,            title: dream.substring(0, 30) + '...'
+            sessionId: currentSessionId,
+            role: 'user',
+            content: dream,
+            title: dream.substring(0, 30) + '...'
         }).save();
 
         const user = await User.findById(userId);
@@ -561,7 +586,6 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         }).save();
 
         res.json({ plan, audit, sessionId: currentSessionId });
-
     } catch (error) {
         console.error('Dream analyze error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
@@ -575,7 +599,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 
     if (!originalPlan || !followUpAnswer || !dreamDescription) {
         return res.status(400).json({
-            message: 'originalPlan, followUpAnswer, and dreamDescription are required'        });
+            message: 'originalPlan, followUpAnswer, and dreamDescription are required'
+        });
     }
 
     const currentSessionId = sessionId || uuidv4();        
@@ -584,9 +609,11 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             userId,
             sessionId: currentSessionId,
             role: 'user',
-            content: followUpAnswer        }).save();
+            content: followUpAnswer
+        }).save();
 
-        const user = await User.findById(userId);        const userProfile = {
+        const user = await User.findById(userId);
+        const userProfile = {
             fullName:    user.fullName,
             country:     user.country,
             skillLevel:  user.skillLevel,
@@ -608,8 +635,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 
     } catch (error) {
         console.error('Plan refinement error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
+        res.status(500).json({ message: error.message || 'Server Error' });    }
 });
 
 // 5. Get User Profile (with expiry check)
@@ -623,6 +649,7 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         res.status(500).json({ message: 'Server Error' });
     }
 });
+
 // 6. Update User Profile
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
@@ -632,10 +659,12 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (fullName)       user.fullName       = fullName;
-        if (primaryGoal)    user.primaryGoal    = primaryGoal;        if (skillLevel)     user.skillLevel     = skillLevel;
+        if (primaryGoal)    user.primaryGoal    = primaryGoal;
+        if (skillLevel)     user.skillLevel     = skillLevel;
         if (interests)      user.interests      = interests;
         if (country)        user.country        = country;
-        if (bio)            user.bio            = bio;        if (profilePicture) user.profilePicture = profilePicture;
+        if (bio)            user.bio            = bio;
+        if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
         res.json(user);
     } catch (err) {
@@ -655,8 +684,7 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) return res.status(400).json({ message: 'Current password is incorrect' });
 
-        if (newPassword.length < 8)
-            return res.status(400).json({ message: 'New password must be at least 8 characters' });
+        if (newPassword.length < 8)            return res.status(400).json({ message: 'New password must be at least 8 characters' });
 
         const salt = await bcrypt.genSalt(10);
         user.password = await bcrypt.hash(newPassword, salt);
@@ -680,11 +708,13 @@ app.delete('/api/users/me', verifyToken, async (req, res) => {
     await deleteAccount(req, res);
 });
 
-// ════════════════════════════════════════════//  ADMIN LAYER ROUTES
+// ════════════════════════════════════════════
+//  ADMIN LAYER ROUTES
 // ════════════════════════════════════════════
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
+
 app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
@@ -703,7 +733,6 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
 
@@ -717,7 +746,8 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
     }
 });
 
-app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    try {
+app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {
+    try {
         const admin = await User.findById(req.userId);        
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         await User.findByIdAndDelete(req.params.id);
@@ -728,12 +758,14 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    try {
 });
 
 app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
-    try {        const admin = await User.findById(req.userId);
+    try {
+        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
 
-        const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });        res.json({ user: targetUser, history: messages });
+        const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
+        res.json({ user: targetUser, history: messages });
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
@@ -750,8 +782,7 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
 
         const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, messages: chatMessages });
-    } catch (err) {
-        console.error('Chat View Error:', err);
+    } catch (err) {        console.error('Chat View Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 });
@@ -764,7 +795,8 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
 
         const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });        const newMessage = new Message({
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+        const newMessage = new Message({
             userId: req.params.id,
             sessionId: 'admin-direct-message',             
             role: 'ai', 
@@ -776,13 +808,15 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
 
         res.json({ message: 'Message sent successfully' });
     } catch (err) {
-        console.error(err);        res.status(500).json({ message: 'Server Error' });
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
 // ════════════════════════════════════════════
 //  REPORT ROUTES
 // ════════════════════════════════════════════
+
 app.post('/api/reports', verifyToken, async (req, res) => {
     try {
         const { subject, message } = req.body;
@@ -797,8 +831,7 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         });
         await newReport.save();
         res.json({ message: 'Report submitted successfully' });
-    } catch (err) {
-        console.error(err);
+    } catch (err) {        console.error(err);
         res.status(500).json({ message: 'Server Error' });
     }
 });
@@ -811,7 +844,8 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
         const reports = await Report.find().sort({ createdAt: -1 });
         res.json(reports);
     } catch (err) {
-        res.status(500).json({ message: 'Server Error' });        }
+        res.status(500).json({ message: 'Server Error' });
+    }
 });
 
 // ════════════════════════════════════════════
@@ -824,14 +858,15 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
             userId: req.userId,             
             sessionId: 'admin-direct-message' 
         }).sort({ createdAt: -1 });
-                res.json(notifications);
+        res.json(notifications);
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error fetching notifications' });
     }
 });
 
-app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {
+app.get('/api/notifications/count', verifyToken, async (req, res) => {
+    try {
         const count = await Message.countDocuments({ 
             userId: req.userId, 
             sessionId: 'admin-direct-message' 
@@ -845,8 +880,7 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {
 });
 
 // Scheduled expiry check (runs daily at midnight)
-const scheduleExpiryCheck = async () => {
-    try {
+const scheduleExpiryCheck = async () => {    try {
         const now = new Date();
         const result = await User.updateMany(
             {
@@ -858,7 +892,7 @@ const scheduleExpiryCheck = async () => {
                 subscriptionEndDate: null
             }
         );
-                if (result.modifiedCount > 0) {
+        if (result.modifiedCount > 0) {
             console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
         }    
     } catch (err) {
