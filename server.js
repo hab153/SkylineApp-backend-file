@@ -831,9 +831,11 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {    const
 
 // 8. Change Email
 app.put('/api/auth/change-email', verifyToken, changeEmail);
-// 9. Verify Ageapp.put('/api/users/verify-age', verifyToken, verifyAge);
+// 9. Verify Age
+app.put('/api/users/verify-age', verifyToken, verifyAge);
 
-// 10. Delete Accountapp.delete('/api/users/me', verifyToken, async (req, res) => {
+// 10. Delete Account
+app.delete('/api/users/me', verifyToken, async (req, res) => {
     await deleteAccount(req, res);
 });
 
