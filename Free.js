@@ -40,13 +40,16 @@ function resetSession(userId) {
 async function analyzeMessageWithAI(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n');
 
+    // FIXED: Escape special characters to prevent breaking the JSON structure
+    const safeMessage = message.replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    const safeHistory = historySnippet ? historySnippet.replace(/"/g, '\\"').replace(/\n/g, '\\n') : 'None yet';
+
     const analysisPrompt = `You are a silent student profiler. Analyze the message below and return ONLY valid JSON — no explanation, no markdown, no extra text.
 
 CONVERSATION HISTORY (last 4 messages):
-${historySnippet || 'None yet'}
-
+${safeHistory}
 CURRENT USER MESSAGE:
-"${message}"
+"${safeMessage}"
 
 CURRENT KNOWN PROFILE (fill nulls where you can detect new info, keep existing values if already set):
 ${JSON.stringify(currentProfile, null, 2)}
@@ -93,8 +96,7 @@ Rules:
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
-            }
-        });
+            }        });
 
         const raw = response.data.choices[0].message.content.trim();
         const cleaned = raw.replace(/```json|```/g, '').trim();
@@ -144,7 +146,6 @@ async function generateFreeResponse(message, history, userProfile) {
         if (!session.topicSignature) {
             session.topicSignature = message.slice(0, 60);
         }
-
         const limitedHistory = history.slice(-8);
 
         // ── Step 2: Build student-focused system prompt ──
@@ -193,8 +194,7 @@ async function generateFreeResponse(message, history, userProfile) {
 
     } catch (error) {
         console.error("❌ [FREE TIER] Error:", error.message);
-        throw new Error("Free AI service temporarily unavailable.");
-    }
+        throw new Error("Free AI service temporarily unavailable.");    }
 }
 
 // ─── STUDENT SYSTEM PROMPT ────────────────────────────────────────────────────
@@ -243,8 +243,7 @@ RULE 3 — Adapt explanations to their cultural and educational context:
 
   🇪🇺 European (French, German, Italian, Dutch, Polish, etc.):
      → French: logical and elegant breakdowns.
-     → German/Dutch: precise, structured, no fluff.
-     → Italian/Spanish: expressive and contextual.
+     → German/Dutch: precise, structured, no fluff.     → Italian/Spanish: expressive and contextual.
 
   🌱 East African (Swahili, Amharic, Somali):
      → Frame learning as a journey with clear milestones.
@@ -294,7 +293,6 @@ RESPONSE FORMAT BY INTENT
 
   ⚡ [ONE STUDY TIP — translated]
   One non-obvious strategy specific to their subjects and style.
-
 📝 ASSIGNMENT intent — "Guided Assignment Help"
   🎯 [WHAT THE QUESTION IS ASKING — translated]
   Break the assignment question into plain language.
@@ -343,8 +341,7 @@ TEACHING LAWS (NEVER BREAK)
    - Motivated → energise and focus them fast
    - Lost → validate, diagnose the real block, start from zero
    - Frustrated → acknowledge, reframe, give a quick win
-5. Match grade level language:
-   - Primary → ultra-simple, single syllable words where possible
+5. Match grade level language:   - Primary → ultra-simple, single syllable words where possible
    - Secondary → clear, relatable, structured
    - University → precise, conceptual, intellectually sharp
 
@@ -393,8 +390,7 @@ function buildStudentProfileSummary(profile, collectedAnswers) {
     if (profile.confusionArea)     lines.push(`Confusion Area: ${profile.confusionArea}`);
     if (profile.studyStyle)        lines.push(`Study Style: ${profile.studyStyle}`);
     if (profile.emotionalState)    lines.push(`Emotional State: ${profile.emotionalState}`);
-    if (profile.careerInterest)    lines.push(`Career Interest: ${profile.careerInterest}`);
-    if (profile.studentIntent)     lines.push(`Current Intent: ${profile.studentIntent}`);
+    if (profile.careerInterest)    lines.push(`Career Interest: ${profile.careerInterest}`);    if (profile.studentIntent)     lines.push(`Current Intent: ${profile.studentIntent}`);
 
     if (collectedAnswers.length > 0) {
         lines.push(`\nIntake Answers:`);
@@ -443,8 +439,7 @@ ${questionCount === 2 ? '→ Q3: How are they feeling about school right now —
 Rules:
 - ONE question only — never two at once.
 - Show you already understand their situation.
-- Do NOT deliver the full answer yet.
-- If you have enough context from earlier messages, skip ahead with:
+- Do NOT deliver the full answer yet.- If you have enough context from earlier messages, skip ahead with:
   "Got it — here's exactly what you need:" — in ${lang}.`;
     }
 
