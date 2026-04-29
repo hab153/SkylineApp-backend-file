@@ -41,7 +41,6 @@ function resetSession(userId) {
 }
 
 // ─── AI-POWERED STUDENT PROFILER ──────────────────────────────────────────────
-// Identical multilingual engine as free.js — detects context in any language
 async function analyzeMessageWithAI(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-6).map(h => `${h.role}: ${h.content}`).join('\n');
 
@@ -120,7 +119,6 @@ Rules:
 function updateSmartMemory(session, analysis) {
     if (!analysis) return;
 
-    // Merge newly detected weak topics
     if (analysis.weakTopicsDetected) {
         const incoming = analysis.weakTopicsDetected.split(',').map(t => t.trim()).filter(Boolean);
         incoming.forEach(topic => {
@@ -128,20 +126,17 @@ function updateSmartMemory(session, analysis) {
                 session.profile.weakTopics.push(topic);
             }
         });
-        // Keep last 15 weak topics max
         if (session.profile.weakTopics.length > 15) {
             session.profile.weakTopics = session.profile.weakTopics.slice(-15);
         }
     }
 
-    // Merge mastered topics
     if (analysis.masteredTopicsDetected) {
         const mastered = analysis.masteredTopicsDetected.split(',').map(t => t.trim()).filter(Boolean);
         mastered.forEach(topic => {
             if (!session.profile.masteredTopics.includes(topic)) {
                 session.profile.masteredTopics.push(topic);
             }
-            // Remove from weak if now mastered
             session.profile.weakTopics = session.profile.weakTopics.filter(w => w !== topic);
         });
     }
@@ -158,7 +153,6 @@ async function generateGoResponse(message, history, userProfile) {
 
         let session = getSession(userId);
 
-        // ── Step 1: AI-powered student profile analysis ──
         const analysis = await analyzeMessageWithAI(message, history, session.profile, apiKey);
 
         if (analysis) {
@@ -171,7 +165,6 @@ async function generateGoResponse(message, history, userProfile) {
                     gradeLevel: session.profile.gradeLevel,
                 };
                 session = resetSession(userId);
-                // GO PLAN: carry smart memory across topic resets
                 Object.assign(session.profile, savedMemory);
                 session.topicSignature = message.slice(0, 60);
             }
@@ -189,7 +182,6 @@ async function generateGoResponse(message, history, userProfile) {
             if (analysis.careerInterest  && analysis.careerInterest  !== 'unknown') p.careerInterest        = analysis.careerInterest;
             if (analysis.studentIntent   && analysis.studentIntent   !== 'general') p.studentIntent         = analysis.studentIntent;
 
-            // GO PLAN: update smart memory
             updateSmartMemory(session, analysis);
         }
 
@@ -197,13 +189,9 @@ async function generateGoResponse(message, history, userProfile) {
             session.topicSignature = message.slice(0, 60);
         }
 
-        // GO PLAN: longer history window = better context
         const limitedHistory = history.slice(-14);
-
-        // ── Step 2: Build GO-tier system prompt ──
         const systemPrompt = buildGoSystemPrompt({ userName, session });
 
-        // ── Step 3: Main response call ──
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: "gpt-4o-mini",
             messages: [
@@ -211,8 +199,8 @@ async function generateGoResponse(message, history, userProfile) {
                 ...limitedHistory,
                 { role: 'user', content: message }
             ],
-            max_tokens: 700,       // GO: 2.7x more than free (260 → 700)
-            temperature: 0.65,     // Slightly tighter = more structured answers
+            max_tokens: 700,
+            temperature: 0.65,
             presence_penalty: 0.1,
             frequency_penalty: 0.1
         }, {
@@ -225,7 +213,6 @@ async function generateGoResponse(message, history, userProfile) {
 
         const aiReply = response.data.choices[0].message.content;
 
-        // ── Step 4: Phase & state tracking ──
         if (isAnswerDelivered(aiReply)) {
             session.phase = 'complete';
             if (session.profile.studentIntent === 'exam-mode') {
@@ -242,7 +229,6 @@ async function generateGoResponse(message, history, userProfile) {
             }
         }
 
-        // GO PLAN: keep 32 messages of history (free keeps 12)
         const newHistory = [
             ...history,
             { role: 'user', content: message },
@@ -252,21 +238,21 @@ async function generateGoResponse(message, history, userProfile) {
         return {
             reply: aiReply,
             updatedHistory: newHistory.slice(-32),
-            updatedProfile: session.profile,   // expose smart memory to calling code
+            updatedProfile: session.profile,
             mode: session.profile.studentIntent
         };
 
     } catch (error) {
         console.error("❌ [GO PLAN] Critical Error:", error.response?.data || error.message);
         
-        // RETURN A SAFE FALLBACK OBJECT INSTEAD OF THROWING
         return {
             reply: "⚠️ I'm having trouble connecting to my brain right now. Please check your internet or try again in a moment.",
             updatedHistory: history,
-            updatedProfile: session.profile,
+            updatedProfile: { weakTopics: [], masteredTopics: [] },
             mode: 'error'
         };
     }
+}  // <-- THIS IS THE FIXED CLOSING BRACE
 
 // ─── GO PLAN SYSTEM PROMPT ────────────────────────────────────────────────────
 function buildGoSystemPrompt({ userName, session }) {
