@@ -14,8 +14,8 @@ const os = require('os'); // ADDED: For temp paths
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
 const goAI = require('./Go');
-// FIXED: Changed 'chat' to 'generateBusinessResponse'
-const { generateDreamPlan, generateBusinessResponse, refinePlan } = require('./businessAI'); 
+// FIXED: Only import generateBusinessResponse as it handles all intents
+const { generateBusinessResponse } = require('./businessAI'); 
 
 // ADDED: Import image and file processing files
 const { resizeImage } = require('./resize');
@@ -47,8 +47,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         
         // Check if paid subscription has expired
         if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();            const endDate = new Date(user.subscriptionEndDate);            
-            if (now > endDate) {
+            const now = new Date();            const endDate = new Date(user.subscriptionEndDate);                        if (now > endDate) {
                 // Auto-downgrade to free                user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
                 await user.save();
@@ -97,8 +96,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         if (status === 'successful') {
             console.log(`✅ Payment successful for txRef: ${txRef}`);
                         if (!txRef) return res.status(400).send('Missing txRef');                        // Infer plan from txRef if meta is missing (Safety Net)
-            if (!planType) {
-                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
+            if (!planType) {                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';            }
 
             const user = await User.findOne({ lastTxRef: txRef });
@@ -147,8 +145,7 @@ const verifyToken = (req, res, next) => {
     if (!token) return res.status(403).json({ message: 'No token provided' });    try {        const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);        req.userId = decoded.user.id;        next();
     } catch (err) {
-        console.error('Token Verification Failed:', err.message);
-        return res.status(401).json({ message: 'Invalid token' });        
+        console.error('Token Verification Failed:', err.message);        return res.status(401).json({ message: 'Invalid token' });        
     }
 };
 
@@ -197,8 +194,7 @@ const checkDailyLimit = async (req, res, next) => {
 // ════════════════════════════════════════════
 // Configure Multer to store files in memory (buffer)
 const storage = multer.memoryStorage();
-const upload = multer({ 
-    storage: storage,
+const upload = multer({     storage: storage,
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit for images
 });
 
@@ -247,8 +243,7 @@ app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, r
         let aiReply;
         let updatedHistory = [];
 
-        // We simulate a chat message with the image description
-        const imagePrompt = `[Image Analysis]: ${imageDescription}\n\nThe user has uploaded an image. Please respond to the content of this image directly.`;
+        // We simulate a chat message with the image description        const imagePrompt = `[Image Analysis]: ${imageDescription}\n\nThe user has uploaded an image. Please respond to the content of this image directly.`;
 
         if (plan === 'free') {
             const result = await freeAI.generateFreeResponse(imagePrompt, [], user);
@@ -298,7 +293,6 @@ app.post('/api/upload-file', verifyToken, upload.single('file'), async (req, res
         if (!req.file) {
             return res.status(400).json({ message: 'No file provided' });
         }
-
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -347,9 +341,7 @@ app.post('/api/upload-file', verifyToken, upload.single('file'), async (req, res
             fileText = await convertFileToText(tempFilePath, req.file.mimetype);
         } catch (err) {
             fs.unlinkSync(tempFilePath); // Clean up
-            return res.status(400).json({ message: "Could not read this file type." });
-        }
-        
+            return res.status(400).json({ message: "Could not read this file type." });        }        
         // Delete temp file
         fs.unlinkSync(tempFilePath);
 
@@ -398,8 +390,7 @@ If the user just said "Hi" or didn't ask a specific question, summarize the file
         const sessionId = uuidv4();
         const displayMessage = userMessage ? userMessage : `Uploaded file: ${req.file.originalname}`;
         
-        await new Message({ userId: user._id, sessionId, role: 'user', content: displayMessage }).save();
-        await new Message({ userId: user._id, sessionId, role: 'ai', content: aiReply }).save();
+        await new Message({ userId: user._id, sessionId, role: 'user', content: displayMessage }).save();        await new Message({ userId: user._id, sessionId, role: 'ai', content: aiReply }).save();
 
         res.json({ 
             success: true, 
@@ -448,8 +439,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                 console.error("❌ No userId found in verification response and no user found by txRef");
                 return res.status(400).json({ success: false, message: "No userId found" });
             }
-            
-            console.log(`✅ Verifying payment for user: ${userId}`);
+                        console.log(`✅ Verifying payment for user: ${userId}`);
 
             // Determine plan type from txRef if not in meta
             let planType = 'pro'; // Default fallback
@@ -498,8 +488,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
 
-        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-3ejd.vercel.app'; 
-        const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-3ejd.vercel.app';         const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Save txRef to user BEFORE creating payment
         user.lastTxRef = txRef;
@@ -548,8 +537,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 //  CHAT ROUTE (THE AI ROUTER)
 // ════════════════════════════════════════════
 
-app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { message, history, sessionId } = req.body;    const userId = req.userId;
+app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { message, history, sessionId } = req.body;    const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
 
     const currentSessionId = sessionId || uuidv4();
@@ -597,19 +585,57 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             sessionId: currentSessionId,
             role: 'ai',
             content: aiReply        }).save();
-
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
-
     } catch (error) {
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }});
+
+// ════════════════════════════════════════════
+//  FEEDBACK ROUTE (LIKE / DISLIKE) - NEW
+// ════════════════════════════════════════════
+app.post('/api/feedback', verifyToken, async (req, res) => {
+    try {
+        const { messageId, type } = req.body; // type is 'like' or 'dislike'
+        
+        if (!messageId || !['like', 'dislike'].includes(type)) {
+            return res.status(400).json({ message: 'Invalid feedback data' });
+        }
+
+        // Find the message and update feedback
+        const message = await Message.findById(messageId);
+        
+        if (!message) {
+            return res.status(404).json({ message: 'Message not found' });
+        }
+
+        // Optional: Ensure the user owns this message/session
+        if (message.userId.toString() !== req.userId) {
+            return res.status(403).json({ message: 'Unauthorized' });
+        }
+
+        // If clicking the same button again, toggle it off (optional UX)
+        if (message.feedback === type) {
+            message.feedback = null;
+        } else {
+            message.feedback = type;
+        }
+        
+        await message.save();
+
+        res.json({ success: true, feedback: message.feedback });
+
+    } catch (err) {
+        console.error('Feedback Error:', err);
+        res.status(500).json({ message: 'Server Error saving feedback' });
+    }
+});
+
 // ════════════════════════════════════════════
 //  OTHER PROTECTED API ROUTES (WITH EXPIRY CHECK)
 // ════════════════════════════════════════════
 
-// 1. Get All Chat Sessions
-app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
+// 1. Get All Chat Sessionsapp.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
@@ -641,39 +667,50 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
 });
 
 // 3. Analyze Dream & Generate Squibb-Style Plan
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { dream, sessionId } = req.body;
+// FIXED: Now uses generateBusinessResponse which detects 'planner' or 'mastery' intent
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    
+    const { dream, sessionId } = req.body;
     const userId = req.userId;
 
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
     const currentSessionId = sessionId || uuidv4();    
+    
     try {
         await new Message({
             userId,
-            sessionId: currentSessionId,            role: 'user',
-            content: dream,            title: dream.substring(0, 30) + '...'
+            sessionId: currentSessionId,            
+            role: 'user',
+            content: dream,            
+            title: dream.substring(0, 30) + '...'
         }).save();
 
-        const user = await User.findById(userId);
-        const userProfile = {
+        const user = await User.findById(userId);        const userProfile = {
             fullName:    user.fullName,
             country:     user.country,
             skillLevel:  user.skillLevel,            
             primaryGoal: user.primaryGoal,
             interests:   user.interests,
-            bio:         user.bio
+            bio:         user.bio,
+            userId:      user._id.toString()
         };
-        const { plan, audit } = await requestQueue.enqueue(async () => {
-            return await generateDreamPlan(dream, userProfile);
+
+        // FIXED: Use generateBusinessResponse instead of generateDreamPlan
+        const result = await requestQueue.enqueue(async () => {
+            return await generateBusinessResponse(dream, [], userProfile);
         });
 
         await new Message({
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: JSON.stringify(plan)
+            content: result.reply
         }).save();
 
-        res.json({ plan, audit, sessionId: currentSessionId });
+        res.json({ 
+            plan: result.reply, 
+            audit: {}, 
+            sessionId: currentSessionId 
+        });
 
     } catch (error) {
         console.error('Dream analyze error:', error);
@@ -682,20 +719,24 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 });
 
 // 4b. Refine an existing plan
+// FIXED: Now uses generateBusinessResponse which handles follow-ups naturally
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
-    const userId = req.userId;    if (!originalPlan || !followUpAnswer || !dreamDescription) {
+    const userId = req.userId;    
+    
+    if (!followUpAnswer || !dreamDescription) {
         return res.status(400).json({
-            message: 'originalPlan, followUpAnswer, and dreamDescription are required'        });
+            message: 'followUpAnswer and dreamDescription are required'        
+        });
     }
 
     const currentSessionId = sessionId || uuidv4();        
     try {
         await new Message({
-            userId,
-            sessionId: currentSessionId,
+            userId,            sessionId: currentSessionId,
             role: 'user',
-            content: followUpAnswer        }).save();
+            content: followUpAnswer        
+        }).save();
 
         const user = await User.findById(userId);
         const userProfile = {
@@ -704,19 +745,27 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             skillLevel:  user.skillLevel,
             primaryGoal: user.primaryGoal,            
             interests:   user.interests,
-            bio:         user.bio
+            bio:         user.bio,
+            userId:      user._id.toString()
         };
-        const { plan, audit } = await requestQueue.enqueue(async () => {
-            return await refinePlan(originalPlan, followUpAnswer, dreamDescription, userProfile);
+
+        // FIXED: Use generateBusinessResponse instead of refinePlan
+        const result = await requestQueue.enqueue(async () => {
+            return await generateBusinessResponse(followUpAnswer, [], userProfile);
         });
+
         await new Message({
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: JSON.stringify(plan)
+            content: result.reply
         }).save();
 
-        res.json({ plan, audit, sessionId: currentSessionId });
+        res.json({ 
+            plan: result.reply, 
+            audit: {}, 
+            sessionId: currentSessionId 
+        });
 
     } catch (error) {
         console.error('Plan refinement error:', error);
@@ -733,8 +782,7 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
     } catch (err) {
         console.error(err.message);
         res.status(500).json({ message: 'Server Error' });
-    }});// 6. Update User Profile
-app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
+    }});// 6. Update User Profileapp.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
 
@@ -756,8 +804,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 });
 
 // 7. Change Password
-app.put('/api/auth/change-password', verifyToken, async (req, res) => {
-    const { currentPassword, newPassword } = req.body;
+app.put('/api/auth/change-password', verifyToken, async (req, res) => {    const { currentPassword, newPassword } = req.body;
 
     try {
         let user = await User.findById(req.userId);
@@ -784,8 +831,7 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
 app.put('/api/auth/change-email', verifyToken, changeEmail);
 // 9. Verify Ageapp.put('/api/users/verify-age', verifyToken, verifyAge);
 
-// 10. Delete Account
-app.delete('/api/users/me', verifyToken, async (req, res) => {
+// 10. Delete Accountapp.delete('/api/users/me', verifyToken, async (req, res) => {
     await deleteAccount(req, res);
 });
 
@@ -806,8 +852,7 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
-    }
-});
+    }});
 
 app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
     try {
@@ -835,8 +880,7 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    try {
     }
 });
 
-app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
-    try {        const admin = await User.findById(req.userId);
+app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {    try {        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
@@ -856,7 +900,6 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
 
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-
         const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, messages: chatMessages });
     } catch (err) {
@@ -886,7 +929,6 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         console.error(err);        res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // ════════════════════════════════════════════
 //  REPORT ROUTES
 // ════════════════════════════════════════════
@@ -906,8 +948,7 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         await newReport.save();
         res.json({ message: 'Report submitted successfully' });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: 'Server Error' });
+        console.error(err);        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -937,8 +978,7 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
     }
 });
 
-app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {
-        const count = await Message.countDocuments({ 
+app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {        const count = await Message.countDocuments({ 
             userId: req.userId, 
             sessionId: 'admin-direct-message' 
         });
@@ -956,8 +996,7 @@ const scheduleExpiryCheck = async () => {
         const now = new Date();
         const result = await User.updateMany(
             {
-                subscriptionTier: { $ne: 'free' }, // Check all non-free plans
-                subscriptionEndDate: { $lt: now }
+                subscriptionTier: { $ne: 'free' }, // Check all non-free plans                subscriptionEndDate: { $lt: now }
             },
             {
                 subscriptionTier: 'free',
