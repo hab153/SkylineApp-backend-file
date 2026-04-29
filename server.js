@@ -684,7 +684,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
             userId:      user._id.toString()
         };
 
-        // FIXED: Use generateBusinessResponse instead of generateDreamPlan        const result = await requestQueue.enqueue(async () => {
+        // FIXED: Use generateBusinessResponse instead of generateDreamPlan        
+        const result = await requestQueue.enqueue(async () => {
             return await generateBusinessResponse(dream, [], userProfile);
         });
 
