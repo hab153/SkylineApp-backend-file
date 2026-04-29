@@ -1,4 +1,4 @@
-import OpenAI from 'openai';
+const OpenAI = require('openai');
 
 // businessAI.js — SKYLINE AA-1 STUDENT ULTIMATE EDITION
 // ─────────────────────────────────────────────────────────────
@@ -47,8 +47,7 @@ class StudentSession {
     this.culturalContext = null;
     this.studyStyle = null; // visual, reading, practice, listening
     this.emotionalState = null;
-    
-    // Conversation State
+        // Conversation State
     this.currentMode = null; // mastery | exam | weakness | revision | assignment | planner | mentor
     this.conversationHistory = [];
     this.intentDetected = null;
@@ -97,8 +96,7 @@ class StudentSession {
   
   // Feature 6: Add subject to planner
   addSubject(name, priority = 5, examDate = null, hoursNeeded = 10) {
-    this.subjects.set(name, { priority, examDate, hoursNeeded, topics: [] });
-  }
+    this.subjects.set(name, { priority, examDate, hoursNeeded, topics: [] });  }
   
   // Get weakest topics (top 3)
   getWeakestTopics() {
@@ -147,8 +145,7 @@ Generate a JSON response:
     "confidence_level": "percentage of how sure we are"
   },
   "improvement_plan": {
-    "immediate_actions": ["3 specific actions for next 24 hours"],
-    "weekly_focus": ["3 topics to focus on this week in order"],
+    "immediate_actions": ["3 specific actions for next 24 hours"],    "weekly_focus": ["3 topics to focus on this week in order"],
     "suggested_study_time": "hours per day needed",
     "resources_to_use": ["3 specific free resources or techniques"]
   },
@@ -197,8 +194,7 @@ Return JSON:
   },
   "answer_key": {
     "1": "correct answer",
-    "2": "correct answer with explanation"
-  }
+    "2": "correct answer with explanation"  }
 }
 
 Return ONLY valid JSON.
@@ -247,7 +243,6 @@ Return ONLY valid JSON.
   const response = await callOpenAI(apiKey, prompt, 700);
   return JSON.parse(response);
 }
-
 // ─── FEATURE 4: SMART REVISION ENGINE ─────────────────────────────────────────
 async function generateRevisionSchedule(session, apiKey, examDate, subjects) {
   const weakTopics = session.getWeakestTopics();
@@ -297,8 +292,7 @@ Generate for all ${daysUntilExam} days. Return ONLY valid JSON.
 }
 
 // ─── FEATURE 5: ADVANCED ASSIGNMENT BUILDER ───────────────────────────────────
-async function buildAssignment(session, apiKey, assignmentType, topic, length, format = 'essay') {
-  const prompt = `
+async function buildAssignment(session, apiKey, assignmentType, topic, length, format = 'essay') {  const prompt = `
 You are an assignment builder. Create a ${format} assignment on ${topic}.
 
 ASSIGNMENT TYPE: ${assignmentType} (homework|exam|project|report)
@@ -347,7 +341,6 @@ async function generateStudyPlanner(session, apiKey, subjectsWithDeadlines, week
   
   const prompt = `
 Create a balanced weekly study plan for a student with these subjects:
-
 ${subjectsWithDeadlines.map(s => `- ${s.name}: Exam on ${s.examDate || 'unknown'}, Priority: ${s.priority || 5}/10`).join('\n')}
 
 WEAK TOPICS BY SUBJECT: ${JSON.stringify(weakTopicsBySubject)}
@@ -397,8 +390,7 @@ You are Skyline AA-1 — an AI Study Mentor. Your job is NOT just to give answer
 You are a study coach, motivation advisor, and direction guide.
 
 STUDENT PROFILE:
-- Grade Level: ${session.gradeLevel || 'Not specified'}
-- Known Weak Topics: ${weakTopics.map(w => w.topic).join(', ') || 'None yet'}
+- Grade Level: ${session.gradeLevel || 'Not specified'}- Known Weak Topics: ${weakTopics.map(w => w.topic).join(', ') || 'None yet'}
 - Known Strong Topics: ${strongTopics.map(s => s.topic).join(', ') || 'None yet'}
 - Study Style: ${session.studyStyle || 'Not specified'}
 - Emotional State: ${session.emotionalState || 'Neutral'}
@@ -447,8 +439,7 @@ async function generateBusinessResponse(message, history, userProfile = {}) {
     if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
     
     const userId = userProfile.userId || 'default';
-    const session = getSession(userId, userProfile);
-    session.lastActive = new Date();
+    const session = getSession(userId, userProfile);    session.lastActive = new Date();
     
     // Detect intent from message
     const intent = await detectIntent(message, session, apiKey);
@@ -497,8 +488,7 @@ async function generateBusinessResponse(message, history, userProfile = {}) {
         break;
         
       case 'planner':
-        // Feature 6: Study Planner
-        const subjectsWithDates = await extractSubjectsWithDeadlines(message, session, apiKey);
+        // Feature 6: Study Planner        const subjectsWithDates = await extractSubjectsWithDeadlines(message, session, apiKey);
         const weeklyHours = await extractWeeklyHours(message, session, apiKey);
         const planner = await generateStudyPlanner(session, apiKey, subjectsWithDates, weeklyHours);
         response = formatPlannerResponse(planner, session.detectedLanguage || 'English');
@@ -548,7 +538,6 @@ async function detectIntent(message, session, apiKey) {
 Analyze this student message and return ONLY the intent keyword (one word):
 
 Message: "${message}"
-
 Intent options:
 - mastery: wants to learn a subject from beginner to expert
 - exam: wants practice questions, mock test, or exam simulation
@@ -598,7 +587,6 @@ From this message, extract the exam date. Return YYYY-MM-DD format.
 If not specified, return "30 days from today".
 
 Message: "${message}"
-
 Return ONLY the date string.
   `;
   
@@ -647,7 +635,6 @@ Return ONLY the list (e.g., "Math, English, Biology").
     return ['general studies'];
   }
 }
-
 // ─── HELPER: EXTRACT WEEKLY HOURS ─────────────────────────────────────────────
 async function extractWeeklyHours(message, session, apiKey) {
   const prompt = `
@@ -697,8 +684,7 @@ You are Skyline AA-1 — a premium student AI with these superpowers:
 2. 🎯 Exam Simulator — generates timed practice tests
 3. 📊 Weakness Analyzer — knows what they struggle with
 4. 🔄 Smart Revision — spaced repetition scheduling
-5. ✍️ Assignment Builder — structures essays and reports
-6. 📅 Study Planner — balances multiple subjects
+5. ✍️ Assignment Builder — structures essays and reports6. 📅 Study Planner — balances multiple subjects
 7. 🧠 AI Mentor — guides, doesn't just answer
 8. ⚡ Priority AI — fastest, smartest responses
 
@@ -748,7 +734,6 @@ ${path.milestones.map(m => `- Week ${m.week}: ${m.goal}`).join('\n')}
 
 Would you like me to generate a practice quiz for the first topic? 🔥`;
 }
-
 function formatExamResponse(exam, language) {
   return `## 🎯 ${exam.exam.title}
 
@@ -797,7 +782,6 @@ ${analysis.improvement_plan.weekly_focus.map(f => `- ${f}`).join('\n')}
 
 Want me to generate practice questions for your weakest topic? 🎯`;
 }
-
 function formatRevisionResponse(schedule, language) {
   const today = schedule.schedule.daily_plan[0];
   
@@ -847,7 +831,6 @@ ${assignment.structure.body_paragraphs.map(p => `- **${p.heading}:** ${p.key_poi
 
 **Conclusion:**
 ${assignment.structure.conclusion.map(p => `- ${p}`).join('\n')}
-
 ### 📊 Marking Rubric
 ${assignment.rubric.criteria.join(' • ')}
 
@@ -897,8 +880,7 @@ async function callOpenAI(apiKey, prompt, maxTokens = 400) {
     temperature: 0.3,
   });
   
-  return response.choices[0].message.content;
-}
+  return response.choices[0].message.content;}
 
 async function callOpenAIWithMessages(apiKey, messages, maxTokens = 600) {
   const openai = new OpenAI({ apiKey });
@@ -918,7 +900,7 @@ async function callOpenAIWithMessages(apiKey, messages, maxTokens = 600) {
 }
 
 // ─── EXPORTS ───────────────────────────────────────────────────────────────────
-export { 
+module.exports = { 
   generateBusinessResponse,
   StudentSession,
   getSession,
