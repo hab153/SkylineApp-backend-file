@@ -14,8 +14,8 @@ const os = require('os'); // ADDED: For temp paths
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
 const goAI = require('./Go');
-// FIXED: Only import generateBusinessResponse as it handles all intents
-const { generateBusinessResponse } = require('./businessAI'); 
+// FIXED: Changed 'chat' to 'generateBusinessResponse'
+const { generateDreamPlan, generateBusinessResponse, refinePlan } = require('./businessAI'); 
 
 // ADDED: Import image and file processing files
 const { resizeImage } = require('./resize');
@@ -47,7 +47,9 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         
         // Check if paid subscription has expired
         if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();            const endDate = new Date(user.subscriptionEndDate);                        if (now > endDate) {                // Auto-downgrade to free                user.subscriptionTier = 'free';
+            const now = new Date();            const endDate = new Date(user.subscriptionEndDate);            
+            if (now > endDate) {
+                // Auto-downgrade to free                user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
                 await user.save();
                 console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
@@ -95,8 +97,10 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         if (status === 'successful') {
             console.log(`✅ Payment successful for txRef: ${txRef}`);
                         if (!txRef) return res.status(400).send('Missing txRef');                        // Infer plan from txRef if meta is missing (Safety Net)
-            if (!planType) {                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
+            if (!planType) {
+                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';            }
+
             const user = await User.findOne({ lastTxRef: txRef });
             
             if (user) {
@@ -143,9 +147,11 @@ const verifyToken = (req, res, next) => {
     if (!token) return res.status(403).json({ message: 'No token provided' });    try {        const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);        req.userId = decoded.user.id;        next();
     } catch (err) {
-        console.error('Token Verification Failed:', err.message);        return res.status(401).json({ message: 'Invalid token' });        
+        console.error('Token Verification Failed:', err.message);
+        return res.status(401).json({ message: 'Invalid token' });        
     }
 };
+
 // ── Daily Usage Limit Middleware (UPDATED LIMITS: GO 18, PRO 40) ──
 const checkDailyLimit = async (req, res, next) => {
     try {
@@ -191,9 +197,11 @@ const checkDailyLimit = async (req, res, next) => {
 // ════════════════════════════════════════════
 // Configure Multer to store files in memory (buffer)
 const storage = multer.memoryStorage();
-const upload = multer({     storage: storage,
+const upload = multer({ 
+    storage: storage,
     limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit for images
 });
+
 app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, res) => {
     try {
         if (!req.file) {
@@ -239,11 +247,13 @@ app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, r
         let aiReply;
         let updatedHistory = [];
 
-        // We simulate a chat message with the image description        const imagePrompt = `[Image Analysis]: ${imageDescription}\n\nThe user has uploaded an image. Please respond to the content of this image directly.`;
+        // We simulate a chat message with the image description
+        const imagePrompt = `[Image Analysis]: ${imageDescription}\n\nThe user has uploaded an image. Please respond to the content of this image directly.`;
 
         if (plan === 'free') {
             const result = await freeAI.generateFreeResponse(imagePrompt, [], user);
-            aiReply = result.reply;            updatedHistory = result.updatedHistory;
+            aiReply = result.reply;
+            updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
             const result = await goAI.generateGoResponse(imagePrompt, [], user);
             aiReply = result.reply;
@@ -288,11 +298,13 @@ app.post('/api/upload-file', verifyToken, upload.single('file'), async (req, res
         if (!req.file) {
             return res.status(400).json({ message: 'No file provided' });
         }
+
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         // --- CHECK FILE SIZE LIMITS ---
-        const fileSizeKB = req.file.size / 1024;        let maxFileSizeKB = 200; // Free
+        const fileSizeKB = req.file.size / 1024;
+        let maxFileSizeKB = 200; // Free
         if (user.subscriptionTier === 'go') maxFileSizeKB = 300;
         if (user.subscriptionTier === 'pro') maxFileSizeKB = 500;
 
@@ -335,13 +347,15 @@ app.post('/api/upload-file', verifyToken, upload.single('file'), async (req, res
             fileText = await convertFileToText(tempFilePath, req.file.mimetype);
         } catch (err) {
             fs.unlinkSync(tempFilePath); // Clean up
-            return res.status(400).json({ message: "Could not read this file type." });        }
+            return res.status(400).json({ message: "Could not read this file type." });
+        }
         
         // Delete temp file
         fs.unlinkSync(tempFilePath);
 
         // --- COMBINE FILE TEXT WITH USER MESSAGE ---
-        const userMessage = req.body.message || "";         
+        const userMessage = req.body.message || ""; 
+        
         const combinedPrompt = `
 [FILE CONTENT START]
 ${fileText}
@@ -383,14 +397,16 @@ If the user just said "Hi" or didn't ask a specific question, summarize the file
         // Save interaction
         const sessionId = uuidv4();
         const displayMessage = userMessage ? userMessage : `Uploaded file: ${req.file.originalname}`;
-                await new Message({ userId: user._id, sessionId, role: 'user', content: displayMessage }).save();
+        
+        await new Message({ userId: user._id, sessionId, role: 'user', content: displayMessage }).save();
         await new Message({ userId: user._id, sessionId, role: 'ai', content: aiReply }).save();
 
         res.json({ 
             success: true, 
             reply: aiReply, 
             sessionId, 
-            remainingFiles: fileLimit - user.usage.dailyFileCount         });
+            remainingFiles: fileLimit - user.usage.dailyFileCount 
+        });
 
     } catch (error) {
         console.error('❌ File Upload Error:', error);
@@ -431,7 +447,8 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
             if (!userId) {
                 console.error("❌ No userId found in verification response and no user found by txRef");
                 return res.status(400).json({ success: false, message: "No userId found" });
-            }            
+            }
+            
             console.log(`✅ Verifying payment for user: ${userId}`);
 
             // Determine plan type from txRef if not in meta
@@ -439,7 +456,8 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
             if (tx_ref.includes('_go_')) planType = 'go';
             else if (tx_ref.includes('_pro_')) planType = 'pro';
 
-            const updatedUser = await User.findByIdAndUpdate(                userId, 
+            const updatedUser = await User.findByIdAndUpdate(
+                userId, 
                 {
                     subscriptionTier: planType,                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
                     lastTxRef: null                },
@@ -479,6 +497,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         } else {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
+
         const vercelUrl = process.env.VERCEL_URL || 'https://new-version-3ejd.vercel.app'; 
         const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
@@ -488,7 +507,8 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         console.log(`💾 Saved txRef ${txRef} to user ${user._id} for plan ${planType}`);
         const payload = {
             tx_ref: txRef,
-            amount: amount,            currency: "USD",             redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,            customer: {
+            amount: amount,            currency: "USD", 
+            redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,            customer: {
                 email: user.email,
                 phonenumber: user.phone || "08012345678",
                 name: user.fullName || user.username,
@@ -527,6 +547,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 //  CHAT ROUTE (THE AI ROUTER)
 // ════════════════════════════════════════════
+
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { message, history, sessionId } = req.body;    const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
@@ -537,7 +558,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         await new Message({
             userId,
             sessionId: currentSessionId,
-            role: 'user',            content: message,
+            role: 'user',
+            content: message,
             title: message.substring(0, 30) + '...'
         }).save();
 
@@ -575,55 +597,17 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             sessionId: currentSessionId,
             role: 'ai',
             content: aiReply        }).save();
+
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
 
     } catch (error) {
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }});
-
-// ════════════════════════════════════════════
-//  FEEDBACK ROUTE (LIKE / DISLIKE) - NEW
-// ════════════════════════════════════════════
-app.post('/api/feedback', verifyToken, async (req, res) => {
-    try {        const { messageId, type } = req.body; // type is 'like' or 'dislike'
-        
-        if (!messageId || !['like', 'dislike'].includes(type)) {
-            return res.status(400).json({ message: 'Invalid feedback data' });
-        }
-
-        // Find the message and update feedback
-        const message = await Message.findById(messageId);
-        
-        if (!message) {
-            return res.status(404).json({ message: 'Message not found' });
-        }
-
-        // Optional: Ensure the user owns this message/session
-        if (message.userId.toString() !== req.userId) {
-            return res.status(403).json({ message: 'Unauthorized' });
-        }
-
-        // If clicking the same button again, toggle it off (optional UX)
-        if (message.feedback === type) {
-            message.feedback = null;
-        } else {
-            message.feedback = type;
-        }
-        
-        await message.save();
-
-        res.json({ success: true, feedback: message.feedback });
-
-    } catch (err) {
-        console.error('Feedback Error:', err);
-        res.status(500).json({ message: 'Server Error saving feedback' });
-    }
-});
-
 // ════════════════════════════════════════════
 //  OTHER PROTECTED API ROUTES (WITH EXPIRY CHECK)
 // ════════════════════════════════════════════
+
 // 1. Get All Chat Sessions
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
@@ -635,7 +619,8 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
                     _id: '$sessionId',
                     title: { $first: '$title' },
                     lastUpdated: { $first: '$createdAt' }
-                }            },
+                }
+            },
             { $sort: { lastUpdated: -1 } }
         ]);
         res.json(sessions);
@@ -656,21 +641,16 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
 });
 
 // 3. Analyze Dream & Generate Squibb-Style Plan
-// FIXED: Now uses generateBusinessResponse which detects 'planner' or 'mastery' intent
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    
-    const { dream, sessionId } = req.body;
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { dream, sessionId } = req.body;
     const userId = req.userId;
 
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
     const currentSessionId = sessionId || uuidv4();    
-    
     try {
         await new Message({
             userId,
-            sessionId: currentSessionId,            
-            role: 'user',
-            content: dream,            
-            title: dream.substring(0, 30) + '...'
+            sessionId: currentSessionId,            role: 'user',
+            content: dream,            title: dream.substring(0, 30) + '...'
         }).save();
 
         const user = await User.findById(userId);
@@ -680,27 +660,20 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
             skillLevel:  user.skillLevel,            
             primaryGoal: user.primaryGoal,
             interests:   user.interests,
-            bio:         user.bio,
-            userId:      user._id.toString()
+            bio:         user.bio
         };
-
-        // FIXED: Use generateBusinessResponse instead of generateDreamPlan        
-        const result = await requestQueue.enqueue(async () => {
-            return await generateBusinessResponse(dream, [], userProfile);
+        const { plan, audit } = await requestQueue.enqueue(async () => {
+            return await generateDreamPlan(dream, userProfile);
         });
 
         await new Message({
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: result.reply
+            content: JSON.stringify(plan)
         }).save();
 
-        res.json({ 
-            plan: result.reply, 
-            audit: {}, 
-            sessionId: currentSessionId 
-        });
+        res.json({ plan, audit, sessionId: currentSessionId });
 
     } catch (error) {
         console.error('Dream analyze error:', error);
@@ -709,15 +682,11 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 });
 
 // 4b. Refine an existing plan
-// FIXED: Now uses generateBusinessResponse which handles follow-ups naturally
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
-    const userId = req.userId;    
-    
-    if (!followUpAnswer || !dreamDescription) {
+    const userId = req.userId;    if (!originalPlan || !followUpAnswer || !dreamDescription) {
         return res.status(400).json({
-            message: 'followUpAnswer and dreamDescription are required'        
-        });
+            message: 'originalPlan, followUpAnswer, and dreamDescription are required'        });
     }
 
     const currentSessionId = sessionId || uuidv4();        
@@ -726,36 +695,28 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             userId,
             sessionId: currentSessionId,
             role: 'user',
-            content: followUpAnswer        
-        }).save();
+            content: followUpAnswer        }).save();
 
         const user = await User.findById(userId);
         const userProfile = {
             fullName:    user.fullName,
             country:     user.country,
             skillLevel:  user.skillLevel,
-            primaryGoal: user.primaryGoal,                        interests:   user.interests,
-            bio:         user.bio,
-            userId:      user._id.toString()
+            primaryGoal: user.primaryGoal,            
+            interests:   user.interests,
+            bio:         user.bio
         };
-
-        // FIXED: Use generateBusinessResponse instead of refinePlan
-        const result = await requestQueue.enqueue(async () => {
-            return await generateBusinessResponse(followUpAnswer, [], userProfile);
+        const { plan, audit } = await requestQueue.enqueue(async () => {
+            return await refinePlan(originalPlan, followUpAnswer, dreamDescription, userProfile);
         });
-
         await new Message({
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: result.reply
+            content: JSON.stringify(plan)
         }).save();
 
-        res.json({ 
-            plan: result.reply, 
-            audit: {}, 
-            sessionId: currentSessionId 
-        });
+        res.json({ plan, audit, sessionId: currentSessionId });
 
     } catch (error) {
         console.error('Plan refinement error:', error);
@@ -783,7 +744,8 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         if (fullName)       user.fullName       = fullName;
         if (primaryGoal)    user.primaryGoal    = primaryGoal;        if (skillLevel)     user.skillLevel     = skillLevel;
         if (interests)      user.interests      = interests;
-        if (country)        user.country        = country;        if (bio)            user.bio            = bio;
+        if (country)        user.country        = country;
+        if (bio)            user.bio            = bio;
         if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
         res.json(user);
@@ -794,7 +756,8 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 });
 
 // 7. Change Password
-app.put('/api/auth/change-password', verifyToken, async (req, res) => {    const { currentPassword, newPassword } = req.body;
+app.put('/api/auth/change-password', verifyToken, async (req, res) => {
+    const { currentPassword, newPassword } = req.body;
 
     try {
         let user = await User.findById(req.userId);
@@ -832,7 +795,8 @@ app.delete('/api/users/me', verifyToken, async (req, res) => {
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
 
-app.get('/api/admin/users', verifyToken, async (req, res) => {    try {
+app.get('/api/admin/users', verifyToken, async (req, res) => {
+    try {
         const user = await User.findById(req.userId);
         if (!user || !user.isAdmin)
             return res.status(403).json({ message: 'Access denied. Admins only.' });
@@ -842,7 +806,8 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {    try {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
-    }});
+    }
+});
 
 app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
     try {
@@ -881,7 +846,8 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ message: 'Server Error' });
-    }});
+    }
+});
 
 app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
     try {
@@ -890,6 +856,7 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
 
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
+
         const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, messages: chatMessages });
     } catch (err) {
@@ -930,7 +897,8 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        const newReport = new Report({            userId: req.userId,
+        const newReport = new Report({
+            userId: req.userId,
             username: user.username,
             subject,
             message
@@ -938,7 +906,8 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         await newReport.save();
         res.json({ message: 'Report submitted successfully' });
     } catch (err) {
-        console.error(err);        res.status(500).json({ message: 'Server Error' });
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -980,13 +949,15 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {
         res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
+
 // Scheduled expiry check (runs daily at midnight)
 const scheduleExpiryCheck = async () => {
     try {
         const now = new Date();
         const result = await User.updateMany(
             {
-                subscriptionTier: { $ne: 'free' }, // Check all non-free plans                subscriptionEndDate: { $lt: now }
+                subscriptionTier: { $ne: 'free' }, // Check all non-free plans
+                subscriptionEndDate: { $lt: now }
             },
             {
                 subscriptionTier: 'free',
