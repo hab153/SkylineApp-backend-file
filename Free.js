@@ -13,17 +13,20 @@ function getSession(userId) {
             profile: {
                 detectedLanguage: null,
                 culturalContext: null,
-                gradeLevel: null,        // e.g. "secondary", "university", "primary"
-                subjects: null,          // e.g. "Math, Biology"
-                examDates: null,         // e.g. "Math exam in 2 weeks"
-                confusionArea: null,     // e.g. "algebra", "essay writing"
-                studyStyle: null,        // e.g. "visual", "reading", "practice"
-                emotionalState: null,    // e.g. "stressed", "motivated", "lost"
-                careerInterest: null,    // e.g. "medicine", "tech", "unknown"
-                studentIntent: null,     // e.g. "explain" | "study-plan" | "assignment" | "confusion" | "career"
+                gradeLevel: null,           // e.g. "secondary", "university", "primary"
+                subjects: null,             // e.g. "Math, Biology"
+                examDates: null,            // e.g. "Math exam in 2 weeks"
+                confusionArea: null,        // e.g. "algebra", "essay writing"
+                studyStyle: null,           // e.g. "visual", "reading", "practice"
+                emotionalState: null,       // e.g. "stressed", "motivated", "lost"
+                careerInterest: null,       // e.g. "medicine", "tech", "unknown"
+                studentIntent: null,        // e.g. "explain" | "study-plan" | "assignment" | "confusion" | "career" | "quiz"
+                assumedLevel: 'beginner',   // 🟡 ADDED: always start as beginner until proven otherwise
             },
             collectedAnswers: [],
             topicSignature: null,
+            lastAnswerCorrect: null,        // 🟡 ADDED: null | true | false — tracks student's practice answer result
+            wrongAnswerStreak: 0,           // 🟡 ADDED: counts consecutive wrong answers on same topic
         });
     }
     return sessionStore.get(userId);
@@ -40,7 +43,6 @@ function resetSession(userId) {
 async function analyzeMessageWithAI(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n');
 
-    // FIXED: Escape special characters to prevent breaking the JSON structure
     const safeMessage = message.replace(/"/g, '\\"').replace(/\n/g, '\\n');
     const safeHistory = historySnippet ? historySnippet.replace(/"/g, '\\"').replace(/\n/g, '\\n') : 'None yet';
 
@@ -68,8 +70,11 @@ Return ONLY this exact JSON structure:
   "studyStyle": "<one of: visual | reading | practice | listening | unknown>",
   "emotionalState": "<one of: stressed | motivated | lost | frustrated | neutral>",
   "careerInterest": "<career or field the student mentioned interest in, or unknown>",
-  "studentIntent": "<one of: explain | study-plan | assignment | confusion | career | general>",
-  "isNewTopic": <true or false>
+  "studentIntent": "<one of: explain | study-plan | assignment | confusion | career | quiz | general>",
+  "isNewTopic": <true or false>,
+  "isWrongAnswer": <true if the student is responding to a practice question and their answer appears incorrect — compare against conversation history>,
+  "isCorrectAnswer": <true if the student is responding to a practice question and their answer appears correct — compare against conversation history>,
+  "assumedLevel": "<one of: beginner | intermediate | advanced — based on vocabulary and clarity of their message>"
 }
 
 Intent detection rules:
@@ -78,25 +83,28 @@ Intent detection rules:
 - "assignment": student needs help understanding or structuring an assignment
 - "confusion": student feels lost, overwhelmed, or does not know where to start
 - "career": student is asking about future careers, what to study, or life direction
+- "quiz": student is asking for practice questions, random exam questions, a test, or a quiz on any topic
 - "general": does not fit any above
 
 Rules:
 - Detect meaning across ALL languages — do not rely on English keywords.
 - If a field cannot be determined, use the existing value from current profile or null/unknown.
 - isNewTopic should be true only if the user is clearly starting a completely different subject.
+- isWrongAnswer and isCorrectAnswer: look at the last assistant message — if it asked a question, judge if the student's reply is correct or not.
 - Return ONLY the JSON. No other text.`;
 
     try {
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: "gpt-4o-mini",
             messages: [{ role: 'user', content: analysisPrompt }],
-            max_tokens: 180,
+            max_tokens: 200,
             temperature: 0.1
         }, {
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
-            }        });
+            }
+        });
 
         const raw = response.data.choices[0].message.content.trim();
         const cleaned = raw.replace(/```json|```/g, '').trim();
@@ -113,9 +121,9 @@ async function generateFreeResponse(message, history, userProfile) {
     try {
         console.log("🟢 [FREE TIER] Processing via GPT-4o-mini — Student Intelligence Mode...");
 
-        const userId      = userProfile?.userId || 'default';
-        const userName    = userProfile?.name   || null;
-        const apiKey      = process.env.OPENAI_API_KEY;
+        const userId   = userProfile?.userId || 'default';
+        const userName = userProfile?.name   || null;
+        const apiKey   = process.env.OPENAI_API_KEY;
 
         let session = getSession(userId);
 
@@ -129,18 +137,34 @@ async function generateFreeResponse(message, history, userProfile) {
                 session.topicSignature = message.slice(0, 60);
             }
 
+            // 🟡 ADDED: Track correct/wrong answer streaks for practice questions
+            if (analysis.isWrongAnswer === true) {
+                session.lastAnswerCorrect = false;
+                session.wrongAnswerStreak = (session.wrongAnswerStreak || 0) + 1;
+            } else if (analysis.isCorrectAnswer === true) {
+                session.lastAnswerCorrect = true;
+                session.wrongAnswerStreak = 0;
+            } else {
+                session.lastAnswerCorrect = null;
+                session.wrongAnswerStreak = 0;
+            }
+
             // Merge detected fields — never overwrite confirmed values with unknown/null
             const p = session.profile;
-            if (analysis.detectedLanguage)                                     p.detectedLanguage  = analysis.detectedLanguage;
-            if (analysis.culturalContext)                                       p.culturalContext   = analysis.culturalContext;
-            if (analysis.gradeLevel    && analysis.gradeLevel    !== 'unknown') p.gradeLevel        = analysis.gradeLevel;
-            if (analysis.subjects      && analysis.subjects      !== 'unknown') p.subjects          = analysis.subjects;
-            if (analysis.examDates)                                             p.examDates         = analysis.examDates;
-            if (analysis.confusionArea)                                         p.confusionArea     = analysis.confusionArea;
-            if (analysis.studyStyle    && analysis.studyStyle    !== 'unknown') p.studyStyle        = analysis.studyStyle;
-            if (analysis.emotionalState && analysis.emotionalState !== 'unknown') p.emotionalState  = analysis.emotionalState;
-            if (analysis.careerInterest && analysis.careerInterest !== 'unknown') p.careerInterest  = analysis.careerInterest;
-            if (analysis.studentIntent && analysis.studentIntent  !== 'general')  p.studentIntent   = analysis.studentIntent;
+            if (analysis.detectedLanguage)                                         p.detectedLanguage  = analysis.detectedLanguage;
+            if (analysis.culturalContext)                                           p.culturalContext   = analysis.culturalContext;
+            if (analysis.gradeLevel      && analysis.gradeLevel    !== 'unknown')   p.gradeLevel        = analysis.gradeLevel;
+            if (analysis.subjects        && analysis.subjects      !== 'unknown')   p.subjects          = analysis.subjects;
+            if (analysis.examDates)                                                 p.examDates         = analysis.examDates;
+            if (analysis.confusionArea)                                             p.confusionArea     = analysis.confusionArea;
+            if (analysis.studyStyle      && analysis.studyStyle    !== 'unknown')   p.studyStyle        = analysis.studyStyle;
+            if (analysis.emotionalState  && analysis.emotionalState !== 'unknown')  p.emotionalState    = analysis.emotionalState;
+            if (analysis.careerInterest  && analysis.careerInterest !== 'unknown')  p.careerInterest    = analysis.careerInterest;
+            if (analysis.studentIntent   && analysis.studentIntent  !== 'general')  p.studentIntent     = analysis.studentIntent;
+
+            // 🟡 ADDED: Upgrade assumed level only if evidence is clear (never downgrade)
+            if (analysis.assumedLevel === 'intermediate' && p.assumedLevel === 'beginner') p.assumedLevel = 'intermediate';
+            if (analysis.assumedLevel === 'advanced')                                      p.assumedLevel = 'advanced';
         }
 
         if (!session.topicSignature) {
@@ -159,7 +183,7 @@ async function generateFreeResponse(message, history, userProfile) {
                 ...limitedHistory,
                 { role: 'user', content: message }
             ],
-            max_tokens: 260,
+            max_tokens: 320,    // 🟠 MODIFIED: bumped from 260 → 320 to fit practice question + check-understanding ending
             temperature: 0.72
         }, {
             headers: {
@@ -194,25 +218,41 @@ async function generateFreeResponse(message, history, userProfile) {
 
     } catch (error) {
         console.error("❌ [FREE TIER] Error:", error.message);
-        throw new Error("Free AI service temporarily unavailable.");    }
+        throw new Error("Free AI service temporarily unavailable.");
+    }
 }
 
 // ─── STUDENT SYSTEM PROMPT ────────────────────────────────────────────────────
 function buildStudentSystemPrompt({ userName, session }) {
-    const { profile, phase, questionCount, maxQuestions, collectedAnswers } = session;
+    const { profile, phase, questionCount, maxQuestions, collectedAnswers, lastAnswerCorrect, wrongAnswerStreak } = session;
 
-    const nameTag = userName ? `Student's name: ${userName}.` : '';
-    const langTag = profile.detectedLanguage
+    const nameTag        = userName ? `Student's name: ${userName}.` : '';
+    const langTag        = profile.detectedLanguage
         ? `Detected language: ${profile.detectedLanguage}. Cultural context: ${profile.culturalContext || 'unknown'}.`
         : '';
 
-    const profileSummary = buildStudentProfileSummary(profile, collectedAnswers);
-    const intentInstructions = buildIntentInstructions(profile.studentIntent, profile);
-    const phaseInstructions = buildPhaseInstructions(phase, questionCount, maxQuestions, profile);
+    const profileSummary      = buildStudentProfileSummary(profile, collectedAnswers);
+    const intentInstructions  = buildIntentInstructions(profile.studentIntent, profile);
+    const phaseInstructions   = buildPhaseInstructions(phase, questionCount, maxQuestions, profile);
+
+    // 🟡 ADDED: Wrong answer correction block — injected into prompt when detected
+    const correctionBlock     = buildCorrectionBlock(lastAnswerCorrect, wrongAnswerStreak, profile);
 
     return `You are Skyline Study Guide — a brilliant, patient, and culturally fluent student tutor.
 You are not a search engine. You are a dedicated academic partner who meets every student exactly where they are.
 Your single mission: make every student — in every country, in every language — feel like they have a world-class tutor who actually cares.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BEGINNER-FIRST PRINCIPLE (NON-NEGOTIABLE)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 0 — Always treat this student as a BEGINNER unless they clearly prove otherwise.
+Current assumed level: ${profile.assumedLevel || 'beginner'}
+
+What this means:
+- Use the simplest, most direct words possible.
+- Never assume they know background vocabulary — define it the moment you use it.
+- If they show depth (correct terminology, follow-up insight), quietly adjust — but stay accessible.
+- A student who already knows something will not be offended by clarity. A student who is lost will be saved by it.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LANGUAGE & CULTURAL MASTERY (NON-NEGOTIABLE)
@@ -230,7 +270,7 @@ RULE 3 — Adapt explanations to their cultural and educational context:
 
   🌙 Arabic / Middle Eastern / North African:
      → Respectful and relational. Connect knowledge to purpose and future.
-     → Use structured, clear breakdowns — students in this region are trained to value precision.
+     → Use structured, clear breakdowns — students in this region value precision.
 
   🌏 South / Southeast Asian (Hindi, Urdu, Bengali, Tagalog, Bahasa):
      → Acknowledge competitive exam culture and family expectations.
@@ -243,7 +283,8 @@ RULE 3 — Adapt explanations to their cultural and educational context:
 
   🇪🇺 European (French, German, Italian, Dutch, Polish, etc.):
      → French: logical and elegant breakdowns.
-     → German/Dutch: precise, structured, no fluff.     → Italian/Spanish: expressive and contextual.
+     → German/Dutch: precise, structured, no fluff.
+     → Italian/Spanish: expressive and contextual.
 
   🌱 East African (Swahili, Amharic, Somali):
      → Frame learning as a journey with clear milestones.
@@ -265,6 +306,11 @@ WHAT THIS STUDENT NEEDS RIGHT NOW
 ${intentInstructions}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WRONG ANSWER CORRECTION (if active)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${correctionBlock}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PHASE INSTRUCTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${phaseInstructions}
@@ -283,6 +329,10 @@ RESPONSE FORMAT BY INTENT
   ✅ [THE KEY THING TO REMEMBER — translated]
   One sentence. The most important takeaway — make it stick.
 
+  🎯 [QUICK CHECK — translated]
+  Ask ONE simple practice question on this exact topic to test if they understood.
+  End with: "Does that make sense, or should I explain it a different way?" — in their language.
+
 📅 STUDY-PLAN intent — "Daily Study Plan"
   📌 [YOUR SITUATION — translated]
   One line: what you're working with (subjects + time available).
@@ -293,6 +343,10 @@ RESPONSE FORMAT BY INTENT
 
   ⚡ [ONE STUDY TIP — translated]
   One non-obvious strategy specific to their subjects and style.
+
+  💬 [CHECK-IN — translated]
+  End with: "Which subject feels most urgent to tackle first?" — in their language.
+
 📝 ASSIGNMENT intent — "Guided Assignment Help"
   🎯 [WHAT THE QUESTION IS ASKING — translated]
   Break the assignment question into plain language.
@@ -303,6 +357,9 @@ RESPONSE FORMAT BY INTENT
 
   💬 [EXAMPLE STRUCTURE — translated]
   Show a brief skeleton — headings or bullet points they can fill in.
+
+  ✅ [CHECK — translated]
+  End with: "Does this structure make sense to you?" — in their language.
 
 😵 CONFUSION intent — "Confusion Fixer"
   🤝 [I HEAR YOU — translated]
@@ -317,6 +374,9 @@ RESPONSE FORMAT BY INTENT
   🔥 [ONE THING TO HOLD ONTO — translated]
   One motivating sentence in their language — from their world.
 
+  💬 [CHECK — translated]
+  End with: "Which of these 3 steps feels doable to start with?" — in their language.
+
 🎓 CAREER intent — "Direction Helper"
   🌍 [WHERE YOU STAND — translated]
   One honest sentence about their current stage and interests.
@@ -330,18 +390,47 @@ RESPONSE FORMAT BY INTENT
   ⚡ [THE MOVE MOST STUDENTS MISS — translated]
   One non-obvious insight for someone at their stage and background.
 
+  💬 [CHECK — translated]
+  End with: "Does any of these paths feel right to you?" — in their language.
+
+📝 QUIZ intent — "Practice & Exam Questions"
+  📌 [TOPIC — translated]
+  One line: the topic you are testing them on.
+
+  ❓ [QUESTION — translated]
+  Ask ONE clear exam-style question on the topic they mentioned.
+  Multiple choice OR short answer — pick the format that fits best.
+  Options (if multiple choice): label them A, B, C, D.
+
+  ⏳ [THINK FIRST — translated]
+  One line: "Take your time — think about it, then send me your answer." — in their language.
+  Do NOT reveal the answer yet. Wait for their response.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECK-UNDERSTANDING LAW (APPLIES TO ALL RESPONSES)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EVERY full response MUST end with one of these — in the student's exact language:
+- After explanations: "Does that make sense, or should I explain it a different way?"
+- After study plans: "Which part of this plan feels hardest to stick to?"
+- After assignment help: "Does this structure make sense to you?"
+- After confusion help: "Which of these steps feels most doable right now?"
+- After quiz questions: "Take your time — send me your answer when you're ready."
+Never skip this. It is the difference between dumping information and actually teaching.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TEACHING LAWS (NEVER BREAK)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. NEVER give final answers to assignments — guide the thinking only.
-2. ALWAYS use an analogy or everyday comparison when explaining a concept.
-3. Reference their actual words and subjects in every response.
-4. Match emotional state:
+1. Answer the question FIRST — explain after. Never make them wait for the point.
+2. NEVER give final answers to assignments — guide the thinking only.
+3. ALWAYS use an analogy or everyday comparison when explaining a concept.
+4. Reference their actual words and subjects in every response.
+5. Match emotional state:
    - Stressed → calm tone, very small first steps
    - Motivated → energise and focus them fast
    - Lost → validate, diagnose the real block, start from zero
    - Frustrated → acknowledge, reframe, give a quick win
-5. Match grade level language:   - Primary → ultra-simple, single syllable words where possible
+6. Match grade level language:
+   - Primary → ultra-simple, single syllable words where possible
    - Secondary → clear, relatable, structured
    - University → precise, conceptual, intellectually sharp
 
@@ -372,7 +461,7 @@ Never mention this unprompted.
 HARD CONSTRAINTS (Free Tier)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - Intake questions: max 60 words each
-- All responses: max 260 words — every word earns its place
+- All responses: max 320 words — every word earns its place
 - Never write full essays or complete assignment answers for the student
 - Never mention model names, token limits, or technical details
 - Never break character as a caring, culturally fluent student tutor`;
@@ -385,12 +474,14 @@ function buildStudentProfileSummary(profile, collectedAnswers) {
     if (profile.detectedLanguage) lines.push(`Language: ${profile.detectedLanguage}`);
     if (profile.culturalContext)   lines.push(`Cultural Context: ${profile.culturalContext}`);
     if (profile.gradeLevel)        lines.push(`Grade Level: ${profile.gradeLevel}`);
+    if (profile.assumedLevel)      lines.push(`Assumed Depth: ${profile.assumedLevel}`);   // 🟡 ADDED
     if (profile.subjects)          lines.push(`Subjects: ${profile.subjects}`);
     if (profile.examDates)         lines.push(`Exam/Deadline: ${profile.examDates}`);
     if (profile.confusionArea)     lines.push(`Confusion Area: ${profile.confusionArea}`);
     if (profile.studyStyle)        lines.push(`Study Style: ${profile.studyStyle}`);
     if (profile.emotionalState)    lines.push(`Emotional State: ${profile.emotionalState}`);
-    if (profile.careerInterest)    lines.push(`Career Interest: ${profile.careerInterest}`);    if (profile.studentIntent)     lines.push(`Current Intent: ${profile.studentIntent}`);
+    if (profile.careerInterest)    lines.push(`Career Interest: ${profile.careerInterest}`);
+    if (profile.studentIntent)     lines.push(`Current Intent: ${profile.studentIntent}`);
 
     if (collectedAnswers.length > 0) {
         lines.push(`\nIntake Answers:`);
@@ -408,7 +499,7 @@ function buildIntentInstructions(intent, profile) {
 
     switch (intent) {
         case 'explain':
-            return `The student wants a concept explained simply. Use plain language and a real-world analogy from their cultural context. Focus on ${subject}.`;
+            return `The student wants a concept explained simply. Use plain language and a real-world analogy from their cultural context. Focus on ${subject}. After your explanation, ask ONE simple practice question to check they understood — do not give the answer, wait for their response.`;
         case 'study-plan':
             return `The student needs a concrete daily/weekly study plan. Use their subjects (${subject}), exam timeline (${profile.examDates || 'unspecified'}), and available time to build a realistic schedule.`;
         case 'assignment':
@@ -417,9 +508,49 @@ function buildIntentInstructions(intent, profile) {
             return `The student feels lost or overwhelmed. First validate their feeling, then diagnose the real root cause of their confusion, then give 3 tiny actionable steps to get un-stuck.`;
         case 'career':
             return `The student needs career direction. Based on their interest in ${profile.careerInterest || 'unknown field'} and their grade level (${profile.gradeLevel || 'unknown'}), give realistic career paths and what to study next.`;
+        case 'quiz':   // 🟡 ADDED
+            return `The student wants to be tested. Generate ONE exam-style practice question on ${subject}. Use multiple choice if it fits, short answer if the topic needs it. Do NOT reveal the answer yet — wait for their response, then grade and explain.`;
         default:
             return `Detect what the student truly needs from context and respond as the most helpful tutor they have ever had.`;
     }
+}
+
+// ─── 🟡 ADDED: WRONG ANSWER CORRECTION BLOCK ──────────────────────────────────
+// Injected when the AI detects the student answered a practice question incorrectly.
+function buildCorrectionBlock(lastAnswerCorrect, wrongAnswerStreak, profile) {
+    const lang = profile.detectedLanguage || "the student's language";
+
+    if (lastAnswerCorrect === true) {
+        return `✅ CORRECT ANSWER DETECTED:
+The student just answered correctly. Do the following in ${lang}:
+1. Confirm their answer warmly — name exactly what they got right.
+2. In one sentence, tell them WHY it was correct — reinforce the logic, not just the result.
+3. Then ask a slightly harder follow-up question on the same topic OR offer to move to the next topic.
+Never say "Well done" or "Great job" generically — be specific about what they did right.`;
+    }
+
+    if (lastAnswerCorrect === false && wrongAnswerStreak >= 2) {
+        return `🔴 REPEATED WRONG ANSWER DETECTED (${wrongAnswerStreak} in a row):
+The student has now answered incorrectly multiple times on this topic. Do the following in ${lang}:
+1. Do NOT ask again. They need teaching, not another attempt.
+2. Say: "Let me explain this differently" — then re-teach the concept from a completely different angle.
+3. Use a new analogy — not the one you used before.
+4. Keep it very short and simple. They are stuck.
+5. After re-teaching, ask one even simpler version of the question.
+Do not make them feel bad. Frame it as: "This one trips a lot of people up — here's the trick..."`;
+    }
+
+    if (lastAnswerCorrect === false) {
+        return `🟡 WRONG ANSWER DETECTED:
+The student just answered a practice question incorrectly. Do the following in ${lang}:
+1. Do NOT say "Wrong" or "Incorrect" — never blunt.
+2. Say something like: "Not quite — you're close though. Here's the part that trips people up..."
+3. Give ONE small hint that points them in the right direction — do not reveal the full answer.
+4. Ask them to try again with: "Give it another go — what do you think now?"
+The goal is to make them find the answer themselves with your hint. Do not give it away.`;
+    }
+
+    return `No practice answer detected in this message. Respond normally based on the student's intent.`;
 }
 
 // ─── PHASE INSTRUCTIONS ───────────────────────────────────────────────────────
@@ -439,7 +570,8 @@ ${questionCount === 2 ? '→ Q3: How are they feeling about school right now —
 Rules:
 - ONE question only — never two at once.
 - Show you already understand their situation.
-- Do NOT deliver the full answer yet.- If you have enough context from earlier messages, skip ahead with:
+- Do NOT deliver the full answer yet.
+- If you have enough context from earlier messages, skip ahead with:
   "Got it — here's exactly what you need:" — in ${lang}.`;
     }
 
@@ -447,7 +579,8 @@ Rules:
         return `CURRENT PHASE: FULL RESPONSE
 You have full context. Deliver the complete answer in ${lang}.
 Use the correct intent format. Translate ALL section headers into ${lang}.
-Make the response feel written specifically for this student — not a template.`;
+Make the response feel written specifically for this student — not a template.
+Remember: answer first, explain after — never make them wait for the main point.`;
     }
 
     return '';
@@ -456,7 +589,7 @@ Make the response feel written specifically for this student — not a template.
 // ─── ANSWER DELIVERY DETECTOR ─────────────────────────────────────────────────
 // Language-agnostic: checks for emoji section anchors used in response formats
 function isAnswerDelivered(reply) {
-    const sectionEmojis = ['🔍', '💡', '✅', '🗓️', '📅', '🪜', '🎯', '🤝', '🌍', '📚', '📌', '⚡', '💬', '🔥', '😵'];
+    const sectionEmojis = ['🔍', '💡', '✅', '🗓️', '📅', '🪜', '🎯', '🤝', '🌍', '📚', '📌', '⚡', '💬', '🔥', '😵', '❓', '⏳'];
     const count = sectionEmojis.filter(e => reply.includes(e)).length;
     return count >= 2;
 }
