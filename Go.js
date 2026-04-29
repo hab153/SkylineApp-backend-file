@@ -257,10 +257,16 @@ async function generateGoResponse(message, history, userProfile) {
         };
 
     } catch (error) {
-        console.error("❌ [GO PLAN] Error:", error.response?.data || error.message);
-        throw new Error("Go AI service temporarily unavailable. Please try again.");
+        console.error("❌ [GO PLAN] Critical Error:", error.response?.data || error.message);
+        
+        // RETURN A SAFE FALLBACK OBJECT INSTEAD OF THROWING
+        return {
+            reply: "⚠️ I'm having trouble connecting to my brain right now. Please check your internet or try again in a moment.",
+            updatedHistory: history,
+            updatedProfile: session.profile,
+            mode: 'error'
+        };
     }
-}
 
 // ─── GO PLAN SYSTEM PROMPT ────────────────────────────────────────────────────
 function buildGoSystemPrompt({ userName, session }) {
