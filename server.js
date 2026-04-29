@@ -635,7 +635,8 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
 //  OTHER PROTECTED API ROUTES (WITH EXPIRY CHECK)
 // ════════════════════════════════════════════
 
-// 1. Get All Chat Sessionsapp.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
+// 1. Get All Chat Sessions
+app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
