@@ -783,7 +783,8 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
     } catch (err) {
         console.error(err.message);
         res.status(500).json({ message: 'Server Error' });
-    }});// 6. Update User Profileapp.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
+    }});// 6. Update User Profile
+app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
 
