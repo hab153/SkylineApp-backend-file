@@ -26,12 +26,6 @@ const MessageSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    // ADDED: Feedback field for Like/Dislike
-    feedback: {
-        type: String,
-        enum: ['like', 'dislike', null],
-        default: null
-    },
     createdAt: {
         type: Date,
         default: Date.now
