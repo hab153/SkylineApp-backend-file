@@ -562,9 +562,21 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         } 
         else if (plan === 'go') {
             console.log("🟡 Routing to Go AI");
-            const result = await goAI.generateGoResponse(message, history || [], user);
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
+            try {
+                const result = await goAI.generateGoResponse(message, history || [], user);
+                
+                // SAFETY CHECK: Ensure result exists
+                if (result && result.reply) {
+                    aiReply = result.reply;
+                    updatedHistory = result.updatedHistory || [];
+                } else {
+                    console.error("❌ Go AI returned empty result");
+                    aiReply = "⚠️ Sorry, I encountered an internal error. Please try again.";
+                }
+            } catch (goError) {
+                console.error("❌ Go AI Route Error:", goError);
+                aiReply = "⚠️ Go AI Service is currently unavailable.";
+            }
         } 
         else {
             // PRO PLAN uses BusinessAI (Existing Logic)
