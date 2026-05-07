@@ -635,7 +635,8 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
     }
 });
 
-// 7. Change Passwordapp.put('/api/auth/change-password', verifyToken, async (req, res) => {    
+// 7. Change Password
+app.put('/api/auth/change-password', verifyToken, async (req, res) => {    
     const { currentPassword, newPassword } = req.body;
 
     try {
