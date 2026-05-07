@@ -47,7 +47,8 @@ function getTavilyQuotaSummary() {
     return `📊 Tavily Search: ${tavilyQuota.used}/${tavilyQuota.limit} used (${pct}%) ${status} · Resets monthly`;
 }
 
-// ─── TAVILY SEARCH ────────────────────────────────────────────────────────────async function searchWithTavily(query, tavilyKey, options = {}) {
+// ─── TAVILY SEARCH ────────────────────────────────────────────────────────────
+async function searchWithTavily(query, tavilyKey, options = {}) {
     const response = await axios.post('https://api.tavily.com/search', {
         api_key:          tavilyKey,
         query,
