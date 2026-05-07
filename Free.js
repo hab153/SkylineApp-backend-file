@@ -1,6 +1,110 @@
 // Free.js
 const axios = require('axios');
 
+// ─── CONFIG ────────────────────────────────────────────────────────────────────
+const MAX_SEARCH_RESULTS = 40;
+const MAX_LEADS_RETURNED = 3;
+const TAVILY_LIMIT       = 1000;  // Free tier: 1000 requests/month
+
+// ─── TAVILY QUOTA TRACKER ─────────────────────────────────────────────────────
+// Tracks monthly usage. Resets automatically after 30 days.
+const tavilyQuota = {
+    used:      0,
+    limit:     TAVILY_LIMIT,
+    lastReset: Date.now(),
+};
+
+function checkTavilyReset() {
+    const ONE_MONTH = 30 * 24 * 60 * 60 * 1000;
+    if (Date.now() - tavilyQuota.lastReset >= ONE_MONTH) {
+        console.log(`♻️  [QUOTA] Tavily monthly quota reset. Was ${tavilyQuota.used}/${tavilyQuota.limit} — now 0.`);
+        tavilyQuota.used      = 0;
+        tavilyQuota.lastReset = Date.now();
+    }
+}
+
+function getTavilyRemaining() {
+    checkTavilyReset();
+    return tavilyQuota.limit - tavilyQuota.used;
+}
+
+function recordTavilyUsage() {
+    tavilyQuota.used += 1;
+    const remaining = getTavilyRemaining();
+    console.log(`📊 [QUOTA] Tavily: ${tavilyQuota.used}/${tavilyQuota.limit} used (${remaining} remaining).`);
+    if (remaining <= 0) {
+        console.warn('🔴 [QUOTA] Tavily monthly limit reached. No more searches until reset.');
+    }
+}
+
+function getTavilyQuotaSummary() {
+    checkTavilyReset();
+    const remaining = getTavilyRemaining();
+    const pct       = Math.round((tavilyQuota.used / tavilyQuota.limit) * 100);
+    const status    = remaining <= 0
+        ? '🔴 EXHAUSTED'
+        : remaining < tavilyQuota.limit * 0.1
+            ? '🟡 LOW'
+            : '🟢 OK';
+    return `📊 Tavily Search: ${tavilyQuota.used}/${tavilyQuota.limit} used (${pct}%) ${status} · Resets monthly`;
+}
+
+// ─── TAVILY SEARCH ────────────────────────────────────────────────────────────
+async function searchWithTavily(query, tavilyKey) {
+    const response = await axios.post('https://api.tavily.com/search', {
+        api_key:      tavilyKey,
+        query,
+        search_depth: 'basic',
+        max_results:  10,
+    }, {
+        headers: { 'Content-Type': 'application/json' }
+    });
+
+    return (response.data?.results || []).map(r => ({
+        title:   r.title          || '',
+        url:     r.url            || '',
+        snippet: r.content        || '',
+        date:    r.published_date || null,
+    }));
+}
+
+// ─── MULTI-QUERY SEARCH RUNNER ────────────────────────────────────────────────
+// Runs all queries through Tavily, deduplicates by domain, caps at 40 results.
+async function searchBusinessesOnline(queries, tavilyKey) {
+    const allResults  = [];
+    const seenDomains = new Set();
+
+    for (const query of queries) {
+        if (allResults.length >= MAX_SEARCH_RESULTS) break;
+
+        if (getTavilyRemaining() <= 0) {
+            console.warn('🚫 [SEARCH] Tavily quota exhausted. Cannot continue searching.');
+            break;
+        }
+
+        try {
+            console.log(`🔍 [Tavily] Query: "${query}"`);
+            const results = await searchWithTavily(query, tavilyKey);
+            recordTavilyUsage();
+
+            for (const r of results) {
+                const domain = extractDomain(r.url || '');
+                if (domain && !seenDomains.has(domain) && allResults.length < MAX_SEARCH_RESULTS) {
+                    seenDomains.add(domain);
+                    allResults.push(r);
+                }
+            }
+
+        } catch (err) {
+            console.warn(`⚠️  [Tavily] Search error: ${err.message}`);
+            recordTavilyUsage(); // Count it — Tavily likely counted it on their end
+        }
+    }
+
+    console.log(`📦 [SEARCH] Done — ${allResults.length} unique results collected.`);
+    return allResults;
+}
+
 // ─── SESSION STORE ────────────────────────────────────────────────────────────
 const sessionStore = new Map();
 
@@ -8,25 +112,16 @@ function getSession(userId) {
     if (!sessionStore.has(userId)) {
         sessionStore.set(userId, {
             phase: 'intake',
-            questionCount: 0,
-            maxQuestions: 3,
             profile: {
-                detectedLanguage: null,
-                culturalContext: null,
-                gradeLevel: null,           // e.g. "secondary", "university", "primary"
-                subjects: null,             // e.g. "Math, Biology"
-                examDates: null,            // e.g. "Math exam in 2 weeks"
-                confusionArea: null,        // e.g. "algebra", "essay writing"
-                studyStyle: null,           // e.g. "visual", "reading", "practice"
-                emotionalState: null,       // e.g. "stressed", "motivated", "lost"
-                careerInterest: null,       // e.g. "medicine", "tech", "unknown"
-                studentIntent: null,        // e.g. "explain" | "study-plan" | "assignment" | "confusion" | "career" | "quiz"
-                assumedLevel: 'beginner',   // 🟡 ADDED: always start as beginner until proven otherwise
+                targetDescription: null,
+                industry:          null,
+                painPoint:         null,
+                location:          null,
+                businessSize:      null,
+                budget:            null,
             },
-            collectedAnswers: [],
-            topicSignature: null,
-            lastAnswerCorrect: null,        // 🟡 ADDED: null | true | false — tracks student's practice answer result
-            wrongAnswerStreak: 0,           // 🟡 ADDED: counts consecutive wrong answers on same topic
+            lastSearchQueries: [],
+            lastLeads:         [],
         });
     }
     return sessionStore.get(userId);
@@ -37,561 +132,216 @@ function resetSession(userId) {
     return getSession(userId);
 }
 
-// ─── AI-POWERED STUDENT PROFILER ──────────────────────────────────────────────
-// Detects student context from any language. Works in Arabic, Yoruba, Hausa,
-// French, Swahili, Hindi, Pidgin, Spanish — any language.
-async function analyzeMessageWithAI(message, history, currentProfile, apiKey) {
+// ─── STEP 1: PARSE USER INTENT ────────────────────────────────────────────────
+async function parseLeadIntent(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n');
 
-    const safeMessage = message.replace(/"/g, '\\"').replace(/\n/g, '\\n');
-    const safeHistory = historySnippet ? historySnippet.replace(/"/g, '\\"').replace(/\n/g, '\\n') : 'None yet';
+    const prompt = `You are a lead generation analyst. Extract structured search parameters from this sales professional's message.
 
-    const analysisPrompt = `You are a silent student profiler. Analyze the message below and return ONLY valid JSON — no explanation, no markdown, no extra text.
+CONVERSATION HISTORY:
+${historySnippet || 'None'}
 
-CONVERSATION HISTORY (last 4 messages):
-${safeHistory}
-CURRENT USER MESSAGE:
-"${safeMessage}"
+USER MESSAGE: "${message}"
 
-CURRENT KNOWN PROFILE (fill nulls where you can detect new info, keep existing values if already set):
+CURRENT KNOWN PROFILE:
 ${JSON.stringify(currentProfile, null, 2)}
 
-INSTRUCTIONS:
-Detect the following from the message. The message may be in ANY human language — analyze meaning, not just English keywords.
-
-Return ONLY this exact JSON structure:
+Return ONLY valid JSON — no markdown:
 {
-  "detectedLanguage": "<full language name e.g. Arabic, Yoruba, French, English, Hausa, Swahili, Hindi, Pidgin, Spanish, etc.>",
-  "culturalContext": "<culture group e.g. West African, Middle Eastern, East Asian, Latin American, Western European, South Asian, etc.>",
-  "gradeLevel": "<one of: primary | secondary | university | vocational | unknown>",
-  "subjects": "<comma-separated subjects detected e.g. Math, Biology, English or unknown>",
-  "examDates": "<any exam/deadline timeline mentioned e.g. 'exam in 3 days' or null>",
-  "confusionArea": "<the specific topic or concept the student is confused about, or null>",
-  "studyStyle": "<one of: visual | reading | practice | listening | unknown>",
-  "emotionalState": "<one of: stressed | motivated | lost | frustrated | neutral>",
-  "careerInterest": "<career or field the student mentioned interest in, or unknown>",
-  "studentIntent": "<one of: explain | study-plan | assignment | confusion | career | quiz | general>",
-  "isNewTopic": <true or false>,
-  "isWrongAnswer": <true if the student is responding to a practice question and their answer appears incorrect — compare against conversation history>,
-  "isCorrectAnswer": <true if the student is responding to a practice question and their answer appears correct — compare against conversation history>,
-  "assumedLevel": "<one of: beginner | intermediate | advanced — based on vocabulary and clarity of their message>"
+  "targetDescription": "<type of customer/business they want>",
+  "industry": "<industry or niche>",
+  "painPoint": "<problem the target businesses have>",
+  "location": "<geographic focus or null>",
+  "businessSize": "<startup | small | medium | enterprise | any>",
+  "budget": "<low | mid | high | unknown>",
+  "searchQueries": [
+    "<specific ready-to-run search string — business directory angle>",
+    "<specific ready-to-run search string — LinkedIn/news signal angle>",
+    "<specific ready-to-run search string — pain point / job posting angle>"
+  ],
+  "isNewSearch": <true if new request, false if refining>
 }
 
-Intent detection rules:
-- "explain": student wants a topic or concept explained simply
-- "study-plan": student wants a schedule, plan, or daily study guide
-- "assignment": student needs help understanding or structuring an assignment
-- "confusion": student feels lost, overwhelmed, or does not know where to start
-- "career": student is asking about future careers, what to study, or life direction
-- "quiz": student is asking for practice questions, random exam questions, a test, or a quiz on any topic
-- "general": does not fit any above
-
-Rules:
-- Detect meaning across ALL languages — do not rely on English keywords.
-- If a field cannot be determined, use the existing value from current profile or null/unknown.
-- isNewTopic should be true only if the user is clearly starting a completely different subject.
-- isWrongAnswer and isCorrectAnswer: look at the last assistant message — if it asked a question, judge if the student's reply is correct or not.
-- Return ONLY the JSON. No other text.`;
+Rules: searchQueries must be real, specific, ready-to-run strings. Return ONLY the JSON.`;
 
     try {
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-            model: "gpt-4o-mini",
-            messages: [{ role: 'user', content: analysisPrompt }],
-            max_tokens: 200,
+            model:       'gpt-4o-mini',
+            messages:    [{ role: 'user', content: prompt }],
+            max_tokens:  300,
             temperature: 0.1
         }, {
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
 
-        const raw = response.data.choices[0].message.content.trim();
+        const raw     = response.data.choices[0].message.content.trim();
         const cleaned = raw.replace(/```json|```/g, '').trim();
         return JSON.parse(cleaned);
 
     } catch (err) {
-        console.warn("⚠️ [FREE TIER] Student profile analysis failed, using defaults:", err.message);
+        console.warn('⚠️ [LEAD FINDER] Intent parsing failed:', err.message);
         return null;
     }
 }
 
-// ─── MAIN FUNCTION ────────────────────────────────────────────────────────────
+// ─── STEP 2: AI RANKS AND PICKS TOP 3 ────────────────────────────────────────
+async function rankAndSelectTopLeads(rawResults, profile, apiKey) {
+    if (rawResults.length === 0) return [];
+
+    const compactResults = rawResults.map((r, i) => ({
+        index:   i,
+        title:   r.title,
+        url:     r.url,
+        snippet: r.snippet?.slice(0, 180) || '',
+        date:    r.date || null,
+    }));
+
+    const prompt = `You are an elite B2B lead analyst.
+
+TARGET PROFILE:
+${JSON.stringify(profile, null, 2)}
+
+From the ${rawResults.length} results below, select EXACTLY ${MAX_LEADS_RETURNED} best leads.
+
+RAW RESULTS:
+${JSON.stringify(compactResults, null, 2)}
+
+Return ONLY valid JSON:
+{
+  "leads": [
+    {
+      "rank": 1,
+      "businessName": "<name>",
+      "url": "<url>",
+      "industry": "<their industry>",
+      "opportunitySignal": "<why they likely need help — specific to their snippet>",
+      "outreachAngle": "<personalised opening line for outreach>",
+      "fitScore": <1-10>
+    }
+  ]
+}
+
+Rules: rank by fitScore descending. opportunitySignal must reference their actual snippet. Return ONLY the JSON.`;
+
+    try {
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages:    [{ role: 'user', content: prompt }],
+            max_tokens:  600,
+            temperature: 0.2
+        }, {
+            headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
+        });
+
+        const raw     = response.data.choices[0].message.content.trim();
+        const cleaned = raw.replace(/```json|```/g, '').trim();
+        return JSON.parse(cleaned).leads || [];
+
+    } catch (err) {
+        console.warn('⚠️ [LEAD FINDER] Ranking failed:', err.message);
+        return [];
+    }
+}
+
+// ─── STEP 3: FORMAT FINAL RESPONSE ────────────────────────────────────────────
+function formatLeadResponse(leads, profile, totalSearched) {
+    if (leads.length === 0) {
+        return [
+            `🔍 Searched ${totalSearched} businesses — no strong matches for "${profile.targetDescription || 'your request'}".`,
+            `Try: add a location, name a specific pain point, or narrow the niche.`,
+            ``,
+            getTavilyQuotaSummary(),
+        ].join('\n');
+    }
+
+    const lines = [
+        `🎯 **Lead Search Complete**`,
+        `${totalSearched} businesses searched · Top ${leads.length} returned\n`,
+        `**Target:** ${profile.targetDescription || 'As described'}\n`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    ];
+
+    leads.forEach((lead, i) => {
+        lines.push(
+            `\n**#${lead.rank} — ${lead.businessName}** · Fit: ${lead.fitScore}/10`,
+            `🌐 ${lead.url || 'URL not found'}`,
+            `🏭 ${lead.industry}`,
+            `📡 Opportunity: ${lead.opportunitySignal}`,
+            `✉️  Outreach: *"${lead.outreachAngle}"*`,
+            i < leads.length - 1 ? `\n─────────────────────────────────────` : ''
+        );
+    });
+
+    lines.push(
+        `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `\n${getTavilyQuotaSummary()}`,
+        `\nRefine: give a location, different niche, or say "Find more like #1".`
+    );
+
+    return lines.join('\n');
+}
+
+// ─── MAIN EXPORT ───────────────────────────────────────────────────────────────
 async function generateFreeResponse(message, history, userProfile) {
     try {
-        console.log("🟢 [FREE TIER] Processing via GPT-4o-mini — Student Intelligence Mode...");
+        console.log('🟢 [LEAD FINDER] Processing...');
 
-        const userId   = userProfile?.userId || 'default';
-        const userName = userProfile?.name   || null;
-        const apiKey   = process.env.OPENAI_API_KEY;
+        const userId    = userProfile?.userId || 'default';
+        const apiKey    = process.env.OPENAI_API_KEY;
+        const tavilyKey = process.env.TAVILY_API_KEY;
 
         let session = getSession(userId);
 
-        // ── Step 1: AI-powered student profile analysis ──
-        const analysis = await analyzeMessageWithAI(message, history, session.profile, apiKey);
+        // ── Parse intent ──
+        const intent = await parseLeadIntent(message, history, session.profile, apiKey);
 
-        if (analysis) {
-            // Reset if student clearly switched to a new subject
-            if (analysis.isNewTopic && session.topicSignature) {
-                session = resetSession(userId);
-                session.topicSignature = message.slice(0, 60);
-            }
+        if (intent) {
+            if (intent.isNewSearch && session.lastLeads.length > 0) session = resetSession(userId);
 
-            // 🟡 ADDED: Track correct/wrong answer streaks for practice questions
-            if (analysis.isWrongAnswer === true) {
-                session.lastAnswerCorrect = false;
-                session.wrongAnswerStreak = (session.wrongAnswerStreak || 0) + 1;
-            } else if (analysis.isCorrectAnswer === true) {
-                session.lastAnswerCorrect = true;
-                session.wrongAnswerStreak = 0;
-            } else {
-                session.lastAnswerCorrect = null;
-                session.wrongAnswerStreak = 0;
-            }
-
-            // Merge detected fields — never overwrite confirmed values with unknown/null
             const p = session.profile;
-            if (analysis.detectedLanguage)                                         p.detectedLanguage  = analysis.detectedLanguage;
-            if (analysis.culturalContext)                                           p.culturalContext   = analysis.culturalContext;
-            if (analysis.gradeLevel      && analysis.gradeLevel    !== 'unknown')   p.gradeLevel        = analysis.gradeLevel;
-            if (analysis.subjects        && analysis.subjects      !== 'unknown')   p.subjects          = analysis.subjects;
-            if (analysis.examDates)                                                 p.examDates         = analysis.examDates;
-            if (analysis.confusionArea)                                             p.confusionArea     = analysis.confusionArea;
-            if (analysis.studyStyle      && analysis.studyStyle    !== 'unknown')   p.studyStyle        = analysis.studyStyle;
-            if (analysis.emotionalState  && analysis.emotionalState !== 'unknown')  p.emotionalState    = analysis.emotionalState;
-            if (analysis.careerInterest  && analysis.careerInterest !== 'unknown')  p.careerInterest    = analysis.careerInterest;
-            if (analysis.studentIntent   && analysis.studentIntent  !== 'general')  p.studentIntent     = analysis.studentIntent;
-
-            // 🟡 ADDED: Upgrade assumed level only if evidence is clear (never downgrade)
-            if (analysis.assumedLevel === 'intermediate' && p.assumedLevel === 'beginner') p.assumedLevel = 'intermediate';
-            if (analysis.assumedLevel === 'advanced')                                      p.assumedLevel = 'advanced';
+            if (intent.targetDescription) p.targetDescription = intent.targetDescription;
+            if (intent.industry)          p.industry          = intent.industry;
+            if (intent.painPoint)         p.painPoint         = intent.painPoint;
+            if (intent.location)          p.location          = intent.location;
+            if (intent.businessSize)      p.businessSize      = intent.businessSize;
+            if (intent.budget)            p.budget            = intent.budget;
+            session.lastSearchQueries = intent.searchQueries || [];
         }
 
-        if (!session.topicSignature) {
-            session.topicSignature = message.slice(0, 60);
-        }
-        const limitedHistory = history.slice(-8);
+        // ── Live search via Tavily ──
+        const rawResults  = await searchBusinessesOnline(session.lastSearchQueries, tavilyKey);
 
-        // ── Step 2: Build student-focused system prompt ──
-        const systemPrompt = buildStudentSystemPrompt({ userName, session });
+        // ── AI picks top 3 ──
+        const topLeads    = await rankAndSelectTopLeads(rawResults, session.profile, apiKey);
+        session.lastLeads = topLeads;
+        session.phase     = 'complete';
 
-        // ── Step 3: Main response call ──
-        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-            model: "gpt-4o-mini",
-            messages: [
-                { role: 'system', content: systemPrompt },
-                ...limitedHistory,
-                { role: 'user', content: message }
-            ],
-            max_tokens: 320,    // 🟠 MODIFIED: bumped from 260 → 320 to fit practice question + check-understanding ending
-            temperature: 0.72
-        }, {
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        const aiReply = response.data.choices[0].message.content;
-
-        // ── Step 4: Phase tracking ──
-        if (isAnswerDelivered(aiReply)) {
-            session.phase = 'complete';
-        } else if (session.phase === 'intake') {
-            session.questionCount += 1;
-            session.collectedAnswers.push({ q: session.questionCount, answer: message });
-            if (session.questionCount >= session.maxQuestions) {
-                session.phase = 'respond';
-            }
-        }
+        const reply = formatLeadResponse(topLeads, session.profile, rawResults.length);
 
         const newHistory = [
             ...history,
-            { role: 'user', content: message },
-            { role: 'assistant', content: aiReply }
+            { role: 'user',      content: message },
+            { role: 'assistant', content: reply   }
         ];
 
         return {
-            reply: aiReply,
-            updatedHistory: newHistory.slice(-12)
+            reply,
+            updatedHistory: newHistory.slice(-12),
+            leads:          topLeads,
+            totalSearched:  rawResults.length,
+            quotaStatus:    getTavilyQuotaSummary(),
         };
 
     } catch (error) {
-        console.error("❌ [FREE TIER] Error:", error.message);
-        throw new Error("Free AI service temporarily unavailable.");
+        console.error('❌ [LEAD FINDER] Error:', error.message);
+        throw new Error('Lead search service temporarily unavailable.');
     }
 }
 
-// ─── STUDENT SYSTEM PROMPT ────────────────────────────────────────────────────
-function buildStudentSystemPrompt({ userName, session }) {
-    const { profile, phase, questionCount, maxQuestions, collectedAnswers, lastAnswerCorrect, wrongAnswerStreak } = session;
-
-    const nameTag        = userName ? `Student's name: ${userName}.` : '';
-    const langTag        = profile.detectedLanguage
-        ? `Detected language: ${profile.detectedLanguage}. Cultural context: ${profile.culturalContext || 'unknown'}.`
-        : '';
-
-    const profileSummary      = buildStudentProfileSummary(profile, collectedAnswers);
-    const intentInstructions  = buildIntentInstructions(profile.studentIntent, profile);
-    const phaseInstructions   = buildPhaseInstructions(phase, questionCount, maxQuestions, profile);
-
-    // 🟡 ADDED: Wrong answer correction block — injected into prompt when detected
-    const correctionBlock     = buildCorrectionBlock(lastAnswerCorrect, wrongAnswerStreak, profile);
-
-    return `You are Skyline Study Guide — a brilliant, patient, and culturally fluent student tutor.
-You are not a search engine. You are a dedicated academic partner who meets every student exactly where they are.
-Your single mission: make every student — in every country, in every language — feel like they have a world-class tutor who actually cares.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BEGINNER-FIRST PRINCIPLE (NON-NEGOTIABLE)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE 0 — Always treat this student as a BEGINNER unless they clearly prove otherwise.
-Current assumed level: ${profile.assumedLevel || 'beginner'}
-
-What this means:
-- Use the simplest, most direct words possible.
-- Never assume they know background vocabulary — define it the moment you use it.
-- If they show depth (correct terminology, follow-up insight), quietly adjust — but stay accessible.
-- A student who already knows something will not be offended by clarity. A student who is lost will be saved by it.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LANGUAGE & CULTURAL MASTERY (NON-NEGOTIABLE)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${langTag}
-
-RULE 1 — ALWAYS respond in the EXACT language the student wrote in. No exceptions.
-RULE 2 — Do not translate. Speak natively in their language with full fluency.
-RULE 3 — Adapt explanations to their cultural and educational context:
-
-  🌍 West African (Yoruba, Igbo, Hausa, Pidgin, Twi):
-     → Use local examples and familiar everyday comparisons.
-     → Acknowledge school pressure from family and community.
-     → Be warm, encouraging, and practical.
-
-  🌙 Arabic / Middle Eastern / North African:
-     → Respectful and relational. Connect knowledge to purpose and future.
-     → Use structured, clear breakdowns — students in this region value precision.
-
-  🌏 South / Southeast Asian (Hindi, Urdu, Bengali, Tagalog, Bahasa):
-     → Acknowledge competitive exam culture and family expectations.
-     → Frame effort as both personal and family achievement.
-     → Step-by-step is deeply valued here.
-
-  🌐 Latin American (Spanish, Portuguese):
-     → Warm, expressive tone. Use relatable everyday analogies.
-     → Connect learning to practical life outcomes.
-
-  🇪🇺 European (French, German, Italian, Dutch, Polish, etc.):
-     → French: logical and elegant breakdowns.
-     → German/Dutch: precise, structured, no fluff.
-     → Italian/Spanish: expressive and contextual.
-
-  🌱 East African (Swahili, Amharic, Somali):
-     → Frame learning as a journey with clear milestones.
-     → Encouragement tied to community and future impact.
-
-RULE 4 — If the student switches languages mid-conversation, switch immediately.
-RULE 5 — Translate ALL section headers into the student's language.
-
-${nameTag}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STUDENT PROFILE (AI Detected)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${profileSummary}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHAT THIS STUDENT NEEDS RIGHT NOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${intentInstructions}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WRONG ANSWER CORRECTION (if active)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${correctionBlock}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PHASE INSTRUCTIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${phaseInstructions}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RESPONSE FORMAT BY INTENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📖 EXPLAIN intent — "Explain it Simply"
-  🔍 [WHAT IT IS — translated]
-  One sentence: what this topic actually is, in plain language.
-
-  💡 [SIMPLE BREAKDOWN — translated]
-  2–3 bullet points. Use an everyday analogy from their world.
-
-  ✅ [THE KEY THING TO REMEMBER — translated]
-  One sentence. The most important takeaway — make it stick.
-
-  🎯 [QUICK CHECK — translated]
-  Ask ONE simple practice question on this exact topic to test if they understood.
-  End with: "Does that make sense, or should I explain it a different way?" — in their language.
-
-📅 STUDY-PLAN intent — "Daily Study Plan"
-  📌 [YOUR SITUATION — translated]
-  One line: what you're working with (subjects + time available).
-
-  🗓️ [YOUR STUDY PLAN — translated]
-  Day-by-day or week overview. Specific subject + hours.
-  Example: "Day 1 — Math 2hr (focus: algebra) + Biology 1hr (focus: cells)"
-
-  ⚡ [ONE STUDY TIP — translated]
-  One non-obvious strategy specific to their subjects and style.
-
-  💬 [CHECK-IN — translated]
-  End with: "Which subject feels most urgent to tackle first?" — in their language.
-
-📝 ASSIGNMENT intent — "Guided Assignment Help"
-  🎯 [WHAT THE QUESTION IS ASKING — translated]
-  Break the assignment question into plain language.
-
-  🪜 [HOW TO APPROACH IT — translated]
-  3 steps: how to think through it, structure it, and complete it.
-  DO NOT give the final answer. Guide the thinking.
-
-  💬 [EXAMPLE STRUCTURE — translated]
-  Show a brief skeleton — headings or bullet points they can fill in.
-
-  ✅ [CHECK — translated]
-  End with: "Does this structure make sense to you?" — in their language.
-
-😵 CONFUSION intent — "Confusion Fixer"
-  🤝 [I HEAR YOU — translated]
-  One sentence validating exactly what they said they're feeling.
-
-  🔍 [HERE'S THE REAL PROBLEM — translated]
-  Name the actual root cause of their confusion clearly.
-
-  🪜 [YOUR NEXT 3 STEPS — translated]
-  Three very small, very doable actions. Start from zero.
-
-  🔥 [ONE THING TO HOLD ONTO — translated]
-  One motivating sentence in their language — from their world.
-
-  💬 [CHECK — translated]
-  End with: "Which of these 3 steps feels doable to start with?" — in their language.
-
-🎓 CAREER intent — "Direction Helper"
-  🌍 [WHERE YOU STAND — translated]
-  One honest sentence about their current stage and interests.
-
-  🎯 [CAREER PATHS THAT FIT YOU — translated]
-  2–3 paths aligned with what they mentioned. Brief reason for each.
-
-  📚 [WHAT TO STUDY NEXT — translated]
-  Specific subjects or skills to focus on in the next 3–6 months.
-
-  ⚡ [THE MOVE MOST STUDENTS MISS — translated]
-  One non-obvious insight for someone at their stage and background.
-
-  💬 [CHECK — translated]
-  End with: "Does any of these paths feel right to you?" — in their language.
-
-📝 QUIZ intent — "Practice & Exam Questions"
-  📌 [TOPIC — translated]
-  One line: the topic you are testing them on.
-
-  ❓ [QUESTION — translated]
-  Ask ONE clear exam-style question on the topic they mentioned.
-  Multiple choice OR short answer — pick the format that fits best.
-  Options (if multiple choice): label them A, B, C, D.
-
-  ⏳ [THINK FIRST — translated]
-  One line: "Take your time — think about it, then send me your answer." — in their language.
-  Do NOT reveal the answer yet. Wait for their response.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CHECK-UNDERSTANDING LAW (APPLIES TO ALL RESPONSES)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EVERY full response MUST end with one of these — in the student's exact language:
-- After explanations: "Does that make sense, or should I explain it a different way?"
-- After study plans: "Which part of this plan feels hardest to stick to?"
-- After assignment help: "Does this structure make sense to you?"
-- After confusion help: "Which of these steps feels most doable right now?"
-- After quiz questions: "Take your time — send me your answer when you're ready."
-Never skip this. It is the difference between dumping information and actually teaching.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TEACHING LAWS (NEVER BREAK)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Answer the question FIRST — explain after. Never make them wait for the point.
-2. NEVER give final answers to assignments — guide the thinking only.
-3. ALWAYS use an analogy or everyday comparison when explaining a concept.
-4. Reference their actual words and subjects in every response.
-5. Match emotional state:
-   - Stressed → calm tone, very small first steps
-   - Motivated → energise and focus them fast
-   - Lost → validate, diagnose the real block, start from zero
-   - Frustrated → acknowledge, reframe, give a quick win
-6. Match grade level language:
-   - Primary → ultra-simple, single syllable words where possible
-   - Secondary → clear, relatable, structured
-   - University → precise, conceptual, intellectually sharp
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ANTI-GENERIC FILTER (CRITICAL)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"Could this response have been given to any other student anywhere?"
-If YES — rewrite until it could ONLY apply to this student.
-
-Banned phrases in ANY language:
-- "Study hard"
-- "Believe in yourself"
-- "You can do it"
-- "Break it into small steps"
-- "Make a schedule"
-
-Replace every cliché with something subject-specific, culturally grounded, and actionable.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-UPGRADE TRIGGER (when student hits the ceiling)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Only when the student pushes for more after a full answer — respond in their language:
-"What you're asking for now — [specific thing] — is unlocked in the Pro plan.
-That gives you [specific feature]. You've already done the hard part by asking the right question."
-Never mention this unprompted.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HARD CONSTRAINTS (Free Tier)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Intake questions: max 60 words each
-- All responses: max 320 words — every word earns its place
-- Never write full essays or complete assignment answers for the student
-- Never mention model names, token limits, or technical details
-- Never break character as a caring, culturally fluent student tutor`;
-}
-
-// ─── STUDENT PROFILE SUMMARY ──────────────────────────────────────────────────
-function buildStudentProfileSummary(profile, collectedAnswers) {
-    const lines = [];
-
-    if (profile.detectedLanguage) lines.push(`Language: ${profile.detectedLanguage}`);
-    if (profile.culturalContext)   lines.push(`Cultural Context: ${profile.culturalContext}`);
-    if (profile.gradeLevel)        lines.push(`Grade Level: ${profile.gradeLevel}`);
-    if (profile.assumedLevel)      lines.push(`Assumed Depth: ${profile.assumedLevel}`);   // 🟡 ADDED
-    if (profile.subjects)          lines.push(`Subjects: ${profile.subjects}`);
-    if (profile.examDates)         lines.push(`Exam/Deadline: ${profile.examDates}`);
-    if (profile.confusionArea)     lines.push(`Confusion Area: ${profile.confusionArea}`);
-    if (profile.studyStyle)        lines.push(`Study Style: ${profile.studyStyle}`);
-    if (profile.emotionalState)    lines.push(`Emotional State: ${profile.emotionalState}`);
-    if (profile.careerInterest)    lines.push(`Career Interest: ${profile.careerInterest}`);
-    if (profile.studentIntent)     lines.push(`Current Intent: ${profile.studentIntent}`);
-
-    if (collectedAnswers.length > 0) {
-        lines.push(`\nIntake Answers:`);
-        collectedAnswers.forEach(a => lines.push(`  Q${a.q}: "${a.answer}"`));
-    }
-
-    return lines.length > 0
-        ? lines.join('\n')
-        : 'Profile still being built — intake phase active.';
-}
-
-// ─── INTENT INSTRUCTIONS ──────────────────────────────────────────────────────
-function buildIntentInstructions(intent, profile) {
-    const subject = profile.subjects || 'their subject';
-
-    switch (intent) {
-        case 'explain':
-            return `The student wants a concept explained simply. Use plain language and a real-world analogy from their cultural context. Focus on ${subject}. After your explanation, ask ONE simple practice question to check they understood — do not give the answer, wait for their response.`;
-        case 'study-plan':
-            return `The student needs a concrete daily/weekly study plan. Use their subjects (${subject}), exam timeline (${profile.examDates || 'unspecified'}), and available time to build a realistic schedule.`;
-        case 'assignment':
-            return `The student needs assignment guidance — NOT the answer. Break the question down, show a thinking process, and give a structure they can fill in themselves.`;
-        case 'confusion':
-            return `The student feels lost or overwhelmed. First validate their feeling, then diagnose the real root cause of their confusion, then give 3 tiny actionable steps to get un-stuck.`;
-        case 'career':
-            return `The student needs career direction. Based on their interest in ${profile.careerInterest || 'unknown field'} and their grade level (${profile.gradeLevel || 'unknown'}), give realistic career paths and what to study next.`;
-        case 'quiz':   // 🟡 ADDED
-            return `The student wants to be tested. Generate ONE exam-style practice question on ${subject}. Use multiple choice if it fits, short answer if the topic needs it. Do NOT reveal the answer yet — wait for their response, then grade and explain.`;
-        default:
-            return `Detect what the student truly needs from context and respond as the most helpful tutor they have ever had.`;
-    }
-}
-
-// ─── 🟡 ADDED: WRONG ANSWER CORRECTION BLOCK ──────────────────────────────────
-// Injected when the AI detects the student answered a practice question incorrectly.
-function buildCorrectionBlock(lastAnswerCorrect, wrongAnswerStreak, profile) {
-    const lang = profile.detectedLanguage || "the student's language";
-
-    if (lastAnswerCorrect === true) {
-        return `✅ CORRECT ANSWER DETECTED:
-The student just answered correctly. Do the following in ${lang}:
-1. Confirm their answer warmly — name exactly what they got right.
-2. In one sentence, tell them WHY it was correct — reinforce the logic, not just the result.
-3. Then ask a slightly harder follow-up question on the same topic OR offer to move to the next topic.
-Never say "Well done" or "Great job" generically — be specific about what they did right.`;
-    }
-
-    if (lastAnswerCorrect === false && wrongAnswerStreak >= 2) {
-        return `🔴 REPEATED WRONG ANSWER DETECTED (${wrongAnswerStreak} in a row):
-The student has now answered incorrectly multiple times on this topic. Do the following in ${lang}:
-1. Do NOT ask again. They need teaching, not another attempt.
-2. Say: "Let me explain this differently" — then re-teach the concept from a completely different angle.
-3. Use a new analogy — not the one you used before.
-4. Keep it very short and simple. They are stuck.
-5. After re-teaching, ask one even simpler version of the question.
-Do not make them feel bad. Frame it as: "This one trips a lot of people up — here's the trick..."`;
-    }
-
-    if (lastAnswerCorrect === false) {
-        return `🟡 WRONG ANSWER DETECTED:
-The student just answered a practice question incorrectly. Do the following in ${lang}:
-1. Do NOT say "Wrong" or "Incorrect" — never blunt.
-2. Say something like: "Not quite — you're close though. Here's the part that trips people up..."
-3. Give ONE small hint that points them in the right direction — do not reveal the full answer.
-4. Ask them to try again with: "Give it another go — what do you think now?"
-The goal is to make them find the answer themselves with your hint. Do not give it away.`;
-    }
-
-    return `No practice answer detected in this message. Respond normally based on the student's intent.`;
-}
-
-// ─── PHASE INSTRUCTIONS ───────────────────────────────────────────────────────
-function buildPhaseInstructions(phase, questionCount, maxQuestions, profile) {
-    const lang = profile.detectedLanguage || "the student's language";
-
-    if (phase === 'intake') {
-        const remaining = maxQuestions - questionCount;
-        return `CURRENT PHASE: INTAKE (Question ${questionCount + 1} of max ${maxQuestions})
-You have ${remaining} question(s) left before responding fully.
-
-Ask ONE focused, friendly question in ${lang} to fill the most important missing gap:
-${questionCount === 0 ? '→ Q1: What subject or topic do they need help with, and what exactly is confusing them?' : ''}
-${questionCount === 1 ? '→ Q2: Do they have an exam or deadline coming up, and how far along in the topic are they?' : ''}
-${questionCount === 2 ? '→ Q3: How are they feeling about school right now — stressed, lost, motivated, or something else?' : ''}
-
-Rules:
-- ONE question only — never two at once.
-- Show you already understand their situation.
-- Do NOT deliver the full answer yet.
-- If you have enough context from earlier messages, skip ahead with:
-  "Got it — here's exactly what you need:" — in ${lang}.`;
-    }
-
-    if (phase === 'respond' || phase === 'complete') {
-        return `CURRENT PHASE: FULL RESPONSE
-You have full context. Deliver the complete answer in ${lang}.
-Use the correct intent format. Translate ALL section headers into ${lang}.
-Make the response feel written specifically for this student — not a template.
-Remember: answer first, explain after — never make them wait for the main point.`;
-    }
-
-    return '';
-}
-
-// ─── ANSWER DELIVERY DETECTOR ─────────────────────────────────────────────────
-// Language-agnostic: checks for emoji section anchors used in response formats
-function isAnswerDelivered(reply) {
-    const sectionEmojis = ['🔍', '💡', '✅', '🗓️', '📅', '🪜', '🎯', '🤝', '🌍', '📚', '📌', '⚡', '💬', '🔥', '😵', '❓', '⏳'];
-    const count = sectionEmojis.filter(e => reply.includes(e)).length;
-    return count >= 2;
+// ─── UTILITY ───────────────────────────────────────────────────────────────────
+function extractDomain(url) {
+    try { return new URL(url).hostname.replace('www.', ''); }
+    catch { return url; }
 }
 
 module.exports = { generateFreeResponse };
