@@ -7,7 +7,6 @@ const MAX_LEADS_RETURNED = 3;
 const TAVILY_LIMIT       = 1000;  // Free tier: 1000 requests/month
 
 // ─── TAVILY QUOTA TRACKER ─────────────────────────────────────────────────────
-// Tracks monthly usage. Resets automatically after 30 days.
 const tavilyQuota = {
     used:      0,
     limit:     TAVILY_LIMIT,
@@ -50,12 +49,14 @@ function getTavilyQuotaSummary() {
 }
 
 // ─── TAVILY SEARCH ────────────────────────────────────────────────────────────
-async function searchWithTavily(query, tavilyKey) {
+async function searchWithTavily(query, tavilyKey, options = {}) {
     const response = await axios.post('https://api.tavily.com/search', {
-        api_key:      tavilyKey,
+        api_key:          tavilyKey,
         query,
-        search_depth: 'basic',
-        max_results:  10,
+        search_depth:     options.depth        || 'basic',
+        max_results:      options.maxResults    || 10,
+        include_answer:   options.includeAnswer || false,
+        include_raw_content: options.rawContent || false,
     }, {
         headers: { 'Content-Type': 'application/json' }
     });
@@ -69,7 +70,6 @@ async function searchWithTavily(query, tavilyKey) {
 }
 
 // ─── MULTI-QUERY SEARCH RUNNER ────────────────────────────────────────────────
-// Runs all queries through Tavily, deduplicates by domain, caps at 40 results.
 async function searchBusinessesOnline(queries, tavilyKey) {
     const allResults  = [];
     const seenDomains = new Set();
@@ -97,7 +97,7 @@ async function searchBusinessesOnline(queries, tavilyKey) {
 
         } catch (err) {
             console.warn(`⚠️  [Tavily] Search error: ${err.message}`);
-            recordTavilyUsage(); // Count it — Tavily likely counted it on their end
+            recordTavilyUsage();
         }
     }
 
@@ -122,6 +122,7 @@ function getSession(userId) {
             },
             lastSearchQueries: [],
             lastLeads:         [],
+            lastResearchCache: {},  // companyUrl -> ResearchReport
         });
     }
     return sessionStore.get(userId);
@@ -132,7 +133,359 @@ function resetSession(userId) {
     return getSession(userId);
 }
 
-// ─── STEP 1: PARSE USER INTENT ────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ███  MODULE 1 — THE RESEARCH MODULE ("The Eyes")
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── 1A: FETCH TOP NEWS HEADLINES ─────────────────────────────────────────────
+async function fetchCompanyNews(companyName, tavilyKey) {
+    if (getTavilyRemaining() <= 0) {
+        console.warn('🚫 [NEWS] Tavily quota exhausted.');
+        return [];
+    }
+
+    try {
+        console.log(`📰 [NEWS] Fetching headlines for: "${companyName}"`);
+        const query   = `${companyName} latest news 2024 2025`;
+        const results = await searchWithTavily(query, tavilyKey, {
+            depth:      'basic',
+            maxResults: 5,
+        });
+        recordTavilyUsage();
+
+        // Return top 3 with dates, sorted by recency
+        const withDates = results
+            .filter(r => r.title && r.snippet)
+            .sort((a, b) => {
+                if (!a.date && !b.date) return 0;
+                if (!a.date) return 1;
+                if (!b.date) return -1;
+                return new Date(b.date) - new Date(a.date);
+            })
+            .slice(0, 3);
+
+        console.log(`✅ [NEWS] Found ${withDates.length} headlines.`);
+        return withDates.map(r => ({
+            headline: r.title,
+            summary:  r.snippet?.slice(0, 200) || '',
+            url:      r.url,
+            date:     r.date || 'Date unknown',
+        }));
+
+    } catch (err) {
+        console.warn(`⚠️ [NEWS] Failed: ${err.message}`);
+        return [];
+    }
+}
+
+// ─── 1B: EXTRACT MISSION STATEMENT ────────────────────────────────────────────
+async function extractMissionStatement(companyUrl, companyName, tavilyKey, openAiKey) {
+    if (getTavilyRemaining() <= 0) return null;
+
+    try {
+        console.log(`🎯 [MISSION] Extracting mission for: "${companyName}"`);
+        const query   = `${companyName} mission statement vision about us`;
+        const results = await searchWithTavily(query, tavilyKey, {
+            depth:      'basic',
+            maxResults: 5,
+        });
+        recordTavilyUsage();
+
+        if (results.length === 0) return null;
+
+        // Use GPT-4o-mini to extract clean mission statement from snippets
+        const snippets = results
+            .map(r => `SOURCE: ${r.url}\n${r.snippet}`)
+            .join('\n\n');
+
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages:    [{
+                role:    'user',
+                content: `From the snippets below, extract the official mission statement or core purpose of "${companyName}".
+Return ONLY a single clean sentence (max 40 words). If not found, return null.
+
+SNIPPETS:
+${snippets}
+
+Return ONLY the mission sentence or the word null. No extra text.`,
+            }],
+            max_tokens:  80,
+            temperature: 0.1,
+        }, {
+            headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
+        });
+
+        const result = response.data.choices[0].message.content.trim();
+        return result.toLowerCase() === 'null' ? null : result;
+
+    } catch (err) {
+        console.warn(`⚠️ [MISSION] Failed: ${err.message}`);
+        return null;
+    }
+}
+
+// ─── 1C: FIND DECISION MAKERS ─────────────────────────────────────────────────
+async function findDecisionMakers(companyName, tavilyKey, openAiKey) {
+    if (getTavilyRemaining() <= 0) return [];
+
+    try {
+        console.log(`👤 [DECISION MAKERS] Searching for: "${companyName}"`);
+        const query   = `${companyName} CEO founder director manager leadership team site:linkedin.com OR site:crunchbase.com`;
+        const results = await searchWithTavily(query, tavilyKey, {
+            depth:      'basic',
+            maxResults: 7,
+        });
+        recordTavilyUsage();
+
+        if (results.length === 0) return [];
+
+        const snippets = results
+            .map(r => `SOURCE: ${r.url}\n${r.snippet}`)
+            .join('\n\n');
+
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages:    [{
+                role:    'user',
+                content: `From these snippets about "${companyName}", extract real decision makers (CEO, Founder, Director, Manager, VP, Head of).
+Return ONLY valid JSON — no markdown:
+{
+  "decisionMakers": [
+    { "name": "<Full Name>", "title": "<Job Title>", "source": "<url>" }
+  ]
+}
+Max 3 entries. Only include people with verifiable names AND titles. If none found, return { "decisionMakers": [] }.
+
+SNIPPETS:
+${snippets}`,
+            }],
+            max_tokens:  250,
+            temperature: 0.1,
+        }, {
+            headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
+        });
+
+        const raw     = response.data.choices[0].message.content.trim();
+        const cleaned = raw.replace(/```json|```/g, '').trim();
+        const parsed  = JSON.parse(cleaned);
+        console.log(`✅ [DECISION MAKERS] Found ${parsed.decisionMakers?.length || 0}.`);
+        return parsed.decisionMakers || [];
+
+    } catch (err) {
+        console.warn(`⚠️ [DECISION MAKERS] Failed: ${err.message}`);
+        return [];
+    }
+}
+
+// ─── 1D: ORCHESTRATE FULL COMPANY RESEARCH ────────────────────────────────────
+async function runCompanyResearch(companyNameOrUrl, tavilyKey, openAiKey) {
+    const companyName = extractCompanyName(companyNameOrUrl);
+    const companyUrl  = companyNameOrUrl.startsWith('http') ? companyNameOrUrl : null;
+
+    console.log(`\n🔬 [RESEARCH] Starting full research on: "${companyName}"`);
+    const startTime = Date.now();
+
+    // Run all research in parallel to hit the <20s benchmark
+    const [news, missionStatement, decisionMakers] = await Promise.all([
+        fetchCompanyNews(companyName, tavilyKey),
+        extractMissionStatement(companyUrl, companyName, tavilyKey, openAiKey),
+        findDecisionMakers(companyName, tavilyKey, openAiKey),
+    ]);
+
+    const researchReport = {
+        companyName,
+        companyUrl:       companyUrl || null,
+        researchedAt:     new Date().toISOString(),
+        news,
+        missionStatement: missionStatement || 'Not found',
+        decisionMakers,
+        researchDuration: `${((Date.now() - startTime) / 1000).toFixed(1)}s`,
+    };
+
+    console.log(`✅ [RESEARCH] Complete in ${researchReport.researchDuration}.`);
+    return researchReport;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ███  MODULE 2 — THE WRITING ENGINE ("The Brain")
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── 2A: BUILD USER CONTEXT FROM PROFILE ──────────────────────────────────────
+function buildUserContext(userProfile) {
+    return {
+        usp:          userProfile?.usp          || 'We help businesses grow with AI-powered automation.',
+        senderName:   userProfile?.senderName   || 'Your Name',
+        senderTitle:  userProfile?.senderTitle  || 'Founder',
+        companyName:  userProfile?.companyName  || 'Your Company',
+        tone:         userProfile?.tone         || 'professional but conversational',
+        goal:         userProfile?.goal         || 'book a discovery call',
+        product:      userProfile?.product      || 'our solution',
+    };
+}
+
+// ─── 2B: DRAFT PERSONALIZED EMAIL (GPT-4o-mini processes, GPT-4o writes) ──────
+async function generatePersonalizedEmail(researchReport, userProfileContext, openAiKey) {
+    console.log(`✍️  [WRITING ENGINE] Generating email for: "${researchReport.companyName}"`);
+
+    const topNews         = researchReport.news?.[0] || null;
+    const decisionMaker   = researchReport.decisionMakers?.[0] || null;
+    const missionSnippet  = researchReport.missionStatement !== 'Not found'
+        ? researchReport.missionStatement
+        : null;
+
+    // ── Step 1: GPT-4o-mini — extract key intelligence & connection points ──
+    const intelligencePrompt = `You are a B2B outreach analyst. Given this research, identify the STRONGEST personalisation hooks.
+
+RESEARCH:
+Company: ${researchReport.companyName}
+Mission: ${missionSnippet || 'Unknown'}
+Top News: ${topNews ? `"${topNews.headline}" — ${topNews.summary}` : 'None found'}
+Decision Maker: ${decisionMaker ? `${decisionMaker.name}, ${decisionMaker.title}` : 'Unknown'}
+
+SENDER CONTEXT:
+USP: ${userProfileContext.usp}
+Product: ${userProfileContext.product}
+Goal: ${userProfileContext.goal}
+
+Return ONLY valid JSON:
+{
+  "primaryHook": "<the single strongest personalisation angle — must be from live news or mission>",
+  "connectionToProduct": "<how the hook directly connects to sender's product/USP>",
+  "suggestedSubjectLine": "<compelling subject line under 8 words>",
+  "recipientFirstName": "<first name of decision maker or null>",
+  "recipientTitle": "<job title or null>"
+}`;
+
+    let intelligence = null;
+    try {
+        const miniResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages:    [{ role: 'user', content: intelligencePrompt }],
+            max_tokens:  250,
+            temperature: 0.2,
+        }, {
+            headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
+        });
+        const raw     = miniResponse.data.choices[0].message.content.trim();
+        const cleaned = raw.replace(/```json|```/g, '').trim();
+        intelligence  = JSON.parse(cleaned);
+    } catch (err) {
+        console.warn(`⚠️ [WRITING ENGINE] Intelligence extraction failed: ${err.message}`);
+    }
+
+    // ── Step 2: GPT-4o — write the final human-quality email ──
+    const recipientLine = intelligence?.recipientFirstName
+        ? `Hi ${intelligence.recipientFirstName},`
+        : `Hi there,`;
+
+    const writingPrompt = `You are an elite B2B copywriter. Write a cold outreach email using ONLY the provided research hooks. No generic filler.
+
+RULES:
+- Exactly 3 paragraphs.
+- Paragraph 1: Open with the PRIMARY HOOK (reference real news or mission). Never start with "I hope", "My name is", or "I wanted to reach out."
+- Paragraph 2: Connect their situation directly to "${userProfileContext.product}" and the sender's USP. Be specific. No fluff.
+- Paragraph 3: Soft CTA — goal is to "${userProfileContext.goal}". One sentence max.
+- Tone: ${userProfileContext.tone}.
+- Sound like a sharp human, not an AI. Vary sentence length.
+- Do NOT use: "I hope this finds you well", "game-changer", "synergy", "touch base", "circle back", "revolutionary."
+
+EMAIL BLUEPRINT:
+Subject: ${intelligence?.suggestedSubjectLine || `Quick thought on ${researchReport.companyName}`}
+Recipient: ${recipientLine}
+Primary Hook: ${intelligence?.primaryHook || topNews?.headline || `${researchReport.companyName}'s recent activity`}
+Product Connection: ${intelligence?.connectionToProduct || userProfileContext.usp}
+Sender: ${userProfileContext.senderName}, ${userProfileContext.senderTitle} at ${userProfileContext.companyName}
+
+Write ONLY the email body (no subject line, no signature). Start directly with the opening line.`;
+
+    try {
+        const gpt4Response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o',
+            messages:    [{ role: 'user', content: writingPrompt }],
+            max_tokens:  400,
+            temperature: 0.7,
+        }, {
+            headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
+        });
+
+        const emailBody = gpt4Response.data.choices[0].message.content.trim();
+
+        return {
+            subjectLine:    intelligence?.suggestedSubjectLine || `Quick thought on ${researchReport.companyName}`,
+            recipient:      recipientLine,
+            body:           emailBody,
+            primaryHook:    intelligence?.primaryHook    || null,
+            newsUsed:       topNews?.headline            || null,
+            decisionMaker:  decisionMaker?.name          || null,
+        };
+
+    } catch (err) {
+        console.warn(`⚠️ [WRITING ENGINE] Email generation failed: ${err.message}`);
+        return null;
+    }
+}
+
+// ─── 2C: FORMAT THE DIRECTOR'S REPORT ─────────────────────────────────────────
+function formatResearchAndEmailReport(researchReport, emailDraft) {
+    const lines = [
+        `🔬 **Intelligence Report — ${researchReport.companyName}**`,
+        `⏱ Researched in ${researchReport.researchDuration}\n`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `\n📋 **RESEARCH SUMMARY**\n`,
+    ];
+
+    // Mission
+    lines.push(`🎯 **Mission:** ${researchReport.missionStatement}\n`);
+
+    // News
+    if (researchReport.news?.length > 0) {
+        lines.push(`📰 **Latest Headlines:**`);
+        researchReport.news.forEach((n, i) => {
+            lines.push(`  ${i + 1}. ${n.headline}`);
+            lines.push(`     📅 ${n.date} · ${n.url}`);
+        });
+        lines.push('');
+    } else {
+        lines.push(`📰 **Latest Headlines:** None found\n`);
+    }
+
+    // Decision Makers
+    if (researchReport.decisionMakers?.length > 0) {
+        lines.push(`👤 **Decision Makers:**`);
+        researchReport.decisionMakers.forEach(dm => {
+            lines.push(`  • ${dm.name} — ${dm.title}`);
+        });
+        lines.push('');
+    } else {
+        lines.push(`👤 **Decision Makers:** Not identified\n`);
+    }
+
+    lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+    // Email Draft
+    if (emailDraft) {
+        lines.push(`\n✉️  **PERSONALIZED EMAIL DRAFT**\n`);
+        lines.push(`📌 **Subject:** ${emailDraft.subjectLine}`);
+        lines.push(`👤 **To:** ${emailDraft.recipient}\n`);
+        lines.push(emailDraft.body);
+        lines.push('');
+        if (emailDraft.newsUsed) {
+            lines.push(`📡 *Hook source: "${emailDraft.newsUsed}"*`);
+        }
+    } else {
+        lines.push(`\n✉️  **Email Draft:** Could not be generated.\n`);
+    }
+
+    lines.push(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(`\n${getTavilyQuotaSummary()}`);
+
+    return lines.join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ███  STEP 1: PARSE USER INTENT (unchanged + extended)
+// ═══════════════════════════════════════════════════════════════════════════════
 async function parseLeadIntent(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n');
 
@@ -145,6 +498,8 @@ USER MESSAGE: "${message}"
 
 CURRENT KNOWN PROFILE:
 ${JSON.stringify(currentProfile, null, 2)}
+
+Also detect if the user is asking to research a specific company by URL or name (e.g. "research Moniepoint", "write an email for stripe.com").
 
 Return ONLY valid JSON — no markdown:
 {
@@ -159,7 +514,9 @@ Return ONLY valid JSON — no markdown:
     "<specific ready-to-run search string — LinkedIn/news signal angle>",
     "<specific ready-to-run search string — pain point / job posting angle>"
   ],
-  "isNewSearch": <true if new request, false if refining>
+  "isNewSearch": <true if new request, false if refining>,
+  "researchTarget": "<company name or URL if user wants company research, else null>",
+  "mode": "<'leads' if searching for new leads | 'research' if researching a specific company>"
 }
 
 Rules: searchQueries must be real, specific, ready-to-run strings. Return ONLY the JSON.`;
@@ -168,7 +525,7 @@ Rules: searchQueries must be real, specific, ready-to-run strings. Return ONLY t
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: prompt }],
-            max_tokens:  300,
+            max_tokens:  350,
             temperature: 0.1
         }, {
             headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
@@ -184,7 +541,7 @@ Rules: searchQueries must be real, specific, ready-to-run strings. Return ONLY t
     }
 }
 
-// ─── STEP 2: AI RANKS AND PICKS TOP 3 ────────────────────────────────────────
+// ─── STEP 2: AI RANKS AND PICKS TOP 3 (unchanged) ────────────────────────────
 async function rankAndSelectTopLeads(rawResults, profile, apiKey) {
     if (rawResults.length === 0) return [];
 
@@ -243,7 +600,7 @@ Rules: rank by fitScore descending. opportunitySignal must reference their actua
     }
 }
 
-// ─── STEP 3: FORMAT FINAL RESPONSE ────────────────────────────────────────────
+// ─── STEP 3: FORMAT LEAD RESPONSE (unchanged) ─────────────────────────────────
 function formatLeadResponse(leads, profile, totalSearched) {
     if (leads.length === 0) {
         return [
@@ -275,13 +632,16 @@ function formatLeadResponse(leads, profile, totalSearched) {
     lines.push(
         `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
         `\n${getTavilyQuotaSummary()}`,
-        `\nRefine: give a location, different niche, or say "Find more like #1".`
+        `\nRefine: give a location, different niche, or say "Find more like #1".`,
+        `\n💡 Tip: Say "Research [company name]" to get a full intel report + personalized email.`
     );
 
     return lines.join('\n');
 }
 
-// ─── MAIN EXPORT ───────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ███  MAIN EXPORT — ROUTER (leads mode OR research+write mode)
+// ═══════════════════════════════════════════════════════════════════════════════
 async function generateFreeResponse(message, history, userProfile) {
     try {
         console.log('🟢 [LEAD FINDER] Processing...');
@@ -308,10 +668,50 @@ async function generateFreeResponse(message, history, userProfile) {
             session.lastSearchQueries = intent.searchQueries || [];
         }
 
-        // ── Live search via Tavily ──
-        const rawResults  = await searchBusinessesOnline(session.lastSearchQueries, tavilyKey);
+        // ══════════════════════════════════════════════════════════════════════
+        // ROUTE A: RESEARCH + EMAIL MODE
+        // Triggered when user says "research X", "write email for X", "intel on X"
+        // ══════════════════════════════════════════════════════════════════════
+        if (intent?.mode === 'research' && intent?.researchTarget) {
+            const target = intent.researchTarget;
 
-        // ── AI picks top 3 ──
+            // Check cache first (avoid re-researching same company in session)
+            let researchReport = session.lastResearchCache?.[target];
+
+            if (!researchReport) {
+                researchReport = await runCompanyResearch(target, tavilyKey, apiKey);
+                if (session.lastResearchCache) {
+                    session.lastResearchCache[target] = researchReport;
+                }
+            } else {
+                console.log(`⚡ [RESEARCH] Cache hit for: "${target}"`);
+            }
+
+            // Build user context from userProfile
+            const userCtx    = buildUserContext(userProfile);
+            const emailDraft = await generatePersonalizedEmail(researchReport, userCtx, apiKey);
+            const reply      = formatResearchAndEmailReport(researchReport, emailDraft);
+
+            const newHistory = [
+                ...history,
+                { role: 'user',      content: message },
+                { role: 'assistant', content: reply   }
+            ];
+
+            return {
+                reply,
+                updatedHistory:  newHistory.slice(-12),
+                researchReport,
+                emailDraft,
+                mode:            'research',
+                quotaStatus:     getTavilyQuotaSummary(),
+            };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ROUTE B: LEAD SEARCH MODE (original behaviour — fully preserved)
+        // ══════════════════════════════════════════════════════════════════════
+        const rawResults  = await searchBusinessesOnline(session.lastSearchQueries, tavilyKey);
         const topLeads    = await rankAndSelectTopLeads(rawResults, session.profile, apiKey);
         session.lastLeads = topLeads;
         session.phase     = 'complete';
@@ -330,6 +730,7 @@ async function generateFreeResponse(message, history, userProfile) {
             leads:          topLeads,
             totalSearched:  rawResults.length,
             quotaStatus:    getTavilyQuotaSummary(),
+            mode:           'leads',
         };
 
     } catch (error) {
@@ -342,6 +743,20 @@ async function generateFreeResponse(message, history, userProfile) {
 function extractDomain(url) {
     try { return new URL(url).hostname.replace('www.', ''); }
     catch { return url; }
+}
+
+function extractCompanyName(input) {
+    if (!input) return 'Unknown Company';
+    try {
+        // If it's a URL, pull the domain name and clean it up
+        const hostname = new URL(input.startsWith('http') ? input : `https://${input}`).hostname;
+        return hostname.replace('www.', '').split('.')[0]
+            .replace(/-/g, ' ')
+            .replace(/\b\w/g, c => c.toUpperCase());
+    } catch {
+        // It's already a plain company name
+        return input.trim();
+    }
 }
 
 module.exports = { generateFreeResponse };
