@@ -5,48 +5,74 @@ const MAX_SEARCH_RESULTS = 40;
 const MAX_LEADS_RETURNED = 3;
 const TAVILY_LIMIT       = 1000;  // Free tier: 1000 requests/month
 
-// ─── PERSONALIZATION GUARDS (MISSING COMPONENT 3) ─────────────────────────────
+// ─── REASONING FILTER (injected into every GPT prompt that touches facts) ─────
+const REASONING_FILTER = `
+⚠️ REASONING FILTER — NON-NEGOTIABLE. READ BEFORE ANYTHING ELSE:
+1. You are a strict fact extractor. You may ONLY use facts that appear verbatim or are clearly implied in the SNIPPETS provided in this prompt.
+2. You MUST COMPLETELY IGNORE everything you know from your training data about this company, its people, its products, or its financials.
+3. If a fact is not present in the snippets, you MUST return null for that field. Never guess. Never infer from training memory.
+4. If a snippet contradicts your training data, the SNIPPET IS CORRECT. Training data is outdated. Snippets are live.
+5. Never invent names, titles, funding rounds, dates, or locations. If you cannot find it in the snippets, it does not exist for this task.
+6. The current year is 2026. Any reference to "current", "latest", or "now" means 2026. Reject any fact that appears to be from before 2024 unless it is historical context explicitly requested.
+`;
+
+// ─── PERSONALIZATION GUARDS ────────────────────────────────────────────────────
 const BANNED_WORDS = [
-    // Overused AI filler
-    'transformative', 'seamless', 'mission-critical', 'synergy', 'game-changer',
-    'revolutionary', 'cutting-edge', 'innovative', 'disruptive', 'next-level',
-    'holistic', 'robust', 'scalable', 'leverage', 'streamline', 'optimize',
-    'empower', 'unlock', 'elevate', 'enhance', 'boost', 'accelerate', 'amplify',
-    // Spam trigger phrases  
-    'I hope this finds you well', 'I wanted to reach out', 'touch base', 
-    'circle back', 'quick question', 'just following up', 'as per my last email',
-    'I am reaching out because', 'My name is', 'I hope you are doing well',
+    // AI filler
+    'transformative','seamless','mission-critical','synergy','game-changer',
+    'revolutionary','cutting-edge','innovative','disruptive','next-level',
+    'holistic','robust','scalable','leverage','streamline','optimize',
+    'empower','unlock','elevate','enhance','boost','accelerate','amplify',
+    'delve','awe-inspiring','exciting','landscape','unleash','dynamic',
+    'groundbreaking','paradigm','ecosystem','value-add','best-in-class',
+    // Spam triggers
+    'I hope this finds you well','I wanted to reach out','touch base',
+    'circle back','quick question','just following up','as per my last email',
+    'I am reaching out because','My name is','I hope you are doing well',
+    'I hope you\'re having a great day',
     // Weak CTAs
-    'let me know your thoughts', 'feel free to', 'do not hesitate', 
-    'please find attached', 'as mentioned'
+    'let me know your thoughts','feel free to','do not hesitate',
+    'please find attached','as mentioned','at your earliest convenience',
+    // Vague filler
+    'in today\'s world','in the current landscape','in this day and age',
+    'more important than ever','going forward','moving forward'
 ];
 
 function buildBannedWordsInstruction() {
-    return `BANNED WORDS & PHRASES (NEVER use any of these — instant rejection):
+    return `BANNED WORDS & PHRASES — HARD RULE. NEVER use any of the following:
 ${BANNED_WORDS.map(w => `  ✗ "${w}"`).join('\n')}
-If you find yourself wanting to use one of these, replace it with a specific fact from the research instead.`;
+
+If you feel the urge to use one of these words, STOP. Replace it with a specific fact, number, name, or date from the research instead. Vague language is not allowed.`;
 }
 
-// ─── FLAG STORE (MISSING COMPONENT 4) ─────────────────────────────────────────
+// ─── FINANCIAL SIZE SANITY THRESHOLDS ─────────────────────────────────────────
+const ENTERPRISE_KEYWORDS = [
+    'nasdaq','nyse','publicly traded','public company','ftse','fortune 500',
+    'fortune 100','billion','trillion','s&p 500','listed company','ipo',
+    'market cap','stock ticker','sec filing','annual report'
+];
+
+// ─── FLAG STORE ────────────────────────────────────────────────────────────────
 const flagStore = {
-    flaggedLeads:    [],  // { url, reason, flaggedAt }
-    flaggedContacts: [],  // { name, companyName, reason, flaggedAt }
-    flaggedDomains:  new Set(), // Domains to skip in future searches
+    flaggedLeads:    [],
+    flaggedContacts: [],
+    flaggedDomains:  new Set(),
 };
 
 function flagBadLead(url, reason = 'user_reported') {
     const domain = extractDomain(url);
     flagStore.flaggedLeads.push({ url, reason, flaggedAt: new Date().toISOString() });
     flagStore.flaggedDomains.add(domain);
-    console.warn(`🚩 [FLAG] Lead flagged: ${url} (Reason: ${reason}). Domain "${domain}" added to skip list.`);
-    return { flagged: true, domain, message: `"${domain}" will be excluded from future searches this session.` };
+    console.warn(`🚩 [FLAG] Lead flagged: ${url} (Reason: ${reason}). Domain "${domain}" blocked for this session.`);
+    return { flagged: true, domain, message: `"${domain}" excluded from future searches this session.` };
 }
 
 function flagBadContact(name, companyName, reason = 'user_reported') {
     flagStore.flaggedContacts.push({ name, companyName, reason, flaggedAt: new Date().toISOString() });
     console.warn(`🚩 [FLAG] Contact flagged: ${name} at ${companyName} (Reason: ${reason}).`);
-    return { flagged: true, message: `"${name}" has been flagged and will be excluded from future outreach.` };
+    return { flagged: true, message: `"${name}" flagged and excluded from future outreach.` };
 }
+
 function getFlagSummary() {
     return {
         totalFlaggedLeads:    flagStore.flaggedLeads.length,
@@ -96,25 +122,130 @@ function getTavilyQuotaSummary() {
             : '🟢 OK';
     return `📊 Tavily Search: ${tavilyQuota.used}/${tavilyQuota.limit} used (${pct}%) ${status} · Resets monthly`;
 }
-// ─── TAVILY SEARCH ────────────────────────────────────────────────────────────
+
+// ─── OPENAI TOKEN TRACKER ─────────────────────────────────────────────────────
+const openAiTracker = {
+    totalCallsThisSession:    0,
+    totalTokensThisSession:   0,
+    callLog: [],   // { fn, model, tokens, timestamp }
+};
+
+function recordOpenAiUsage(fnName, model, tokensUsed) {
+    openAiTracker.totalCallsThisSession  += 1;
+    openAiTracker.totalTokensThisSession += tokensUsed;
+    openAiTracker.callLog.push({
+        fn:        fnName,
+        model,
+        tokens:    tokensUsed,
+        timestamp: new Date().toISOString(),
+    });
+    console.log(`🧮 [TOKENS] ${fnName} (${model}): ${tokensUsed} tokens. Session total: ${openAiTracker.totalTokensThisSession}`);
+}
+
+function getFullCreditDashboard() {
+    checkTavilyReset();
+    const tavilyRemaining = getTavilyRemaining();
+    const tavilyPct       = Math.round((tavilyQuota.used / tavilyQuota.limit) * 100);
+    const tavilyStatus    = tavilyRemaining <= 0 ? '🔴 EXHAUSTED'
+        : tavilyRemaining < tavilyQuota.limit * 0.1 ? '🟡 LOW' : '🟢 OK';
+
+    return {
+        tavily: {
+            used:      tavilyQuota.used,
+            limit:     tavilyQuota.limit,
+            remaining: tavilyRemaining,
+            pct:       tavilyPct,
+            status:    tavilyStatus,
+        },
+        openai: {
+            callsThisSession:  openAiTracker.totalCallsThisSession,
+            tokensThisSession: openAiTracker.totalTokensThisSession,
+            callLog:           openAiTracker.callLog.slice(-10),  // Last 10 calls
+        },
+        flags: getFlagSummary(),
+        summary: `📊 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit} (${tavilyPct}%) ${tavilyStatus} | OpenAI: ${openAiTracker.totalCallsThisSession} calls, ${openAiTracker.totalTokensThisSession} tokens this session`,
+    };
+}
+
+// ─── TAVILY SEARCH (UPGRADED — Advanced depth + date filter) ─────────────────
 async function searchWithTavily(query, tavilyKey, options = {}) {
     const response = await axios.post('https://api.tavily.com/search', {
-        api_key:          tavilyKey,
+        api_key:             tavilyKey,
         query,
-        search_depth:     options.depth        || 'basic',
-        max_results:      options.maxResults    || 10,
-        include_answer:   options.includeAnswer || false,
-        include_raw_content: options.rawContent || false,
+        search_depth:        'advanced',           // MANDATORY: always advanced, never basic
+        max_results:         options.maxResults || 10,
+        include_answer:      options.includeAnswer || false,
+        include_raw_content: options.rawContent    || false,
     }, {
-        headers: { 'Content-Type': 'application/json' }
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 12000,   // 12 second timeout — never hang the pipeline
     });
 
-    return (response.data?.results || []).map(r => ({
+    const results = (response.data?.results || []).map(r => ({
         title:   r.title          || '',
         url:     r.url            || '',
         snippet: r.content        || '',
         date:    r.published_date || null,
     }));
+
+    // ── STRICT DATE FILTER ──────────────────────────────────────────────────
+    // Priority 1: Results from last 30 days
+    // Priority 2: Results from last 90 days
+    // Priority 3: All results (fallback — never block the pipeline)
+    const now         = Date.now();
+    const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
+    const NINETY_DAYS = 90 * 24 * 60 * 60 * 1000;
+
+    const recent30  = results.filter(r => r.date && (now - new Date(r.date).getTime()) <= THIRTY_DAYS);
+    const recent90  = results.filter(r => r.date && (now - new Date(r.date).getTime()) <= NINETY_DAYS);
+    const undated   = results.filter(r => !r.date);
+
+    let prioritized;
+    if (recent30.length >= 2) {
+        prioritized = [...recent30, ...undated];
+        console.log(`📅 [DATE FILTER] ${recent30.length} results from last 30 days — prioritized.`);
+    } else if (recent90.length >= 2) {
+        prioritized = [...recent90, ...undated];
+        console.log(`📅 [DATE FILTER] Falling back to 90-day window (${recent90.length} results).`);
+    } else {
+        prioritized = results;
+        console.log(`📅 [DATE FILTER] No recent results — using all ${results.length} (verify dates manually).`);
+    }
+
+    return prioritized;
+}
+
+// ─── MULTI-STEP SEARCH RE-QUERY LOOP ─────────────────────────────────────────
+async function searchWithFallback(primaryQuery, fallbackQuery, tavilyKey, options = {}) {
+    let results = [];
+
+    // ── Attempt 1: Primary query ────────────────────────────────────────────
+    try {
+        if (getTavilyRemaining() <= 0) throw new Error('Quota exhausted');
+        console.log(`🔍 [SEARCH] Primary query: "${primaryQuery}"`);
+        results = await searchWithTavily(primaryQuery, tavilyKey, options);
+        recordTavilyUsage();
+        console.log(`📦 [SEARCH] Primary returned ${results.length} results.`);
+    } catch (err) {
+        console.warn(`⚠️ [SEARCH] Primary failed: ${err.message}`);
+        recordTavilyUsage();
+    }
+
+    // ── Attempt 2: Fallback if primary is weak (fewer than 2 results) ───────
+    if (results.length < 2 && fallbackQuery && getTavilyRemaining() > 0) {
+        console.log(`🔄 [RE-QUERY] Primary weak. Triggering fallback: "${fallbackQuery}"`);
+        try {
+            const fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, options);
+            recordTavilyUsage();
+            results = [...results, ...fallbackResults];
+            console.log(`✅ [RE-QUERY] Fallback added ${fallbackResults.length} results. Total: ${results.length}`);
+        } catch (err) {
+            console.warn(`⚠️ [RE-QUERY] Fallback failed: ${err.message}`);
+            recordTavilyUsage();
+        }
+    }
+
+    return results;
 }
 
 // ─── MULTI-QUERY SEARCH RUNNER ────────────────────────────────────────────────
@@ -137,22 +268,23 @@ async function searchBusinessesOnline(queries, tavilyKey) {
 
             for (const r of results) {
                 const domain = extractDomain(r.url || '');
-                
-                // Skip flagged domains (MISSING COMPONENT 4)
+
+                // Skip flagged domains
                 if (flagStore.flaggedDomains.has(domain)) {
                     console.log(`⏭️ [SKIP] Flagged domain skipped: ${domain}`);
                     continue;
                 }
 
                 if (domain && !seenDomains.has(domain) && allResults.length < MAX_SEARCH_RESULTS) {
-                    seenDomains.add(domain);                    allResults.push(r);
+                    seenDomains.add(domain);
+                    allResults.push(r);
                 }
             }
 
         } catch (err) {
             console.warn(`⚠️  [Tavily] Search error: ${err.message}`);
             recordTavilyUsage();
-        }    
+        }
     }
 
     console.log(`📦 [SEARCH] Done — ${allResults.length} unique results collected.`);
@@ -191,67 +323,59 @@ function resetSession(userId) {
 // ███  MODULE 1 — THE RESEARCH MODULE ("The Eyes")
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── FACEBOOK SLANG CLEANER (CRITICAL FIX 5) ──────────────────────────────────
+// ─── SNIPPET CLEANER (Facebook/Slang Filter) ──────────────────────────────────
 function cleanSearchSnippets(results, companyName) {
-    // If no results, return empty
     if (!results || results.length === 0) return results;
-    // Detect if this looks like a local/community business
+
     const snippetText = results.map(r => r.snippet || '').join(' ').toLowerCase();
-    const localSignals = ['facebook', 'fb.com', 'whatsapp', 'follow us', 'like our page', 
-                          'pls', 'plz', 'dm us', 'inbox us', 'repost', 'share this', 
-                          'lol', 'haha', 'amazing grace', 'brother', 'sister', 'brethren'];
-    const isLocalContent = localSignals.some(signal => snippetText.includes(signal));
+    const localSignals = [
+        'facebook','fb.com','whatsapp','follow us','like our page',
+        'pls','plz','dm us','inbox us','repost','share this',
+        'lol','haha','amazing grace','brother','sister','brethren',
+        'click the link in bio','tap the link','swipe up','story time',
+        'blessed','amen','prayer','🙏','😂','🔥','❤️','👇'
+    ];
+    const isLocalContent = localSignals.some(s => snippetText.includes(s));
 
-    if (!isLocalContent) return results; // No cleaning needed
+    if (!isLocalContent) return results;
 
-    console.log(`🧹 [CLEANER] Local/social content detected for "${companyName}". Cleaning snippets...`);
+    console.log(`🧹 [CLEANER] Social/local content detected for "${companyName}". Sanitizing snippets...`);
 
     return results.map(r => ({
         ...r,
-        snippet: r.snippet
-            // Remove emojis
+        snippet: (r.snippet || '')
             .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
-            // Remove social media calls to action
-            .replace(/\b(pls|plz|dm us|inbox us|follow us|like our page|repost|share this|click the link in bio)\b/gi, '')
-            // Remove informal filler
-            .replace(/\b(lol|haha|omg|lmao|tbh|imo|fyi|smh|ngl)\b/gi, '')
-            // Collapse multiple spaces/newlines
+            .replace(/[\u{2600}-\u{27BF}]/gu, '')
+            .replace(/\b(pls|plz|dm us|inbox us|follow us|like our page|repost|share this|tap the link|swipe up|click the link in bio)\b/gi, '')
+            .replace(/\b(lol|haha|omg|lmao|tbh|imo|fyi|smh|ngl|blessed|amen)\b/gi, '')
             .replace(/\s{2,}/g, ' ')
             .trim()
     }));
 }
 
-// ─── MULTI-STEP SEARCH RE-QUERY LOOP (MISSING COMPONENT 1) ────────────────────
-async function searchWithFallback(primaryQuery, fallbackQuery, tavilyKey, options = {}) {
-    let results = [];
-
-    // Try primary
-    try {
-        console.log(`🔍 [SEARCH] Primary: "${primaryQuery}"`);
-        results = await searchWithTavily(primaryQuery, tavilyKey, options);
-        recordTavilyUsage();
-    } catch (err) {
-        console.warn(`⚠️ [SEARCH] Primary failed: ${err.message}`);
-        recordTavilyUsage();
-    }
-
-    // If primary returned fewer than 2 results, try fallback
-    if (results.length < 2 && fallbackQuery && getTavilyRemaining() > 0) {
-        console.log(`🔄 [RE-QUERY] Primary weak (${results.length} results). Trying fallback: "${fallbackQuery}"`);
-        try {
-            const fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, options);
-            recordTavilyUsage();
-            results = [...results, ...fallbackResults];
-            console.log(`✅ [RE-QUERY] Fallback added ${fallbackResults.length} results. Total: ${results.length}`);
-        } catch (err) {            console.warn(`⚠️ [RE-QUERY] Fallback also failed: ${err.message}`);
-            recordTavilyUsage();
-        }
-    }
-
-    return results;
+// ─── NULL SANITIZER ───────────────────────────────────────────────────────────
+function sanitizeProfile(profile, companyName) {
+    // ZERO NULLS POLICY: Every field must return a professional human-readable value
+    return {
+        missionStatement: profile.missionStatement
+            || `${companyName} is an active business — mission statement not publicly indexed.`,
+        founded:          profile.founded
+            || 'Founding year not publicly listed',
+        headquarters:     profile.headquarters
+            || 'Headquarters location not indexed',
+        employeeCount:    (profile.employeeCount && profile.employeeCount !== 'unknown')
+            ? profile.employeeCount
+            : 'Team size not publicly listed',
+        businessModel:    (profile.businessModel && profile.businessModel !== 'unknown')
+            ? profile.businessModel
+            : 'Business model not classified',
+        primaryProduct:   profile.primaryProduct
+            || `${companyName}'s core offering — details not publicly indexed.`,
+        websiteUrl:       profile.websiteUrl || null,
+    };
 }
 
-// ─── UPGRADE 1: DEEP NEWS INTELLIGENCE ────────────────────────────────────────
+// ─── DEEP NEWS INTELLIGENCE + BUYING SIGNALS + SENTIMENT ─────────────────────
 async function fetchCompanyNews(companyName, tavilyKey, openAiKey) {
     if (getTavilyRemaining() <= 0) {
         console.warn('🚫 [NEWS] Tavily quota exhausted.');
@@ -259,269 +383,252 @@ async function fetchCompanyNews(companyName, tavilyKey, openAiKey) {
     }
 
     try {
-        console.log(`📰 [NEWS] Fetching deep intelligence for: "${companyName}"`);
-        
-        // Run 3 targeted queries in parallel
-        const queries = [            
-            `${companyName} news 2024 2025`,
-            `${companyName} funding expansion launch partnership announcement`,
-            `${companyName} problems challenges lawsuit controversy`
+        console.log(`📰 [NEWS] Running deep intelligence fetch for: "${companyName}"`);
+
+        // 3 parallel targeted queries — each hunting a different signal type
+        const [rawGrowth, rawRisk, rawHiring] = await Promise.allSettled([
+            searchWithTavily(`${companyName} news announcement expansion launch 2025 2026`, tavilyKey, { maxResults: 5 }),
+            searchWithTavily(`${companyName} funding raised investment series valuation 2025 2026`, tavilyKey, { maxResults: 5 }),
+            searchWithTavily(`${companyName} hiring jobs team growth problems challenges`, tavilyKey, { maxResults: 5 }),
+        ]);
+
+        recordTavilyUsage();
+        recordTavilyUsage();
+        recordTavilyUsage();
+
+        const allRaw = [
+            ...(rawGrowth.status  === 'fulfilled' ? rawGrowth.value  : []),
+            ...(rawRisk.status    === 'fulfilled' ? rawRisk.value    : []),
+            ...(rawHiring.status  === 'fulfilled' ? rawHiring.value  : []),
         ];
 
-        const searchPromises = queries.map(q => searchWithTavily(q, tavilyKey, { maxResults: 5 }));
-        const rawResultsArrays = await Promise.all(searchPromises);
-        
-        // Record usage for all 3 calls
-        for (let i = 0; i < 3; i++) recordTavilyUsage();
-
-        // Flatten and deduplicate by URL
-        const allResults = rawResultsArrays.flat();
-        
-        // Apply Cleaner (CRITICAL FIX 5)
-        const cleanedResults = cleanSearchSnippets(allResults, companyName);
-
-        const seenUrls = new Set();
-        const uniqueResults = cleanedResults.filter(r => {
+        // Deduplicate by URL
+        const seenUrls   = new Set();
+        const deduped    = allRaw.filter(r => {
             if (!r.url || seenUrls.has(r.url)) return false;
             seenUrls.add(r.url);
             return true;
         });
 
-        // Take top 5
-        const top5 = uniqueResults.slice(0, 5);
+        // Clean social media noise
+        const cleaned = cleanSearchSnippets(deduped, companyName);
+        const top5    = cleaned.slice(0, 5);
 
         if (top5.length === 0) return [];
 
-        // Prepare snippets for GPT classification        
-        const snippetsForGPT = top5.map((r, idx) => 
-            `ITEM ${idx}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nDate: ${r.date || 'Unknown'}`
-        ).join('\n\n');
+        // Single GPT-4o-mini batch call to classify all items
+        const snippetsForGPT = top5.map((r, i) =>
+            `ITEM ${i}:\nTitle: ${r.title}\nSnippet: ${r.snippet?.slice(0, 300) || ''}\nDate: ${r.date || 'Unknown'}\nURL: ${r.url}`
+        ).join('\n\n---\n\n');
 
-        // Classify sentiment and signalType using GPT-4o-mini
-        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+        const classifyResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: 'gpt-4o-mini',
             messages: [{
                 role: 'user',
-                content: `Analyze the following 5 news items about "${companyName}". 
-For each item, determine:
-1. sentiment: "positive", "negative", or "neutral"
-2. signalType: "growth", "risk", "funding", "product", "hiring", or "other"
+                content: `${REASONING_FILTER}
 
-Return ONLY a valid JSON array of objects with keys: index, sentiment, signalType.
+TASK: Analyze these ${top5.length} news items about "${companyName}".
+For each item, return:
+- sentiment: "positive", "negative", or "neutral"
+- signalType: "growth" | "risk" | "funding" | "product" | "hiring" | "expansion" | "other"
+- buyingSignal: true if this news indicates the company is growing, hiring, expanding, or just received funding (any of these = likely buying). false otherwise.
+- sourceUrl: copy the URL exactly from the item
 
-DATA:
+Return ONLY a valid JSON array. No markdown. No explanation:
+[
+  { "index": 0, "sentiment": "...", "signalType": "...", "buyingSignal": true, "sourceUrl": "..." },
+  ...
+]
+
+NEWS ITEMS:
 ${snippetsForGPT}`
             }],
-            max_tokens: 300,
-            temperature: 0.1
+            max_tokens: 400,
+            temperature: 0.1,
         }, {
             headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
         });
+
+        recordOpenAiUsage('fetchCompanyNews', 'gpt-4o-mini', classifyResponse.data?.usage?.total_tokens || 0);
+
         let classifications = [];
         try {
-            const raw = response.data.choices[0].message.content.trim();
-            const cleaned = raw.replace(/```json|```/g, '').trim();
-            classifications = JSON.parse(cleaned);
+            const raw      = classifyResponse.data.choices[0].message.content.trim();
+            const cleaned2 = raw.replace(/```json|```/g, '').trim();
+            classifications = JSON.parse(cleaned2);
         } catch (e) {
-            console.warn('⚠️ [NEWS] GPT classification failed, using defaults.');
+            console.warn('⚠️ [NEWS] Classification parse failed. Using defaults.');
         }
 
-        // Map results to final shape
         const finalNews = top5.map((r, idx) => {
-            const meta = classifications[idx] || {};
+            const meta = classifications.find(c => c.index === idx) || {};
             return {
-                headline: r.title,
-                summary: r.snippet ? r.snippet.slice(0, 250) : '',
-                url: r.url,
-                date: r.date || 'Date unknown',
-                sentiment: meta.sentiment || 'neutral',
-                signalType: meta.signalType || 'other'
+                headline:     r.title,
+                summary:      r.snippet ? r.snippet.slice(0, 250) : '',
+                url:          r.url,     // SOURCE URL always included for verification
+                date:         r.date    || 'Date not indexed',
+                sentiment:    meta.sentiment   || 'neutral',
+                signalType:   meta.signalType  || 'other',
+                buyingSignal: meta.buyingSignal ?? false,
             };
         });
 
-        console.log(`✅ [NEWS] Found ${finalNews.length} classified headlines.`);
+        console.log(`✅ [NEWS] ${finalNews.length} classified headlines. Buying signals: ${finalNews.filter(n => n.buyingSignal).length}`);
         return finalNews;
 
-    } catch (err) {        console.warn(`⚠️ [NEWS] Failed: ${err.message}`);
+    } catch (err) {
+        console.warn(`⚠️ [NEWS] Failed: ${err.message}`);
         return [];
     }
 }
 
-// ─── SANITIZE PROFILE (CRITICAL FIX 4 - LEVEL 1) ──────────────────────────────
-function sanitizeProfile(profile, companyName) {
-    return {
-        missionStatement: profile.missionStatement || `${companyName} is an active business — mission statement not publicly listed.`,
-        founded:          profile.founded          || 'Not publicly listed',
-        headquarters:     profile.headquarters     || 'Location not found',
-        employeeCount:    profile.employeeCount    || 'unknown',
-        businessModel:    profile.businessModel    || 'unknown',
-        primaryProduct:   profile.primaryProduct   || `${companyName}'s core offering — details not indexed.`,
-        websiteUrl:       profile.websiteUrl       || null,
-    };
-}
-
-// ─── UPGRADE 2: COMPANY PROFILE BUILDER ───────────────────────────────────────
+// ─── FULL COMPANY PROFILE BUILDER ─────────────────────────────────────────────
 async function extractMissionStatement(companyUrl, companyName, tavilyKey, openAiKey) {
-    if (getTavilyRemaining() <= 0) {
-        return sanitizeProfile({
-            missionStatement: null,
-            founded: null,
-            headquarters: null,
-            employeeCount: "unknown",
-            businessModel: "unknown",
-            primaryProduct: null,
-            websiteUrl: companyUrl || null
-        }, companyName);
-    }
+    const defaultProfile = {
+        missionStatement: null,
+        founded:          null,
+        headquarters:     null,
+        employeeCount:    'unknown',
+        businessModel:    'unknown',
+        primaryProduct:   null,
+        websiteUrl:       companyUrl || null,
+        isEnterprise:     false,
+        companySizeClass: 'unknown',  // 'local' | 'sme' | 'enterprise' | 'unknown'
+    };
+
+    if (getTavilyRemaining() <= 0) return sanitizeProfile(defaultProfile, companyName);
 
     try {
-        console.log(`🎯 [PROFILE] Building profile for: "${companyName}"`);
-        const query = `${companyName} about us mission founded headquarters employees business model`;
-        const results = await searchWithTavily(query, tavilyKey, { maxResults: 5 });        
+        console.log(`🎯 [PROFILE] Building company profile for: "${companyName}"`);
+
+        const results = await searchWithTavily(
+            `${companyName} about us mission founded headquarters employees business model`,
+            tavilyKey, { maxResults: 5 }
+        );
         recordTavilyUsage();
 
-        // Apply Cleaner (CRITICAL FIX 5)
-        const cleanedResults = cleanSearchSnippets(results, companyName);
+        if (results.length === 0) return sanitizeProfile(defaultProfile, companyName);
 
-        if (cleanedResults.length === 0) {
-            return sanitizeProfile({
-                missionStatement: null,
-                founded: null,
-                headquarters: null,
-                employeeCount: "unknown",
-                businessModel: "unknown",
-                primaryProduct: null,
-                websiteUrl: companyUrl || null            }, companyName);
+        const cleaned  = cleanSearchSnippets(results, companyName);
+        const snippets = cleaned.map(r => `SOURCE: ${r.url}\n${r.snippet}`).join('\n\n');
+
+        // ── FINANCIAL SANITY CHECK: Detect enterprise/public companies ──────
+        const allText        = snippets.toLowerCase();
+        const isEnterprise   = ENTERPRISE_KEYWORDS.some(kw => allText.includes(kw));
+        const companySizeClass = isEnterprise ? 'enterprise' : 'unknown';
+
+        if (isEnterprise) {
+            console.log(`💡 [PROFILE] Enterprise/public company detected for "${companyName}". Size guard active.`);
         }
-
-        const snippets = cleanedResults.map(r => `SOURCE: ${r.url}\n${r.snippet}`).join('\n\n');
-
-        // Add Reasoning Filter (CRITICAL FIX 1)
-        const reasoningFilter = `⚠️ REASONING FILTER — MANDATORY:
-You are a strict fact extractor. You MUST follow these rules with zero exceptions:
-1. You can ONLY use facts that appear verbatim or are clearly implied in the SNIPPETS provided below.
-2. You MUST IGNORE everything you know from your training data about this company or its people.
-3. If a fact is not present in the snippets, you MUST return null for that field — never guess.
-4. If a snippet contradicts your training data, the snippet is correct. Always trust the snippet.
-5. Never invent names, titles, funding rounds, or dates. Only extract. Never generate.`;
 
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: 'gpt-4o-mini',
             messages: [{
                 role: 'user',
-                content: `${reasoningFilter}
+                content: `${REASONING_FILTER}
 
-Extract the following details about "${companyName}" from the snippets below. 
-Return ONLY valid JSON with these exact keys:
+TASK: Extract the following details about "${companyName}" from the snippets only.
+Return ONLY valid JSON with these exact keys. No markdown. No explanation:
 {
   "missionStatement": "string or null",
-  "founded": "year string or null",
-  "headquarters": "city, country string or null",
-  "employeeCount": "one of: 1-10, 11-50, 51-200, 201-500, 500+, unknown",
-  "businessModel": "one of: B2B, B2C, B2B2C, marketplace, SaaS, services, unknown",
-  "primaryProduct": "one sentence description or null",
-  "websiteUrl": "url string or null"
+  "founded":          "year string or null",
+  "headquarters":     "city, country string or null",
+  "employeeCount":    "one of: 1-10 | 11-50 | 51-200 | 201-500 | 500+ | unknown",
+  "businessModel":    "one of: B2B | B2C | B2B2C | marketplace | SaaS | services | unknown",
+  "primaryProduct":   "one sentence description or null",
+  "websiteUrl":       "url string or null"
 }
+
+ADDITIONAL RULE: If the snippets show words like 'billion', 'trillion', 'publicly traded', 'NASDAQ', 'NYSE', 'Fortune 500', 'IPO' — set employeeCount to "500+" and businessModel to one of the B2B/B2C options, never leave as unknown.
 
 SNIPPETS:
 ${snippets}`
             }],
-            max_tokens: 300,
-            temperature: 0.1
+            max_tokens: 350,
+            temperature: 0.1,
         }, {
             headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
         });
 
-        const raw = response.data.choices[0].message.content.trim();
-        const cleaned = raw.replace(/```json|```/g, '').trim();
-        const profile = JSON.parse(cleaned);
+        recordOpenAiUsage('extractMissionStatement', 'gpt-4o-mini', response.data?.usage?.total_tokens || 0);
 
-        // Ensure websiteUrl is populated if found in search but not in JSON
+        const raw      = response.data.choices[0].message.content.trim();
+        const cleaned2 = raw.replace(/```json|```/g, '').trim();
+        const profile  = JSON.parse(cleaned2);
+
         if (!profile.websiteUrl && companyUrl) profile.websiteUrl = companyUrl;
-        
-        console.log(`✅ [PROFILE] Profile built.`);
-                // Apply Sanitization (CRITICAL FIX 4)
-        return sanitizeProfile(profile, companyName);
+        profile.isEnterprise   = isEnterprise;
+        profile.companySizeClass = companySizeClass;
+
+        const sanitized = sanitizeProfile(profile, companyName);
+        console.log(`✅ [PROFILE] Profile built. Enterprise: ${isEnterprise}`);
+        return { ...sanitized, isEnterprise, companySizeClass };
+
     } catch (err) {
         console.warn(`⚠️ [PROFILE] Failed: ${err.message}`);
-        return sanitizeProfile({
-            missionStatement: null,
-            founded: null,
-            headquarters: null,
-            employeeCount: "unknown",
-            businessModel: "unknown",
-            primaryProduct: null,
-            websiteUrl: companyUrl || null
-        }, companyName);
+        return sanitizeProfile(defaultProfile, companyName);
     }
 }
 
-// ─── LIVENESS CHECK / VERIFICATION AGENT (CRITICAL FIX 3) ─────────────────────
+// ─── VERIFICATION AGENT ───────────────────────────────────────────────────────
 async function verifyDecisionMakers(decisionMakers, companyName, researchSnippets, openAiKey) {
     if (!decisionMakers || decisionMakers.length === 0) return [];
 
     try {
-        console.log(`🔎 [VERIFY] Running liveness check on ${decisionMakers.length} decision makers...`);
+        console.log(`🔎 [VERIFY] Running liveness check on ${decisionMakers.length} contact(s) for "${companyName}"...`);
 
-        const verifyPrompt = `
-⚠️ REASONING FILTER — MANDATORY:
-You are a strict fact extractor. You MUST follow these rules with zero exceptions:
-1. You can ONLY use facts that appear verbatim or are clearly implied in the SNIPPETS provided below.
-2. You MUST IGNORE everything you know from your training data about this company or its people.
-3. If a fact is not present in the snippets, you MUST return null for that field — never guess.
-4. If a snippet contradicts your training data, the snippet is correct. Always trust the snippet.
-5. Never invent names, titles, funding rounds, or dates. Only extract. Never generate.
+        const verifyPrompt = `${REASONING_FILTER}
 
-TASK:
-You are a Verification Agent. For each person below, determine if they are CURRENTLY in the stated role at "${companyName}" based ONLY on the snippets provided.
+TASK: You are a Verification Agent. Your only job is to confirm whether each person listed below is currently and actively in their stated role at "${companyName}" right now in 2026.
 
 PEOPLE TO VERIFY:
-${JSON.stringify(decisionMakers, null, 2)}
+${JSON.stringify(decisionMakers.map(d => ({ name: d.name, title: d.title, sourceUrl: d.sourceUrl || null })), null, 2)}
 
-SNIPPETS FROM LIVE SEARCH:
-${researchSnippets}
+LIVE RESEARCH SNIPPETS:
+${researchSnippets || 'No snippets provided — treat all as unverified.'}
 
-For each person, return one of three statuses:
-- "confirmed": The snippets actively confirm they are currently in this role.
-- "unverified": The snippets mention them but do not confirm their current role status.
-- "likely_outdated": The snippets suggest they have left, been replaced, passed away, or the role changed.
+STATUS RULES:
+- "confirmed": Snippets from 2025 or 2026 actively show this person in this exact role.
+- "unverified": Mentioned but no recent date confirmation found in snippets.
+- "likely_outdated": Any of these is true: snippet says "former", "ex-", "previously", "resigned", "retired", "passed away", "no longer", "left the company", or the only references are from before 2024.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON. No markdown:
 {
   "verified": [
-    {      "name": "...",
-      "title": "...",
-      "linkedinUrl": "...",
-      "source": "...",
-      "isHiring": boolean,
+    {
+      "name":           "...",
+      "title":          "...",
+      "linkedinUrl":    "...",
+      "source":         "...",
+      "sourceUrl":      "...",
+      "isHiring":       boolean,
       "recentActivity": "...",
       "livenessStatus": "confirmed | unverified | likely_outdated",
-      "livenessNote": "brief reason for your status decision, or null"
+      "livenessNote":   "brief reason or null"
     }
   ]
-}
-
-CRITICAL: Never mark someone as "confirmed" if they only appear in old news. Recency matters.`;
+}`;
 
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: verifyPrompt }],
-            max_tokens: 500,
-            temperature: 0.1
+            max_tokens: 600,
+            temperature: 0.1,
         }, {
             headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
         });
 
-        const raw = response.data.choices[0].message.content.trim();
-        const cleaned = raw.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(cleaned);
+        recordOpenAiUsage('verifyDecisionMakers', 'gpt-4o-mini', response.data?.usage?.total_tokens || 0);
 
-        // Filter out likely_outdated contacts — they are dangerous to email
-        const safe = parsed.verified.filter(p => p.livenessStatus !== 'likely_outdated');
+        const raw     = response.data.choices[0].message.content.trim();
+        const cleaned = raw.replace(/```json|```/g, '').trim();
+        const parsed  = JSON.parse(cleaned);
+
+        const safe    = parsed.verified.filter(p => p.livenessStatus !== 'likely_outdated');
         const removed = parsed.verified.length - safe.length;
 
         if (removed > 0) {
-            console.warn(`⚠️ [VERIFY] Removed ${removed} likely-outdated contact(s). Safe to use: ${safe.length}.`);
+            console.warn(`⚠️ [VERIFY] ${removed} contact(s) removed (likely outdated). ${safe.length} safe to use.`);
         } else {
             console.log(`✅ [VERIFY] All ${safe.length} contact(s) passed liveness check.`);
         }
@@ -529,66 +636,68 @@ CRITICAL: Never mark someone as "confirmed" if they only appear in old news. Rec
         return safe;
 
     } catch (err) {
-        console.warn(`⚠️ [VERIFY] Liveness check failed: ${err.message}. Returning original unverified list.`);
-        return decisionMakers; // Safe fallback — do not block the pipeline
+        console.warn(`⚠️ [VERIFY] Liveness check failed: ${err.message}. Returning unverified list as fallback.`);
+        return decisionMakers;
     }
 }
 
-// ─── UPGRADE 3: LINKEDIN SIGNAL HUNTER ────────────────────────────────────────
+// ─── LINKEDIN SIGNAL HUNTER + LIVENESS DETECTION ─────────────────────────────
 async function findDecisionMakers(companyName, tavilyKey, openAiKey) {
     if (getTavilyRemaining() <= 0) return [];
 
-    try {        console.log(`👤 [DECISION MAKERS] Hunting signals for: "${companyName}"`);
-        
-        // Use searchWithFallback (MISSING COMPONENT 1)
+    try {
+        console.log(`👤 [DECISION MAKERS] Hunting for current leadership at: "${companyName}"`);
+
+        // Primary: LinkedIn/Crunchbase lookup
+        // Fallback: General leadership/hiring search
         const [res1, res2] = await Promise.all([
             searchWithFallback(
                 `${companyName} CEO founder director site:linkedin.com OR site:crunchbase.com`,
-                `${companyName} leadership team staff management`,
+                `${companyName} current leadership team executives management 2025 2026`,
                 tavilyKey, { maxResults: 5 }
             ),
             searchWithFallback(
-                `${companyName} head of sales marketing growth VP director hiring`,
-                `${companyName} employees team about`,
+                `${companyName} head of sales marketing VP growth director hiring 2025 2026`,
+                `${companyName} staff employees personnel team`,
                 tavilyKey, { maxResults: 5 }
-            )
+            ),
         ]);
-        // Note: recordTavilyUsage() is now called inside searchWithFallback — do NOT call it again here
+        // Note: recordTavilyUsage() is called inside searchWithFallback — do NOT call again here
 
-        // Apply Cleaner (CRITICAL FIX 5)
-        const cleanedRes1 = cleanSearchSnippets(res1, companyName);
-        const cleanedRes2 = cleanSearchSnippets(res2, companyName);
-        const combined = [...cleanedRes1, ...cleanedRes2];
-
+        const combined = [...res1, ...res2];
         if (combined.length === 0) return [];
 
-        const snippets = combined.map(r => `SOURCE: ${r.url}\n${r.snippet}`).join('\n\n');
-
-        // Add Reasoning Filter (CRITICAL FIX 1)
-        const reasoningFilter = `⚠️ REASONING FILTER — MANDATORY:
-You are a strict fact extractor. You MUST follow these rules with zero exceptions:
-1. You can ONLY use facts that appear verbatim or are clearly implied in the SNIPPETS provided below.
-2. You MUST IGNORE everything you know from your training data about this company or its people.
-3. If a fact is not present in the snippets, you MUST return null for that field — never guess.
-4. If a snippet contradicts your training data, the snippet is correct. Always trust the snippet.
-5. Never invent names, titles, funding rounds, or dates. Only extract. Never generate.`;
+        const cleaned  = cleanSearchSnippets(combined, companyName);
+        const snippets = cleaned.map(r => `SOURCE: ${r.url}\nDATE: ${r.date || 'Unknown'}\n${r.snippet}`).join('\n\n');
 
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: 'gpt-4o-mini',
             messages: [{
                 role: 'user',
-                content: `${reasoningFilter}
+                content: `${REASONING_FILTER}
 
-From these snippets about "${companyName}", extract up to 5 key decision makers.
-Identify if they are likely hiring based on context.
-Return ONLY valid JSON:
+TASK: Extract up to 5 current decision makers at "${companyName}" from the snippets.
+
+CRITICAL LIVENESS RULES:
+- "confirmed": Snippets actively show this person in this role in 2025 or 2026.
+- "unverified": Snippets mention them but give no recent date confirmation.
+- "likely_outdated": Snippets suggest they left, were replaced, retired, or passed away.
+- NEVER mark someone as confirmed based on undated snippets alone.
+- If a snippet says "former", "ex-", "previously", "resigned", "passed away", "retired" — mark as likely_outdated.
+
+Return ONLY valid JSON. No markdown:
 {
   "decisionMakers": [
-    { 
-      "name": "Full Name",       "title": "Job Title", 
-      "linkedinUrl": "url or null", 
-      "source": "linkedin | crunchbase | news | other",      "isHiring": boolean,
-      "recentActivity": "brief note on recent post/announcement or null"
+    {
+      "name":           "Full Name",
+      "title":          "Current Job Title",
+      "linkedinUrl":    "url or null",
+      "source":         "linkedin | crunchbase | news | other",
+      "sourceUrl":      "the exact URL this was found at",
+      "isHiring":       boolean,
+      "recentActivity": "brief note on recent post/announcement or null",
+      "livenessStatus": "confirmed | unverified | likely_outdated",
+      "livenessNote":   "brief reason for status, or null"
     }
   ]
 }
@@ -596,18 +705,28 @@ Return ONLY valid JSON:
 SNIPPETS:
 ${snippets}`
             }],
-            max_tokens: 400,
-            temperature: 0.1
+            max_tokens: 600,
+            temperature: 0.1,
         }, {
             headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
         });
 
-        const raw = response.data.choices[0].message.content.trim();
-        const cleaned = raw.replace(/```json|```/g, '').trim();
-        const parsed = JSON.parse(cleaned);
-        
-        console.log(`✅ [DECISION MAKERS] Found ${parsed.decisionMakers?.length || 0}.`);
-        return parsed.decisionMakers || [];
+        recordOpenAiUsage('findDecisionMakers', 'gpt-4o-mini', response.data?.usage?.total_tokens || 0);
+
+        const raw      = response.data.choices[0].message.content.trim();
+        const cleaned2 = raw.replace(/```json|```/g, '').trim();
+        const parsed   = JSON.parse(cleaned2);
+
+        // Filter out dangerous contacts immediately
+        const allFound = parsed.decisionMakers || [];
+        const safe     = allFound.filter(dm => dm.livenessStatus !== 'likely_outdated');
+        const removed  = allFound.length - safe.length;
+
+        if (removed > 0) {
+            console.warn(`⚠️ [LIVENESS] Removed ${removed} likely-outdated contact(s). Safe: ${safe.length}`);
+        }
+        console.log(`✅ [DECISION MAKERS] ${safe.length} verified contacts found.`);
+        return safe;
 
     } catch (err) {
         console.warn(`⚠️ [DECISION MAKERS] Failed: ${err.message}`);
@@ -615,87 +734,104 @@ ${snippets}`
     }
 }
 
-// ─── UPGRADE 4: FINANCIAL SIGNALS ─────────────────────────────────────────────
+// ─── FINANCIAL INTELLIGENCE + SIZE SANITY GUARD ───────────────────────────────
 async function fetchFinancialSignals(companyName, tavilyKey, openAiKey) {
     const emptyShape = {
-        lastFundingRound: "Unknown",
-        amountRaised: null,
-        investors: [],
-        estimatedRevenue: null,
-        growthSignal: "unknown",
-        financialSources: []
+        lastFundingRound:   'No public funding data',
+        amountRaised:       null,
+        investors:          [],
+        estimatedRevenue:   null,
+        growthSignal:       'unknown',
+        companySizeVerdict: 'unknown',   // 'bootstrapped' | 'sme' | 'funded' | 'public' | 'unknown'
+        financialSources:   [],
     };
 
     if (getTavilyRemaining() <= 0) {
-        console.warn('🚫 [FINANCE] Tavily quota exhausted.');
+        console.warn('🚫 [FINANCE] Quota exhausted.');
         return emptyShape;
     }
 
     try {
-        console.log(`💰 [FINANCE] Checking financial health for: "${companyName}"`);
-        const q1 = `${companyName} funding raised investment series valuation 2024 2025`;
-        const q2 = `${companyName} revenue growth profit annual report`;
+        console.log(`💰 [FINANCE] Scanning financial signals for: "${companyName}"`);
 
-        const [res1, res2] = await Promise.all([            searchWithTavily(q1, tavilyKey, { maxResults: 5 }),
-            searchWithTavily(q2, tavilyKey, { maxResults: 5 })
+        const [res1, res2] = await Promise.all([
+            searchWithFallback(
+                `${companyName} funding raised investment series valuation 2025 2026`,
+                `${companyName} investors backed venture capital`,
+                tavilyKey, { maxResults: 5 }
+            ),
+            searchWithFallback(
+                `${companyName} revenue annual report profit growth 2025 2026`,
+                `${companyName} financial results earnings turnover`,
+                tavilyKey, { maxResults: 5 }
+            ),
         ]);
 
-        recordTavilyUsage(); // Call 1
-        recordTavilyUsage(); // Call 2
-
-        // Apply Cleaner (CRITICAL FIX 5)
-        const cleanedRes1 = cleanSearchSnippets(res1, companyName);
-        const cleanedRes2 = cleanSearchSnippets(res2, companyName);
-        const combined = [...cleanedRes1, ...cleanedRes2];
-
+        const combined = [...res1, ...res2];
         if (combined.length === 0) return emptyShape;
 
-        const snippets = combined.map(r => `SOURCE: ${r.url}\n${r.snippet}`).join('\n\n');
-        const sources = combined.map(r => r.url).slice(0, 2);
+        const cleaned  = cleanSearchSnippets(combined, companyName);
+        const snippets = cleaned.map(r => `SOURCE: ${r.url}\nDATE: ${r.date || 'Unknown'}\n${r.snippet}`).join('\n\n');
+        const fallbackSources = combined.map(r => r.url).filter(Boolean).slice(0, 3);
 
-        // Add Reasoning Filter (CRITICAL FIX 1)
-        const reasoningFilter = `⚠️ REASONING FILTER — MANDATORY:
-You are a strict fact extractor. You MUST follow these rules with zero exceptions:
-1. You can ONLY use facts that appear verbatim or are clearly implied in the SNIPPETS provided below.
-2. You MUST IGNORE everything you know from your training data about this company or its people.
-3. If a fact is not present in the snippets, you MUST return null for that field — never guess.
-4. If a snippet contradicts your training data, the snippet is correct. Always trust the snippet.
-5. Never invent names, titles, funding rounds, or dates. Only extract. Never generate.`;
+        // ── FINANCIAL SANITY CHECK ───────────────────────────────────────────
+        const allText    = snippets.toLowerCase();
+        const isPublic   = ENTERPRISE_KEYWORDS.some(kw => allText.includes(kw));
+        const hasBillions = allText.includes('billion') || allText.includes('trillion');
 
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: 'gpt-4o-mini',
             messages: [{
                 role: 'user',
-                content: `${reasoningFilter}
+                content: `${REASONING_FILTER}
 
-Extract financial signals for "${companyName}" from the snippets.
-Return ONLY valid JSON:
+TASK: Extract financial signals for "${companyName}" from the snippets only.
+
+SANITY CHECK RULES (mandatory):
+- If snippets mention "billion", "trillion", "NASDAQ", "NYSE", "publicly traded", "IPO", "Fortune 500" — companySizeVerdict MUST be "public". Never call this company "bootstrapped" or "small".
+- If snippets mention "Series A/B/C/D", "seed round", "venture capital", "raised $" — companySizeVerdict MUST be "funded".
+- Only use "bootstrapped" if the snippets explicitly use that word.
+- If no financial signals exist at all — use "unknown".
+
+Return ONLY valid JSON. No markdown:
 {
-  "lastFundingRound": "Series A, Seed, IPO, or Unknown",
-  "amountRaised": "$Xm or null",
-  "investors": ["name1", "name2"],
-  "estimatedRevenue": "range string or null",
-  "growthSignal": "scaling | stable | struggling | unknown",
-  "financialSources": ["url1", "url2"]
+  "lastFundingRound":   "Series X, Seed, IPO, Public, or No public data",
+  "amountRaised":       "$Xm or $Xb or null",
+  "investors":          ["name1", "name2"],
+  "estimatedRevenue":   "range string or null",
+  "growthSignal":       "scaling | stable | struggling | unknown",
+  "companySizeVerdict": "bootstrapped | sme | funded | public | unknown",
+  "financialSources":   ["url1", "url2"]
 }
 
 SNIPPETS:
 ${snippets}`
             }],
-            max_tokens: 300,
-            temperature: 0.1
+            max_tokens: 350,
+            temperature: 0.1,
         }, {
-            headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }        });
+            headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
+        });
 
-        const raw = response.data.choices[0].message.content.trim();
-        const cleaned = raw.replace(/```json|```/g, '').trim();
-        const data = JSON.parse(cleaned);
+        recordOpenAiUsage('fetchFinancialSignals', 'gpt-4o-mini', response.data?.usage?.total_tokens || 0);
 
-        // Merge sources if GPT didn't catch them
-        if (!data.financialSources || data.financialSources.length === 0) {
-            data.financialSources = sources;
+        const raw      = response.data.choices[0].message.content.trim();
+        const cleaned2 = raw.replace(/```json|```/g, '').trim();
+        const data     = JSON.parse(cleaned2);
+
+        // Override if sanity check detects enterprise signals the model missed
+        if (isPublic || hasBillions) {
+            if (data.companySizeVerdict === 'bootstrapped' || data.companySizeVerdict === 'sme') {
+                console.warn(`⚠️ [FINANCE] Sanity override: Model said "${data.companySizeVerdict}" but public/enterprise signals detected. Correcting to "public".`);
+                data.companySizeVerdict = 'public';
+            }
         }
-        console.log(`✅ [FINANCE] Signals extracted.`);
+
+        if (!data.financialSources || data.financialSources.length === 0) {
+            data.financialSources = fallbackSources;
+        }
+
+        console.log(`✅ [FINANCE] Verdict: ${data.companySizeVerdict}. Signal: ${data.growthSignal}`);
         return data;
 
     } catch (err) {
@@ -704,89 +840,101 @@ ${snippets}`
     }
 }
 
-// ─── UPGRADE 5: MASTER ORCHESTRATOR ───────────────────────────────────────────
+// ─── MASTER ORCHESTRATOR ──────────────────────────────────────────────────────
 async function runCompanyResearch(companyNameOrUrl, tavilyKey, openAiKey) {
     const companyName = extractCompanyName(companyNameOrUrl);
     const companyUrl  = companyNameOrUrl.startsWith('http') ? companyNameOrUrl : null;
 
-    console.log(`\n🔬 [RESEARCH] Starting full research on: "${companyName}"`);
+    console.log(`\n🔬 [RESEARCH] ═══ Starting full research on: "${companyName}" ═══`);
     const startTime = Date.now();
 
-    // Check Cache
-    const userId = 'temp-research'; // Temporary session for standalone test if needed, otherwise handled by caller
-    // Note: In the main router, cache is checked before calling this. 
-    // However, if called directly, we assume no cache here or rely on caller.
-
-    // Run all 4 upgraded functions in parallel
+    // Run all 4 research modules in parallel
+    // Promise.allSettled — one failure NEVER kills the report
     const results = await Promise.allSettled([
-        fetchCompanyNews(companyName, tavilyKey, openAiKey),       // Index 0
-        extractMissionStatement(companyUrl, companyName, tavilyKey, openAiKey), // Index 1
-        findDecisionMakers(companyName, tavilyKey, openAiKey),     // Index 2
-        fetchFinancialSignals(companyName, tavilyKey, openAiKey)   // Index 3
+        fetchCompanyNews(companyName, tavilyKey, openAiKey),
+        extractMissionStatement(companyUrl, companyName, tavilyKey, openAiKey),
+        findDecisionMakers(companyName, tavilyKey, openAiKey),
+        fetchFinancialSignals(companyName, tavilyKey, openAiKey),
     ]);
 
-    // Extract data or default shapes
-    const newsIntelligence = results[0].status === 'fulfilled' ? results[0].value : [];
-    const companyProfile   = results[1].status === 'fulfilled' ? results[1].value : sanitizeProfile({
-        missionStatement: null, founded: null, headquarters: null, 
-        employeeCount: "unknown", businessModel: "unknown", 
-        primaryProduct: null, websiteUrl: companyUrl
+    // Extract or use default shapes
+    const newsIntelligence  = results[0].status === 'fulfilled' ? results[0].value : [];
+    const companyProfile    = results[1].status === 'fulfilled' ? results[1].value : sanitizeProfile({
+        missionStatement: null, founded: null, headquarters: null,
+        employeeCount: 'unknown', businessModel: 'unknown',
+        primaryProduct: null, websiteUrl: companyUrl,
     }, companyName);
-    const decisionMakers   = results[2].status === 'fulfilled' ? results[2].value : [];
-    const financialSignals = results[3].status === 'fulfilled' ? results[3].value : {
-        lastFundingRound: "Unknown", amountRaised: null, investors: [],         estimatedRevenue: null, growthSignal: "unknown", financialSources: []
+    const rawDecisionMakers = results[2].status === 'fulfilled' ? results[2].value : [];
+    const financialSignals  = results[3].status === 'fulfilled' ? results[3].value : {
+        lastFundingRound: 'No public funding data', amountRaised: null,
+        investors: [], estimatedRevenue: null, growthSignal: 'unknown',
+        companySizeVerdict: 'unknown', financialSources: [],
     };
 
-    // CRITICAL FIX 3: Run Liveness Check
-    // Collect all snippets used in research for the verification agent
-    const allResearchSnippets = [
-        ...(results[0].value || []).map(n => n.summary || ''),
-        ...(results[2].value || []).map(d => d.recentActivity || ''),
-    ].join('\n');
+    // Collect all research snippets for the liveness verification agent
+    const allResearchText = [
+        ...newsIntelligence.map(n => n.summary || ''),
+        ...rawDecisionMakers.map(d => d.recentActivity || ''),
+    ].filter(Boolean).join('\n');
 
-    const verifiedDecisionMakers = await verifyDecisionMakers(
-        decisionMakers,
-        companyName,
-        allResearchSnippets,
-        openAiKey
-    );
+    // Run the Verification Agent on all decision makers
+    const decisionMakers = rawDecisionMakers.length > 0
+        ? await verifyDecisionMakers(rawDecisionMakers, companyName, allResearchText, openAiKey)
+        : [];
 
-    // Calculate Quality
-    let quality = "sparse";
-    const hasNews = newsIntelligence.length >= 1;
-    const hasRichNews = newsIntelligence.length >= 3;
-    const hasDMs = verifiedDecisionMakers.length >= 1;
-    const hasRichDMs = verifiedDecisionMakers.length >= 2;
-    const hasFinData = financialSignals.lastFundingRound !== "Unknown" || financialSignals.amountRaised;
-    if (hasRichNews && hasRichDMs && hasFinData) {
-        quality = "rich";
-    } else if (hasNews || hasDMs) {
-        quality = "moderate";
-    }
+    // Buying signals summary
+    const buyingSignals = {
+        hasFundingSignal:   newsIntelligence.some(n => n.signalType === 'funding'),
+        hasHiringSignal:    newsIntelligence.some(n => n.signalType === 'hiring')
+                            || decisionMakers.some(d => d.isHiring),
+        hasExpansionSignal: newsIntelligence.some(n => n.signalType === 'expansion' || n.signalType === 'growth'),
+        topBuyingSignal:    newsIntelligence.find(n => n.buyingSignal) || null,
+    };
+
+    // Research quality scoring
+    const hasRichNews  = newsIntelligence.length >= 3;
+    const hasNews      = newsIntelligence.length >= 1;
+    const hasRichDMs   = decisionMakers.length >= 2;
+    const hasDMs       = decisionMakers.length >= 1;
+    const hasFinData   = financialSignals.companySizeVerdict !== 'unknown'
+                         || financialSignals.amountRaised;
+
+    let researchQuality;
+    if (hasRichNews && hasRichDMs && hasFinData) researchQuality = 'rich';
+    else if (hasNews || hasDMs)                  researchQuality = 'moderate';
+    else                                          researchQuality = 'sparse';
+
+    // Module failure notes
+    const researchNotes = [];
+    if (results[0].status === 'rejected') researchNotes.push('⚠️ News module failed — no headlines available');
+    if (results[1].status === 'rejected') researchNotes.push('⚠️ Profile module failed — using defaults');
+    if (results[2].status === 'rejected') researchNotes.push('⚠️ Decision Maker module failed');
+    if (results[3].status === 'rejected') researchNotes.push('⚠️ Financial module failed');
+    if (researchQuality === 'sparse')     researchNotes.push('⚠️ Sparse data — results may be limited for this company');
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    
-    // Notes
-    const notes = [];
-    if (results[0].status === 'rejected') notes.push("News module failed");
-    if (results[1].status === 'rejected') notes.push("Profile module failed");
-    if (results[2].status === 'rejected') notes.push("Decision Maker module failed");
-    if (results[3].status === 'rejected') notes.push("Financial module failed");
+
+    // Latency guard — warn if over 20 seconds
+    if (parseFloat(duration) > 20) {
+        console.warn(`⚠️ [LATENCY] Research took ${duration}s — exceeded 20s target. Investigate parallel bottleneck.`);
+    }
 
     const researchReport = {
         companyName,
         companyUrl:       companyUrl || null,
         researchedAt:     new Date().toISOString(),
         researchDuration: `${duration}s`,
-        tavilyCallsUsed:  9, // Fixed max per spec: 3+1+2+2+1 reserve
+        tavilyCallsUsed:  tavilyQuota.used,
         companyProfile,
         newsIntelligence,
-        decisionMakers: verifiedDecisionMakers, // Use verified list
+        decisionMakers,
         financialSignals,
-        researchQuality:  quality,        researchNotes:    notes
+        buyingSignals,
+        researchQuality,
+        researchNotes,
     };
 
-    console.log(`✅ [RESEARCH] Complete in ${researchReport.researchDuration}. Quality: ${quality}`);
+    console.log(`✅ [RESEARCH] ═══ Complete in ${duration}s. Quality: ${researchQuality} | DMs: ${decisionMakers.length} | News: ${newsIntelligence.length} ═══\n`);
     return researchReport;
 }
 
@@ -794,7 +942,7 @@ async function runCompanyResearch(companyNameOrUrl, tavilyKey, openAiKey) {
 // ███  MODULE 2 — THE WRITING ENGINE ("The Brain")
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── 2A: BUILD USER CONTEXT FROM PROFILE ──────────────────────────────────────
+// ─── BUILD USER CONTEXT FROM PROFILE ─────────────────────────────────────────
 function buildUserContext(userProfile) {
     return {
         usp:          userProfile?.usp          || 'We help businesses grow with AI-powered automation.',
@@ -807,55 +955,55 @@ function buildUserContext(userProfile) {
     };
 }
 
-// ─── 2B: DRAFT PERSONALIZED EMAIL (GPT-4o-mini processes, GPT-4o writes) ──────
+// ─── HUMAN-GRADE WRITING ENGINE ───────────────────────────────────────────────
 async function generatePersonalizedEmail(researchReport, userProfileContext, openAiKey) {
     console.log(`✍️  [WRITING ENGINE] Generating email for: "${researchReport.companyName}"`);
 
-    // Adapt to new structure: newsIntelligence is an array, companyProfile is an object
-    const topNews         = researchReport.newsIntelligence?.[0] || null;
-    const decisionMaker   = researchReport.decisionMakers?.[0] || null;
-    const missionSnippet  = researchReport.companyProfile?.missionStatement || null;
+    const topNews       = researchReport.newsIntelligence?.find(n => n.buyingSignal)
+                          || researchReport.newsIntelligence?.[0]
+                          || null;
+    const decisionMaker = researchReport.decisionMakers?.[0] || null;
+    const profile       = researchReport.companyProfile || {};
+    const financial     = researchReport.financialSignals || {};
+    const buying        = researchReport.buyingSignals || {};
 
-    // MISSING COMPONENT 2: Hiring Signal Identity Matcher
+    // ── Hiring Hook Builder ──────────────────────────────────────────────────
     const hiringDM = researchReport.decisionMakers?.find(dm => dm.isHiring);
-    const hiringSignalBlock = hiringDM 
-        ? `Hiring Signal: ${hiringDM.name} (${hiringDM.title}) appears to be actively hiring. Their hiring need may directly relate to what the sender's product replaces or accelerates.`
+    const hiringSignalBlock = hiringDM
+        ? `HIRING SIGNAL DETECTED: ${hiringDM.name} (${hiringDM.title}) is actively hiring. Their open role may be exactly what the sender's product replaces or accelerates. If using this hook, "connectionToProduct" MUST explain how the sender's product addresses the gap they are hiring for (e.g., "They are hiring a sales rep — our AI Sales Engine does that job autonomously").`
         : 'Hiring Signal: None detected.';
 
-    // ── Step 1: GPT-4o-mini — extract key intelligence & connection points ──
-    
-    // Add Reasoning Filter (CRITICAL FIX 1)
-    const reasoningFilter = `⚠️ REASONING FILTER — MANDATORY:
-You are a strict fact extractor. You MUST follow these rules with zero exceptions:
-1. You can ONLY use facts that appear verbatim or are clearly implied in the SNIPPETS provided below.
-2. You MUST IGNORE everything you know from your training data about this company or its people.
-3. If a fact is not present in the snippets, you MUST return null for that field — never guess.
-4. If a snippet contradicts your training data, the snippet is correct. Always trust the snippet.
-5. Never invent names, titles, funding rounds, or dates. Only extract. Never generate.`;
-    const intelligencePrompt = `${reasoningFilter}
+    // ── Step 1: GPT-4o-mini — intelligence extraction ───────────────────────
+    const intelligencePrompt = `${REASONING_FILTER}
 
-You are a B2B outreach analyst. Given this research, identify the STRONGEST personalisation hooks.
+TASK: You are a B2B outreach intelligence analyst. Identify the STRONGEST personalisation hook for a cold email.
 
-RESEARCH:
+LIVE RESEARCH:
 Company: ${researchReport.companyName}
-Mission: ${missionSnippet || 'Unknown'}
-Top News: ${topNews ? `"${topNews.headline}" — ${topNews.summary}` : 'None found'}
-Decision Maker: ${decisionMaker ? `${decisionMaker.name}, ${decisionMaker.title}` : 'Unknown'}
+Mission: ${profile.missionStatement || 'Not found'}
+Business Model: ${profile.businessModel || 'Unknown'}
+Employee Count: ${profile.employeeCount || 'Unknown'}
+Top News: ${topNews ? `"${topNews.headline}" — ${topNews.summary} (Source: ${topNews.url})` : 'None found'}
+Financial Signal: ${financial.lastFundingRound || 'None'} ${financial.amountRaised ? `| Raised: ${financial.amountRaised}` : ''} | Size: ${financial.companySizeVerdict || 'unknown'}
+Decision Maker: ${decisionMaker ? `${decisionMaker.name}, ${decisionMaker.title} (Status: ${decisionMaker.livenessStatus})` : 'Not found'}
 ${hiringSignalBlock}
 
 SENDER CONTEXT:
 USP: ${userProfileContext.usp}
 Product: ${userProfileContext.product}
+Sender: ${userProfileContext.senderName}, ${userProfileContext.senderTitle} at ${userProfileContext.companyName}
 Goal: ${userProfileContext.goal}
+Tone: ${userProfileContext.tone}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON. No markdown:
 {
-  "primaryHook": "<the single strongest personalisation angle — must be from live news or mission>",
-  "connectionToProduct": "<how the hook directly connects to sender's product/USP>",
-  "suggestedSubjectLine": "<compelling subject line under 8 words>",
-  "recipientFirstName": "<first name of decision maker or null>",
-  "recipientTitle": "<job title or null>",
-  "hiringHook": "<one sentence connecting their open role to sender's product, or null if no hiring signal>"
+  "primaryHook":          "<single strongest personalisation angle — must reference a specific live data point: news headline, funding event, hiring signal, expansion news. Never use generic praise.>",
+  "connectionToProduct":  "<how the hook directly connects to the sender's specific product/USP — be concrete>",
+  "suggestedSubjectLine": "<MAXIMUM 5 WORDS. Must reference one specific detail from the research. Examples: 'After your Series B', 'Re: Lagos expansion move', 'Noticed your sales hire'. BANNED subject words: enhance, improve, grow, transform, boost, optimize, revolutionize, upcoming, streamline, leverage, empower>",
+  "recipientFirstName":   "<first name only of decision maker, or null>",
+  "recipientTitle":       "<job title or null>",
+  "hiringHook":           "<if hiring signal exists: one sentence connecting their open role to sender's product. Otherwise null.>",
+  "patternInterruptOpener": "<a single data-backed opening sentence that does NOT start with 'I', 'We', 'My name', or 'I hope'. Must reference a specific fact: a date, a number, a city, a product name, an event. This is the first sentence of the email.>"
 }`;
 
     let intelligence = null;
@@ -863,11 +1011,12 @@ Return ONLY valid JSON:
         const miniResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: intelligencePrompt }],
-            max_tokens:  250,
+            max_tokens:  400,
             temperature: 0.2,
         }, {
             headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
         });
+        recordOpenAiUsage('generatePersonalizedEmail:intelligence', 'gpt-4o-mini', miniResponse.data?.usage?.total_tokens || 0);
         const raw     = miniResponse.data.choices[0].message.content.trim();
         const cleaned = raw.replace(/```json|```/g, '').trim();
         intelligence  = JSON.parse(cleaned);
@@ -875,62 +1024,66 @@ Return ONLY valid JSON:
         console.warn(`⚠️ [WRITING ENGINE] Intelligence extraction failed: ${err.message}`);
     }
 
-    // CRITICAL FIX 2: Subject Line Pattern Interruption
-    // We enforce the stricter rule in the writing prompt below, but we also sanity check here if possible.
-    // The prompt instruction is the primary enforcement mechanism.
+    // ── NO-NULL RECIPIENT POLICY ─────────────────────────────────────────────
+    let recipientGreeting;
+    if (intelligence?.recipientFirstName) {
+        recipientGreeting = `Hi ${intelligence.recipientFirstName},`;
+    } else if (intelligence?.recipientTitle) {
+        recipientGreeting = `Hi ${intelligence.recipientTitle},`;
+    } else if (profile.businessModel === 'B2B') {
+        recipientGreeting = `Hi Sales Leader,`;
+    } else {
+        recipientGreeting = `Hi ${researchReport.companyName} Team,`;
+    }
 
-    // ── Step 2: GPT-4o — write the final human-quality email ──
-    const recipientLine = intelligence?.recipientFirstName
-        ? `Hi ${intelligence.recipientFirstName},`        : `Hi there,`;
-
-    const writingPrompt = `You are an elite B2B copywriter. Write a cold outreach email using ONLY the provided research hooks. No generic filler.
-
-RULES:
-- Exactly 3 paragraphs.
-- Paragraph 1: Open with the PRIMARY HOOK (reference real news or mission). Never start with "I hope", "My name is", or "I wanted to reach out."
-- Paragraph 2: Connect their situation directly to "${userProfileContext.product}" and the sender's USP. Be specific. No fluff.
-- Paragraph 3: Soft CTA — goal is to "${userProfileContext.goal}". One sentence max.
-- Tone: ${userProfileContext.tone}.
-- Sound like a sharp human, not an AI. Vary sentence length.
+    // ── Step 2: GPT-4o — write the final email ──────────────────────────────
+    const writingPrompt = `You are an elite B2B cold email copywriter. Your emails get replies because they sound like a sharp human who did real research — not like an AI running a template.
 
 ${buildBannedWordsInstruction()}
 
-EMAIL BLUEPRINT:
-Subject Rules:
-- MAXIMUM 5 WORDS. Hard limit. Never exceed.
-- MUST reference one specific detail from the research (a company name, a number, a city, a product name, a news event).
-- MUST NOT use any of these words: enhance, improve, grow, transform, boost, optimize, revolutionize, upcoming, streamline, leverage, empower.
-- Format examples of GOOD subject lines: "Stripe's Lagos expansion?", "Noticed your Series B", "Re: your hiring push", "After the Flutterwave deal".
-- Format examples of BAD subject lines: "Enhance Your Business Operations", "Improve Your Growth Strategy".
-- The subject line must feel like it was written by a human who read one specific thing about this company today.
+STRICT STRUCTURE RULES:
+- Exactly 3 short paragraphs. No headers. No bullet points. No lists.
+- Paragraph 1: START with this exact opening (do not change it): "${intelligence?.patternInterruptOpener || `${researchReport.companyName}'s recent move caught my attention.`}"
+  Then in 1-2 more sentences, expand on the hook with a specific detail from the research. This paragraph must prove you did real research.
+- Paragraph 2: Connect their specific situation to "${userProfileContext.product}" and the sender's USP: "${userProfileContext.usp}". Be concrete. Name a specific outcome, number, or mechanic. No vague promises.
+- Paragraph 3: Soft CTA — ONE sentence only. Goal: "${userProfileContext.goal}". Do NOT use "feel free to", "do not hesitate", or "let me know your thoughts".
+- Tone: ${userProfileContext.tone}.
+- Vary sentence length. Mix short punchy sentences with slightly longer ones. Avoid uniform rhythm.
+- Never start ANY sentence with "I hope", "I wanted", "My name is", "We are a company that", "As a", "I am reaching out".
+${intelligence?.hiringHook ? `- Hiring Hook available (use if stronger than primary hook): "${intelligence.hiringHook}"` : ''}
 
-Subject: ${intelligence?.suggestedSubjectLine || `Quick thought on ${researchReport.companyName}`}
-Recipient: ${recipientLine}
-Primary Hook: ${intelligence?.primaryHook || topNews?.headline || `${researchReport.companyName}'s recent activity`}
+EMAIL CONSTRUCTION:
+Greeting: ${recipientGreeting}
+Primary Research Hook: ${intelligence?.primaryHook || topNews?.headline || `${researchReport.companyName}'s recent activity`}
 Product Connection: ${intelligence?.connectionToProduct || userProfileContext.usp}
-${intelligence?.hiringHook ? `Hiring Hook (use this if stronger than primary hook): ${intelligence.hiringHook}` : ''}
-Sender: ${userProfileContext.senderName}, ${userProfileContext.senderTitle} at ${userProfileContext.companyName}
+Sender Signature: ${userProfileContext.senderName}, ${userProfileContext.senderTitle} at ${userProfileContext.companyName}
 
-Write ONLY the email body (no subject line, no signature). Start directly with the opening line.`;
+Write ONLY the email body — no subject line, no sender name, no signature block. Start with the greeting on its own line, then the first paragraph.`;
 
     try {
         const gpt4Response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
             messages:    [{ role: 'user', content: writingPrompt }],
-            max_tokens:  400,
+            max_tokens:  450,
             temperature: 0.7,
         }, {
             headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' }
         });
 
+        recordOpenAiUsage('generatePersonalizedEmail:writing', 'gpt-4o', gpt4Response.data?.usage?.total_tokens || 0);
+
         const emailBody = gpt4Response.data.choices[0].message.content.trim();
 
         return {
-            subjectLine:    intelligence?.suggestedSubjectLine || `Quick thought on ${researchReport.companyName}`,
-            recipient:      recipientLine,
+            subjectLine:    intelligence?.suggestedSubjectLine || `Re: ${researchReport.companyName}`,
+            recipient:      recipientGreeting,
             body:           emailBody,
             primaryHook:    intelligence?.primaryHook    || null,
-            newsUsed:       topNews?.headline            || null,            decisionMaker:  decisionMaker?.name          || null,
+            hiringHook:     intelligence?.hiringHook     || null,
+            newsUsed:       topNews?.headline             || null,
+            newsSourceUrl:  topNews?.url                  || null,
+            decisionMaker:  decisionMaker?.name           || null,
+            livenessStatus: decisionMaker?.livenessStatus || null,
         };
 
     } catch (err) {
@@ -939,57 +1092,75 @@ Write ONLY the email body (no subject line, no signature). Start directly with t
     }
 }
 
-// ─── 2C: FORMAT THE DIRECTOR'S REPORT ─────────────────────────────────────────
+// ─── REPORT FORMATTER ─────────────────────────────────────────────────────────
 function formatResearchAndEmailReport(researchReport, emailDraft) {
     const lines = [
         `🔬 **Intelligence Report — ${researchReport.companyName}**`,
-        `⏱ Researched in ${researchReport.researchDuration}\n`,
+        `⏱ Researched in ${researchReport.researchDuration} · Quality: ${researchReport.researchQuality?.toUpperCase()}`,
+        `📅 Date: ${new Date(researchReport.researchedAt).toUTCString()}\n`,
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `\n📋 **RESEARCH SUMMARY**\n`,
+        `\n📋 **COMPANY PROFILE**\n`,
     ];
 
-    // Mission (CRITICAL FIX 4 - Level 2)
-    const missionDisplay = researchReport.companyProfile?.missionStatement 
-        || `${researchReport.companyName} — mission not publicly indexed.`;
-    lines.push(`🎯 **Mission:** ${missionDisplay}\n`);
+    const p = researchReport.companyProfile || {};
+    // ZERO NULLS POLICY: every field goes through a display guard
+    lines.push(`🎯 **Mission:** ${p.missionStatement || `${researchReport.companyName} — mission not publicly indexed.`}`);
+    lines.push(`🏢 **HQ:** ${p.headquarters || 'Location not indexed'}`);
+    lines.push(`📅 **Founded:** ${p.founded || 'Not listed'}`);
+    lines.push(`👥 **Team Size:** ${p.employeeCount || 'Not listed'}`);
+    lines.push(`🔧 **Model:** ${p.businessModel || 'Not classified'}`);
+    lines.push(`📦 **Product:** ${p.primaryProduct || `${researchReport.companyName}'s offering — not indexed.`}\n`);
 
-    // News (from new newsIntelligence array)
-    if (researchReport.newsIntelligence?.length > 0) {
-        lines.push(`📰 **Latest Headlines:**`);
-        researchReport.newsIntelligence.forEach((n, i) => {
-            lines.push(`  ${i + 1}. ${n.headline} (${n.sentiment})`);
-            lines.push(`     📅 ${n.date} · ${n.url}`);
-        });
-        lines.push('');
-    } else {
-        lines.push(`📰 **Latest Headlines:** None found\n`);
-    }
-
-    // Decision Makers (CRITICAL FIX 4 - Level 2)
-    if (researchReport.decisionMakers?.length > 0) {
-        lines.push(`👤 **Decision Makers:**`);
-        researchReport.decisionMakers.forEach(dm => {
-            lines.push(`  • ${dm.name} — ${dm.title}`);
-            if (dm.isHiring) lines.push(`    🚀 *Hiring Signal Detected*`);
-        });
-        lines.push('');
-    } else {
-        lines.push(`👤 **Decision Makers:** No verified contacts found at this time. Consider a domain-level outreach approach.`);
-    }
-
-    // Financials (CRITICAL FIX 4 - Level 2)
-    const fin = researchReport.financialSignals;
-    if (fin && fin.lastFundingRound !== "Unknown") {        lines.push(`💰 **Financial Signals:**`);
-        lines.push(`  • Last Round: ${fin.lastFundingRound}`);
-        if (fin.amountRaised) lines.push(`  • Raised: ${fin.amountRaised}`);
-        if (fin.growthSignal) lines.push(`  • Growth: ${fin.growthSignal}`);
-        lines.push('');
-    } else {
-        lines.push(`💰 **Financial Signals:** No public funding data indexed. Company may be bootstrapped or pre-announcement.`);
-    }
-
+    // News
     lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(`\n📰 **INTELLIGENCE HEADLINES**\n`);
+    if (researchReport.newsIntelligence?.length > 0) {
+        researchReport.newsIntelligence.forEach((n, i) => {
+            const buyingTag = n.buyingSignal ? ' 🟢 BUYING SIGNAL' : '';
+            lines.push(`  ${i + 1}. [${n.sentiment?.toUpperCase()}] ${n.headline}${buyingTag}`);
+            lines.push(`     📅 ${n.date} · 🔗 ${n.url}`);
+        });
+    } else {
+        lines.push(`  No headlines indexed for this company. Consider direct website research.`);
+    }
+    lines.push('');
+
+    // Decision Makers
+    lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(`\n👤 **VERIFIED DECISION MAKERS**\n`);
+    if (researchReport.decisionMakers?.length > 0) {
+        researchReport.decisionMakers.forEach(dm => {
+            const liveness = dm.livenessStatus === 'confirmed' ? '✅ Confirmed Active' : '⚠️ Unverified';
+            lines.push(`  • ${dm.name} — ${dm.title} [${liveness}]`);
+            if (dm.linkedinUrl)    lines.push(`    🔗 ${dm.linkedinUrl}`);
+            if (dm.isHiring)       lines.push(`    🚀 Hiring signal detected`);
+            if (dm.recentActivity) lines.push(`    📡 ${dm.recentActivity}`);
+        });
+    } else {
+        lines.push(`  No verified contacts found. Consider using the company's general contact or a department-level approach.`);
+    }
+    lines.push('');
+
+    // Financial
+    lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    lines.push(`\n💰 **FINANCIAL SIGNALS**\n`);
+    const fin = researchReport.financialSignals;
+    if (fin) {
+        lines.push(`  • Size Verdict: ${fin.companySizeVerdict || 'Not determined'}`);
+        lines.push(`  • Last Funding: ${fin.lastFundingRound || 'No public data'}`);
+        if (fin.amountRaised)     lines.push(`  • Raised: ${fin.amountRaised}`);
+        if (fin.estimatedRevenue) lines.push(`  • Revenue: ${fin.estimatedRevenue}`);
+        lines.push(`  • Growth Signal: ${fin.growthSignal || 'Unknown'}`);
+        if (fin.financialSources?.length > 0) {
+            lines.push(`  • Sources: ${fin.financialSources.join(' | ')}`);
+        }
+    } else {
+        lines.push(`  No financial data indexed. Company may be bootstrapped or pre-announcement.`);
+    }
+    lines.push('');
+
     // Email Draft
+    lines.push(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     if (emailDraft) {
         lines.push(`\n✉️  **PERSONALIZED EMAIL DRAFT**\n`);
         lines.push(`📌 **Subject:** ${emailDraft.subjectLine}`);
@@ -997,20 +1168,80 @@ function formatResearchAndEmailReport(researchReport, emailDraft) {
         lines.push(emailDraft.body);
         lines.push('');
         if (emailDraft.newsUsed) {
-            lines.push(`📡 *Hook source: "${emailDraft.newsUsed}"*`);
+            lines.push(`📡 *Hook source: "${emailDraft.newsUsed}" — ${emailDraft.newsSourceUrl || ''}*`);
+        }
+        if (emailDraft.hiringHook) {
+            lines.push(`🚀 *Hiring hook available: "${emailDraft.hiringHook}"*`);
+        }
+        if (emailDraft.livenessStatus) {
+            lines.push(`🔎 *Contact liveness: ${emailDraft.livenessStatus}*`);
         }
     } else {
-        lines.push(`\n✉️  **Email Draft:** Could not be generated.\n`);
+        lines.push(`\n✉️  **Email Draft:** Research completed but email could not be generated. Try again or check OpenAI quota.`);
+    }
+
+    // Research notes
+    if (researchReport.researchNotes?.length > 0) {
+        lines.push(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        lines.push(`\n⚠️ **Research Notes:**`);
+        researchReport.researchNotes.forEach(note => lines.push(`  ${note}`));
     }
 
     lines.push(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    lines.push(`\n${getTavilyQuotaSummary()}`);
+    lines.push(`\n${getFullCreditDashboard().summary}`);
 
     return lines.join('\n');
 }
 
+// ─── STRUCTURED JSON OUTPUT ───────────────────────────────────────────────────
+// Produces the clean JSON object Month 2 needs for automated sending
+function generateStructuredLeadJSON(researchReport, emailDraft, userProfile) {
+    const dm = researchReport.decisionMakers?.[0] || null;
+    return {
+        lead: {
+            companyName:      researchReport.companyName,
+            companyUrl:       researchReport.companyUrl,
+            researchedAt:     researchReport.researchedAt,
+            researchQuality:  researchReport.researchQuality,
+            industry:         researchReport.companyProfile?.businessModel || 'unknown',
+            companySizeClass: researchReport.financialSignals?.companySizeVerdict || 'unknown',
+            buyingSignals: {
+                hasFunding:   researchReport.buyingSignals?.hasFundingSignal   || false,
+                hasHiring:    researchReport.buyingSignals?.hasHiringSignal    || false,
+                hasExpansion: researchReport.buyingSignals?.hasExpansionSignal || false,
+            },
+        },
+        contact: dm ? {
+            name:           dm.name,
+            title:          dm.title,
+            linkedinUrl:    dm.linkedinUrl || null,
+            livenessStatus: dm.livenessStatus,
+            isHiring:       dm.isHiring || false,
+        } : null,
+        outreach: emailDraft ? {
+            subjectLine: emailDraft.subjectLine,
+            greeting:    emailDraft.recipient,
+            body:        emailDraft.body,
+            hookSource:  emailDraft.newsUsed      || null,
+            hookUrl:     emailDraft.newsSourceUrl || null,
+            hiringHook:  emailDraft.hiringHook    || null,
+        } : null,
+        sender: {
+            name:    userProfile?.senderName  || null,
+            title:   userProfile?.senderTitle || null,
+            company: userProfile?.companyName || null,
+            goal:    userProfile?.goal        || null,
+        },
+        meta: {
+            generatedAt:     new Date().toISOString(),
+            tavilyCallsUsed: researchReport.tavilyCallsUsed,
+            readyForSending: !!(emailDraft && dm && dm.livenessStatus !== 'likely_outdated'),
+        },
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// ███  STEP 1: PARSE USER INTENT (unchanged + extended)
+// ███  STEP 1: PARSE USER INTENT (unchanged)
 // ═══════════════════════════════════════════════════════════════════════════════
 async function parseLeadIntent(message, history, currentProfile, apiKey) {
     const historySnippet = history.slice(-4).map(h => `${h.role}: ${h.content}`).join('\n');
@@ -1028,7 +1259,8 @@ ${JSON.stringify(currentProfile, null, 2)}
 Also detect if the user is asking to research a specific company by URL or name (e.g. "research Moniepoint", "write an email for stripe.com").
 
 Return ONLY valid JSON — no markdown:
-{  "targetDescription": "<type of customer/business they want>",
+{
+  "targetDescription": "<type of customer/business they want>",
   "industry": "<industry or niche>",
   "painPoint": "<problem the target businesses have>",
   "location": "<geographic focus or null>",
@@ -1037,7 +1269,8 @@ Return ONLY valid JSON — no markdown:
   "searchQueries": [
     "<specific ready-to-run search string — business directory angle>",
     "<specific ready-to-run search string — LinkedIn/news signal angle>",
-    "<specific ready-to-run search string — pain point / job posting angle>"  ],
+    "<specific ready-to-run search string — pain point / job posting angle>"
+  ],
   "isNewSearch": <true if new request, false if refining>,
   "researchTarget": "<company name or URL if user wants company research, else null>",
   "mode": "<'leads' if searching for new leads | 'research' if researching a specific company>"
@@ -1054,6 +1287,8 @@ Rules: searchQueries must be real, specific, ready-to-run strings. Return ONLY t
         }, {
             headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
+
+        recordOpenAiUsage('parseLeadIntent', 'gpt-4o-mini', response.data?.usage?.total_tokens || 0);
 
         const raw     = response.data.choices[0].message.content.trim();
         const cleaned = raw.replace(/```json|```/g, '').trim();
@@ -1112,6 +1347,8 @@ Rules: rank by fitScore descending. opportunitySignal must reference their actua
             headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }
         });
 
+        recordOpenAiUsage('rankAndSelectTopLeads', 'gpt-4o-mini', response.data?.usage?.total_tokens || 0);
+
         const raw     = response.data.choices[0].message.content.trim();
         const cleaned = raw.replace(/```json|```/g, '').trim();
         return JSON.parse(cleaned).leads || [];
@@ -1126,14 +1363,16 @@ Rules: rank by fitScore descending. opportunitySignal must reference their actua
 function formatLeadResponse(leads, profile, totalSearched) {
     if (leads.length === 0) {
         return [
-            `🔍 Searched ${totalSearched} businesses — no strong matches for "${profile.targetDescription || 'your request'}".`,            `Try: add a location, name a specific pain point, or narrow the niche.`,
+            `🔍 Searched ${totalSearched} businesses — no strong matches for "${profile.targetDescription || 'your request'}".`,
+            `Try: add a location, name a specific pain point, or narrow the niche.`,
             ``,
             getTavilyQuotaSummary(),
         ].join('\n');
     }
 
     const lines = [
-        `🎯 **Lead Search Complete**`,        `${totalSearched} businesses searched · Top ${leads.length} returned\n`,
+        `🎯 **Lead Search Complete**`,
+        `${totalSearched} businesses searched · Top ${leads.length} returned\n`,
         `**Target:** ${profile.targetDescription || 'As described'}\n`,
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     ];
@@ -1175,13 +1414,14 @@ async function generateFreeResponse(message, history, userProfile) {
         // ── Parse intent ──
         const intent = await parseLeadIntent(message, history, session.profile, apiKey);
 
-        if (intent) {            if (intent.isNewSearch && session.lastLeads.length > 0) session = resetSession(userId);
+        if (intent) {
+            if (intent.isNewSearch && session.lastLeads.length > 0) session = resetSession(userId);
 
             const p = session.profile;
             if (intent.targetDescription) p.targetDescription = intent.targetDescription;
             if (intent.industry)          p.industry          = intent.industry;
             if (intent.painPoint)         p.painPoint         = intent.painPoint;
-            if (intent.location)          p.location          = intent.location;            
+            if (intent.location)          p.location          = intent.location;
             if (intent.businessSize)      p.businessSize      = intent.businessSize;
             if (intent.budget)            p.budget            = intent.budget;
             session.lastSearchQueries = intent.searchQueries || [];
@@ -1219,18 +1459,19 @@ async function generateFreeResponse(message, history, userProfile) {
 
             return {
                 reply,
-                updatedHistory:  newHistory.slice(-12),
+                updatedHistory: newHistory.slice(-12),
                 researchReport,
                 emailDraft,
-                mode:            'research',
-                quotaStatus:     getTavilyQuotaSummary(),
-            };        }
+                mode:           'research',
+                quotaStatus:    getTavilyQuotaSummary(),
+            };
+        }
 
         // ══════════════════════════════════════════════════════════════════════
         // ROUTE B: LEAD SEARCH MODE (original behaviour — fully preserved)
         // ══════════════════════════════════════════════════════════════════════
         const rawResults  = await searchBusinessesOnline(session.lastSearchQueries, tavilyKey);
-        const topLeads    = await rankAndSelectTopLeads(rawResults, session.profile, apiKey);        
+        const topLeads    = await rankAndSelectTopLeads(rawResults, session.profile, apiKey);
         session.lastLeads = topLeads;
         session.phase     = 'complete';
 
@@ -1266,14 +1507,21 @@ function extractDomain(url) {
 function extractCompanyName(input) {
     if (!input) return 'Unknown Company';
     try {
-        // If it's a URL, pull the domain name and clean it up
         const hostname = new URL(input.startsWith('http') ? input : `https://${input}`).hostname;
         return hostname.replace('www.', '').split('.')[0]
             .replace(/-/g, ' ')
             .replace(/\b\w/g, c => c.toUpperCase());
     } catch {
-        // It's already a plain company name
-        return input.trim();    }
+        return input.trim();
+    }
 }
 
-module.exports = { generateFreeResponse, flagBadLead, flagBadContact, getFlagSummary }
+// ─── EXPORTS ───────────────────────────────────────────────────────────────────
+module.exports = {
+    generateFreeResponse,
+    flagBadLead,
+    flagBadContact,
+    getFlagSummary,
+    getFullCreditDashboard,
+    generateStructuredLeadJSON,
+};
