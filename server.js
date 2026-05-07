@@ -439,7 +439,8 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         if (message.userId.toString() !== req.userId) {
             return res.status(403).json({ message: 'Unauthorized' });
         }
-        // If clicking the same button again, toggle it off (optional UX)        if (message.feedback === type) {
+        // If clicking the same button again, toggle it off (optional UX)        
+        if (message.feedback === type) {
             message.feedback = null;
         } else {
             message.feedback = type;
