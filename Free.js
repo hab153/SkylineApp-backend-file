@@ -292,7 +292,8 @@ async function fetchCompanyNews(companyName, tavilyKey, openAiKey) {
 
         if (top5.length === 0) return [];
 
-        // Prepare snippets for GPT classification        const snippetsForGPT = top5.map((r, idx) => 
+        // Prepare snippets for GPT classification        
+        const snippetsForGPT = top5.map((r, idx) => 
             `ITEM ${idx}:\nTitle: ${r.title}\nSnippet: ${r.snippet}\nDate: ${r.date || 'Unknown'}`
         ).join('\n\n');
 
