@@ -47,7 +47,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
                 user.subscriptionEndDate = null;
                 await user.save();
                 console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
-            }                }        
+            }                        }        
         next();
     } catch (err) {
         console.error('Error checking subscription expiry:', err);
@@ -96,7 +96,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             if (!planType) {                
                 if (txRef.includes('_go_')) planType = 'go';                
                 else if (txRef.includes('_pro_')) planType = 'pro';
-                else planType = 'free';                        }
+                else planType = 'free';                                    }
 
             const user = await User.findOne({ lastTxRef: txRef });
             
@@ -145,14 +145,14 @@ const verifyToken = (req, res, next) => {
     try {        
         const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);        
-        req.userId = decoded.user.id;                next();
+        req.userId = decoded.user.id;                        next();
     } catch (err) {
         console.error('Token Verification Failed:', err.message);        
         return res.status(401).json({ message: 'Invalid token' });        
     }
 };
 
-// ── Daily Usage Limit Middleware (FIXED & ROBUST) ──
+// ── Daily Usage Limit Middleware (UPDATED: FREE = 30) ──
 const checkDailyLimit = async (req, res, next) => {
     try {
         // 1. Fetch Fresh User Data
@@ -168,7 +168,7 @@ const checkDailyLimit = async (req, res, next) => {
         }
 
         // 3. Define Limits Based on TIER
-        let limit = 4; // Free Limit
+        let limit = 30; // Free Limit (Updated from 4 to 30)
         if (user.subscriptionTier === 'go') limit = 18; 
         if (user.subscriptionTier === 'pro') limit = 40; 
 
@@ -194,7 +194,7 @@ const checkDailyLimit = async (req, res, next) => {
         }
 
         // 6. Increment and Save
-        user.usage.dailyCallCount += 1;        await user.save();
+        user.usage.dailyCallCount += 1;                await user.save();
 
         next(); // Proceed to the actual route
 
@@ -243,7 +243,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
             
             console.log(`✅ Verifying payment for user: ${userId}`);
 
-            // Determine plan type from txRef if not in meta            let planType = 'pro'; // Default fallback
+            // Determine plan type from txRef if not in meta                        let planType = 'pro'; // Default fallback
             if (tx_ref.includes('_go_')) planType = 'go';
             else if (tx_ref.includes('_pro_')) planType = 'pro';
 
@@ -292,7 +292,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
 
-        const vercelUrl = process.env.VERCEL_URL || 'https://skylineai-app.vercel.app';                 const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+        const vercelUrl = process.env.VERCEL_URL || 'https://skylineai-app.vercel.app';                         const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Save txRef to user BEFORE creating payment
         user.lastTxRef = txRef;
@@ -390,7 +390,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             }
         } 
         else {
-            // PRO PLAN uses BusinessAI (Existing Logic)            console.log("🔴 Routing to Pro/Business AI");
+            // PRO PLAN uses BusinessAI (Existing Logic)                        console.log("🔴 Routing to Pro/Business AI");
             const userProfile = {
                 fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
                 primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
@@ -439,8 +439,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         if (message.userId.toString() !== req.userId) {
             return res.status(403).json({ message: 'Unauthorized' });
         }
-        // If clicking the same button again, toggle it off (optional UX)
-        if (message.feedback === type) {
+        // If clicking the same button again, toggle it off (optional UX)        if (message.feedback === type) {
             message.feedback = null;
         } else {
             message.feedback = type;
@@ -488,8 +487,8 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
             userId: req.userId,
             sessionId: req.params.sessionId
         }).sort({ createdAt: 1 });        
-        res.json(messages);    } catch (error) {        
-        res.status(500).json({ message: 'Server Error fetching history' });
+        res.json(messages);    
+    } catch (error) {                res.status(500).json({ message: 'Server Error fetching history' });
     }
 });
 
@@ -537,8 +536,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         res.json({ 
             plan: result.reply, 
             audit: {}, 
-            sessionId: currentSessionId         });
-
+            sessionId: currentSessionId         
+        });
     } catch (error) {
         console.error('Dream analyze error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
@@ -586,8 +585,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: result.reply        }).save();
-
+            content: result.reply        
+        }).save();
         res.json({ 
             plan: result.reply, 
             audit: {}, 
@@ -636,8 +635,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 });
 
 // 7. Change Password
-app.put('/api/auth/change-password', verifyToken, async (req, res) => {    
-    const { currentPassword, newPassword } = req.body;
+app.put('/api/auth/change-password', verifyToken, async (req, res) => {        const { currentPassword, newPassword } = req.body;
 
     try {
         let user = await User.findById(req.userId);
@@ -685,8 +683,8 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
 
         const users = await User.find().select('-password');
         res.json(users);
-    } catch (err) {        console.error(err);
-        res.status(500).json({ message: 'Server Error' });
+    } catch (err) {        
+        console.error(err);        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -734,8 +732,8 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     }
 });
 
-app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {    try {
-        const admin = await User.findById(req.userId);
+app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {    
+    try {        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
 
         const targetUser = await User.findById(req.params.id).select('-password');
@@ -783,8 +781,8 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        const newReport = new Report({            userId: req.userId,
-            username: user.username,
+        const newReport = new Report({            
+            userId: req.userId,            username: user.username,
             subject,
             message
         });
@@ -832,8 +830,8 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
         });
         
         res.json({ count });
-    } catch (err) {        console.error(err);
-        res.status(500).json({ message: 'Server Error counting notifications' });
+    } catch (err) {        
+        console.error(err);        res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
 
