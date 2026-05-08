@@ -34,6 +34,12 @@ const app = express();
 app.use(cors());
 
 // ════════════════════════════════════════════
+//  IN-MEMORY STATE STORE (For Nylas Auth)
+// ════════════════════════════════════════════
+// Maps random state UUIDs to UserIds temporarily during OAuth flow
+const stateStore = {};
+
+// ════════════════════════════════════════════
 //  CHECK SUBSCRIPTION EXPIRY MIDDLEWARE
 // ════════════════════════════════════════════
 const checkSubscriptionExpiry = async (req, res, next) => {
@@ -41,13 +47,13 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
-        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();                        
+        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {            const now = new Date();                        
             const endDate = new Date(user.subscriptionEndDate);                        
             if (now > endDate) {
                 user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
-                await user.save();                console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
+                await user.save();
+                console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
             }                        
         }        
         next();
@@ -57,11 +63,14 @@ const checkSubscriptionExpiry = async (req, res, next) => {
     }
 };
 
+// ... [Keep all other middleware and routes exactly as they were] ...
+
 // ════════════════════════════════════════════
 //  WEBHOOK ROUTE - UPDATED FOR 3 TIERS
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    console.log("🔥 Webhook hit!");
+    // ... [Keep existing code] ...
+     console.log("🔥 Webhook hit!");
     
     const sig = req.headers['verif-hash'];
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
@@ -87,8 +96,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         }
 
         if (status === 'successful') {            
-            console.log(`✅ Payment successful for txRef: ${txRef}`);
-            if (!txRef) return res.status(400).send('Missing txRef');                        
+            console.log(`✅ Payment successful for txRef: ${txRef}`);            if (!txRef) return res.status(400).send('Missing txRef');                        
             
             if (!planType) {                
                 if (txRef.includes('_go_')) planType = 'go';                
@@ -137,8 +145,7 @@ const verifyToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
-    if (!token) return res.status(403).json({ message: 'No token provided' });    
-    try {        
+    if (!token) return res.status(403).json({ message: 'No token provided' });        try {        
         const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);        
         req.userId = decoded.user.id;                        
@@ -187,14 +194,11 @@ const checkDailyLimit = async (req, res, next) => {
         await user.save();
 
         next();
-
     } catch (err) {
         console.error('Error checking daily limit:', err);
         res.status(500).json({ message: 'Server Error checking usage limits' });
     }
 };
-
-// In server.js, replace the Nylas Routes section with this:
 
 // ════════════════════════════════════════════
 //  NYLAS AUTHENTICATION ROUTES (Month 2) - RENDER ONLY
@@ -204,7 +208,16 @@ const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/au
 
 // 1. Get the Connection URL
 app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const url = getAuthUrl(req.userId);
+    const userId = req.userId;
+    
+    // Generate a random state UUID
+    const randomState = uuidv4();
+    
+    // Store the mapping: State -> UserId
+    stateStore[randomState] = userId;
+    
+    // Pass the random state to nylasService
+    const url = getAuthUrl(randomState);
     res.json({ url });
 });
 
@@ -212,6 +225,17 @@ app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
 app.get('/api/auth/nylas/callback', async (req, res) => {
     const { code, state } = req.query; 
     
+    // Retrieve the UserId from our store using the state
+    const userId = stateStore[state];
+    
+    if (!userId) {
+        console.error('❌ Invalid or expired state received.');
+        return res.status(400).send('Invalid Session. Please try connecting again.');
+    }
+    
+    // Clean up the store to prevent reuse
+    delete stateStore[state];
+
     try {
         // 1. Exchange code for access token using V3 endpoint
         const tokenData = await axios.post('https://api.us.nylas.com/v3/connect/token', {
@@ -219,8 +243,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             client_secret: process.env.NYLAS_CLIENT_SECRET,
             grant_type: 'authorization_code',
             code: code,
-            redirect_uri: RENDER_CALLBACK_URL // Must match Nylas Dashboard
-        });
+            redirect_uri: RENDER_CALLBACK_URL // Must match Nylas Dashboard        });
 
         const accessToken = tokenData.data.access_token;
         
@@ -236,8 +259,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             emailAddress = grantsRes.data[0].email_address;
         }
 
-        // 3. Save to Database
-        await User.findByIdAndUpdate(state, { 
+        // 3. Save to Database using the retrieved userId
+        await User.findByIdAndUpdate(userId, { 
             'nylasIntegration.accessToken': accessToken,
             'nylasIntegration.emailAddress': emailAddress,
             'nylasIntegration.isConnected': true
@@ -253,6 +276,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     }
 });
 
+// ... [Keep all remaining routes (Flutterwave, Chat, Admin, etc.) exactly as they were] ...
+
 // ════════════════════════════════════════════
 //  FLUTTERWAVE PAYMENT ROUTES
 // ════════════════════════════════════════════
@@ -267,8 +292,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
             {
                 headers: {
                     Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
-                },
-            }
+                },            }
         );
 
         const data = response.data.data;        
@@ -317,8 +341,7 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
     } catch (err) {
         console.error('❌ Verification Error:', err.response?.data || err.message);
         res.status(500).json({ message: "Verification failed", error: err.message });
-    }
-});
+    }});
 
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     try {
@@ -367,8 +390,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         console.log(`💰 Creating payment for user ${user._id}, tx_ref: ${txRef}`);
 
         const response = await axios.post(`${process.env.FLUTTERWAVE_BASE_URL}/payments`, payload, {
-            headers: {
-                Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+            headers: {                Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
                 'Content-Type': 'application/json',
             },
         });
@@ -417,8 +439,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
                     // Simple email guesser for testing
                     email: `${name.toLowerCase().replace(/\s/g, '.')}@${company.toLowerCase()}.com`,
                     status: 'Queued',
-                    nextActionDate: new Date() // Run immediately in next engine cycle
-                });
+                    nextActionDate: new Date() // Run immediately in next engine cycle                });
                 await newLead.save();
 
                 return res.json({ 
@@ -467,8 +488,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             const userProfile = {
                 fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
                 primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
-                userId: user._id.toString()
-            };
+                userId: user._id.toString()            };
             const result = await requestQueue.enqueue(async () => {                
                 return await generateBusinessResponse(message, history || [], userProfile);
             });            
@@ -517,7 +537,6 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         if (!message) {
             return res.status(404).json({ message: 'Message not found' });
         }
-
         if (message.userId.toString() !== req.userId) {
             return res.status(403).json({ message: 'Unauthorized' });
         }
@@ -567,8 +586,7 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
             userId: req.userId,
             sessionId: req.params.sessionId
         }).sort({ createdAt: 1 });        
-        res.json(messages);    
-    } catch (error) {                
+        res.json(messages);        } catch (error) {                
         res.status(500).json({ message: 'Server Error fetching history' });
     }
 });
@@ -617,8 +635,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         });
     } catch (error) {
         console.error('Dream analyze error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
+        res.status(500).json({ message: error.message || 'Server Error' });    }
 });
 
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
@@ -667,8 +684,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
         });
 
     } catch (error) {
-        console.error('Plan refinement error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
+        console.error('Plan refinement error:', error);        res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
@@ -717,8 +733,7 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         if (newPassword.length < 8)
             return res.status(400).json({ message: 'New password must be at least 8 characters' });
         const salt = await bcrypt.genSalt(10);
-        user.password = await bcrypt.hash(newPassword, salt);
-        await user.save();
+        user.password = await bcrypt.hash(newPassword, salt);        await user.save();
 
         res.json({ message: 'Password updated successfully' });    } catch (err) {
         console.error(err.message);
@@ -767,8 +782,7 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         await targetUser.save();
         res.json({ message: 'Status updated' });
     } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+        res.status(500).json({ message: 'Server Error' });    }
 });
 app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    
     try {
@@ -817,7 +831,6 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
-
         const targetUser = await User.findById(req.params.id);        if (!targetUser) return res.status(404).json({ message: 'User not found' });        
         const newMessage = new Message({
             userId: req.params.id,
@@ -867,8 +880,7 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
         const reports = await Report.find().sort({ createdAt: -1 });
         res.json(reports);
     } catch (err) {
-        res.status(500).json({ message: 'Server Error' });            }
-});
+        res.status(500).json({ message: 'Server Error' });            }});
 
 // ════════════════════════════════════════════
 //  NOTIFICATION ROUTES (USER)
@@ -917,8 +929,7 @@ const scheduleExpiryCheck = async () => {
         if (result.modifiedCount > 0) {
             console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
         }        } catch (err) {
-        console.error('Error in expiry check:', err);
-    }
+        console.error('Error in expiry check:', err);    }
 };
 
 // Run expiry check on startup and every 24 hours
