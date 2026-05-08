@@ -1,7 +1,8 @@
 // nylasService.js
 const axios = require('axios');
 
-const NYLAS_API_BASE = 'https://api.nylas.com'; // Use https://api.us.nylas.com if you are on the US region
+// Use api.us.nylas.com if you are on the US region, otherwise api.nylas.com
+const NYLAS_API_BASE = process.env.NYLAS_API_URI || 'https://api.us.nylas.com'; 
 
 /**
  * Generates the URL for the user to connect their email.
@@ -10,8 +11,9 @@ function getAuthUrl(userId) {
     const clientId = process.env.NYLAS_CLIENT_ID;
     const redirectUri = 'https://skylineai-app.vercel.app/api/auth/nylas/callback';
     
-    // Nylas OAuth2 URL structure
-    return `${NYLAS_API_BASE}/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&login_hint=${userId}`;
+    // Nylas V3 OAuth2 URL structure
+    // Note: Nylas V3 uses 'login_hint' to pre-fill the email if known, but it's optional
+    return `${NYLAS_API_BASE}/v3/connect/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=email.read_only,email.send&login_hint=${userId}`;
 }
 
 /**
@@ -19,7 +21,7 @@ function getAuthUrl(userId) {
  */
 async function exchangeCodeForToken(code) {
     try {
-        const response = await axios.post(`${NYLAS_API_BASE}/oauth/token`, {
+        const response = await axios.post(`${NYLAS_API_BASE}/v3/connect/token`, {
             client_id: process.env.NYLAS_CLIENT_ID,
             client_secret: process.env.NYLAS_CLIENT_SECRET,
             grant_type: 'authorization_code',
@@ -38,12 +40,20 @@ async function exchangeCodeForToken(code) {
  */
 async function getUserEmail(accessToken) {
     try {
-        const response = await axios.get(`${NYLAS_API_BASE}/account`, {
+        // In V3, we get account info from the /v3/grants endpoint or by decoding the token
+        // For simplicity, we'll use the V3 grants endpoint which lists connected accounts
+        const response = await axios.get(`${NYLAS_API_BASE}/v3/grants`, {
             headers: {
-                'Authorization': `Bearer ${accessToken}`
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
             }
         });
-        return response.data.email_address;
+        
+        // The first grant is usually the one we just created
+        if (response.data && response.data.length > 0) {
+            return response.data[0].email_address;
+        }
+        throw new Error('No grants found');
     } catch (error) {
         console.error('❌ Get Account Error:', error.response ? error.response.data : error.message);
         throw error;
@@ -52,16 +62,11 @@ async function getUserEmail(accessToken) {
 
 /**
  * Sends an email on behalf of the connected user.
- * @param {string} accessToken - The user's Nylas access token (Grant ID in v3, but we use token for v2 compatibility here)
- * @param {string} to - Recipient email
- * @param {string} subject - Email subject
- * @param {string} body - Email body
  */
 async function sendEmail(accessToken, to, subject, body) {
     try {
-        // Note: This endpoint structure is for Nylas V2. If you are using V3, the endpoint is /v3/grants/{grant_id}/messages/send
-        // For maximum compatibility with your current setup, we assume V2 style token usage.
-        const response = await axios.post(`${NYLAS_API_BASE}/send`, {
+        // Nylas V3 Send Endpoint
+        const response = await axios.post(`${NYLAS_API_BASE}/v3/grants/me/messages/send`, {
             to: [{ email: to }],
             subject: subject,
             body: body
