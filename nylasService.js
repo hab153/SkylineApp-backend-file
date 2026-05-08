@@ -9,12 +9,13 @@ const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/au
 
 /**
  * Generates the URL for the user to connect their email.
+ * @param {string} state - A unique random string to track the session
  */
-function getAuthUrl(userId) {
+function getAuthUrl(state) {
     const clientId = process.env.NYLAS_CLIENT_ID;
     
-    // Use the Render Callback URL
-    return `${NYLAS_API_BASE}/v3/connect/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(RENDER_CALLBACK_URL)}&response_type=code&scope=email.read_only,email.send`;
+    // Include the state parameter in the URL
+    return `${NYLAS_API_BASE}/v3/connect/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(RENDER_CALLBACK_URL)}&response_type=code&scope=email.read_only,email.send&state=${state}`;
 }
 
 /**
