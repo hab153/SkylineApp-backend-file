@@ -1,5 +1,5 @@
 // nylasService.js
-const Nylas = require("nylas");
+const { Nylas } = require("nylas");
 
 const nylas = new Nylas({
     apiKey: process.env.NYLAS_API_KEY,
