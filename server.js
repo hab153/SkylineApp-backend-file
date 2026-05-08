@@ -145,7 +145,7 @@ const verifyToken = (req, res, next) => {
         next();
     } catch (err) {
         console.error('Token Verification Failed:', err.message);        
-        return res.status(401).json({ message: 'Invalid token' });            }
+        return res.status(401).json({ message: 'Invalid token' });                }
 };
 
 // ── Daily Usage Limit Middleware (UPDATED: FREE = 30) ──
@@ -407,9 +407,39 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const plan = user.subscriptionTier || 'free';    
     
     try {
+        // --- MONTH 2: CHECK FOR SEQUENCE COMMAND ---
+        if (message.startsWith('START_SEQUENCE')) {
+            // Extract lead info (Simple parsing: "START_SEQUENCE for: Name at Company")
+            const leadInfo = message.replace('START_SEQUENCE for:', '').trim();
+            const parts = leadInfo.split(' at ');
+            
+            if (parts.length >= 2) {
+                const name = parts[0].trim();
+                const company = parts[1].trim();
+
+                // Create a new Lead in the Database
+                const newLead = new Lead({
+                    userId: userId,
+                    name: name,
+                    company: company,
+                    // Simple email guesser for testing
+                    email: `${name.toLowerCase().replace(/\s/g, '.')}@${company.toLowerCase()}.com`,
+                    status: 'Queued',
+                    nextActionDate: new Date() // Run immediately in next engine cycle
+                });
+                await newLead.save();
+
+                return res.json({ 
+                    reply: `✅ Sequence Initiated for ${name} at ${company}. The engine will pick this up shortly.`,
+                    sessionId: currentSessionId,
+                    history: [...(history || []), { role: 'user', content: message }, { role: 'assistant', content: `✅ Sequence Initiated for ${name} at ${company}.` }]
+                });
+            }
+        }
+        // -------------------------------------------
+
         await new Message({
-            userId,
-            sessionId: currentSessionId,
+            userId,            sessionId: currentSessionId,
             role: 'user',
             content: message,
             title: message.substring(0, 30) + '...'
@@ -439,7 +469,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
                 console.error("❌ Go AI Route Error:", goError);
                 aiReply = "⚠️ Go AI Service is currently unavailable.";
             }
-        }         else {
+        } 
+        else {
             console.log("🔴 Routing to Pro/Business AI");
             const userProfile = {
                 fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
@@ -457,8 +488,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             userId,
             sessionId: currentSessionId,
             role: 'ai',
-            content: aiReply        
-        }).save();
+            content: aiReply                }).save();
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
     } catch (error) {
         console.error('Chat route error:', error);
@@ -488,7 +518,8 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         }
         
         if (message.feedback === type) {
-            message.feedback = null;        } else {
+            message.feedback = null;
+        } else {
             message.feedback = type;
         }
         
@@ -506,8 +537,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
 //  OTHER PROTECTED API ROUTES
 // ════════════════════════════════════════════
 
-app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {        
+app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {    try {        
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
             { $sort: { createdAt: -1 } },
@@ -537,6 +567,7 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
         res.status(500).json({ message: 'Server Error fetching history' });
     }
 });
+
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    
     const { dream, sessionId } = req.body;
     const userId = req.userId;
@@ -555,8 +586,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 
         const user = await User.findById(userId);        
         const userProfile = {
-            fullName:    user.fullName,
-            country:     user.country,
+            fullName:    user.fullName,            country:     user.country,
             skillLevel:  user.skillLevel,            
             primaryGoal: user.primaryGoal,
             interests:   user.interests,
@@ -586,7 +616,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
     }
 });
 
-app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;    
+app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
+    const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;    
     const userId = req.userId;    
     
     if (!followUpAnswer || !dreamDescription) {
@@ -604,8 +635,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
             content: followUpAnswer        
         }).save();
 
-        const user = await User.findById(userId);
-        const userProfile = {
+        const user = await User.findById(userId);        const userProfile = {
             fullName:    user.fullName,
             country:     user.country,
             skillLevel:  user.skillLevel,
@@ -636,6 +666,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
+
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const user = await User.findById(req.userId).select('-password');
@@ -653,7 +684,6 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-
         if (fullName)       user.fullName       = fullName;
         if (primaryGoal)    user.primaryGoal    = primaryGoal;        
         if (skillLevel)     user.skillLevel     = skillLevel;
@@ -684,6 +714,7 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
+
         res.json({ message: 'Password updated successfully' });
     } catch (err) {
         console.error(err.message);
@@ -703,7 +734,6 @@ app.delete('/api/users/me', verifyToken, async (req, res) => {
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
-
 app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
@@ -733,7 +763,8 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         res.json({ message: 'Status updated' });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
-    }});
+    }
+});
 
 app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    
     try {
@@ -752,7 +783,6 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-
         const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, history: messages });
     } catch (err) {
@@ -782,6 +812,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
+
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });        
         const newMessage = new Message({
@@ -800,8 +831,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
     }
 });
 
-// ════════════════════════════════════════════
-//  REPORT ROUTES
+// ════════════════════════════════════════════//  REPORT ROUTES
 // ════════════════════════════════════════════
 
 app.post('/api/reports', verifyToken, async (req, res) => {
@@ -831,7 +861,8 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
 
         const reports = await Report.find().sort({ createdAt: -1 });
         res.json(reports);
-    } catch (err) {        res.status(500).json({ message: 'Server Error' });        
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });        
     }
 });
 
@@ -850,7 +881,6 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error fetching notifications' });
     }
 });
-
 app.get('/api/notifications/count', verifyToken, async (req, res) => {    
     try {        
         const count = await Message.countDocuments({ 
@@ -880,7 +910,8 @@ const scheduleExpiryCheck = async () => {
             }
         );
         if (result.modifiedCount > 0) {
-            console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);        }    
+            console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
+        }    
     } catch (err) {
         console.error('Error in expiry check:', err);
     }
@@ -898,7 +929,6 @@ setTimeout(() => {
 require('./sequenceEngine');
 
 // ════════════════════════════════════════════
-const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 5001;app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
