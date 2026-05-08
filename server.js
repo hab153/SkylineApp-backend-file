@@ -194,8 +194,13 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 
-// ════════════════════════════════════════════//  NYLAS AUTHENTICATION ROUTES (Month 2)
+// In server.js, replace the Nylas Routes section with this:
+
 // ════════════════════════════════════════════
+//  NYLAS AUTHENTICATION ROUTES (Month 2) - RENDER ONLY
+// ════════════════════════════════════════════
+
+const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/auth/nylas/callback';
 
 // 1. Get the Connection URL
 app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
@@ -203,7 +208,7 @@ app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
     res.json({ url });
 });
 
-// 2. Handle the Callback (When user finishes connecting) - TEST REDIRECT TO INDEX.HTML
+// 2. Handle the Callback (When user finishes connecting)
 app.get('/api/auth/nylas/callback', async (req, res) => {
     const { code, state } = req.query; 
     
@@ -214,7 +219,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             client_secret: process.env.NYLAS_CLIENT_SECRET,
             grant_type: 'authorization_code',
             code: code,
-            redirect_uri: 'https://skylineai-app.vercel.app/api/auth/nylas/callback'
+            redirect_uri: RENDER_CALLBACK_URL // Must match Nylas Dashboard
         });
 
         const accessToken = tokenData.data.access_token;
@@ -238,31 +243,13 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             'nylasIntegration.isConnected': true
         });
 
-        console.log("✅ Nylas Connection Successful. Redirecting to index.html for test.");
-        // Redirect to index.html specifically for testing
-        res.redirect('https://skylineai-app.vercel.app/index.html?connected=true');
+        console.log("✅ Nylas Connection Successful. Redirecting to dashboard.html.");
+        
+        // 4. Redirect to Frontend (Vercel) after saving on Backend (Render)
+        res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
     } catch (err) {
         console.error('❌ Nylas Callback Error:', err.response ? err.response.data : err.message);
-        res.status(500).send('Connection Failed: ' + (err.response ? err.response.data.error : err.message));    }
-});
-
-// 3. Inbound Email Webhook (The Inbox Brain)
-app.post('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
-    try {
-        const payload = req.body;
-        // Nylas webhook structure varies, but usually contains 'from' and 'body'
-        const userEmail = payload.from ? payload.from[0].email : null; 
-        const bodyText = payload.body || payload.text;
-
-        if (userEmail && bodyText) {
-            // Fire and forget - don't block the webhook response
-            handleIncomingReply(userEmail, bodyText);
-        }
-        
-        res.status(200).send('Received');
-    } catch (err) {
-        console.error('❌ Webhook Error:', err);
-        res.status(500).send('Error');
+        res.status(500).send('Connection Failed: ' + (err.response ? err.response.data.error : err.message));
     }
 });
 
