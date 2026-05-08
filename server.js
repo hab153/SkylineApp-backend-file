@@ -440,7 +440,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
                     // Simple email guesser for testing
                     email: `${name.toLowerCase().replace(/\s/g, '.')}@${company.toLowerCase()}.com`,
                     status: 'Queued',
-                    nextActionDate: new Date() // Run immediately in next engine cycle                });
+                    nextActionDate: new Date() // Run immediately in next engine cycle                
+                });
                 await newLead.save();
 
                 return res.json({ 
