@@ -47,8 +47,7 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    // --- ADMIN SECURITY FIELDS ---        
-    isAdmin: {
+    // --- ADMIN SECURITY FIELDS ---            isAdmin: {
         type: Boolean,
         default: false
     },
@@ -71,10 +70,8 @@ const UserSchema = new mongoose.Schema({
             type: Date,
             default: null
         },
-        // ADDED FOR IMAGE UPLOAD LIMITS:
         dailyImageCount: { type: Number, default: 0 },
         lastImageUploadDate: { type: Date, default: null },
-        // ADDED FOR FILE UPLOAD LIMITS:
         dailyFileCount: { type: Number, default: 0 },
         lastFileUploadDate: { type: Date, default: null }
     },
@@ -82,7 +79,7 @@ const UserSchema = new mongoose.Schema({
     // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
     subscriptionTier: {
         type: String,
-        enum: ['free', 'go', 'pro'], // Added 'go'
+        enum: ['free', 'go', 'pro'],
         default: 'free'
     },
     subscriptionEndDate: {
@@ -90,20 +87,27 @@ const UserSchema = new mongoose.Schema({
         default: null
     },
     
-    // --- PAYMENT FIELDS (NEW) ---
+    // --- PAYMENT FIELDS ---
     lastTxRef: {
         type: String,
         default: null,
-        index: true  // Add index for faster lookups
+        index: true
     },
     
-    // Optional: Track payment history    
     paymentHistory: [{
         txRef: { type: String, required: true },
         amount: { type: Number, required: true },        currency: { type: String, default: 'USD' },
-        status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },        paidAt: { type: Date, default: Date.now },
+        status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },
+        paidAt: { type: Date, default: Date.now },
         subscriptionEndDate: { type: Date }
     }],
+
+    // --- NYLAS EMAIL INTEGRATION (Month 2) ---
+    nylasIntegration: {
+        accessToken: { type: String, default: null },
+        emailAddress: { type: String, default: null },
+        isConnected: { type: Boolean, default: false }
+    },
 
     createdAt: {
         type: Date,
@@ -141,14 +145,16 @@ UserSchema.methods.downgradeIfExpired = async function() {
         this.subscriptionTier = 'free';
         this.subscriptionEndDate = null;
         await this.save();
-        return true;
-    }
+        return true;    }
     return false;
 };
 
 // Method to upgrade to pro
-UserSchema.methods.upgradeToPro = async function(days = 30) {    this.subscriptionTier = 'pro';
-    this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);    await this.save();    return this;
+UserSchema.methods.upgradeToPro = async function(days = 30) {    
+    this.subscriptionTier = 'pro';
+    this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);    
+    await this.save();    
+    return this;
 };
 
 // Method to add payment record
