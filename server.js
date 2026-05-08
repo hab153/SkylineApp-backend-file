@@ -243,7 +243,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             client_secret: process.env.NYLAS_CLIENT_SECRET,
             grant_type: 'authorization_code',
             code: code,
-            redirect_uri: RENDER_CALLBACK_URL // Must match Nylas Dashboard        });
+            redirect_uri: RENDER_CALLBACK_URL // Must match Nylas Dashboard        
+        });
 
         const accessToken = tokenData.data.access_token;
         
