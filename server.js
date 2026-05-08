@@ -243,7 +243,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     }
 });
 
-// 3. Inbound Email Webhook (The Inbox Brain)app.post('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
+// 3. Inbound Email Webhook (The Inbox Brain)
+app.post('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     try {
         const payload = req.body;
         // Nylas webhook structure varies, but usually contains 'from' and 'body'
