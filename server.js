@@ -204,7 +204,6 @@ app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
 });
 
 // 2. Handle the Callback (When user finishes connecting)
-// Note: This assumes you have a helper in nylasService or you handle the token exchange here via Axios
 app.get('/api/auth/nylas/callback', async (req, res) => {
     const { code, state } = req.query; 
     
@@ -244,11 +243,9 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // 3. Inbound Email Webhook (The Inbox Brain)
-app.post('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
-    try {
+app.post('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {    try {
         const payload = req.body;
         // Nylas webhook structure varies, but usually contains 'from' and 'body'
-        // Note: You may need to adjust this based on the exact Nylas webhook payload structure
         const userEmail = payload.from ? payload.from[0].email : null; 
         const bodyText = payload.body || payload.text;
 
@@ -293,9 +290,9 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                 if (user) {
                     userId = user._id;
                 }            
-            }            
-            if (!userId) {
-                console.error("❌ No userId found in verification response and no user found by txRef");
+            }
+            
+            if (!userId) {                console.error("❌ No userId found in verification response and no user found by txRef");
                 return res.status(400).json({ success: false, message: "No userId found" });
             }
             
@@ -342,9 +339,9 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         if (planType === 'go') {
             amount = 9; 
             planName = 'Skyline AA-1 GO Plan';
-        } else if (planType === 'pro') {            amount = 20; 
-            planName = 'Skyline AA-1 PRO Plan';
-        } else {
+        } else if (planType === 'pro') {
+            amount = 20; 
+            planName = 'Skyline AA-1 PRO Plan';        } else {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
 
@@ -391,9 +388,9 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             console.error('❌ Failed to initialize payment:', response.data);            
             res.status(400).json({ message: 'Failed to initialize payment', error: response.data });
         }    
-    } catch (error) {        console.error('❌ Flutterwave Error:', error.response ? error.response.data : error.message);
-        res.status(500).json({ message: 'Server Error initializing payment' });
-    }
+    } catch (error) {
+        console.error('❌ Flutterwave Error:', error.response ? error.response.data : error.message);
+        res.status(500).json({ message: 'Server Error initializing payment' });    }
 });
 
 // ════════════════════════════════════════════
@@ -440,9 +437,9 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
                 }
             } catch (goError) {
                 console.error("❌ Go AI Route Error:", goError);
-                aiReply = "⚠️ Go AI Service is currently unavailable.";            }
-        } 
-        else {
+                aiReply = "⚠️ Go AI Service is currently unavailable.";
+            }
+        }         else {
             console.log("🔴 Routing to Pro/Business AI");
             const userProfile = {
                 fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
@@ -489,9 +486,9 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         if (message.userId.toString() !== req.userId) {
             return res.status(403).json({ message: 'Unauthorized' });
         }
-                if (message.feedback === type) {
-            message.feedback = null;
-        } else {
+        
+        if (message.feedback === type) {
+            message.feedback = null;        } else {
             message.feedback = type;
         }
         
@@ -538,8 +535,8 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
         res.json(messages);    
     } catch (error) {                
         res.status(500).json({ message: 'Server Error fetching history' });
-    }});
-
+    }
+});
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    
     const { dream, sessionId } = req.body;
     const userId = req.userId;
@@ -588,8 +585,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
-app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;    
+
+app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;    
     const userId = req.userId;    
     
     if (!followUpAnswer || !dreamDescription) {
@@ -636,9 +633,9 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 
     } catch (error) {
         console.error('Plan refinement error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });    }
+        res.status(500).json({ message: error.message || 'Server Error' });
+    }
 });
-
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const user = await User.findById(req.userId).select('-password');
@@ -685,8 +682,8 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         if (newPassword.length < 8)
             return res.status(400).json({ message: 'New password must be at least 8 characters' });
         const salt = await bcrypt.genSalt(10);
-        user.password = await bcrypt.hash(newPassword, salt);        await user.save();
-
+        user.password = await bcrypt.hash(newPassword, salt);
+        await user.save();
         res.json({ message: 'Password updated successfully' });
     } catch (err) {
         console.error(err.message);
@@ -734,9 +731,9 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
 
         await targetUser.save();
         res.json({ message: 'Status updated' });
-    } catch (err) {        res.status(500).json({ message: 'Server Error' });
-    }
-});
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });
+    }});
 
 app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    
     try {
@@ -783,8 +780,8 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const { messageContent } = req.body;        if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
-
+        const { messageContent } = req.body;
+        if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });        
         const newMessage = new Message({
@@ -832,9 +829,9 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
 
-        const reports = await Report.find().sort({ createdAt: -1 });        res.json(reports);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });        
+        const reports = await Report.find().sort({ createdAt: -1 });
+        res.json(reports);
+    } catch (err) {        res.status(500).json({ message: 'Server Error' });        
     }
 });
 
@@ -881,9 +878,9 @@ const scheduleExpiryCheck = async () => {
                 subscriptionTier: 'free',
                 subscriptionEndDate: null
             }
-        );        if (result.modifiedCount > 0) {
-            console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
-        }    
+        );
+        if (result.modifiedCount > 0) {
+            console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);        }    
     } catch (err) {
         console.error('Error in expiry check:', err);
     }
