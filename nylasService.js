@@ -12,8 +12,8 @@ function getAuthUrl(userId) {
     const redirectUri = 'https://skylineai-app.vercel.app/api/auth/nylas/callback';
     
     // Nylas V3 OAuth2 URL structure
-    // Note: Nylas V3 uses 'login_hint' to pre-fill the email if known, but it's optional
-    return `${NYLAS_API_BASE}/v3/connect/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=email.read_only,email.send&login_hint=${userId}`;
+    // Removed login_hint to prevent 400 errors if userId is not an email
+    return `${NYLAS_API_BASE}/v3/connect/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=email.read_only,email.send`;
 }
 
 /**
@@ -40,8 +40,7 @@ async function exchangeCodeForToken(code) {
  */
 async function getUserEmail(accessToken) {
     try {
-        // In V3, we get account info from the /v3/grants endpoint or by decoding the token
-        // For simplicity, we'll use the V3 grants endpoint which lists connected accounts
+        // In V3, we get account info from the /v3/grants endpoint
         const response = await axios.get(`${NYLAS_API_BASE}/v3/grants`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
