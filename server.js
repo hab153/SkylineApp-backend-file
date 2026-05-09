@@ -325,9 +325,9 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK (WITH SIGNATURE VERIFICATION)
+//  INBOUND EMAIL WEBHOOK (FIXED SIGNATURE VERIFICATION)
 // ════════════════════════════════════════════
-app.all('/api/webhooks/inbound-email', async (req, res) => {
+app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     
     // 1. HANDLE NYLAS VERIFICATION CHALLENGE (GET Request)
     if (req.method === 'GET') {
@@ -341,26 +341,37 @@ app.all('/api/webhooks/inbound-email', async (req, res) => {
 
     // 2. HANDLE INCOMING EMAILS (POST Request)
     if (req.method === 'POST') {
-        try {            // --- SECURITY CHECK: Verify Nylas Signature ---
+        try {
             const signature = req.headers['x-nylas-signature'];
             const secret = process.env.NYLAS_WEBHOOK_SECRET;
 
+            // Parse the raw body into JSON for our use
+            let payload;
+            try {
+                payload = JSON.parse(req.body.toString());
+            } catch (e) {
+                console.error('❌ [WEBHOOK] Failed to parse JSON body');
+                return res.status(400).send('Invalid JSON');
+            }
+
+            // --- SECURITY CHECK: Verify Nylas Signature ---
             if (signature && secret) {
+                const crypto = require('crypto');
                 const hmac = crypto.createHmac('sha256', secret);
-                const digest = hmac.update(JSON.stringify(req.body)).digest('hex');
+                // Use the RAW body buffer for hashing, not the parsed object
+                hmac.update(req.body); 
+                const digest = hmac.digest('hex');
                 
                 if (signature !== digest) {
                     console.warn('⚠️ [WEBHOOK] Invalid signature detected. Request rejected.');
+                    console.log(`[DEBUG] Expected: ${digest}, Received: ${signature}`);
                     return res.status(401).send('Invalid Signature');
                 }
             } else {
-                console.warn('⚠️ [WEBHOOK] No signature or secret found. Skipping verification (Dev Mode).');
+                console.warn('⚠️ [WEBHOOK] No signature or secret found. Skipping verification.');
             }
             // -----------------------------------------------
 
-            const payload = req.body;
-            
-            // Extract sender info from Nylas V3 Webhook
             const fromEmail = payload.from ? payload.from[0].email : null;
             const subject = payload.subject || '';
             const bodyText = payload.body || payload.text_plain || '';
@@ -369,20 +380,15 @@ app.all('/api/webhooks/inbound-email', async (req, res) => {
 
             console.log(`📨 [WEBHOOK] Reply received from: ${fromEmail}`);
 
-            // Find the Lead who owns this email address
             const lead = await Lead.findOne({ email: fromEmail });
 
             if (lead) {
-                // Update Lead Status to Replied
                 lead.status = 'Replied';
-                
-                // Save the reply to history
                 lead.replies.push({
                     date: new Date(),
                     content: bodyText,
                     from: 'lead' 
                 });
-                
                 await lead.save();
                 console.log(`✅ [WEBHOOK] Saved reply for Lead: ${lead.name}`);
             } else {
@@ -390,7 +396,8 @@ app.all('/api/webhooks/inbound-email', async (req, res) => {
             }
 
             return res.status(200).send('OK');
-        } catch (err) {            console.error('❌ [WEBHOOK] Error:', err.message);
+        } catch (err) {
+            console.error('❌ [WEBHOOK] Error:', err.message);
             return res.status(500).send('Error');
         }
     }
