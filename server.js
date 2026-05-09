@@ -17,8 +17,6 @@ const { generateBusinessResponse } = require('./businessAI');
 const Lead = require('./Lead');
 // Import sendEmail along with other nylas functions
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
-// We no longer need handleIncomingReply if we handle it directly here for Leads
-// const { handleIncomingReply } = require('./replyHandler'); 
 
 const authRoutes = require('./authRoutes');
 const Message = require('./Message');
@@ -47,9 +45,9 @@ const checkSubscriptionExpiry = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-                if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();
-            const endDate = new Date(user.subscriptionEndDate);
+        
+        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
+            const now = new Date();            const endDate = new Date(user.subscriptionEndDate);
             if (now > endDate) {
                 user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
@@ -96,9 +94,9 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             console.log(`✅ Payment successful for txRef: ${txRef}`);
             if (!txRef) return res.status(400).send('Missing txRef');
             
-            if (!planType) {                if (txRef.includes('_go_')) planType = 'go';
-                else if (txRef.includes('_pro_')) planType = 'pro';
-                else planType = 'free';
+            if (!planType) {
+                if (txRef.includes('_go_')) planType = 'go';
+                else if (txRef.includes('_pro_')) planType = 'pro';                else planType = 'free';
             }
 
             const user = await User.findOne({ lastTxRef: txRef });
@@ -145,9 +143,9 @@ const verifyToken = (req, res, next) => {
     try {
         const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);
-        req.userId = decoded.user.id;        next();
-    } catch (err) {
-        console.error('Token Verification Failed:', err.message);
+        req.userId = decoded.user.id;
+        next();
+    } catch (err) {        console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });
     }
 };
@@ -194,9 +192,9 @@ const checkDailyLimit = async (req, res, next) => {
 //  NYLAS AUTHENTICATION ROUTES
 // ════════════════════════════════════════════
 
-app.get('/api/auth/nylas/url', verifyToken, (req, res) => {    const userId = req.userId;
-    const randomState = uuidv4();
-    stateStore[randomState] = userId;
+app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
+    const userId = req.userId;
+    const randomState = uuidv4();    stateStore[randomState] = userId;
     
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
 
@@ -245,8 +243,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
     } catch (err) {
         console.error(`❌ Nylas Callback Error: ${err.message}`);
-        res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);
-    }
+        res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);    }
 });
 
 // ════════════════════════════════════════════
@@ -292,10 +289,10 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     });
                 }
                 await lead.save();
+
                 if (leadData.messages && leadData.messages.length > 0) {
                     const result = await sendEmail(
-                        accessToken, 
-                        leadData.email, 
+                        accessToken,                         leadData.email, 
                         leadData.messages[0].subject, 
                         leadData.messages[0].body
                     );
@@ -327,45 +324,61 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK (UPDATED FOR LEADS)
+//  INBOUND EMAIL WEBHOOK (UPDATED FOR NYLAS VERIFICATION)
 // ════════════════════════════════════════════
-app.post('/api/webhooks/inbound-email', express.json(), async (req, res) => {
-    try {
-        const payload = req.body;
-        
-        // Extract sender info from Nylas V3 Webhook
-        const fromEmail = payload.from ? payload.from[0].email : null;
-        const subject = payload.subject || '';
-        const bodyText = payload.body || payload.text_plain || '';
-
-        if (!fromEmail) return res.status(200).send('OK');
-
-        console.log(`📨 [WEBHOOK] Reply received from: ${fromEmail}`);
-        // Find the Lead who owns this email address
-        const lead = await Lead.findOne({ email: fromEmail });
-
-        if (lead) {
-            // Update Lead Status to Replied
-            lead.status = 'Replied';
-            
-            // Save the reply to history
-            lead.replies.push({
-                date: new Date(),
-                content: bodyText,
-                from: 'lead' // Mark as coming from the lead
-            });
-            
-            await lead.save();
-            console.log(`✅ [WEBHOOK] Saved reply for Lead: ${lead.name}`);
-        } else {
-            console.warn(`⚠️ [WEBHOOK] No lead found for email: ${fromEmail}`);
+app.all('/api/webhooks/inbound-email', async (req, res) => {
+    
+    // 1. HANDLE NYLAS VERIFICATION CHALLENGE (GET Request)
+    if (req.method === 'GET') {
+        const challenge = req.query.challenge;
+        console.log(`🔔 [WEBHOOK] Verification challenge received: ${challenge}`);
+        if (challenge) {
+            return res.status(200).send(challenge); // Return plain text, no JSON
         }
-
-        res.status(200).send('OK');
-    } catch (err) {
-        console.error('❌ [WEBHOOK] Error:', err.message);
-        res.status(500).send('Error');
+        return res.status(400).send('No challenge provided');
     }
+
+    // 2. HANDLE INCOMING EMAILS (POST Request)
+    if (req.method === 'POST') {
+        try {
+            const payload = req.body;            
+            // Extract sender info from Nylas V3 Webhook
+            const fromEmail = payload.from ? payload.from[0].email : null;
+            const subject = payload.subject || '';
+            const bodyText = payload.body || payload.text_plain || '';
+
+            if (!fromEmail) return res.status(200).send('OK');
+
+            console.log(`📨 [WEBHOOK] Reply received from: ${fromEmail}`);
+
+            // Find the Lead who owns this email address
+            const lead = await Lead.findOne({ email: fromEmail });
+
+            if (lead) {
+                // Update Lead Status to Replied
+                lead.status = 'Replied';
+                
+                // Save the reply to history
+                lead.replies.push({
+                    date: new Date(),
+                    content: bodyText,
+                    from: 'lead' // Mark as coming from the lead
+                });
+                
+                await lead.save();
+                console.log(`✅ [WEBHOOK] Saved reply for Lead: ${lead.name}`);
+            } else {
+                console.warn(`⚠️ [WEBHOOK] No lead found for email: ${fromEmail}`);
+            }
+
+            return res.status(200).send('OK');
+        } catch (err) {
+            console.error('❌ [WEBHOOK] Error:', err.message);
+            return res.status(500).send('Error');
+        }
+    }
+
+    res.status(405).send('Method Not Allowed');
 });
 
 // ════════════════════════════════════════════
@@ -378,7 +391,6 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
             userId: req.userId, 
             status: 'Replied' 
         }).sort({ lastContactDate: -1 });
-
         res.json({ 
             count: repliedLeads.length,
             leads: repliedLeads 
@@ -390,7 +402,8 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  CHAT ROUTE (THE AI ROUTER)// ════════════════════════════════════════════
+//  CHAT ROUTE (THE AI ROUTER)
+// ════════════════════════════════════════════
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { message, history, sessionId } = req.body;
     const userId = req.userId;
@@ -426,8 +439,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         } 
         else {
             const userProfile = {
-                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
+                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
                 userId: user._id.toString()
             };
             const result = await requestQueue.enqueue(async () => {
@@ -439,7 +451,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
 
         await new Message({
             userId,
-            sessionId: currentSessionId,            role: 'ai',
+            sessionId: currentSessionId,
+            role: 'ai',
             content: aiReply
         }).save();
 
@@ -475,8 +488,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid feedback data' });
         }
         const message = await Message.findById(messageId);
-        if (!message) return res.status(404).json({ message: 'Message not found' });
-        if (message.userId.toString() !== req.userId) {
+        if (!message) return res.status(404).json({ message: 'Message not found' });        if (message.userId.toString() !== req.userId) {
             return res.status(403).json({ message: 'Unauthorized' });
         }
         message.feedback = message.feedback === type ? null : type;
@@ -488,7 +500,8 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  OTHER PROTECTED API ROUTES (Sessions, History, Dreams, Users, Admin, Reports, Notifications)//  ... [KEEP ALL EXISTING CODE HERE] ...
+//  OTHER PROTECTED API ROUTES (Sessions, History, Dreams, Users, Admin, Reports, Notifications)
+//  ... [KEEP ALL EXISTING CODE HERE] ...
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const sessions = await Message.aggregate([
@@ -524,8 +537,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(dream, [], userProfile); });
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
-    } catch (error) {
-        res.status(500).json({ message: error.message || 'Server Error' });
+    } catch (error) {        res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
 
@@ -537,7 +549,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
         const user = await User.findById(userId);
-        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };        const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(followUpAnswer, [], userProfile); });
+        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
+        const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(followUpAnswer, [], userProfile); });
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
@@ -573,7 +586,6 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     try {
@@ -586,7 +598,8 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
         res.json({ message: 'Password updated successfully' });
-    } catch (err) {        res.status(500).json({ message: 'Server Error' });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -622,8 +635,7 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         await User.findByIdAndDelete(req.params.id);
-        res.json({ message: 'User deleted' });
-    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
+        res.json({ message: 'User deleted' });    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     try {
@@ -635,7 +647,8 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
         res.json({ user: targetUser, history: messages });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {    try {
+app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
+    try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
@@ -671,8 +684,7 @@ app.post('/api/reports', verifyToken, async (req, res) => {
 });
 app.get('/api/admin/reports', verifyToken, async (req, res) => {
     try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
+        const admin = await User.findById(req.userId);        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const reports = await Report.find().sort({ createdAt: -1 });
         res.json(reports);
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
@@ -684,7 +696,8 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
         const notifications = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
         res.json(notifications);
     } catch (err) { res.status(500).json({ message: 'Server Error fetching notifications' }); }
-});app.get('/api/notifications/count', verifyToken, async (req, res) => {
+});
+app.get('/api/notifications/count', verifyToken, async (req, res) => {
     try {
         const count = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
         res.json({ count });
