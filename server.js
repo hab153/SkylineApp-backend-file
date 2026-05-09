@@ -263,36 +263,41 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
         const accessToken = user.nylasIntegration.accessToken;
         let sentCount = 0;
         let errors = [];
+        const now = new Date(); // Current time for all sends in this batch
 
         for (const leadData of leads) {
             try {
                 // 1. Create/Update Lead in DB
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
+                
                 if (!lead) {
                     lead = new Lead({
                         userId: req.userId,
                         name: leadData.name,
                         email: leadData.email,
                         company: leadData.company,
-                        status: 'Contacted'
+                        status: 'Contacted',
+                        lastContactDate: now // Set initial contact date
                     });
                 } else {
                     lead.status = 'Contacted';
+                    lead.lastContactDate = now; // Update contact date
                 }
                 
-                // Save the initial message sent
+                // Save the initial message sent to history
                 if (leadData.messages && leadData.messages.length > 0) {
                     lead.replies.push({
-                        date: new Date(),
+                        date: now,
                         content: leadData.messages[0].body,
                         from: 'ai'
                     });
                 }
                 await lead.save();
 
-                // 2. Send Email via Nylas using the helper function
+                // 2. Send Email via Nylas
                 if (leadData.messages && leadData.messages.length > 0) {
-                    const result = await sendEmail(                        accessToken, 
+                    const result = await sendEmail(
+                        accessToken, 
                         leadData.email, 
                         leadData.messages[0].subject, 
                         leadData.messages[0].body
@@ -301,6 +306,9 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     if (result.success) {
                         sentCount++;
                     } else {
+                        // If Nylas says failed, update status
+                        lead.status = 'Failed';
+                        await lead.save();
                         errors.push({ email: leadData.email, error: result.error });
                     }
                 }
