@@ -17,7 +17,8 @@ const { generateBusinessResponse } = require('./businessAI');
 const Lead = require('./Lead');
 // Import sendEmail along with other nylas functions
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
-const { handleIncomingReply } = require('./replyHandler');
+// We no longer need handleIncomingReply if we handle it directly here for Leads
+// const { handleIncomingReply } = require('./replyHandler'); 
 
 const authRoutes = require('./authRoutes');
 const Message = require('./Message');
@@ -46,8 +47,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-        
-        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {            const now = new Date();
+                if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
+            const now = new Date();
             const endDate = new Date(user.subscriptionEndDate);
             if (now > endDate) {
                 user.subscriptionTier = 'free';
@@ -95,8 +96,8 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             console.log(`✅ Payment successful for txRef: ${txRef}`);
             if (!txRef) return res.status(400).send('Missing txRef');
             
-            if (!planType) {
-                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
+            if (!planType) {                if (txRef.includes('_go_')) planType = 'go';
+                else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';
             }
 
@@ -144,8 +145,8 @@ const verifyToken = (req, res, next) => {
     try {
         const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);
-        req.userId = decoded.user.id;
-        next();    } catch (err) {
+        req.userId = decoded.user.id;        next();
+    } catch (err) {
         console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });
     }
@@ -193,8 +194,8 @@ const checkDailyLimit = async (req, res, next) => {
 //  NYLAS AUTHENTICATION ROUTES
 // ════════════════════════════════════════════
 
-app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId = req.userId;    const randomState = uuidv4();
+app.get('/api/auth/nylas/url', verifyToken, (req, res) => {    const userId = req.userId;
+    const randomState = uuidv4();
     stateStore[randomState] = userId;
     
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
@@ -242,8 +243,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         });
 
         res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
-
-    } catch (err) {        console.error(`❌ Nylas Callback Error: ${err.message}`);
+    } catch (err) {
+        console.error(`❌ Nylas Callback Error: ${err.message}`);
         res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);
     }
 });
@@ -253,7 +254,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 // ════════════════════════════════════════════
 app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
     try {
-        const { leads } = req.body; // Array of { name, email, company, messages: [{subject, body}] }
+        const { leads } = req.body;
         const user = await User.findById(req.userId);
 
         if (!user.nylasIntegration || !user.nylasIntegration.isConnected) {
@@ -263,11 +264,10 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
         const accessToken = user.nylasIntegration.accessToken;
         let sentCount = 0;
         let errors = [];
-        const now = new Date(); // Current time for all sends in this batch
+        const now = new Date();
 
         for (const leadData of leads) {
             try {
-                // 1. Create/Update Lead in DB
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 
                 if (!lead) {
@@ -277,14 +277,13 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                         email: leadData.email,
                         company: leadData.company,
                         status: 'Contacted',
-                        lastContactDate: now // Set initial contact date
+                        lastContactDate: now
                     });
                 } else {
                     lead.status = 'Contacted';
-                    lead.lastContactDate = now; // Update contact date
+                    lead.lastContactDate = now;
                 }
                 
-                // Save the initial message sent to history
                 if (leadData.messages && leadData.messages.length > 0) {
                     lead.replies.push({
                         date: now,
@@ -293,8 +292,6 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     });
                 }
                 await lead.save();
-
-                // 2. Send Email via Nylas
                 if (leadData.messages && leadData.messages.length > 0) {
                     const result = await sendEmail(
                         accessToken, 
@@ -306,7 +303,6 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     if (result.success) {
                         sentCount++;
                     } else {
-                        // If Nylas says failed, update status
                         lead.status = 'Failed';
                         await lead.save();
                         errors.push({ email: leadData.email, error: result.error });
@@ -331,21 +327,70 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK
+//  INBOUND EMAIL WEBHOOK (UPDATED FOR LEADS)
 // ════════════════════════════════════════════
 app.post('/api/webhooks/inbound-email', express.json(), async (req, res) => {
     try {
-        await handleIncomingReply(req.body);
+        const payload = req.body;
+        
+        // Extract sender info from Nylas V3 Webhook
+        const fromEmail = payload.from ? payload.from[0].email : null;
+        const subject = payload.subject || '';
+        const bodyText = payload.body || payload.text_plain || '';
+
+        if (!fromEmail) return res.status(200).send('OK');
+
+        console.log(`📨 [WEBHOOK] Reply received from: ${fromEmail}`);
+        // Find the Lead who owns this email address
+        const lead = await Lead.findOne({ email: fromEmail });
+
+        if (lead) {
+            // Update Lead Status to Replied
+            lead.status = 'Replied';
+            
+            // Save the reply to history
+            lead.replies.push({
+                date: new Date(),
+                content: bodyText,
+                from: 'lead' // Mark as coming from the lead
+            });
+            
+            await lead.save();
+            console.log(`✅ [WEBHOOK] Saved reply for Lead: ${lead.name}`);
+        } else {
+            console.warn(`⚠️ [WEBHOOK] No lead found for email: ${fromEmail}`);
+        }
+
         res.status(200).send('OK');
     } catch (err) {
-        console.error('❌ Webhook Error:', err.message);
-        res.status(500).send('Handler failed');
+        console.error('❌ [WEBHOOK] Error:', err.message);
+        res.status(500).send('Error');
     }
 });
 
 // ════════════════════════════════════════════
-//  CHAT ROUTE (THE AI ROUTER)
+//  CHECK FOR NEW REPLIES (For Frontend Notification)
 // ════════════════════════════════════════════
+app.get('/api/notifications/replies', verifyToken, async (req, res) => {
+    try {
+        // Find leads belonging to this user that have status 'Replied'
+        const repliedLeads = await Lead.find({ 
+            userId: req.userId, 
+            status: 'Replied' 
+        }).sort({ lastContactDate: -1 });
+
+        res.json({ 
+            count: repliedLeads.length,
+            leads: repliedLeads 
+        });
+    } catch (err) {
+        console.error('Error fetching replies:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// ════════════════════════════════════════════
+//  CHAT ROUTE (THE AI ROUTER)// ════════════════════════════════════════════
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { message, history, sessionId } = req.body;
     const userId = req.userId;
@@ -355,8 +400,6 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const plan = user.subscriptionTier || 'free';
     
     try {
-        // REMOVED OLD START_SEQUENCE LOGIC HERE
-
         await new Message({
             userId,
             sessionId: currentSessionId,
@@ -396,9 +439,9 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
 
         await new Message({
             userId,
-            sessionId: currentSessionId,
-            role: 'ai',
-            content: aiReply        }).save();
+            sessionId: currentSessionId,            role: 'ai',
+            content: aiReply
+        }).save();
 
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
 
@@ -445,8 +488,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  OTHER PROTECTED API ROUTES (Sessions, History, Dreams, Users, Admin, Reports, Notifications)
-//  ... [KEEP ALL EXISTING CODE HERE] ...
+//  OTHER PROTECTED API ROUTES (Sessions, History, Dreams, Users, Admin, Reports, Notifications)//  ... [KEEP ALL EXISTING CODE HERE] ...
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const sessions = await Message.aggregate([
@@ -495,8 +537,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
         const user = await User.findById(userId);
-        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(followUpAnswer, [], userProfile); });        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
+        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };        const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(followUpAnswer, [], userProfile); });
+        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         res.status(500).json({ message: error.message || 'Server Error' });
@@ -544,8 +586,8 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
         res.json({ message: 'Password updated successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });    }
+    } catch (err) {        res.status(500).json({ message: 'Server Error' });
+    }
 });
 
 app.put('/api/auth/change-email', verifyToken, changeEmail);
@@ -593,8 +635,8 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
         res.json({ user: targetUser, history: messages });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
-    try {        const admin = await User.findById(req.userId);
+app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {    try {
+        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
@@ -642,8 +684,8 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
         const notifications = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
         res.json(notifications);
     } catch (err) { res.status(500).json({ message: 'Server Error fetching notifications' }); }
-});
-app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {
+});app.get('/api/notifications/count', verifyToken, async (req, res) => {
+    try {
         const count = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
         res.json({ count });
     } catch (err) { res.status(500).json({ message: 'Server Error counting notifications' }); }
@@ -658,8 +700,6 @@ const scheduleExpiryCheck = async () => {
     } catch (err) { console.error('Error in expiry check:', err); }
 };
 setTimeout(() => { scheduleExpiryCheck(); setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000); }, 5000);
-
-// REMOVED: require('./sequenceEngine'); // We are removing the old automated engine
 
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
