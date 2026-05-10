@@ -47,7 +47,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
-        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {            const now = new Date();
+        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
+            const now = new Date();
             const endDate = new Date(user.subscriptionEndDate);
             if (now > endDate) {
                 user.subscriptionTier = 'free';
@@ -64,7 +65,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
 };
 
 // ════════════════════════════════════════════
-//  WEBHOOK ROUTE - UPDATED FOR 3 TIERS
+//  WEBHOOK ROUTE - MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     console.log("🔥 Webhook hit!");
@@ -77,8 +78,17 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         return res.status(401).send('Unauthorized');
     }
 
+    // req.body is a Buffer here - this works because express.raw() runs first
+    let payload;
     try {
-        const payload = JSON.parse(req.body.toString());
+        const rawBody = req.body.toString('utf-8');
+        payload = JSON.parse(rawBody);
+    } catch (e) {
+        console.error('❌ Failed to parse webhook body:', e.message);
+        return res.status(400).send('Invalid JSON');
+    }
+
+    try {
         let txRef, status, planType;
         
         if (payload.status) {
@@ -96,7 +106,8 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             if (!txRef) return res.status(400).send('Missing txRef');
             
             if (!planType) {
-                if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
+                if (txRef.includes('_go_')) planType = 'go';
+                else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';
             }
 
@@ -123,213 +134,10 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
     }
 });
 
-// Now apply express.json() for all other routes
-app.use(express.json());
-app.use(express.static(path.join(__dirname)));
-
-// Database Connection
-mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('✅ MongoDB Connected'))
-    .catch(err => console.log('❌ MongoDB Connection Error:', err));
-
-// Auth Routes
-app.use('/api/auth', authRoutes);
-
-// ── Verify Token Middleware ──
-const verifyToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) return res.status(403).json({ message: 'No token provided' });
-    try {
-        const secret = process.env.JWT_SECRET || 'secretkey';
-        const decoded = jwt.verify(token, secret);
-        req.userId = decoded.user.id;
-        next();    } catch (err) {
-        console.error('Token Verification Failed:', err.message);
-        return res.status(401).json({ message: 'Invalid token' });
-    }
-};
-
-// ── Daily Usage Limit Middleware ──
-const checkDailyLimit = async (req, res, next) => {
-    try {
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        if (!user.usage) {
-            user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
-        }
-
-        let limit = 30; // Free Limit
-        if (user.subscriptionTier === 'go') limit = 18; 
-        if (user.subscriptionTier === 'pro') limit = 40; 
-
-        const now = new Date();
-        const todayStr = now.toDateString();
-        const lastCallDate = user.usage.lastCallDate ? new Date(user.usage.lastCallDate) : null;
-        const lastCallStr = lastCallDate ? lastCallDate.toDateString() : '';
-
-        if (lastCallStr !== todayStr) {
-            user.usage.dailyCallCount = 0;
-            user.usage.lastCallDate = now;
-            await user.save();
-        }
-
-        if (user.usage.dailyCallCount >= limit) {
-            return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade your plan for more.` });
-        }
-
-        user.usage.dailyCallCount += 1;
-        await user.save();
-        next();
-    } catch (err) {
-        console.error('Error checking daily limit:', err);
-        res.status(500).json({ message: 'Server Error checking usage limits' });
-    }
-};
-
 // ════════════════════════════════════════════
-//  NYLAS AUTHENTICATION ROUTES
+//  INBOUND EMAIL WEBHOOK - MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
-
-app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId = req.userId;    const randomState = uuidv4();
-    stateStore[randomState] = userId;
-    
-    setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
-
-    const url = getAuthUrl(randomState);
-    res.json({ url });
-});
-
-app.get('/api/auth/nylas/callback', async (req, res) => {
-    const { code, state, error: oauthError } = req.query;
-
-    if (oauthError) {
-        return res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=false&error=' + oauthError);
-    }
-
-    if (!code || !state) {
-        return res.status(400).send('Missing required parameters.');
-    }
-
-    const userId = stateStore[state];
-    if (!userId) {
-        return res.status(400).send('Session expired. Please try connecting again.');
-    }
-    
-    delete stateStore[state];
-
-    try {
-        const tokenData = await exchangeCodeForToken(code);
-        const accessToken = tokenData.access_token;
-
-        if (!accessToken) throw new Error('No access token returned from Nylas');
-
-        let emailAddress = 'unknown@nylas.com';
-        try {
-            emailAddress = await getUserEmail(accessToken);
-        } catch (emailErr) {
-            console.warn(`⚠️ Could not retrieve email: ${emailErr.message}`);
-        }
-
-        await User.findByIdAndUpdate(userId, { 
-            'nylasIntegration.accessToken': accessToken,
-            'nylasIntegration.emailAddress': emailAddress,
-            'nylasIntegration.isConnected': true,
-            'nylasIntegration.connectedAt': new Date()
-        });
-
-        res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
-    } catch (err) {
-        console.error(`❌ Nylas Callback Error: ${err.message}`);        res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);
-    }
-});
-
-// ════════════════════════════════════════════
-//  BATCH SEND ROUTE (Human-in-the-Loop)
-// ════════════════════════════════════════════
-app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
-    try {
-        const { leads } = req.body;
-        const user = await User.findById(req.userId);
-
-        if (!user.nylasIntegration || !user.nylasIntegration.isConnected) {
-            return res.status(400).json({ message: 'Please connect your email first.' });
-        }
-
-        const accessToken = user.nylasIntegration.accessToken;
-        let sentCount = 0;
-        let errors = [];
-        const now = new Date();
-
-        for (const leadData of leads) {
-            try {
-                let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
-                
-                if (!lead) {
-                    lead = new Lead({
-                        userId: req.userId,
-                        name: leadData.name,
-                        email: leadData.email,
-                        company: leadData.company,
-                        status: 'Contacted',
-                        lastContactDate: now
-                    });
-                } else {
-                    lead.status = 'Contacted';
-                    lead.lastContactDate = now;
-                }
-                
-                if (leadData.messages && leadData.messages.length > 0) {
-                    lead.replies.push({
-                        date: now,
-                        content: leadData.messages[0].body,
-                        from: 'ai'
-                    });
-                }
-                await lead.save();
-
-                if (leadData.messages && leadData.messages.length > 0) {
-                    const result = await sendEmail(                        accessToken, 
-                        leadData.email, 
-                        leadData.messages[0].subject, 
-                        leadData.messages[0].body
-                    );
-
-                    if (result.success) {
-                        sentCount++;
-                    } else {
-                        lead.status = 'Failed';
-                        await lead.save();
-                        errors.push({ email: leadData.email, error: result.error });
-                    }
-                }
-            } catch (err) {
-                console.error(`Failed to send to ${leadData.email}:`, err.message);
-                errors.push({ email: leadData.email, error: err.message });
-            }
-        }
-
-        res.json({ 
-            success: true, 
-            message: `Sent ${sentCount} emails.`, 
-            errors: errors 
-        });
-
-    } catch (err) {
-        console.error('Batch Send Error:', err);
-        res.status(500).json({ message: 'Server Error during batch send' });
-    }
-});
-
-// ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK (FINAL ROBUST VERSION)
-// ════════════════════════════════════════════
-const webhookMiddleware = express.raw({ type: 'application/json' });
-
-app.all('/api/webhooks/inbound-email', webhookMiddleware, async (req, res) => {
+app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     
     // 1. HANDLE NYLAS VERIFICATION CHALLENGE (GET Request)
     if (req.method === 'GET') {
@@ -391,7 +199,8 @@ app.all('/api/webhooks/inbound-email', webhookMiddleware, async (req, res) => {
                 lead.status = 'Replied';
                 lead.replies.push({
                     date: new Date(),
-                    content: bodyText,                    from: 'lead' 
+                    content: bodyText,
+                    from: 'lead' 
                 });
                 await lead.save();
                 console.log(`✅ [WEBHOOK] Saved reply for Lead: ${lead.name}`);
@@ -408,6 +217,213 @@ app.all('/api/webhooks/inbound-email', webhookMiddleware, async (req, res) => {
     }
 
     res.status(405).send('Method Not Allowed');
+});
+
+// ════════════════════════════════════════════
+//  NOW apply express.json() for all other routes
+// ════════════════════════════════════════════
+app.use(express.json());
+app.use(express.static(path.join(__dirname)));
+
+// Database Connection
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => console.log('✅ MongoDB Connected'))
+    .catch(err => console.log('❌ MongoDB Connection Error:', err));
+
+// Auth Routes
+app.use('/api/auth', authRoutes);
+
+// ── Verify Token Middleware ──
+const verifyToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) return res.status(403).json({ message: 'No token provided' });
+    try {
+        const secret = process.env.JWT_SECRET || 'secretkey';
+        const decoded = jwt.verify(token, secret);
+        req.userId = decoded.user.id;
+        next();
+    } catch (err) {
+        console.error('Token Verification Failed:', err.message);
+        return res.status(401).json({ message: 'Invalid token' });
+    }
+};
+
+// ── Daily Usage Limit Middleware ──
+const checkDailyLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) {
+            user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
+        }
+
+        let limit = 30; // Free Limit
+        if (user.subscriptionTier === 'go') limit = 18; 
+        if (user.subscriptionTier === 'pro') limit = 40; 
+
+        const now = new Date();
+        const todayStr = now.toDateString();
+        const lastCallDate = user.usage.lastCallDate ? new Date(user.usage.lastCallDate) : null;
+        const lastCallStr = lastCallDate ? lastCallDate.toDateString() : '';
+
+        if (lastCallStr !== todayStr) {
+            user.usage.dailyCallCount = 0;
+            user.usage.lastCallDate = now;
+            await user.save();
+        }
+
+        if (user.usage.dailyCallCount >= limit) {
+            return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade your plan for more.` });
+        }
+
+        user.usage.dailyCallCount += 1;
+        await user.save();
+        next();
+    } catch (err) {
+        console.error('Error checking daily limit:', err);
+        res.status(500).json({ message: 'Server Error checking usage limits' });
+    }
+};
+
+// ════════════════════════════════════════════
+//  NYLAS AUTHENTICATION ROUTES
+// ════════════════════════════════════════════
+
+app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
+    const userId = req.userId;
+    const randomState = uuidv4();
+    stateStore[randomState] = userId;
+    
+    setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
+
+    const url = getAuthUrl(randomState);
+    res.json({ url });
+});
+
+app.get('/api/auth/nylas/callback', async (req, res) => {
+    const { code, state, error: oauthError } = req.query;
+
+    if (oauthError) {
+        return res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=false&error=' + oauthError);
+    }
+
+    if (!code || !state) {
+        return res.status(400).send('Missing required parameters.');
+    }
+
+    const userId = stateStore[state];
+    if (!userId) {
+        return res.status(400).send('Session expired. Please try connecting again.');
+    }
+    
+    delete stateStore[state];
+
+    try {
+        const tokenData = await exchangeCodeForToken(code);
+        const accessToken = tokenData.access_token;
+
+        if (!accessToken) throw new Error('No access token returned from Nylas');
+
+        let emailAddress = 'unknown@nylas.com';
+        try {
+            emailAddress = await getUserEmail(accessToken);
+        } catch (emailErr) {
+            console.warn(`⚠️ Could not retrieve email: ${emailErr.message}`);
+        }
+
+        await User.findByIdAndUpdate(userId, { 
+            'nylasIntegration.accessToken': accessToken,
+            'nylasIntegration.emailAddress': emailAddress,
+            'nylasIntegration.isConnected': true,
+            'nylasIntegration.connectedAt': new Date()
+        });
+
+        res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
+    } catch (err) {
+        console.error(`❌ Nylas Callback Error: ${err.message}`);
+        res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);
+    }
+});
+
+// ════════════════════════════════════════════
+//  BATCH SEND ROUTE (Human-in-the-Loop)
+// ════════════════════════════════════════════
+app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
+    try {
+        const { leads } = req.body;
+        const user = await User.findById(req.userId);
+
+        if (!user.nylasIntegration || !user.nylasIntegration.isConnected) {
+            return res.status(400).json({ message: 'Please connect your email first.' });
+        }
+
+        const accessToken = user.nylasIntegration.accessToken;
+        let sentCount = 0;
+        let errors = [];
+        const now = new Date();
+
+        for (const leadData of leads) {
+            try {
+                let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
+                
+                if (!lead) {
+                    lead = new Lead({
+                        userId: req.userId,
+                        name: leadData.name,
+                        email: leadData.email,
+                        company: leadData.company,
+                        status: 'Contacted',
+                        lastContactDate: now
+                    });
+                } else {
+                    lead.status = 'Contacted';
+                    lead.lastContactDate = now;
+                }
+                
+                if (leadData.messages && leadData.messages.length > 0) {
+                    lead.replies.push({
+                        date: now,
+                        content: leadData.messages[0].body,
+                        from: 'ai'
+                    });
+                }
+                await lead.save();
+
+                if (leadData.messages && leadData.messages.length > 0) {
+                    const result = await sendEmail(
+                        accessToken, 
+                        leadData.email, 
+                        leadData.messages[0].subject, 
+                        leadData.messages[0].body
+                    );
+
+                    if (result.success) {
+                        sentCount++;
+                    } else {
+                        lead.status = 'Failed';
+                        await lead.save();
+                        errors.push({ email: leadData.email, error: result.error });
+                    }
+                }
+            } catch (err) {
+                console.error(`Failed to send to ${leadData.email}:`, err.message);
+                errors.push({ email: leadData.email, error: err.message });
+            }
+        }
+
+        res.json({ 
+            success: true, 
+            message: `Sent ${sentCount} emails.`, 
+            errors: errors 
+        });
+
+    } catch (err) {
+        console.error('Batch Send Error:', err);
+        res.status(500).json({ message: 'Server Error during batch send' });
+    }
 });
 
 // ════════════════════════════════════════════
@@ -440,7 +456,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
-        try {
+    try {
         await new Message({
             userId,
             sessionId: currentSessionId,
@@ -489,7 +505,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     } catch (error) {
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
-    }});
+    }
+});
 
 // ════════════════════════════════════════════
 //  GET LEADS FOR DASHBOARD
@@ -502,8 +519,6 @@ app.get('/api/leads', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
-// ... [Keep all other routes like Feedback, Sessions, Admin, etc. exactly as they were] ...
 
 // ════════════════════════════════════════════
 //  FEEDBACK ROUTE
@@ -529,7 +544,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
 
 // ════════════════════════════════════════════
 //  OTHER PROTECTED API ROUTES (Sessions, History, Dreams, Users, Admin, Reports, Notifications)
-//  ... [KEEP ALL EXISTING CODE HERE] ...
+// ════════════════════════════════════════════
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const sessions = await Message.aggregate([
@@ -538,7 +553,8 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
             { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
             { $sort: { lastUpdated: -1 } }
         ]);
-        res.json(sessions);    } catch (error) {
+        res.json(sessions);
+    } catch (error) {
         res.status(500).json({ message: 'Server Error fetching sessions' });
     }
 });
@@ -587,7 +603,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 });
 
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {        const user = await User.findById(req.userId).select('-password');
+    try {
+        const user = await User.findById(req.userId).select('-password');
         if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
     } catch (err) {
@@ -636,7 +653,8 @@ app.put('/api/users/verify-age', verifyToken, verifyAge);
 app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
 
 // ADMIN ROUTES
-app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
+app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
+app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
 app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
@@ -685,7 +703,8 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
         res.json({ user: targetUser, messages: chatMessages });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {    try {
+app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
+    try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
@@ -734,7 +753,8 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
 
 // EXPIRY CHECK
 const scheduleExpiryCheck = async () => {
-    try {        const now = new Date();
+    try {
+        const now = new Date();
         const result = await User.updateMany({ subscriptionTier: { $ne: 'free' }, subscriptionEndDate: { $lt: now } }, { subscriptionTier: 'free', subscriptionEndDate: null });
         if (result.modifiedCount > 0) { console.log(`🔄 Downgraded ${result.modifiedCount} expired users`); }
     } catch (err) { console.error('Error in expiry check:', err); }
