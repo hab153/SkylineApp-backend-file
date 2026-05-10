@@ -341,7 +341,8 @@ app.all('/api/webhooks/inbound-email', webhookMiddleware, async (req, res) => {
         return res.status(400).send('No challenge provided');
     }
 
-    // 2. HANDLE INCOMING EMAILS (POST Request)    if (req.method === 'POST') {
+    // 2. HANDLE INCOMING EMAILS (POST Request)    
+    if (req.method === 'POST') {
         try {
             // --- SIGNATURE VERIFICATION ---
             const signature = req.headers['x-nylas-signature'];
