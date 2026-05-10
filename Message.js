@@ -26,7 +26,7 @@ const MessageSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    // NEW FIELDS FOR NOTIFICATIONS
+    // THESE FIELDS ARE MISSING AND NEED TO BE ADDED:
     notificationType: {
         type: String,
         enum: ['reply', 'admin'],
