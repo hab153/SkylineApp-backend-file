@@ -78,7 +78,6 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         return res.status(401).send('Unauthorized');
     }
 
-    // req.body is a Buffer here - this works because express.raw() runs first
     let payload;
     try {
         const rawBody = req.body.toString('utf-8');
@@ -135,7 +134,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK - FIXED PARSING FOR NYLAS
+//  INBOUND EMAIL WEBHOOK - WITH NOTIFICATION CREATION
 // ════════════════════════════════════════════
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     
@@ -143,7 +142,6 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
     console.log('🔔 [WEBHOOK] Request received at:', new Date().toISOString());
     console.log(`📌 [WEBHOOK] Method: ${req.method}`);
     
-    // 1. HANDLE NYLAS VERIFICATION CHALLENGE (GET Request)
     if (req.method === 'GET') {
         const challenge = req.query.challenge;
         console.log(`🔔 [WEBHOOK] Verification challenge received: ${challenge}`);
@@ -153,10 +151,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
         return res.status(400).send('No challenge provided');
     }
 
-    // 2. HANDLE INCOMING EMAILS (POST Request)    
     if (req.method === 'POST') {
         try {
-            // Parse the Buffer into JSON
             let payload;
             try {
                 const rawBody = req.body.toString('utf-8');
@@ -167,12 +163,9 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                 return res.status(400).send('Invalid JSON');
             }
 
-            // Check what type of webhook this is
             const webhookType = payload.type || payload.event;
             console.log(`📌 [WEBHOOK] Webhook type: ${webhookType}`);
 
-            // ⭐ FIXED: EXTRACT EMAIL DATA FROM CORRECT NYLAS STRUCTURE ⭐
-            // Nylas sends email data inside payload.data.object
             const messageData = payload.data?.object;
             
             let fromEmail = null;
@@ -182,7 +175,6 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
             let messageId = null;
 
             if (messageData && webhookType === 'message.created') {
-                // This is a real email - extract from nested structure
                 fromEmail = messageData.from?.[0]?.email || messageData.from?.email || null;
                 toEmail = messageData.to?.[0]?.email || messageData.to?.email || null;
                 subject = messageData.subject || '(no subject)';
@@ -194,20 +186,16 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                 console.log(`📧 [WEBHOOK] To: ${toEmail}`);
                 console.log(`📧 [WEBHOOK] Subject: ${subject}`);
                 console.log(`📧 [WEBHOOK] Body preview: ${bodyText.substring(0, 200)}`);
-                console.log(`📧 [WEBHOOK] Message ID: ${messageId}`);
                 
-                // Find the Lead in your database
                 if (fromEmail) {
                     const lead = await Lead.findOne({ email: fromEmail });
                     console.log(`🔍 [WEBHOOK] Lead found for ${fromEmail}: ${lead ? 'YES' : 'NO'}`);
                     
                     if (lead) {
-                        // Update lead status
                         const oldStatus = lead.status;
                         lead.status = 'Replied';
                         lead.lastContactDate = new Date();
                         
-                        // Add reply to history
                         lead.replies = lead.replies || [];
                         lead.replies.push({
                             date: new Date(),
@@ -219,20 +207,31 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         
                         await lead.save();
                         console.log(`✅ [WEBHOOK] SUCCESS - Saved reply for Lead: ${lead.name}`);
-                        console.log(`📊 [WEBHOOK] Lead status changed: ${oldStatus} → Replied`);
                         console.log(`💬 [WEBHOOK] Reply count: ${lead.replies.length}`);
+                        
+                        // 🔔 CREATE NOTIFICATION FOR FRONTEND 🔔
+                        try {
+                            const notification = new Message({
+                                userId: lead.userId,
+                                sessionId: 'reply-notification',
+                                role: 'system',
+                                title: '📬 New Lead Reply',
+                                content: `${lead.name} (${lead.email}) replied to your message:\n\n"${bodyText.substring(0, 200)}${bodyText.length > 200 ? '...' : ''}"`,
+                                notificationType: 'reply',
+                                leadId: lead._id,
+                                isRead: false
+                            });
+                            await notification.save();
+                            console.log(`🔔 [WEBHOOK] Notification created for user ${lead.userId}`);
+                        } catch (notifErr) {
+                            console.error('⚠️ [WEBHOOK] Failed to create notification:', notifErr.message);
+                        }
                     } else {
-                        console.warn(`⚠️ [WEBHOOK] No lead found in database for email: ${fromEmail}`);
-                        console.log(`💡 [WEBHOOK] Tip: Make sure this email exists in your Leads collection`);
+                        console.warn(`⚠️ [WEBHOOK] No lead found for email: ${fromEmail}`);
                     }
-                } else {
-                    console.log(`⚠️ [WEBHOOK] No from email in message data`);
                 }
             } else {
-                console.log(`ℹ️ [WEBHOOK] Not a message.created event or no message data - test ping`);
-                if (payload.type) {
-                    console.log(`📌 [WEBHOOK] Received event type: ${payload.type} - ignoring`);
-                }
+                console.log(`ℹ️ [WEBHOOK] Not a message.created event - test ping`);
             }
 
             console.log(`✅ [WEBHOOK] Request processed successfully`);
@@ -241,13 +240,10 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
 
         } catch (err) {
             console.error(`❌ [WEBHOOK] CRITICAL ERROR:`, err.message);
-            console.error(`❌ [WEBHOOK] Error stack:`, err.stack);
-            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
             return res.status(500).send('Error processing webhook');
         }
     }
 
-    console.log(`⚠️ [WEBHOOK] Method not allowed: ${req.method}`);
     res.status(405).send('Method Not Allowed');
 });
 
@@ -292,7 +288,7 @@ const checkDailyLimit = async (req, res, next) => {
             user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
         }
 
-        let limit = 30; // Free Limit
+        let limit = 30;
         if (user.subscriptionTier === 'go') limit = 18; 
         if (user.subscriptionTier === 'pro') limit = 40; 
 
@@ -381,6 +377,55 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
+//  GET ALL NOTIFICATIONS (Admin Messages + Reply Notifications)
+// ════════════════════════════════════════════
+app.get('/api/notifications', verifyToken, async (req, res) => {
+    try {
+        // Get admin messages
+        const adminMessages = await Message.find({ 
+            userId: req.userId, 
+            sessionId: 'admin-direct-message' 
+        }).sort({ createdAt: -1 });
+        
+        // Get reply notifications
+        const replyNotifications = await Message.find({ 
+            userId: req.userId, 
+            sessionId: 'reply-notification',
+            notificationType: 'reply'
+        }).sort({ createdAt: -1 });
+        
+        // Combine both
+        const allNotifications = [...adminMessages, ...replyNotifications];
+        allNotifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        
+        res.json(allNotifications);
+    } catch (err) {
+        console.error('Error fetching notifications:', err);
+        res.status(500).json({ message: 'Server Error fetching notifications' });
+    }
+});
+
+// ════════════════════════════════════════════
+//  MARK NOTIFICATION AS READ
+// ════════════════════════════════════════════
+app.post('/api/notifications/:id/read', verifyToken, async (req, res) => {
+    try {
+        const notification = await Message.findOne({ 
+            _id: req.params.id, 
+            userId: req.userId 
+        });
+        if (!notification) return res.status(404).json({ message: 'Notification not found' });
+        
+        notification.isRead = true;
+        await notification.save();
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Error marking as read:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// ════════════════════════════════════════════
 //  BATCH SEND ROUTE (Human-in-the-Loop)
 // ════════════════════════════════════════════
 app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
@@ -416,9 +461,11 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 }
                 
                 if (leadData.messages && leadData.messages.length > 0) {
+                    if (!lead.replies) lead.replies = [];
                     lead.replies.push({
                         date: now,
                         content: leadData.messages[0].body,
+                        subject: leadData.messages[0].subject,
                         from: 'ai'
                     });
                 }
@@ -576,7 +623,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  OTHER PROTECTED API ROUTES (Sessions, History, Dreams, Users, Admin, Reports, Notifications)
+//  OTHER PROTECTED API ROUTES
 // ════════════════════════════════════════════
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
@@ -770,18 +817,23 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// NOTIFICATIONS
-app.get('/api/notifications', verifyToken, async (req, res) => {
-    try {
-        const notifications = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
-        res.json(notifications);
-    } catch (err) { res.status(500).json({ message: 'Server Error fetching notifications' }); }
-});
+// NOTIFICATIONS COUNT (Updated to include reply notifications)
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
     try {
-        const count = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
-        res.json({ count });
-    } catch (err) { res.status(500).json({ message: 'Server Error counting notifications' }); }
+        const adminCount = await Message.countDocuments({ 
+            userId: req.userId, 
+            sessionId: 'admin-direct-message' 
+        });
+        const replyCount = await Message.countDocuments({ 
+            userId: req.userId, 
+            sessionId: 'reply-notification',
+            notificationType: 'reply'
+        });
+        res.json({ count: adminCount + replyCount });
+    } catch (err) {
+        console.error('Error counting notifications:', err);
+        res.status(500).json({ message: 'Server Error counting notifications' });
+    }
 });
 
 // EXPIRY CHECK
