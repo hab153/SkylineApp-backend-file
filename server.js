@@ -377,18 +377,19 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  GET ALL NOTIFICATIONS (SIMPLIFIED - NO FILTERING)
+//  GET NOTIFICATIONS ONLY (NOT chat history)
 // ════════════════════════════════════════════
 app.get('/api/notifications', verifyToken, async (req, res) => {
     try {
-        // Get ALL messages for this user (no filtering)
-        const allMessages = await Message.find({ 
-            userId: req.userId 
+        // Only get messages that are notifications (not chat history)
+        const notifications = await Message.find({ 
+            userId: req.userId,
+            sessionId: { $in: ['admin-direct-message', 'reply-notification'] }
         }).sort({ createdAt: -1 });
         
-        console.log(`📋 Found ${allMessages.length} total messages for user ${req.userId}`);
+        console.log(`📋 Found ${notifications.length} notifications for user ${req.userId}`);
         
-        res.json(allMessages);
+        res.json(notifications);
     } catch (err) {
         console.error('Error fetching notifications:', err);
         res.status(500).json({ message: 'Server Error fetching notifications' });
