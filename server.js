@@ -377,28 +377,18 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  GET ALL NOTIFICATIONS (Admin Messages + Reply Notifications)
+//  GET ALL NOTIFICATIONS (SIMPLIFIED - NO FILTERING)
 // ════════════════════════════════════════════
 app.get('/api/notifications', verifyToken, async (req, res) => {
     try {
-        // Get admin messages
-        const adminMessages = await Message.find({ 
-            userId: req.userId, 
-            sessionId: 'admin-direct-message' 
+        // Get ALL messages for this user (no filtering)
+        const allMessages = await Message.find({ 
+            userId: req.userId 
         }).sort({ createdAt: -1 });
         
-        // Get reply notifications
-        const replyNotifications = await Message.find({ 
-            userId: req.userId, 
-            sessionId: 'reply-notification',
-            notificationType: 'reply'
-        }).sort({ createdAt: -1 });
+        console.log(`📋 Found ${allMessages.length} total messages for user ${req.userId}`);
         
-        // Combine both
-        const allNotifications = [...adminMessages, ...replyNotifications];
-        allNotifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        
-        res.json(allNotifications);
+        res.json(allMessages);
     } catch (err) {
         console.error('Error fetching notifications:', err);
         res.status(500).json({ message: 'Server Error fetching notifications' });
