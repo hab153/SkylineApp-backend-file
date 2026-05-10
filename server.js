@@ -135,135 +135,109 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK - ENHANCED LOGGING
+//  INBOUND EMAIL WEBHOOK - FIXED PARSING FOR NYLAS
 // ════════════════════════════════════════════
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     
-    // LOG EVERYTHING for debugging
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔔 [WEBHOOK] Request received at:', new Date().toISOString());
     console.log(`📌 [WEBHOOK] Method: ${req.method}`);
-    console.log(`📌 [WEBHOOK] URL: ${req.url}`);
-    console.log(`📌 [WEBHOOK] Headers:`, JSON.stringify(req.headers, null, 2));
-    console.log(`📌 [WEBHOOK] Content-Type: ${req.headers['content-type']}`);
-    console.log(`📌 [WEBHOOK] Content-Length: ${req.headers['content-length']}`);
     
     // 1. HANDLE NYLAS VERIFICATION CHALLENGE (GET Request)
     if (req.method === 'GET') {
         const challenge = req.query.challenge;
         console.log(`🔔 [WEBHOOK] Verification challenge received: ${challenge}`);
         if (challenge) {
-            console.log(`✅ [WEBHOOK] Sending back challenge: ${challenge}`);
             return res.status(200).send(challenge); 
         }
-        console.log(`⚠️ [WEBHOOK] No challenge provided in GET request`);
         return res.status(400).send('No challenge provided');
     }
 
     // 2. HANDLE INCOMING EMAILS (POST Request)    
     if (req.method === 'POST') {
-        // Log raw body size
-        console.log(`📦 [WEBHOOK] Raw body size: ${req.body.length} bytes`);
-        console.log(`📦 [WEBHOOK] Raw body preview (first 500 chars): ${req.body.toString('utf-8').substring(0, 500)}`);
-        
         try {
-            // --- SIGNATURE VERIFICATION ---
-            const signature = req.headers['x-nylas-signature'];
-            const secret = process.env.NYLAS_WEBHOOK_SECRET;
-
-            console.log(`🔐 [WEBHOOK] Signature present: ${signature ? 'YES' : 'NO'}`);
-            console.log(`🔐 [WEBHOOK] Webhook secret configured: ${secret ? 'YES' : 'NO'}`);
-
-            if (signature && secret) {
-                const hmac = crypto.createHmac('sha256', secret);
-                hmac.update(req.body); 
-                const digest = hmac.digest('hex');
-                
-                console.log(`🔐 [WEBHOOK] Expected signature: ${digest}`);
-                console.log(`🔐 [WEBHOOK] Received signature: ${signature}`);
-                
-                if (signature !== digest) {
-                    console.warn('⚠️ [WEBHOOK] Invalid signature detected - this could be a test ping or spoofed request');
-                } else {
-                    console.log('✅ [WEBHOOK] Signature verified successfully - request is from Nylas');
-                }
-            } else {
-                console.log(`⚠️ [WEBHOOK] Signature verification skipped - missing signature or secret`);
-            }
-
-            // Parse the Buffer into JSON so we can use it
+            // Parse the Buffer into JSON
             let payload;
             try {
                 const rawBody = req.body.toString('utf-8');
                 payload = JSON.parse(rawBody);
                 console.log(`✅ [WEBHOOK] Successfully parsed JSON payload`);
-                console.log(`📋 [WEBHOOK] Payload keys: ${Object.keys(payload).join(', ')}`);
-                console.log(`📋 [WEBHOOK] Full payload:`, JSON.stringify(payload, null, 2));
             } catch (e) {
-                console.error('❌ [WEBHOOK] Failed to parse JSON from buffer:', e.message);
-                console.error(`❌ [WEBHOOK] Raw body that failed: ${req.body.toString('utf-8')}`);
+                console.error('❌ [WEBHOOK] Failed to parse JSON:', e.message);
                 return res.status(400).send('Invalid JSON');
             }
 
             // Check what type of webhook this is
-            if (payload.type) {
-                console.log(`📌 [WEBHOOK] Webhook type: ${payload.type}`);
-            }
+            const webhookType = payload.type || payload.event;
+            console.log(`📌 [WEBHOOK] Webhook type: ${webhookType}`);
+
+            // ⭐ FIXED: EXTRACT EMAIL DATA FROM CORRECT NYLAS STRUCTURE ⭐
+            // Nylas sends email data inside payload.data.object
+            const messageData = payload.data?.object;
             
-            if (payload.event) {
-                console.log(`📌 [WEBHOOK] Event type: ${payload.event}`);
-            }
+            let fromEmail = null;
+            let toEmail = null;
+            let subject = '';
+            let bodyText = '';
+            let messageId = null;
 
-            const fromEmail = payload.from ? (payload.from[0]?.email || payload.from.email) : null;
-            const toEmail = payload.to ? (payload.to[0]?.email || payload.to.email) : null;
-            const subject = payload.subject || '(no subject)';
-            const bodyText = payload.body || payload.text_plain || payload.snippet || '';
-            
-            console.log(`📧 [WEBHOOK] From: ${fromEmail}`);
-            console.log(`📧 [WEBHOOK] To: ${toEmail}`);
-            console.log(`📧 [WEBHOOK] Subject: ${subject}`);
-            console.log(`📧 [WEBHOOK] Body preview: ${bodyText.substring(0, 200)}`);
-
-            if (!fromEmail) {
-                console.log(`ℹ️ [WEBHOOK] No from email found - this appears to be a test ping or heartbeat`);
-                console.log(`💡 [WEBHOOK] To receive real emails, configure 'message.created' event in Nylas Dashboard`);
-                return res.status(200).send('OK - Test ping received');
-            }
-
-            console.log(`📨 [WEBHOOK] Processing potential reply from: ${fromEmail}`);
-
-            // Find the Lead
-            const lead = await Lead.findOne({ email: fromEmail });
-            console.log(`🔍 [WEBHOOK] Lead found: ${lead ? `YES (${lead.name})` : 'NO'}`);
-
-            if (lead) {
-                // Update lead status
-                const oldStatus = lead.status;
-                lead.status = 'Replied';
-                lead.lastContactDate = new Date();
+            if (messageData && webhookType === 'message.created') {
+                // This is a real email - extract from nested structure
+                fromEmail = messageData.from?.[0]?.email || messageData.from?.email || null;
+                toEmail = messageData.to?.[0]?.email || messageData.to?.email || null;
+                subject = messageData.subject || '(no subject)';
+                bodyText = messageData.body || messageData.snippet || '';
+                messageId = messageData.id || null;
                 
-                // Add reply to history
-                lead.replies = lead.replies || [];
-                lead.replies.push({
-                    date: new Date(),
-                    content: bodyText,
-                    subject: subject,
-                    from: 'lead',
-                    emailId: payload.id || null
-                });
+                console.log(`✅ [WEBHOOK] ✅ REAL EMAIL DETECTED!`);
+                console.log(`📧 [WEBHOOK] From: ${fromEmail}`);
+                console.log(`📧 [WEBHOOK] To: ${toEmail}`);
+                console.log(`📧 [WEBHOOK] Subject: ${subject}`);
+                console.log(`📧 [WEBHOOK] Body preview: ${bodyText.substring(0, 200)}`);
+                console.log(`📧 [WEBHOOK] Message ID: ${messageId}`);
                 
-                await lead.save();
-                console.log(`✅ [WEBHOOK] SUCCESS - Saved reply for Lead: ${lead.name}`);
-                console.log(`📊 [WEBHOOK] Lead status changed: ${oldStatus} → Replied`);
-                console.log(`💬 [WEBHOOK] Reply count: ${lead.replies.length}`);
+                // Find the Lead in your database
+                if (fromEmail) {
+                    const lead = await Lead.findOne({ email: fromEmail });
+                    console.log(`🔍 [WEBHOOK] Lead found for ${fromEmail}: ${lead ? 'YES' : 'NO'}`);
+                    
+                    if (lead) {
+                        // Update lead status
+                        const oldStatus = lead.status;
+                        lead.status = 'Replied';
+                        lead.lastContactDate = new Date();
+                        
+                        // Add reply to history
+                        lead.replies = lead.replies || [];
+                        lead.replies.push({
+                            date: new Date(),
+                            content: bodyText,
+                            subject: subject,
+                            from: 'lead',
+                            emailId: messageId
+                        });
+                        
+                        await lead.save();
+                        console.log(`✅ [WEBHOOK] SUCCESS - Saved reply for Lead: ${lead.name}`);
+                        console.log(`📊 [WEBHOOK] Lead status changed: ${oldStatus} → Replied`);
+                        console.log(`💬 [WEBHOOK] Reply count: ${lead.replies.length}`);
+                    } else {
+                        console.warn(`⚠️ [WEBHOOK] No lead found in database for email: ${fromEmail}`);
+                        console.log(`💡 [WEBHOOK] Tip: Make sure this email exists in your Leads collection`);
+                    }
+                } else {
+                    console.log(`⚠️ [WEBHOOK] No from email in message data`);
+                }
             } else {
-                console.warn(`⚠️ [WEBHOOK] No lead found in database for email: ${fromEmail}`);
-                console.log(`💡 [WEBHOOK] Tip: Make sure this email exists in your Leads collection`);
+                console.log(`ℹ️ [WEBHOOK] Not a message.created event or no message data - test ping`);
+                if (payload.type) {
+                    console.log(`📌 [WEBHOOK] Received event type: ${payload.type} - ignoring`);
+                }
             }
 
             console.log(`✅ [WEBHOOK] Request processed successfully`);
             console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-            return res.status(200).send('OK - Email processed');
+            return res.status(200).send('OK');
 
         } catch (err) {
             console.error(`❌ [WEBHOOK] CRITICAL ERROR:`, err.message);
