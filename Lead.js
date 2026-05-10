@@ -18,16 +18,12 @@ const LeadSchema = new mongoose.Schema({
     // Sequence Tracking
     status: { 
         type: String, 
-        enum: ['New', 'Queued', 'Contacted', 'Replied', 'Interested', 'Not Interested', 'Closed'], 
+        enum: ['New', 'Queued', 'Contacted', 'Replied', 'Interested', 'Not Interested', 'Closed', 'Failed'], 
         default: 'New' 
     },
     sequenceStep: { 
         type: Number, 
         default: 0 
-        // 0 = Not Started
-        // 1 = Day 1 Email Sent
-        // 2 = Day 3 Follow-up Sent
-        // 3 = Day 6 Break-up Sent
     },
     lastContactDate: { type: Date, default: null },
     nextActionDate: { type: Date, default: null }, 
@@ -43,7 +39,9 @@ const LeadSchema = new mongoose.Schema({
     replies: [{
         date: { type: Date, default: Date.now },
         content: String,
-        from: { type: String, enum: ['lead', 'ai'] }
+        subject: String,  // ← ADD THIS FIELD
+        from: { type: String, enum: ['lead', 'ai'] },
+        emailId: String   // ← ADD THIS FIELD
     }],
 
     createdAt: { type: Date, default: Date.now }
