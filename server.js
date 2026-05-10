@@ -209,12 +209,12 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         console.log(`✅ [WEBHOOK] SUCCESS - Saved reply for Lead: ${lead.name}`);
                         console.log(`💬 [WEBHOOK] Reply count: ${lead.replies.length}`);
                         
-                        // 🔔 CREATE NOTIFICATION - FIXED: using role 'ai' instead of 'system' 🔔
+                        // 🔔 CREATE NOTIFICATION 🔔
                         try {
                             const notification = new Message({
                                 userId: lead.userId,
                                 sessionId: 'reply-notification',
-                                role: 'ai',  // FIXED: changed from 'system' to 'ai'
+                                role: 'ai',
                                 title: '📬 New Lead Reply',
                                 content: `${lead.name} (${lead.email}) replied to your message:\n\n"${bodyText.substring(0, 200)}${bodyText.length > 200 ? '...' : ''}"`,
                                 notificationType: 'reply',
@@ -315,6 +315,39 @@ const checkDailyLimit = async (req, res, next) => {
         res.status(500).json({ message: 'Server Error checking usage limits' });
     }
 };
+
+// ════════════════════════════════════════════
+//  MIGRATE LEAD TO CURRENT USER - FIX FOR USER ID MISMATCH
+// ════════════════════════════════════════════
+app.post('/api/migrate-lead', verifyToken, async (req, res) => {
+    try {
+        const lead = await Lead.findOne({ email: 'habeebullahapaokagi8@gmail.com' });
+        if (!lead) {
+            return res.json({ success: false, error: 'Lead not found' });
+        }
+        
+        console.log(`🔄 Migrating lead "${lead.name}" from user ${lead.userId} to ${req.userId}`);
+        
+        // Change ownership to current user
+        lead.userId = req.userId;
+        await lead.save();
+        
+        // Also migrate any notifications for this lead
+        await Message.updateMany(
+            { leadId: lead._id },
+            { userId: req.userId }
+        );
+        
+        res.json({ 
+            success: true, 
+            message: `Lead "${lead.name}" migrated to your account`,
+            leadId: lead._id
+        });
+    } catch (err) {
+        console.error('Migration error:', err);
+        res.json({ success: false, error: err.message });
+    }
+});
 
 // ════════════════════════════════════════════
 //  NYLAS AUTHENTICATION ROUTES
@@ -808,7 +841,7 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// NOTIFICATIONS COUNT (Updated to include reply notifications)
+// NOTIFICATIONS COUNT
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
     try {
         const adminCount = await Message.countDocuments({ 
@@ -817,8 +850,7 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
         });
         const replyCount = await Message.countDocuments({ 
             userId: req.userId, 
-            sessionId: 'reply-notification',
-            notificationType: 'reply'
+            sessionId: 'reply-notification'
         });
         res.json({ count: adminCount + replyCount });
     } catch (err) {
