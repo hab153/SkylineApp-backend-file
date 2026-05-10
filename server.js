@@ -317,35 +317,45 @@ const checkDailyLimit = async (req, res, next) => {
 };
 
 // ════════════════════════════════════════════
-//  MIGRATE LEAD TO CURRENT USER - FIX FOR USER ID MISMATCH
+//  FIXED NOTIFICATIONS ENDPOINT - BY LEAD EMAIL
 // ════════════════════════════════════════════
-app.post('/api/migrate-lead', verifyToken, async (req, res) => {
+app.get('/api/my-notifications', verifyToken, async (req, res) => {
     try {
-        const lead = await Lead.findOne({ email: 'habeebullahapaokagi8@gmail.com' });
-        if (!lead) {
-            return res.json({ success: false, error: 'Lead not found' });
-        }
+        // Get current user
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
         
-        console.log(`🔄 Migrating lead "${lead.name}" from user ${lead.userId} to ${req.userId}`);
+        console.log(`🔍 Looking for notifications for user: ${user.email} (${user._id})`);
         
-        // Change ownership to current user
-        lead.userId = req.userId;
-        await lead.save();
+        // Find ALL leads owned by this user
+        const userLeads = await Lead.find({ userId: req.userId });
+        console.log(`📋 Found ${userLeads.length} leads for this user`);
         
-        // Also migrate any notifications for this lead
-        await Message.updateMany(
-            { leadId: lead._id },
-            { userId: req.userId }
-        );
+        // Get notification IDs from these leads
+        const leadIds = userLeads.map(l => l._id);
         
-        res.json({ 
-            success: true, 
-            message: `Lead "${lead.name}" migrated to your account`,
-            leadId: lead._id
-        });
+        // Get reply notifications for these leads
+        const replyNotifications = await Message.find({
+            leadId: { $in: leadIds },
+            sessionId: 'reply-notification'
+        }).sort({ createdAt: -1 });
+        
+        // Get admin messages for this user
+        const adminMessages = await Message.find({
+            userId: req.userId,
+            sessionId: 'admin-direct-message'
+        }).sort({ createdAt: -1 });
+        
+        // Combine both
+        const allNotifications = [...replyNotifications, ...adminMessages];
+        allNotifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        
+        console.log(`✅ Found ${replyNotifications.length} reply notifications and ${adminMessages.length} admin messages`);
+        
+        res.json(allNotifications);
     } catch (err) {
-        console.error('Migration error:', err);
-        res.json({ success: false, error: err.message });
+        console.error('Error:', err);
+        res.status(500).json({ error: err.message });
     }
 });
 
@@ -406,46 +416,6 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     } catch (err) {
         console.error(`❌ Nylas Callback Error: ${err.message}`);
         res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);
-    }
-});
-
-// ════════════════════════════════════════════
-//  GET NOTIFICATIONS ONLY (NOT chat history)
-// ════════════════════════════════════════════
-app.get('/api/notifications', verifyToken, async (req, res) => {
-    try {
-        // Only get messages that are notifications (not chat history)
-        const notifications = await Message.find({ 
-            userId: req.userId,
-            sessionId: { $in: ['admin-direct-message', 'reply-notification'] }
-        }).sort({ createdAt: -1 });
-        
-        console.log(`📋 Found ${notifications.length} notifications for user ${req.userId}`);
-        
-        res.json(notifications);
-    } catch (err) {
-        console.error('Error fetching notifications:', err);
-        res.status(500).json({ message: 'Server Error fetching notifications' });
-    }
-});
-
-// ════════════════════════════════════════════
-//  MARK NOTIFICATION AS READ
-// ════════════════════════════════════════════
-app.post('/api/notifications/:id/read', verifyToken, async (req, res) => {
-    try {
-        const notification = await Message.findOne({ 
-            _id: req.params.id, 
-            userId: req.userId 
-        });
-        if (!notification) return res.status(404).json({ message: 'Notification not found' });
-        
-        notification.isRead = true;
-        await notification.save();
-        res.json({ success: true });
-    } catch (err) {
-        console.error('Error marking as read:', err);
-        res.status(500).json({ message: 'Server Error' });
     }
 });
 
