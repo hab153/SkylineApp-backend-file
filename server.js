@@ -47,8 +47,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
-        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();
+        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {            const now = new Date();
             const endDate = new Date(user.subscriptionEndDate);
             if (now > endDate) {
                 user.subscriptionTier = 'free';
@@ -97,8 +96,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         } else if (payload.event === 'charge.completed') {
             status = payload.data?.status;
             txRef = payload.data?.tx_ref;
-            planType = payload.data?.meta?.plan;
-        }
+            planType = payload.data?.meta?.plan;        }
 
         if (status === 'successful') {
             console.log(`✅ Payment successful for txRef: ${txRef}`);
@@ -147,8 +145,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
         console.log(`🔔 [WEBHOOK] Verification challenge received: ${challenge}`);
         if (challenge) {
             return res.status(200).send(challenge); 
-        }
-        return res.status(400).send('No challenge provided');
+        }        return res.status(400).send('No challenge provided');
     }
 
     if (req.method === 'POST') {
@@ -197,8 +194,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         lead.lastContactDate = new Date();
                         
                         lead.replies = lead.replies || [];
-                        lead.replies.push({
-                            date: new Date(),
+                        lead.replies.push({                            date: new Date(),
                             content: bodyText,
                             subject: subject,
                             from: 'lead',
@@ -247,8 +243,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
     res.status(405).send('Method Not Allowed');
 });
 
-// ════════════════════════════════════════════
-//  NOW apply express.json() for all other routes
+// ════════════════════════════════════════════//  NOW apply express.json() for all other routes
 // ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
@@ -297,8 +292,7 @@ const checkDailyLimit = async (req, res, next) => {
         const lastCallDate = user.usage.lastCallDate ? new Date(user.usage.lastCallDate) : null;
         const lastCallStr = lastCallDate ? lastCallDate.toDateString() : '';
 
-        if (lastCallStr !== todayStr) {
-            user.usage.dailyCallCount = 0;
+        if (lastCallStr !== todayStr) {            user.usage.dailyCallCount = 0;
             user.usage.lastCallDate = now;
             await user.save();
         }
@@ -317,47 +311,37 @@ const checkDailyLimit = async (req, res, next) => {
 };
 
 // ════════════════════════════════════════════
-//  FIXED NOTIFICATIONS ENDPOINT - BY LEAD EMAIL
+//  SIMPLIFIED NOTIFICATIONS ENDPOINT
 // ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
     try {
-        // Get current user
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ error: 'User not found' });
+        console.log(`🔍 Fetching notifications for user: ${req.userId}`);
         
-        console.log(`🔍 Looking for notifications for user: ${user.email} (${user._id})`);
-        
-        // Find ALL leads owned by this user
-        const userLeads = await Lead.find({ userId: req.userId });
-        console.log(`📋 Found ${userLeads.length} leads for this user`);
-        
-        // Get notification IDs from these leads
-        const leadIds = userLeads.map(l => l._id);
-        
-        // Get reply notifications for these leads
+        // 1. Get Reply Notifications (Simple Query by userId)
         const replyNotifications = await Message.find({
-            leadId: { $in: leadIds },
+            userId: req.userId,
             sessionId: 'reply-notification'
         }).sort({ createdAt: -1 });
         
-        // Get admin messages for this user
+        console.log(`✅ Found ${replyNotifications.length} reply notifications`);
+
+        // 2. Get Admin Messages (Simple Query by userId)
         const adminMessages = await Message.find({
             userId: req.userId,
             sessionId: 'admin-direct-message'
         }).sort({ createdAt: -1 });
         
-        // Combine both
+        console.log(`✅ Found ${adminMessages.length} admin messages`);
+        
+        // 3. Combine and Sort
         const allNotifications = [...replyNotifications, ...adminMessages];
         allNotifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         
-        console.log(`✅ Found ${replyNotifications.length} reply notifications and ${adminMessages.length} admin messages`);
-        
         res.json(allNotifications);
     } catch (err) {
-        console.error('Error:', err);
+        console.error('❌ Error fetching notifications:', err);
         res.status(500).json({ error: err.message });
-    }
-});
+    }});
 
 // ════════════════════════════════════════════
 //  NYLAS AUTHENTICATION ROUTES
@@ -406,8 +390,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         }
 
         await User.findByIdAndUpdate(userId, { 
-            'nylasIntegration.accessToken': accessToken,
-            'nylasIntegration.emailAddress': emailAddress,
+            'nylasIntegration.accessToken': accessToken,            'nylasIntegration.emailAddress': emailAddress,
             'nylasIntegration.isConnected': true,
             'nylasIntegration.connectedAt': new Date()
         });
@@ -456,8 +439,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 
                 if (leadData.messages && leadData.messages.length > 0) {
                     if (!lead.replies) lead.replies = [];
-                    lead.replies.push({
-                        date: now,
+                    lead.replies.push({                        date: now,
                         content: leadData.messages[0].body,
                         subject: leadData.messages[0].subject,
                         from: 'ai'
@@ -506,8 +488,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 app.get('/api/notifications/replies', verifyToken, async (req, res) => {
     try {
-        const repliedLeads = await Lead.find({ 
-            userId: req.userId, 
+        const repliedLeads = await Lead.find({             userId: req.userId, 
             status: 'Replied' 
         }).sort({ lastContactDate: -1 });
         res.json({ 
@@ -556,8 +537,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         } 
         else {
             const userProfile = {
-                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
+                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
                 userId: user._id.toString()
             };
             const result = await requestQueue.enqueue(async () => {
@@ -606,8 +586,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         const message = await Message.findById(messageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
         if (message.userId.toString() !== req.userId) {
-            return res.status(403).json({ message: 'Unauthorized' });
-        }
+            return res.status(403).json({ message: 'Unauthorized' });        }
         message.feedback = message.feedback === type ? null : type;
         await message.save();
         res.json({ success: true, feedback: message.feedback });
@@ -656,8 +635,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         res.status(500).json({ message: error.message || 'Server Error' });
-    }
-});
+    }});
 
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
@@ -706,8 +684,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 });
 
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
-    const { currentPassword, newPassword } = req.body;
-    try {
+    const { currentPassword, newPassword } = req.body;    try {
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const isMatch = await bcrypt.compare(currentPassword, user.password);
@@ -756,8 +733,7 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {
         await User.findByIdAndDelete(req.params.id);
         res.json({ message: 'User deleted' });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
-});
-app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
+});app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
@@ -806,8 +782,7 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const reports = await Report.find().sort({ createdAt: -1 });
-        res.json(reports);
+        const reports = await Report.find().sort({ createdAt: -1 });        res.json(reports);
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
