@@ -11,11 +11,11 @@ const MessageSchema = new mongoose.Schema({
     sessionId: {
         type: String,
         required: true,
-        index: true // Index to quickly find all messages in a chat session
+        index: true
     },
     title: {
         type: String,
-        default: 'New Dream' // Default title, updated after first message
+        default: 'New Dream'
     },
     role: {
         type: String,
@@ -25,6 +25,21 @@ const MessageSchema = new mongoose.Schema({
     content: {
         type: String,
         required: true
+    },
+    // NEW FIELDS FOR NOTIFICATIONS
+    notificationType: {
+        type: String,
+        enum: ['reply', 'admin'],
+        default: null
+    },
+    leadId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Lead',
+        default: null
+    },
+    isRead: {
+        type: Boolean,
+        default: false
     },
     createdAt: {
         type: Date,
