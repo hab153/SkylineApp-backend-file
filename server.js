@@ -134,7 +134,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK - WITH NOTIFICATION CREATION
+//  INBOUND EMAIL WEBHOOK - FIXED NOTIFICATION (role: 'ai')
 // ════════════════════════════════════════════
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     
@@ -209,12 +209,12 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         console.log(`✅ [WEBHOOK] SUCCESS - Saved reply for Lead: ${lead.name}`);
                         console.log(`💬 [WEBHOOK] Reply count: ${lead.replies.length}`);
                         
-                        // 🔔 CREATE NOTIFICATION FOR FRONTEND 🔔
+                        // 🔔 CREATE NOTIFICATION - FIXED: using role 'ai' instead of 'system' 🔔
                         try {
                             const notification = new Message({
                                 userId: lead.userId,
                                 sessionId: 'reply-notification',
-                                role: 'system',
+                                role: 'ai',  // FIXED: changed from 'system' to 'ai'
                                 title: '📬 New Lead Reply',
                                 content: `${lead.name} (${lead.email}) replied to your message:\n\n"${bodyText.substring(0, 200)}${bodyText.length > 200 ? '...' : ''}"`,
                                 notificationType: 'reply',
