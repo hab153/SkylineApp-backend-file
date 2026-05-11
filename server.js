@@ -930,7 +930,8 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// NOTIFICATIONS COUNTapp.get('/api/notifications/count', verifyToken, async (req, res) => {
+// NOTIFICATIONS COUNT
+app.get('/api/notifications/count', verifyToken, async (req, res) => {
     try {
         const adminCount = await Message.countDocuments({ 
             userId: req.userId, 
