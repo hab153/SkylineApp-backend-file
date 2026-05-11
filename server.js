@@ -488,7 +488,8 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 
         const accessToken = user.nylasIntegration.accessToken;
         
-        // Find all leads with pending messages for this user        const leadsWithPending = await Lead.find({ 
+        // Find all leads with pending messages for this user        
+        const leadsWithPending = await Lead.find({ 
             userId: req.userId, 
             'replies.status': 'pending' 
         });
