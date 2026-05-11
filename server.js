@@ -40,6 +40,32 @@ app.use(cors());
 const stateStore = {};
 
 // ════════════════════════════════════════════
+//  HELPER: REFRESH NYLAS TOKEN
+// ════════════════════════════════════════════
+async function refreshNylasToken(emailAccount) {
+    try {
+        const response = await axios.post(`${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/connect/token`, {
+            client_id: process.env.NYLAS_CLIENT_ID,
+            client_secret: process.env.NYLAS_CLIENT_SECRET,
+            grant_type: 'refresh_token',            refresh_token: emailAccount.refreshToken
+        });
+
+        const newAccessToken = response.data.access_token;
+        
+        // Update the database with the new token and new expiry (1 hour from now)
+        emailAccount.accessToken = newAccessToken;
+        emailAccount.tokenExpiry = new Date(Date.now() + 3600 * 1000); 
+        await emailAccount.save();
+        
+        console.log(`🔄 [NYLAS] Token refreshed for User ${emailAccount.userId}`);
+        return newAccessToken;
+    } catch (err) {
+        console.error('❌ [NYLAS] Token Refresh Failed:', err.message);
+        throw err;
+    }
+}
+
+// ════════════════════════════════════════════
 //  CHECK SUBSCRIPTION EXPIRY MIDDLEWARE
 // ════════════════════════════════════════════
 const checkSubscriptionExpiry = async (req, res, next) => {
@@ -47,7 +73,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
-        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {            const now = new Date();
+        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
+            const now = new Date();
             const endDate = new Date(user.subscriptionEndDate);
             if (now > endDate) {
                 user.subscriptionTier = 'free';
@@ -69,8 +96,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     console.log("🔥 Webhook hit!");
     
-    const sig = req.headers['verif-hash'];
-    const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
+    const sig = req.headers['verif-hash'];    const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
     
     if (secretHash && sig !== secretHash) {
         console.log("⚠️ Hash mismatch - check your FLUTTERWAVE_SECRET_HASH");
@@ -96,7 +122,8 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
         } else if (payload.event === 'charge.completed') {
             status = payload.data?.status;
             txRef = payload.data?.tx_ref;
-            planType = payload.data?.meta?.plan;        }
+            planType = payload.data?.meta?.plan;
+        }
 
         if (status === 'successful') {
             console.log(`✅ Payment successful for txRef: ${txRef}`);
@@ -118,8 +145,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
                 });
                 console.log(`🎉 User ${user._id} upgraded to ${planType.toUpperCase()} Plan!`);
             } else {
-                console.error(`❌ User not found for txRef: ${txRef}`);
-            }
+                console.error(`❌ User not found for txRef: ${txRef}`);            }
         } else {
             console.log(`ℹ️ Webhook received but payment not successful. Status: ${status || 'unknown'}`);
         }
@@ -145,7 +171,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
         try {
             const payload = JSON.parse(req.body.toString('utf-8'));
             const messageData = payload.data?.object;
-                        if (messageData && (payload.type === 'message.created' || payload.event === 'message.created')) {
+            
+            if (messageData && (payload.type === 'message.created' || payload.event === 'message.created')) {
                 const fromEmail = messageData.from?.[0]?.email;
                 const toEmail = messageData.to?.[0]?.email;
                 
@@ -168,7 +195,6 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                     console.warn(`⚠️ [WEBHOOK] Could not identify owner for To: ${toEmail}`);
                     return res.status(200).send('OK');
                 }
-
                 // 2. FIND THE LEAD (Who sent the reply?)
                 const lead = await Lead.findOne({ email: fromEmail, userId: ownerUserId });
                 
@@ -194,7 +220,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         title: '📬 New Lead Reply',
                         content: `${lead.name} replied:\n\n"${bodyText.substring(0, 200)}..."`,
                         notificationType: 'reply',
-                        leadId: lead._id,                        isRead: false
+                        leadId: lead._id,
+                        isRead: false
                     });
                     await notification.save();
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
@@ -216,7 +243,6 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
 // ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
-
 // Database Connection
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => console.log('✅ MongoDB Connected'))
@@ -243,7 +269,8 @@ const verifyToken = (req, res, next) => {
 };
 
 // ── Daily Usage Limit Middleware ──
-const checkDailyLimit = async (req, res, next) => {    try {
+const checkDailyLimit = async (req, res, next) => {
+    try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -265,7 +292,6 @@ const checkDailyLimit = async (req, res, next) => {    try {
             user.usage.lastCallDate = now;
             await user.save();
         }
-
         if (user.usage.dailyCallCount >= limit) {
             return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade your plan for more.` });
         }
@@ -292,7 +318,8 @@ app.get('/api/conversations', verifyToken, async (req, res) => {
 
         const conversations = leads.map(lead => {
             const lastReply = lead.replies && lead.replies.length > 0 
-                ? lead.replies[lead.replies.length - 1]                 : null;
+                ? lead.replies[lead.replies.length - 1] 
+                : null;
 
             let preview = "No messages yet";
             if (lastReply) {
@@ -314,8 +341,7 @@ app.get('/api/conversations', verifyToken, async (req, res) => {
 
         res.json(conversations);
     } catch (err) {
-        console.error('Error fetching conversations:', err);
-        res.status(500).json({ message: 'Server Error' });
+        console.error('Error fetching conversations:', err);        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -341,7 +367,8 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
                 status: lead.status
             },
             messages: cleanHistory
-        });    } catch (err) {
+        });
+    } catch (err) {
         console.error('Error fetching conversation details:', err);
         res.status(500).json({ message: 'Server Error' });
     }
@@ -363,50 +390,39 @@ app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // ════════════════════════════════════════════
-//  BATCH SEND ROUTE (WITH PENDING QUEUE LOGIC)
+//  BATCH SEND ROUTE (WITH AUTO-REFRESH LOGIC)
 // ════════════════════════════════════════════
 app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
     try {
         const { leads } = req.body;
-        const user = await User.findById(req.userId);
         
-        // Check if Nylas is connected
-        if (!user.nylasIntegration || !user.nylasIntegration.isConnected) {
-            // Save as pending if disconnected
-            for (const leadData of leads) {
-                let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
-                if (!lead) {
-                    lead = new Lead({
-                        userId: req.userId,
-                        name: leadData.name,
-                        email: leadData.email,
-                        company: leadData.company,
-                        status: 'Contacted',
-                        lastContactDate: new Date()
-                    });
-                }
-                
-                if (leadData.messages && leadData.messages.length > 0) {
-                    if (!lead.replies) lead.replies = [];
-                    lead.replies.push({                        date: new Date(),
-                        content: leadData.messages[0].body,
-                        subject: leadData.messages[0].subject,
-                        from: 'ai',
-                        status: 'pending' // Mark as pending
-                    });
-                }
-                await lead.save();
-            }
-            return res.status(401).json({ 
-                success: false, 
-                error: 'NYLAS_DISCONNECTED', 
-                message: 'Email disconnected. Please reconnect to send.' 
-            });
+        // 1. Get the Email Account for this user
+        const emailAccount = await EmailAccount.findOne({ userId: req.userId });
+        
+        if (!emailAccount) {
+            return res.status(400).json({ message: 'No email account connected.' });
         }
 
-        const accessToken = user.nylasIntegration.accessToken;
+        // 2. Check if token is expired (or expires in next 5 mins)
+        const isExpired = !emailAccount.tokenExpiry || new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
+        
+        let currentAccessToken = emailAccount.accessToken;
+
+        if (isExpired) {
+            console.log('🔄 Access token expired. Refreshing...');
+            try {
+                currentAccessToken = await refreshNylasToken(emailAccount);
+            } catch (refreshErr) {
+                // If refresh fails, the grant is likely invalid. Force reconnect.
+                return res.status(401).json({ 
+                    success: false, 
+                    error: 'NYLAS_DISCONNECTED', 
+                    message: 'Session expired. Please reconnect.' 
+                });
+            }
+        }
+
         let sentCount = 0;
         let errors = [];
         const now = new Date();
@@ -423,8 +439,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                         company: leadData.company,
                         status: 'Contacted',
                         lastContactDate: now
-                    });
-                } else {
+                    });                } else {
                     lead.status = 'Contacted';
                     lead.lastContactDate = now;
                 }
@@ -440,9 +455,10 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     });
                 }
                 await lead.save();
+
                 if (leadData.messages && leadData.messages.length > 0) {
                     const result = await sendEmail(
-                        accessToken, 
+                        currentAccessToken, // Use the fresh token
                         leadData.email, 
                         leadData.messages[0].subject, 
                         leadData.messages[0].body
@@ -452,6 +468,13 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                         sentCount++;
                         console.log(`✅ Email sent to ${leadData.email}`);
                     } else {
+                        // If send fails due to auth, try refreshing one last time
+                        if (result.error && result.error.includes('401')) {
+                             try {
+                                currentAccessToken = await refreshNylasToken(emailAccount);
+                                // Retry send logic could go here, but for now we mark as error
+                             } catch(e) {}
+                        }
                         lead.status = 'Failed';
                         await lead.save();
                         errors.push({ email: leadData.email, error: result.error });
@@ -465,8 +488,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
         }
 
         res.json({ 
-            success: true, 
-            message: `Sent ${sentCount} emails.`, 
+            success: true,             message: `Sent ${sentCount} emails.`, 
             errors: errors 
         });
 
@@ -481,12 +503,18 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
     try {
-        const user = await User.findById(req.userId);
-        if (!user.nylasIntegration || !user.nylasIntegration.isConnected) {
+        const emailAccount = await EmailAccount.findOne({ userId: req.userId });
+        if (!emailAccount) {
             return res.status(400).json({ message: 'Nylas not connected' });
         }
 
-        const accessToken = user.nylasIntegration.accessToken;
+        // Ensure we have a fresh token
+        let currentAccessToken = emailAccount.accessToken;
+        const isExpired = !emailAccount.tokenExpiry || new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
+        
+        if (isExpired) {
+            currentAccessToken = await refreshNylasToken(emailAccount);
+        }
         
         // Find all leads with pending messages for this user        
         const leadsWithPending = await Lead.find({ 
@@ -501,7 +529,7 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
             
             for (const msg of pendingMessages) {
                 const result = await sendEmail(
-                    accessToken, 
+                    currentAccessToken, 
                     lead.email, 
                     msg.subject || 'Re: Conversation', 
                     msg.content
@@ -509,8 +537,7 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 
                 if (result.success) {
                     msg.status = 'sent';
-                    sentCount++;
-                } else {
+                    sentCount++;                } else {
                     msg.status = 'failed';
                 }
             }
@@ -538,7 +565,8 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
         
         console.log(`✅ Found ${replyNotifications.length} reply notifications`);
         const adminMessages = await Message.find({
-            userId: req.userId,            sessionId: 'admin-direct-message'
+            userId: req.userId,
+            sessionId: 'admin-direct-message'
         }).sort({ createdAt: -1 });
         
         console.log(`✅ Found ${adminMessages.length} admin messages`);
@@ -558,8 +586,7 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 
 app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId = req.userId;
-    const randomState = uuidv4();
+    const userId = req.userId;    const randomState = uuidv4();
     stateStore[randomState] = userId;
     
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
@@ -587,7 +614,9 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     delete stateStore[state];
     try {
         const tokenData = await exchangeCodeForToken(code);
-        const accessToken = tokenData.access_token;        const grantId = tokenData.grant_id; 
+        const accessToken = tokenData.access_token;
+        const refreshToken = tokenData.refresh_token; // <--- GET REFRESH TOKEN
+        const grantId = tokenData.grant_id; 
 
         let emailAddress = 'unknown@nylas.com';
         try {
@@ -606,13 +635,15 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 
         // 2. CREATE/UPDATE THE EMAIL ACCOUNT BRIDGE (THE FIX)
         if (grantId) {
-            await EmailAccount.findOneAndUpdate(
-                { nylasGrantId: grantId },
+            await EmailAccount.findOneAndUpdate(                { nylasGrantId: grantId },
                 {
                     userId: userId,
                     emailAddress: emailAddress,
                     isConnected: true,
-                    provider: 'gmail'
+                    provider: 'gmail',
+                    accessToken: accessToken,
+                    refreshToken: refreshToken, // <--- SAVE REFRESH TOKEN
+                    tokenExpiry: new Date(Date.now() + 3600 * 1000) // <--- SET EXPIRY
                 },
                 { upsert: true, new: true }
             );
@@ -636,7 +667,8 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
             status: 'Replied' 
         }).sort({ lastContactDate: -1 });
         res.json({ 
-            count: repliedLeads.length,            leads: repliedLeads 
+            count: repliedLeads.length,
+            leads: repliedLeads 
         });
     } catch (err) {
         console.error('Error fetching replies:', err);
@@ -652,8 +684,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     const currentSessionId = sessionId || uuidv4();
-    const user = await User.findById(userId);
-    const plan = user.subscriptionTier || 'free';
+    const user = await User.findById(userId);    const plan = user.subscriptionTier || 'free';
     try {
         await new Message({
             userId,
@@ -685,7 +716,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
                 userId: user._id.toString()
             };
             const result = await requestQueue.enqueue(async () => {
-                return await generateBusinessResponse(message, history || [], userProfile);            });
+                return await generateBusinessResponse(message, history || [], userProfile);
+            });
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
@@ -701,8 +733,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
 
     } catch (error) {
         console.error('Chat route error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
+        res.status(500).json({ message: error.message || 'Server Error' });    }
 });
 
 // ════════════════════════════════════════════
@@ -734,7 +765,8 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         message.feedback = message.feedback === type ? null : type;
         await message.save();
         res.json({ success: true, feedback: message.feedback });
-    } catch (err) {        res.status(500).json({ message: 'Server Error saving feedback' });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error saving feedback' });
     }
 });
 
@@ -750,8 +782,7 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
             { $sort: { lastUpdated: -1 } }
         ]);
         res.json(sessions);
-    } catch (error) {
-        res.status(500).json({ message: 'Server Error fetching sessions' });
+    } catch (error) {        res.status(500).json({ message: 'Server Error fetching sessions' });
     }
 });
 
@@ -783,7 +814,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
-    const userId = req.userId;    if (!followUpAnswer || !dreamDescription) { return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' }); }
+    const userId = req.userId;
+    if (!followUpAnswer || !dreamDescription) { return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' }); }
     const currentSessionId = sessionId || uuidv4();
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
@@ -799,8 +831,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
-        const user = await User.findById(req.userId).select('-password');
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        const user = await User.findById(req.userId).select('-password');        if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
@@ -832,7 +863,8 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const isMatch = await bcrypt.compare(currentPassword, user.password);
-        if (!isMatch) return res.status(400).json({ message: 'Current password is incorrect' });        if (newPassword.length < 8) return res.status(400).json({ message: 'New password must be at least 8 characters' });
+        if (!isMatch) return res.status(400).json({ message: 'Current password is incorrect' });
+        if (newPassword.length < 8) return res.status(400).json({ message: 'New password must be at least 8 characters' });
         const salt = await bcrypt.genSalt(10);
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
@@ -848,8 +880,7 @@ app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccou
 
 // ADMIN ROUTES
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
-app.get('/api/admin/users', verifyToken, async (req, res) => {
+app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user || !user.isAdmin) return res.status(403).json({ message: 'Access denied. Admins only.' });
@@ -881,7 +912,8 @@ app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const targetUser = await User.findById(req.params.id).select('-password');        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+        const targetUser = await User.findById(req.params.id).select('-password');
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });
         const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, history: messages });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
@@ -897,8 +929,7 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
+    try {        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
@@ -947,7 +978,6 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
-
 // EXPIRY CHECK
 const scheduleExpiryCheck = async () => {
     try {
