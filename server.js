@@ -280,6 +280,91 @@ const checkDailyLimit = async (req, res, next) => {    try {
 };
 
 // ════════════════════════════════════════════
+//  WHATSAPP-STYLE INBOX ROUTES
+// ════════════════════════════════════════════
+
+// 1. GET CONVERSATIONS (Sidebar List)
+app.get('/api/conversations', verifyToken, async (req, res) => {
+    try {
+        const leads = await Lead.find({ userId: req.userId })
+            .sort({ lastContactDate: -1 })
+            .limit(50); 
+
+        const conversations = leads.map(lead => {
+            const lastReply = lead.replies && lead.replies.length > 0 
+                ? lead.replies[lead.replies.length - 1]                 : null;
+
+            let preview = "No messages yet";
+            if (lastReply) {
+                // Strip HTML tags for clean preview
+                preview = lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50);
+            }
+
+            return {
+                id: lead._id,
+                name: lead.name,
+                company: lead.company,
+                email: lead.email,
+                status: lead.status,
+                lastMessage: preview,
+                lastDate: lead.lastContactDate,
+                unread: !lastReply || lastReply.from === 'lead' 
+            };
+        });
+
+        res.json(conversations);
+    } catch (err) {
+        console.error('Error fetching conversations:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// 2. GET SINGLE CONVERSATION (Chat Area)
+app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
+    try {
+        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        
+        if (!lead) return res.status(404).json({ message: 'Conversation not found' });
+
+        // Clean up all messages in history (Strip HTML)
+        const cleanHistory = (lead.replies || []).map(msg => ({
+            ...msg.toObject(),
+            content: msg.content.replace(/<[^>]*>?/gm, '') // Strip HTML tags
+        }));
+
+        res.json({
+            lead: {
+                id: lead._id,
+                name: lead.name,
+                email: lead.email,
+                company: lead.company,
+                status: lead.status
+            },
+            messages: cleanHistory
+        });    } catch (err) {
+        console.error('Error fetching conversation details:', err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// 3. RENAME CUSTOMER
+app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
+    try {
+        const { newName } = req.body;
+        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        lead.name = newName;
+        await lead.save();
+        
+        res.json({ success: true, newName: lead.name });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// ════════════════════════════════════════════
 //  SIMPLIFIED NOTIFICATIONS ENDPOINT
 // ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
@@ -305,8 +390,7 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
         res.json(allNotifications);
     } catch (err) {
         console.error('❌ Error fetching notifications:', err);
-        res.status(500).json({ error: err.message });
-    }
+        res.status(500).json({ error: err.message });    }
 });
 
 // ════════════════════════════════════════════
@@ -355,8 +439,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 
         // 1. Update User's primary integration (Legacy support)
         await User.findByIdAndUpdate(userId, { 
-            'nylasIntegration.accessToken': accessToken,
-            'nylasIntegration.emailAddress': emailAddress,
+            'nylasIntegration.accessToken': accessToken,            'nylasIntegration.emailAddress': emailAddress,
             'nylasIntegration.isConnected': true,
             'nylasIntegration.connectedAt': new Date()
         });
@@ -405,8 +488,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 
                 if (!lead) {
                     lead = new Lead({
-                        userId: req.userId,
-                        name: leadData.name,
+                        userId: req.userId,                        name: leadData.name,
                         email: leadData.email,
                         company: leadData.company,
                         status: 'Contacted',
@@ -439,7 +521,8 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     if (result.success) {
                         sentCount++;
                         console.log(`✅ Email sent to ${leadData.email}`);
-                    } else {                        lead.status = 'Failed';
+                    } else {
+                        lead.status = 'Failed';
                         await lead.save();
                         errors.push({ email: leadData.email, error: result.error });
                         console.error(`❌ Failed to send to ${leadData.email}: ${result.error}`);
@@ -454,8 +537,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
         res.json({ 
             success: true, 
             message: `Sent ${sentCount} emails.`, 
-            errors: errors 
-        });
+            errors: errors         });
 
     } catch (err) {
         console.error('Batch Send Error:', err);
@@ -488,7 +570,8 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { message, history, sessionId } = req.body;
     const userId = req.userId;
-    if (!message) return res.status(400).json({ message: 'Message is required' });    const currentSessionId = sessionId || uuidv4();
+    if (!message) return res.status(400).json({ message: 'Message is required' });
+    const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
     try {
@@ -503,8 +586,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         let aiReply, updatedHistory;
         if (plan === 'free') {
             const result = await freeAI.generateFreeResponse(message, history || [], user);
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
+            aiReply = result.reply;            updatedHistory = result.updatedHistory;
         } 
         else if (plan === 'go') {
             try {
@@ -537,7 +619,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
 
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
 
-    } catch (error) {        console.error('Chat route error:', error);
+    } catch (error) {
+        console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
@@ -553,7 +636,6 @@ app.get('/api/leads', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // ════════════════════════════════════════════
 //  FEEDBACK ROUTE
 // ════════════════════════════════════════════
@@ -586,7 +668,8 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
             { $sort: { createdAt: -1 } },
             { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
             { $sort: { lastUpdated: -1 } }
-        ]);        res.json(sessions);
+        ]);
+        res.json(sessions);
     } catch (error) {
         res.status(500).json({ message: 'Server Error fetching sessions' });
     }
@@ -601,8 +684,7 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
     }
 });
 
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { dream, sessionId } = req.body;
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { dream, sessionId } = req.body;
     const userId = req.userId;
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
     const currentSessionId = sessionId || uuidv4();
@@ -635,7 +717,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
     }
 });
 
-app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {    try {
+app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
+    try {
         const user = await User.findById(req.userId).select('-password');
         if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
@@ -650,8 +733,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (fullName) user.fullName = fullName;
-        if (primaryGoal) user.primaryGoal = primaryGoal;
-        if (skillLevel) user.skillLevel = skillLevel;
+        if (primaryGoal) user.primaryGoal = primaryGoal;        if (skillLevel) user.skillLevel = skillLevel;
         if (interests) user.interests = interests;
         if (country) user.country = country;
         if (bio) user.bio = bio;
@@ -684,7 +766,8 @@ app.put('/api/auth/change-email', verifyToken, changeEmail);
 app.put('/api/users/verify-age', verifyToken, verifyAge);
 app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
 
-// ADMIN ROUTESapp.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
+// ADMIN ROUTES
+app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
 app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
@@ -699,8 +782,7 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        targetUser.isSuspended = !targetUser.isSuspended;
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });        targetUser.isSuspended = !targetUser.isSuspended;
         targetUser.suspensionEnds = targetUser.isSuspended ? new Date('2099-12-31') : null;
         await targetUser.save();
         res.json({ message: 'Status updated' });
@@ -733,7 +815,8 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
         const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, messages: chatMessages });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
-});app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
+});
+app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
@@ -748,8 +831,7 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
 });
 
 // REPORTS
-app.post('/api/reports', verifyToken, async (req, res) => {
-    try {
+app.post('/api/reports', verifyToken, async (req, res) => {    try {
         const { subject, message } = req.body;
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
@@ -782,7 +864,8 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
     } catch (err) {
         console.error('Error counting notifications:', err);
         res.status(500).json({ message: 'Server Error counting notifications' });
-    }});
+    }
+});
 
 // EXPIRY CHECK
 const scheduleExpiryCheck = async () => {
