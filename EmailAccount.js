@@ -11,7 +11,7 @@ const EmailAccountSchema = new mongoose.Schema({
     nylasGrantId: {
         type: String,
         required: true,
-        unique: true, // Ensures one grant per account
+        unique: true,
         index: true
     },
     emailAddress: {
@@ -19,6 +19,18 @@ const EmailAccountSchema = new mongoose.Schema({
         required: true,
         lowercase: true,
         trim: true
+    },
+    // ADD THESE TWO FIELDS
+    accessToken: {
+        type: String,
+        required: true
+    },
+    refreshToken: {
+        type: String,
+        required: true
+    },
+    tokenExpiry: { // Optional: helpful to know when it expires
+        type: Date
     },
     provider: {
         type: String,
