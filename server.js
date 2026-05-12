@@ -457,8 +457,9 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 await lead.save();
 
                 if (leadData.messages && leadData.messages.length > 0) {
+                    // Use the FRESH token
                     const result = await sendEmail(
-                        currentAccessToken, // Use the fresh token
+                        currentAccessToken, 
                         leadData.email, 
                         leadData.messages[0].subject, 
                         leadData.messages[0].body
@@ -487,8 +488,8 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
             }
         }
 
-        res.json({ 
-            success: true,             message: `Sent ${sentCount} emails.`, 
+        res.json({             success: true, 
+            message: `Sent ${sentCount} emails.`, 
             errors: errors 
         });
 
@@ -536,8 +537,8 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
                 );
 
                 if (result.success) {
-                    msg.status = 'sent';
-                    sentCount++;                } else {
+                    msg.status = 'sent';                    sentCount++;
+                } else {
                     msg.status = 'failed';
                 }
             }
@@ -585,8 +586,8 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
 //  NYLAS AUTHENTICATION ROUTES (WITH BRIDGE)
 // ════════════════════════════════════════════
 
-app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId = req.userId;    const randomState = uuidv4();
+app.get('/api/auth/nylas/url', verifyToken, (req, res) => {    const userId = req.userId;
+    const randomState = uuidv4();
     stateStore[randomState] = userId;
     
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
@@ -634,8 +635,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         });
 
         // 2. CREATE/UPDATE THE EMAIL ACCOUNT BRIDGE (THE FIX)
-        if (grantId) {
-            await EmailAccount.findOneAndUpdate(                { nylasGrantId: grantId },
+        if (grantId) {            await EmailAccount.findOneAndUpdate(
+                { nylasGrantId: grantId },
                 {
                     userId: userId,
                     emailAddress: emailAddress,
@@ -683,8 +684,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const { message, history, sessionId } = req.body;
     const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
-    const currentSessionId = sessionId || uuidv4();
-    const user = await User.findById(userId);    const plan = user.subscriptionTier || 'free';
+    const currentSessionId = sessionId || uuidv4();    const user = await User.findById(userId);
+    const plan = user.subscriptionTier || 'free';
     try {
         await new Message({
             userId,
@@ -732,8 +733,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
 
     } catch (error) {
-        console.error('Chat route error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });    }
+        console.error('Chat route error:', error);        res.status(500).json({ message: error.message || 'Server Error' });
+    }
 });
 
 // ════════════════════════════════════════════
@@ -781,8 +782,8 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
             { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
             { $sort: { lastUpdated: -1 } }
         ]);
-        res.json(sessions);
-    } catch (error) {        res.status(500).json({ message: 'Server Error fetching sessions' });
+        res.json(sessions);    } catch (error) {
+        res.status(500).json({ message: 'Server Error fetching sessions' });
     }
 });
 
@@ -830,8 +831,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 });
 
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
-        const user = await User.findById(req.userId).select('-password');        if (!user) return res.status(404).json({ message: 'User not found' });
+    try {        const user = await User.findById(req.userId).select('-password');
+        if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
@@ -879,8 +880,8 @@ app.put('/api/users/verify-age', verifyToken, verifyAge);
 app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
 
 // ADMIN ROUTES
-app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);app.get('/api/admin/users', verifyToken, async (req, res) => {
+app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
+app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user || !user.isAdmin) return res.status(403).json({ message: 'Access denied. Admins only.' });
@@ -928,8 +929,8 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
         res.json({ user: targetUser, messages: chatMessages });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
-    try {        const admin = await User.findById(req.userId);
+app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {    try {
+        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
