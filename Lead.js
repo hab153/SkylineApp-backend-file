@@ -39,10 +39,20 @@ const LeadSchema = new mongoose.Schema({
     replies: [{
         date: { type: Date, default: Date.now },
         content: String,
-        subject: String,  // ← ADD THIS FIELD
+        subject: String,
         from: { type: String, enum: ['lead', 'ai'] },
-        emailId: String   // ← ADD THIS FIELD
+        emailId: String
     }],
+
+    // AUTO-REPLY SETTINGS (NEW)
+    autoReplyEnabled: {
+        type: Boolean,
+        default: false
+    },
+    autoReplyInstructions: {
+        type: String,
+        default: ''
+    },
 
     createdAt: { type: Date, default: Date.now }
 });
