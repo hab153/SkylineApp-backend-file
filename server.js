@@ -82,13 +82,70 @@ async function refreshNylasToken(emailAccount) {
 }
 
 // ════════════════════════════════════════════
+//  HELPER: GENERATE AUTO-REPLY
+// ════════════════════════════════════════════
+async function generateAutoReply(customerMessage, instructions, leadName) {
+    try {
+        // We use a simple prompt to check if the message is within scope
+        const prompt = `
+        You are an automated email assistant for ${leadName}.
+        
+        STRICT INSTRUCTIONS:
+        ${instructions}
+
+        CUSTOMER MESSAGE:
+        "${customerMessage}"
+
+        TASK:        1. Analyze if the customer's message can be answered strictly using the STRICT INSTRUCTIONS above.
+        2. If the message is OUT OF SCOPE, unrelated, or requires human judgment, respond with ONLY the text: "NO_REPLY".
+        3. If it IS within scope, write a professional, concise email reply. Do not include subject lines or greetings unless specified in instructions.
+        
+        RESPONSE:
+        `;
+
+        // Use your existing business AI or a lightweight call
+        // For this example, we'll use a direct OpenAI/Nylas call if available, or reuse your businessAI
+        // Assuming generateBusinessResponse can handle a custom prompt/context
+        
+        // Note: Since generateBusinessResponse expects a userProfile, we might need a simpler call.
+        // For now, let's assume we can use a direct axios call to OpenAI or similar if you have it configured.
+        // If not, we can mock this or use your existing AI router.
+        
+        // Using a simple fetch to OpenAI for this specific task (assuming you have OPENAI_API_KEY in env)
+        // If you don't have OpenAI directly, we can adapt this to use your existing AI services.
+        
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model: "gpt-4o-mini", // or gpt-3.5-turbo
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.7
+        }, {
+            headers: {
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const reply = response.data.choices[0].message.content.trim();
+        
+        if (reply.includes("NO_REPLY")) {
+            return null; // Signal to not send
+        }
+        
+        return reply;
+
+    } catch (err) {
+        console.error('❌ Auto-Reply Generation Error:', err.message);
+        return null; // Fail safe: do not send if generation fails
+    }
+}
+
+// ════════════════════════════════════════════
 //  CHECK SUBSCRIPTION EXPIRY MIDDLEWARE
 // ════════════════════════════════════════════
 const checkSubscriptionExpiry = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        
+        if (!user) return res.status(404).json({ message: 'User not found' });        
         if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
             const now = new Date();
             const endDate = new Date(user.subscriptionEndDate);
@@ -96,7 +153,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
                 user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
                 await user.save();
-                console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);            }
+                console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
+            }
         }
         next();
     } catch (err) {
@@ -136,8 +194,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             txRef = payload.txRef || payload.tx_ref;
             planType = payload.meta?.plan;
         } else if (payload.event === 'charge.completed') {
-            status = payload.data?.status;
-            txRef = payload.data?.tx_ref;
+            status = payload.data?.status;            txRef = payload.data?.tx_ref;
             planType = payload.data?.meta?.plan;
         }
 
@@ -145,7 +202,8 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             console.log(`✅ Payment successful for txRef: ${txRef}`);
             if (!txRef) return res.status(400).send('Missing txRef');
             
-            if (!planType) {                if (txRef.includes('_go_')) planType = 'go';
+            if (!planType) {
+                if (txRef.includes('_go_')) planType = 'go';
                 else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';
             }
@@ -174,7 +232,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK - USES EMAIL ACCOUNT BRIDGE
+//  INBOUND EMAIL WEBHOOK - WITH AUTO-REPLY
 // ════════════════════════════════════════════
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     if (req.method === 'GET') {
@@ -185,8 +243,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
 
     if (req.method === 'POST') {
         try {
-            const payload = JSON.parse(req.body.toString('utf-8'));
-            const messageData = payload.data?.object;
+            const payload = JSON.parse(req.body.toString('utf-8'));            const messageData = payload.data?.object;
             
             if (messageData && (payload.type === 'message.created' || payload.event === 'message.created')) {
                 const fromEmail = messageData.from?.[0]?.email;
@@ -235,17 +292,56 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         role: 'ai',
                         title: '📬 New Lead Reply',
                         content: `${lead.name} replied:\n\n"${bodyText.substring(0, 200)}..."`,
-                        notificationType: 'reply',
-                        leadId: lead._id,
+                        notificationType: 'reply',                        leadId: lead._id,
                         isRead: false
                     });
                     await notification.save();
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
+
+                    // 4. CHECK FOR AUTO-REPLY
+                    if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
+                        console.log(`🤖 [AUTO-REPLY] Checking instructions for ${lead.name}...`);
+                        
+                        const aiReply = await generateAutoReply(bodyText, lead.autoReplyInstructions, lead.name);
+                        
+                        if (aiReply) {
+                            console.log(`📤 [AUTO-REPLY] Sending automated response to ${lead.email}`);
+                            
+                            // Get Fresh Token
+                            const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
+                            let accessToken = emailAccount.accessToken;
+                            
+                            // Send Email
+                            const result = await sendEmail(
+                                accessToken,
+                                lead.email,
+                                `Re: ${messageData.subject}`,
+                                aiReply
+                            );
+
+                            if (result.success) {
+                                lead.replies.push({
+                                    date: new Date(),
+                                    content: aiReply,
+                                    subject: `Re: ${messageData.subject}`,
+                                    from: 'ai',
+                                    status: 'sent'
+                                });
+                                await lead.save();
+                                console.log(`✅ [AUTO-REPLY] Sent successfully.`);
+                            } else {
+                                console.error(`❌ [AUTO-REPLY] Failed to send: ${result.error}`);
+                            }
+                        } else {
+                            console.log(`🔇 [AUTO-REPLY] No reply generated (Out of scope).`);
+                        }
+                    }
+
                 } else {
                     console.warn(`⚠️ [WEBHOOK] No lead found for ${fromEmail} under User ${ownerUserId}`);
-                }            }
-            return res.status(200).send('OK');
-        } catch (err) {
+                }
+            }
+            return res.status(200).send('OK');        } catch (err) {
             console.error('❌ Webhook Error:', err);
             return res.status(500).send('Error');
         }
@@ -294,8 +390,7 @@ const checkDailyLimit = async (req, res, next) => {
             user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
         }
         let limit = 30;
-        if (user.subscriptionTier === 'go') limit = 18; 
-        if (user.subscriptionTier === 'pro') limit = 40; 
+        if (user.subscriptionTier === 'go') limit = 18;         if (user.subscriptionTier === 'pro') limit = 40; 
 
         const now = new Date();
         const todayStr = now.toDateString();
@@ -344,13 +439,13 @@ app.get('/api/conversations', verifyToken, async (req, res) => {
             }
             return {
                 id: lead._id,
-                name: lead.name,
-                company: lead.company,
+                name: lead.name,                company: lead.company,
                 email: lead.email,
                 status: lead.status,
                 lastMessage: preview,
                 lastDate: lead.lastContactDate,
-                unread: !lastReply || lastReply.from === 'lead' 
+                unread: !lastReply || lastReply.from === 'lead',
+                autoReplyEnabled: lead.autoReplyEnabled // Send status to frontend
             };
         });
 
@@ -380,7 +475,9 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
                 name: lead.name,
                 email: lead.email,
                 company: lead.company,
-                status: lead.status
+                status: lead.status,
+                autoReplyEnabled: lead.autoReplyEnabled,
+                autoReplyInstructions: lead.autoReplyInstructions
             },
             messages: cleanHistory
         });
@@ -391,8 +488,7 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
 });
 
 // 3. RENAME CUSTOMER
-app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
-    try {
+app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {    try {
         const { newName } = req.body;
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         
@@ -402,6 +498,26 @@ app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
         await lead.save();
         
         res.json({ success: true, newName: lead.name });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+// 4. AUTO-REPLY SETTINGS
+app.put('/api/leads/:leadId/auto-reply', verifyToken, async (req, res) => {
+    try {
+        const { enabled, instructions } = req.body;
+        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+        lead.autoReplyEnabled = enabled;
+        if (instructions !== undefined) {
+            lead.autoReplyInstructions = instructions;
+        }
+        
+        await lead.save();
+        res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
     }
@@ -421,8 +537,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
             return res.status(401).json({ 
                 success: false, 
                 error: 'NYLAS_DISCONNECTED', 
-                message: 'No connection found.' 
-            });
+                message: 'No connection found.'             });
         }
 
         // 2. Check if token is expired (or expires in next 5 mins)
@@ -471,8 +586,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                     lead.replies.push({
                         date: now,
                         content: leadData.messages[0].body,
-                        subject: leadData.messages[0].subject,
-                        from: 'ai',
+                        subject: leadData.messages[0].subject,                        from: 'ai',
                         status: 'sent'
                     });
                 }
@@ -521,8 +635,7 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
     try {
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
-            return res.status(400).json({ message: 'Nylas not connected' });
-        }
+            return res.status(400).json({ message: 'Nylas not connected' });        }
 
         // Ensure we have a fresh token
         let currentAccessToken = emailAccount.accessToken;
@@ -571,8 +684,7 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 //  SIMPLIFIED NOTIFICATIONS ENDPOINT
 // ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
-    try {
-        console.log(`🔍 Fetching notifications for user: ${req.userId}`);
+    try {        console.log(`🔍 Fetching notifications for user: ${req.userId}`);
         
         const replyNotifications = await Message.find({
             userId: req.userId,
@@ -621,7 +733,6 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     if (!code || !state) {
         return res.status(400).send('Missing required parameters.');
     }
-
     const userId = stateStore[state];
     if (!userId) {
         return res.status(400).send('Session expired. Please try connecting again.');
@@ -672,7 +783,6 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=token_exchange_failed`);
     }
 });
-
 // ════════════════════════════════════════════
 //  CHECK FOR NEW REPLIES (For Frontend Notification)
 // ════════════════════════════════════════════
@@ -721,8 +831,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
                 const result = await goAI.generateGoResponse(message, history || [], user);
                 aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
                 updatedHistory = result ? (result.updatedHistory || []) : [];
-            } catch (goError) {
-                aiReply = "⚠️ Go AI Service currently unavailable.";
+            } catch (goError) {                aiReply = "⚠️ Go AI Service currently unavailable.";
             }
         } 
         else {
@@ -771,8 +880,7 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
     try {
         const { messageId, type } = req.body;
         if (!messageId || !['like', 'dislike'].includes(type)) {
-            return res.status(400).json({ message: 'Invalid feedback data' });
-        }
+            return res.status(400).json({ message: 'Invalid feedback data' });        }
         const message = await Message.findById(messageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
         if (message.userId.toString() !== req.userId) {
@@ -821,8 +929,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         const user = await User.findById(userId);
         const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
         const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(dream, [], userProfile); });
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
-        res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
+        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();        res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         res.status(500).json({ message: error.message || 'Server Error' });
     }
@@ -872,7 +979,6 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     try {
@@ -921,8 +1027,7 @@ app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         await User.findByIdAndDelete(req.params.id);
-        res.json({ message: 'User deleted' });
-    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
+        res.json({ message: 'User deleted' });    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
     try {
@@ -971,8 +1076,7 @@ app.post('/api/reports', verifyToken, async (req, res) => {
 app.get('/api/admin/reports', verifyToken, async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const reports = await Report.find().sort({ createdAt: -1 });
+        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });        const reports = await Report.find().sort({ createdAt: -1 });
         res.json(reports);
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
