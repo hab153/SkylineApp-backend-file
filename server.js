@@ -390,7 +390,8 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
     }
 });
 
-// 3. RENAME CUSTOMERapp.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
+// 3. RENAME CUSTOMER
+app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
     try {
         const { newName } = req.body;
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
