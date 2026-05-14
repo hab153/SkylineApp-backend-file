@@ -40,6 +40,15 @@ const EmailAccountSchema = new mongoose.Schema({
     isConnected: {
         type: Boolean,
         default: true
+    },
+    // NEW FIELDS FOR RETRY LOGIC
+    refreshFailCount: { 
+        type: Number, 
+        default: 0 
+    },
+    lastRefreshError: { 
+        type: String, 
+        default: null 
     }
 }, { timestamps: true });
 
