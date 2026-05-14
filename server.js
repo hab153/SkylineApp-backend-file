@@ -16,7 +16,7 @@ const { generateBusinessResponse } = require('./businessAI');
 
 // IMPORT MONTH 2 FILES
 const Lead = require('./Lead');
-const EmailAccount = require('./EmailAccount'); // <--- NEW BRIDGE MODEL
+const EmailAccount = require('./EmailAccount');
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
 
 const authRoutes = require('./authRoutes');
@@ -26,57 +26,55 @@ const Report = require('./Report');
 const requestQueue = require('./requestQueue');
 const { verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount } = require('./authController');
 
-// Load environment variables
 dotenv.config();
-
 const app = express();
-
-// Middleware
 app.use(cors());
-
-// ════════════════════════════════════════════
-//  IN-MEMORY STATE STORE (For Nylas Auth)
-// ════════════════════════════════════════════
 const stateStore = {};
 
 // ════════════════════════════════════════════
-//  FIX 1: REFRESH NYLAS TOKEN
-//  - Never deletes the EmailAccount record
-//  - Retries once after 2 seconds before giving up
-//  - Tracks refreshFailCount and lastRefreshError in DB
-//  - Only throws after both attempts fail
+//  FIX 1: refreshNylasToken — NEVER deletes account.
+//  Added retry: tries once, waits 2s, tries again before giving up.
+//  If both attempts fail it throws — caller decides what to do.
+//  The EmailAccount record is ALWAYS preserved.
 // ════════════════════════════════════════════
 async function refreshNylasToken(emailAccount, attempt = 1) {
     try {
-        const response = await axios.post(`${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/connect/token`, {
-            client_id: process.env.NYLAS_CLIENT_ID,
-            client_secret: process.env.NYLAS_CLIENT_SECRET,
-            grant_type: 'refresh_token',
-            refresh_token: emailAccount.refreshToken
-        });
+        const response = await axios.post(
+            `${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/connect/token`,
+            {
+                client_id:     process.env.NYLAS_CLIENT_ID,
+                client_secret: process.env.NYLAS_CLIENT_SECRET,
+                grant_type:    'refresh_token',
+                refresh_token: emailAccount.refreshToken
+            }
+        );
 
         const newAccessToken = response.data.access_token;
-        
-        // Update the database with the new token
-        emailAccount.accessToken = newAccessToken;
-        emailAccount.tokenExpiry = new Date(Date.now() + 3600 * 1000); 
-        emailAccount.refreshFailCount = 0;  // reset on success
+
+        // Persist new token — never touch anything else on the record
+        emailAccount.accessToken  = newAccessToken;
+        emailAccount.tokenExpiry  = new Date(Date.now() + 3600 * 1000);
+        emailAccount.refreshFailCount = 0; // reset failure counter on success
         await emailAccount.save();
-        
+
         console.log(`🔄 [NYLAS] Token refreshed successfully (attempt ${attempt}).`);
         return newAccessToken;
 
     } catch (err) {
-        console.error('❌ [NYLAS] Token Refresh Failed (attempt ' + attempt + '):', err.response?.status, err.response?.data?.error_description || err.message);
-        
-        // Retry once after 2 seconds before giving up
+        console.error(
+            `❌ [NYLAS] Token refresh failed (attempt ${attempt}):`,
+            err.response?.status,
+            err.response?.data?.error_description || err.message
+        );
+
+        // FIX: retry once with a short delay before giving up
         if (attempt === 1) {
-            console.log('⏳ [NYLAS] Retrying token refresh in 2 seconds...');
+            console.log(`⏳ [NYLAS] Retrying token refresh in 2 seconds...`);
             await new Promise(r => setTimeout(r, 2000));
             return refreshNylasToken(emailAccount, 2);
         }
 
-        // Both attempts failed — track failure but DO NOT delete the account
+        // Both attempts failed — track it but DO NOT delete the account
         try {
             emailAccount.refreshFailCount = (emailAccount.refreshFailCount || 0) + 1;
             emailAccount.lastRefreshError = err.response?.data?.error_description || err.message;
@@ -85,20 +83,19 @@ async function refreshNylasToken(emailAccount, attempt = 1) {
             console.warn('[NYLAS] Could not save fail count:', saveErr.message);
         }
 
-        // Just throw the error so the calling function knows it failed.
-        throw err;
+        throw err; // caller handles UI/response, we just propagate
     }
 }
 
 // ════════════════════════════════════════════
 //  FIX 2: PROACTIVE TOKEN REFRESH JOB
-//  Runs every 50 minutes. Silently refreshes any
-//  token expiring within the next 10 minutes.
+//  Runs every 10 minutes. Finds any token expiring
+//  within the next 30 minutes and refreshes it silently.
 //  Users never hit an expired token mid-request.
 // ════════════════════════════════════════════
 async function proactiveTokenRefresh() {
     try {
-        const soon = new Date(Date.now() + 10 * 60 * 1000); // expiring in next 10 min
+        const soon = new Date(Date.now() + 30 * 60 * 1000); // expiring in next 30 min
         const accounts = await EmailAccount.find({
             isConnected: true,
             refreshToken: { $exists: true, $ne: null },
@@ -112,7 +109,7 @@ async function proactiveTokenRefresh() {
             try {
                 await refreshNylasToken(account);
             } catch (err) {
-                // Log but never crash — other accounts still get refreshed
+                // Log but never crash the job — other accounts still get refreshed
                 console.warn(`⚠️ [PROACTIVE] Could not refresh token for ${account.emailAddress}: ${err.message}`);
             }
         }
@@ -122,55 +119,38 @@ async function proactiveTokenRefresh() {
 }
 
 // ════════════════════════════════════════════
-//  HELPER: GENERATE AUTO-REPLY
+//  GENERATE AUTO-REPLY
 // ════════════════════════════════════════════
 async function generateAutoReply(customerMessage, instructions, leadName) {
     try {
-        // Check if OpenAI key is present
         if (!process.env.OPENAI_API_KEY) {
-            console.error('❌ [AUTO-REPLY] OPENAI_API_KEY is missing in environment variables.');
+            console.error('❌ [AUTO-REPLY] OPENAI_API_KEY is missing.');
             return null;
         }
-
-        // We use a simple prompt to check if the message is within scope
         const prompt = `
         You are an automated email assistant for ${leadName}.
-        
-        STRICT INSTRUCTIONS:
-        ${instructions}
-
-        CUSTOMER MESSAGE:
-        "${customerMessage}"
-
+        STRICT INSTRUCTIONS: ${instructions}
+        CUSTOMER MESSAGE: "${customerMessage}"
         TASK:
-        1. Analyze if the customer's message can be answered strictly using the STRICT INSTRUCTIONS above.
-        2. If the message is OUT OF SCOPE, unrelated, or requires human judgment, respond with ONLY the text: "NO_REPLY".
-        3. If it IS within scope, write a professional, concise email reply. Do not include subject lines or greetings unless specified in instructions.
-        
-        RESPONSE:
-        `;
+        1. Analyze if the customer message can be answered strictly using the STRICT INSTRUCTIONS.
+        2. If OUT OF SCOPE or requires human judgment, respond ONLY with: "NO_REPLY".
+        3. If within scope, write a professional, concise email reply.
+        RESPONSE:`;
+
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: "gpt-4o-mini",
             messages: [{ role: "user", content: prompt }],
             temperature: 0.7
         }, {
-            headers: {
-                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' }
         });
 
         const reply = response.data.choices[0].message.content.trim();
-        
-        if (reply.includes("NO_REPLY")) {
-            return null; // Signal to not send
-        }
-        
-        return reply;
+        return reply.includes("NO_REPLY") ? null : reply;
 
     } catch (err) {
         console.error('❌ Auto-Reply Generation Error:', err.message);
-        return null; // Fail safe: do not send if generation fails
+        return null;
     }
 }
 
@@ -181,11 +161,9 @@ const checkSubscriptionExpiry = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-        
         if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
             const now = new Date();
-            const endDate = new Date(user.subscriptionEndDate);
-            if (now > endDate) {
+            if (now > new Date(user.subscriptionEndDate)) {
                 user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
                 await user.save();
@@ -198,67 +176,47 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         next();
     }
 };
+
 // ════════════════════════════════════════════
-//  WEBHOOK ROUTE - MUST BE BEFORE express.json()
+//  WEBHOOK — MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
     console.log("🔥 Webhook hit!");
-    
     const sig = req.headers['verif-hash'];
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
-    
     if (secretHash && sig !== secretHash) {
-        console.log("⚠️ Hash mismatch - check your FLUTTERWAVE_SECRET_HASH");
+        console.log("⚠️ Hash mismatch");
         return res.status(401).send('Unauthorized');
     }
-
     let payload;
     try {
-        const rawBody = req.body.toString('utf-8');
-        payload = JSON.parse(rawBody);
+        payload = JSON.parse(req.body.toString('utf-8'));
     } catch (e) {
-        console.error('❌ Failed to parse webhook body:', e.message);
         return res.status(400).send('Invalid JSON');
     }
-
     try {
         let txRef, status, planType;
-        
         if (payload.status) {
-            status = payload.status;
-            txRef = payload.txRef || payload.tx_ref;
-            planType = payload.meta?.plan;
+            status = payload.status; txRef = payload.txRef || payload.tx_ref; planType = payload.meta?.plan;
         } else if (payload.event === 'charge.completed') {
-            status = payload.data?.status;
-            txRef = payload.data?.tx_ref;
-            planType = payload.data?.meta?.plan;
+            status = payload.data?.status; txRef = payload.data?.tx_ref; planType = payload.data?.meta?.plan;
         }
-
         if (status === 'successful') {
-            console.log(`✅ Payment successful for txRef: ${txRef}`);
             if (!txRef) return res.status(400).send('Missing txRef');
-            
             if (!planType) {
                 if (txRef.includes('_go_')) planType = 'go';
                 else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';
             }
-
             const user = await User.findOne({ lastTxRef: txRef });
             if (user) {
                 const endDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-                await User.findByIdAndUpdate(user._id, {                    subscriptionTier: planType, 
-                    subscriptionEndDate: endDate,
-                    lastTxRef: null
-                });
-                console.log(`🎉 User ${user._id} upgraded to ${planType.toUpperCase()} Plan!`);
+                await User.findByIdAndUpdate(user._id, { subscriptionTier: planType, subscriptionEndDate: endDate, lastTxRef: null });
+                console.log(`🎉 User ${user._id} upgraded to ${planType.toUpperCase()}!`);
             } else {
                 console.error(`❌ User not found for txRef: ${txRef}`);
             }
-        } else {
-            console.log(`ℹ️ Webhook received but payment not successful. Status: ${status || 'unknown'}`);
         }
-
         res.status(200).send('Webhook received');
     } catch (error) {
         console.error('❌ Webhook Error:', error);
@@ -267,146 +225,119 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  FIX 3: INBOUND EMAIL WEBHOOK - WITH AUTO-REPLY
-//  Token refresh is now isolated in its own try-catch.
-//  If refresh fails: logs error, skips send, returns 200.
-//  Nylas won't retry-spam. Lead reply and notification
-//  are always saved regardless of token status.
+//  FIX 3: INBOUND EMAIL WEBHOOK
+//  Token refresh is now wrapped in its own try-catch.
+//  If refresh fails the webhook still returns 200 (Nylas
+//  won't retry-spam us) and we log the failure cleanly.
 // ════════════════════════════════════════════
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     if (req.method === 'GET') {
         const challenge = req.query.challenge;
-        if (challenge) return res.status(200).send(challenge); 
+        if (challenge) return res.status(200).send(challenge);
         return res.status(400).send('No challenge provided');
     }
 
     if (req.method === 'POST') {
         try {
-            const payload = JSON.parse(req.body.toString('utf-8'));
+            const payload     = JSON.parse(req.body.toString('utf-8'));
             const messageData = payload.data?.object;
-            
+
             if (messageData && (payload.type === 'message.created' || payload.event === 'message.created')) {
                 const fromEmail = messageData.from?.[0]?.email;
-                const toEmail = messageData.to?.[0]?.email;                
-                console.log(`📩 [WEBHOOK] Received email from ${fromEmail} to ${toEmail}`);
+                const toEmail   = messageData.to?.[0]?.email;
+                console.log(`📩 [WEBHOOK] Email from ${fromEmail} to ${toEmail}`);
 
-                // 1. FIND THE OWNER OF THE INBOX (THE BRIDGE)
-                const grantId = payload.grant_id || messageData.grant_id; 
+                // 1. Find inbox owner
+                const grantId = payload.grant_id || messageData.grant_id;
                 let ownerUserId = null;
                 if (grantId) {
                     const account = await EmailAccount.findOne({ nylasGrantId: grantId });
                     if (account) ownerUserId = account.userId;
-                } 
-                
-                // Fallback: Look up by "To" email address
-                if (!ownerUserId && toEmail) {
-                    const account = await EmailAccount.findOne({ emailAddress: toEmail.toLowerCase() });                    if (account) ownerUserId = account.userId;
                 }
-
+                if (!ownerUserId && toEmail) {
+                    const account = await EmailAccount.findOne({ emailAddress: toEmail.toLowerCase() });
+                    if (account) ownerUserId = account.userId;
+                }
                 if (!ownerUserId) {
                     console.warn(`⚠️ [WEBHOOK] Could not identify owner for To: ${toEmail}`);
                     return res.status(200).send('OK');
                 }
 
-                // 2. FIND THE LEAD (Who sent the reply?)
+                // 2. Find the Lead
                 const lead = await Lead.findOne({ email: fromEmail, userId: ownerUserId });
-                
                 if (lead) {
-                    lead.status = 'Replied';
+                    lead.status          = 'Replied';
                     lead.lastContactDate = new Date();
-                    
-                    const bodyText = messageData.body || messageData.snippet || '';
-                    lead.replies = lead.replies || [];
-                    lead.replies.push({
-                        date: new Date(),
-                        content: bodyText,
-                        from: 'lead',
-                        subject: messageData.subject
-                    });
+                    const bodyText       = messageData.body || messageData.snippet || '';
+                    lead.replies         = lead.replies || [];
+                    lead.replies.push({ date: new Date(), content: bodyText, from: 'lead', subject: messageData.subject });
                     await lead.save();
 
-                    // 3. CREATE NOTIFICATION FOR THE CORRECT USER
-                    const notification = new Message({
-                        userId: ownerUserId,
-                        sessionId: 'reply-notification',
-                        role: 'ai',
+                    // 3. Notification
+                    await new Message({
+                        userId: ownerUserId, sessionId: 'reply-notification', role: 'ai',
                         title: '📬 New Lead Reply',
                         content: `${lead.name} replied:\n\n"${bodyText.substring(0, 200)}..."`,
-                        notificationType: 'reply',
-                        leadId: lead._id,
-                        isRead: false
-                    });
-                    await notification.save();
+                        notificationType: 'reply', leadId: lead._id, isRead: false
+                    }).save();
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
 
-                    // 4. CHECK FOR AUTO-REPLY
-                    console.log(`🤖 [AUTO-REPLY] Checking status for Lead ${lead._id}... Enabled: ${lead.autoReplyEnabled}`);
-                    
+                    // 4. Auto-Reply with safe token handling
+                    console.log(`🤖 [AUTO-REPLY] Enabled: ${lead.autoReplyEnabled}`);
                     if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
-                        console.log(`📝 [AUTO-REPLY] Instructions found. Generating response...`);
-                        
                         try {
                             const aiReply = await generateAutoReply(bodyText, lead.autoReplyInstructions, lead.name);
-                            
                             if (aiReply) {
-                                console.log(`📤 [AUTO-REPLY] AI Generated Reply: "${aiReply.substring(0, 50)}..."`);                                
-                                // Get Email Account
                                 const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
                                 if (!emailAccount) {
-                                    console.error('❌ [AUTO-REPLY] No email account found for user.');
-                                    return res.status(200).send('OK');
-                                }
+                                    console.error('❌ [AUTO-REPLY] No email account for user.');
+                                } else {
+                                    let accessToken = emailAccount.accessToken;
 
-                                let accessToken = emailAccount.accessToken;
-                                
-                                // FIX: Token refresh is now in its own try-catch.
-                                // If it fails we log and skip the send — we do NOT crash the webhook.
-                                const isExpired = !emailAccount.tokenExpiry || new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
-                                if (isExpired) {
-                                    try {
-                                        console.log('🔄 [AUTO-REPLY] Refreshing token...');
-                                        accessToken = await refreshNylasToken(emailAccount);
-                                    } catch (refreshErr) {
-                                        console.error(`❌ [AUTO-REPLY] Token refresh failed — skipping send for ${lead.email}. User must reconnect.`);
-                                        accessToken = null; // signal to skip send
+                                    // FIX: token refresh has its own try-catch
+                                    // If it fails, we log and skip sending — webhook still returns 200
+                                    const isExpired = !emailAccount.tokenExpiry ||
+                                        new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
+
+                                    if (isExpired) {
+                                        try {
+                                            console.log('🔄 [AUTO-REPLY] Refreshing token...');
+                                            accessToken = await refreshNylasToken(emailAccount);
+                                        } catch (refreshErr) {
+                                            console.error(`❌ [AUTO-REPLY] Token refresh failed — skipping send for ${lead.email}. User must reconnect.`);
+                                            accessToken = null; // signal skip
+                                        }
                                     }
-                                }
-                                
-                                // Only send if we have a valid token
-                                if (accessToken) {
-                                    const result = await sendEmail(
-                                        accessToken,
-                                        lead.email,
-                                        `Re: ${messageData.subject}`,
-                                        aiReply
-                                    );
 
-                                    if (result.success) {
-                                        lead.replies.push({
-                                            date: new Date(),
-                                            content: aiReply,
-                                            subject: `Re: ${messageData.subject}`,
-                                            from: 'ai',
-                                            status: 'sent'
-                                        });
-                                        await lead.save();
-                                        console.log(`✅ [AUTO-REPLY] Sent successfully to ${lead.email}`);
-                                    } else {
-                                        console.error(`❌ [AUTO-REPLY] Failed to send: ${result.error}`);
+                                    if (accessToken) {
+                                        const result = await sendEmail(
+                                            accessToken, lead.email,
+                                            `Re: ${messageData.subject}`, aiReply
+                                        );
+                                        if (result.success) {
+                                            lead.replies.push({
+                                                date: new Date(), content: aiReply,
+                                                subject: `Re: ${messageData.subject}`, from: 'ai', status: 'sent'
+                                            });
+                                            await lead.save();
+                                            console.log(`✅ [AUTO-REPLY] Sent to ${lead.email}`);
+                                        } else {
+                                            console.error(`❌ [AUTO-REPLY] Send failed: ${result.error}`);
+                                        }
                                     }
                                 }
                             } else {
-                                console.log(`🔇 [AUTO-REPLY] AI returned NO_REPLY (Out of scope).`);
+                                console.log(`🔇 [AUTO-REPLY] NO_REPLY — out of scope.`);
                             }
                         } catch (aiErr) {
-                            console.error('❌ [AUTO-REPLY] Generation Error:', aiErr.message);
+                            console.error('❌ [AUTO-REPLY] Generation error:', aiErr.message);
                         }
                     } else {
                         console.log(`⚪ [AUTO-REPLY] Disabled or no instructions.`);
                     }
-
                 } else {
-                    console.warn(`⚠️ [WEBHOOK] No lead found for ${fromEmail} under User ${ownerUserId}`);                }
+                    console.warn(`⚠️ [WEBHOOK] No lead found for ${fromEmail} under User ${ownerUserId}`);
+                }
             }
             return res.status(200).send('OK');
         } catch (err) {
@@ -418,39 +349,34 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
 });
 
 // ════════════════════════════════════════════
-//  NOW apply express.json() for all other routes
+//  NOW apply express.json()
 // ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Database Connection
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => {
         console.log('✅ MongoDB Connected');
-        // FIX 2: Start proactive token refresh AFTER DB is ready
-        // Runs immediately on boot, then every 50 minutes
+        // FIX 4: Start proactive token refresh job AFTER DB is ready
+        // Runs immediately on boot, then every 10 minutes
         proactiveTokenRefresh();
-        setInterval(proactiveTokenRefresh, 50 * 60 * 1000);
-        console.log('🔁 [PROACTIVE] Token refresh job started (every 50 min)');
+        setInterval(proactiveTokenRefresh, 10 * 60 * 1000);
+        console.log('🔁 [PROACTIVE] Token refresh job started (every 10 min)');
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
-// Auth Routes
 app.use('/api/auth', authRoutes);
 
 // ── Verify Token Middleware ──
 const verifyToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
-
     if (!token) return res.status(403).json({ message: 'No token provided' });
     try {
-        const secret = process.env.JWT_SECRET || 'secretkey';
-        const decoded = jwt.verify(token, secret);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secretkey');
         req.userId = decoded.user.id;
         next();
     } catch (err) {
-        console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });
     }
 };
@@ -460,28 +386,16 @@ const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-
-        if (!user.usage) {
-            user.usage = { dailyCallCount: 0, lastCallDate: new Date() };        }
+        if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
         let limit = 30;
-        if (user.subscriptionTier === 'go') limit = 18; 
-        if (user.subscriptionTier === 'pro') limit = 40; 
-
-        const now = new Date();
-        const todayStr = now.toDateString();
-        const lastCallDate = user.usage.lastCallDate ? new Date(user.usage.lastCallDate) : null;
-        const lastCallStr = lastCallDate ? lastCallDate.toDateString() : '';
-
-        if (lastCallStr !== todayStr) {
-            user.usage.dailyCallCount = 0;
-            user.usage.lastCallDate = now;
-            await user.save();
-        }
-
+        if (user.subscriptionTier === 'go')  limit = 18;
+        if (user.subscriptionTier === 'pro') limit = 40;
+        const todayStr   = new Date().toDateString();
+        const lastStr    = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
+        if (lastStr !== todayStr) { user.usage.dailyCallCount = 0; user.usage.lastCallDate = new Date(); await user.save(); }
         if (user.usage.dailyCallCount >= limit) {
-            return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade your plan for more.` });
+            return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade for more.` });
         }
-
         user.usage.dailyCallCount += 1;
         await user.save();
         next();
@@ -494,211 +408,100 @@ const checkDailyLimit = async (req, res, next) => {
 // ════════════════════════════════════════════
 //  WHATSAPP-STYLE INBOX ROUTES
 // ════════════════════════════════════════════
-
-// 1. GET CONVERSATIONS (Sidebar List)
 app.get('/api/conversations', verifyToken, async (req, res) => {
     try {
-        const leads = await Lead.find({ userId: req.userId })
-            .sort({ lastContactDate: -1 })
-            .limit(50); 
-
+        const leads = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
         const conversations = leads.map(lead => {
-            const lastReply = lead.replies && lead.replies.length > 0 
-                ? lead.replies[lead.replies.length - 1] 
-                : null;
-
-            let preview = "No messages yet";
-            if (lastReply) {
-                // Strip HTML tags for clean preview
-                preview = lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50);
-            }            return {
-                id: lead._id,
-                name: lead.name,
-                company: lead.company,
-                email: lead.email,
-                status: lead.status,
-                lastMessage: preview,
-                lastDate: lead.lastContactDate,
-                unread: !lastReply || lastReply.from === 'lead',
-                autoReplyEnabled: lead.autoReplyEnabled // Send status to frontend
-            };
+            const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
+            const preview   = lastReply ? lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50) : "No messages yet";
+            return { id: lead._id, name: lead.name, company: lead.company, email: lead.email, status: lead.status, lastMessage: preview, lastDate: lead.lastContactDate, unread: !lastReply || lastReply.from === 'lead', autoReplyEnabled: lead.autoReplyEnabled };
         });
-
         res.json(conversations);
-    } catch (err) {
-        console.error('Error fetching conversations:', err);
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// 2. GET SINGLE CONVERSATION (Chat Area)
 app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
     try {
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
-        
         if (!lead) return res.status(404).json({ message: 'Conversation not found' });
-
-        // Clean up all messages in history (Strip HTML)
-        const cleanHistory = (lead.replies || []).map(msg => ({
-            ...msg.toObject(),
-            content: msg.content.replace(/<[^>]*>?/gm, '') // Strip HTML tags
-        }));
-
-        res.json({
-            lead: {
-                id: lead._id,
-                name: lead.name,
-                email: lead.email,
-                company: lead.company,
-                status: lead.status,
-                autoReplyEnabled: lead.autoReplyEnabled,
-                autoReplyInstructions: lead.autoReplyInstructions
-            },
-            messages: cleanHistory
-        });
-    } catch (err) {
-        console.error('Error fetching conversation details:', err);
-        res.status(500).json({ message: 'Server Error' });
-    }
+        const cleanHistory = (lead.replies || []).map(msg => ({ ...msg.toObject(), content: msg.content.replace(/<[^>]*>?/gm, '') }));
+        res.json({ lead: { id: lead._id, name: lead.name, email: lead.email, company: lead.company, status: lead.status, autoReplyEnabled: lead.autoReplyEnabled, autoReplyInstructions: lead.autoReplyInstructions }, messages: cleanHistory });
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-// 3. RENAME CUSTOMER
+
 app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
     try {
-        const { newName } = req.body;
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
-        
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
-
-        lead.name = newName;
+        lead.name = req.body.newName;
         await lead.save();
-        
         res.json({ success: true, newName: lead.name });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// 4. AUTO-REPLY SETTINGS
 app.put('/api/leads/:leadId/auto-reply', verifyToken, async (req, res) => {
     try {
         const { enabled, instructions } = req.body;
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
-        
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
-
         lead.autoReplyEnabled = enabled;
-        if (instructions !== undefined) {
-            lead.autoReplyInstructions = instructions;
-        }
-        
+        if (instructions !== undefined) lead.autoReplyInstructions = instructions;
         await lead.save();
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
 // ════════════════════════════════════════════
-//  BATCH SEND ROUTE (WITH AUTO-HEALING)
+//  BATCH SEND ROUTE
 // ════════════════════════════════════════════
 app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
     try {
-        const { leads } = req.body;
-        
-        // 1. Get the Email Account for this user
-        const emailAccount = await EmailAccount.findOne({ userId: req.userId });
-        
+        const { leads }      = req.body;
+        const emailAccount   = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
-            return res.status(401).json({                 success: false, 
-                error: 'NYLAS_DISCONNECTED', 
-                message: 'No connection found.' 
-            });
+            return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'No connection found.' });
         }
 
-        // 2. Check if token is expired (or expires in next 5 mins)
-        const isExpired = !emailAccount.tokenExpiry || new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
-        
+        const isExpired = !emailAccount.tokenExpiry ||
+            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 15 * 60 * 1000);
         let currentAccessToken = emailAccount.accessToken;
 
         if (isExpired) {
-            console.log('🔄 Access token expired. Attempting refresh...');
             try {
                 currentAccessToken = await refreshNylasToken(emailAccount);
             } catch (refreshErr) {
-                // Refresh failed (token is dead). 
-                // Return 401 so frontend saves to Pending Queue and redirects.
-                return res.status(401).json({ 
-                    success: false, 
-                    error: 'NYLAS_DISCONNECTED', 
-                    message: 'Session expired. Please reconnect.' 
-                });
+                return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'Session expired. Please reconnect.' });
             }
         }
 
         let sentCount = 0;
-        let errors = [];
-        const now = new Date();
+        let errors    = [];
+        const now     = new Date();
 
         for (const leadData of leads) {
             try {
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
-                
                 if (!lead) {
-                    lead = new Lead({
-                        userId: req.userId,
-                        name: leadData.name,
-                        email: leadData.email,
-                        company: leadData.company,
-                        status: 'Contacted',
-                        lastContactDate: now
-                    });
+                    lead = new Lead({ userId: req.userId, name: leadData.name, email: leadData.email, company: leadData.company, status: 'Contacted', lastContactDate: now });
                 } else {
-                    lead.status = 'Contacted';
-                    lead.lastContactDate = now;
+                    lead.status = 'Contacted'; lead.lastContactDate = now;
                 }
-                
-                if (leadData.messages && leadData.messages.length > 0) {
-                    if (!lead.replies) lead.replies = [];                    lead.replies.push({
-                        date: now,
-                        content: leadData.messages[0].body,
-                        subject: leadData.messages[0].subject,
-                        from: 'ai',
-                        status: 'sent'
-                    });
+                if (leadData.messages?.length > 0) {
+                    if (!lead.replies) lead.replies = [];
+                    lead.replies.push({ date: now, content: leadData.messages[0].body, subject: leadData.messages[0].subject, from: 'ai', status: 'sent' });
                 }
                 await lead.save();
 
-                if (leadData.messages && leadData.messages.length > 0) {
-                    // Use the FRESH token
-                    const result = await sendEmail(
-                        currentAccessToken, 
-                        leadData.email, 
-                        leadData.messages[0].subject, 
-                        leadData.messages[0].body
-                    );
-
-                    if (result.success) {
-                        sentCount++;
-                        console.log(`✅ Email sent to ${leadData.email}`);
-                    } else {
-                        lead.status = 'Failed';
-                        await lead.save();
-                        errors.push({ email: leadData.email, error: result.error });
-                        console.error(`❌ Failed to send to ${leadData.email}: ${result.error}`);
-                    }
+                if (leadData.messages?.length > 0) {
+                    const result = await sendEmail(currentAccessToken, leadData.email, leadData.messages[0].subject, leadData.messages[0].body);
+                    if (result.success) { sentCount++; console.log(`✅ Email sent to ${leadData.email}`); }
+                    else { lead.status = 'Failed'; await lead.save(); errors.push({ email: leadData.email, error: result.error }); }
                 }
             } catch (err) {
-                console.error(`Failed to send to ${leadData.email}:`, err.message);
                 errors.push({ email: leadData.email, error: err.message });
             }
         }
-
-        res.json({ 
-            success: true, 
-            message: `Sent ${sentCount} emails.`, 
-            errors: errors 
-        });
-
+        res.json({ success: true, message: `Sent ${sentCount} emails.`, errors });
     } catch (err) {
         console.error('Batch Send Error:', err);
         res.status(500).json({ message: 'Server Error during batch send' });
@@ -706,166 +509,107 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  RECONNECT AND AUTO-SEND PENDING MESSAGES
+//  RECONNECT AND AUTO-SEND PENDING
 // ════════════════════════════════════════════
 app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
     try {
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
-        if (!emailAccount) {
-            return res.status(400).json({ message: 'Nylas not connected' });
-        }
+        if (!emailAccount) return res.status(400).json({ message: 'Nylas not connected' });
 
-        // Ensure we have a fresh token
         let currentAccessToken = emailAccount.accessToken;
-        const isExpired = !emailAccount.tokenExpiry || new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
-        
-        if (isExpired) {
-            currentAccessToken = await refreshNylasToken(emailAccount);
-        }
-        
-        // Find all leads with pending messages for this user        
-        const leadsWithPending = await Lead.find({ 
-            userId: req.userId, 
-            'replies.status': 'pending' 
-        });
+        const isExpired = !emailAccount.tokenExpiry ||
+            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 15 * 60 * 1000);
+        if (isExpired) currentAccessToken = await refreshNylasToken(emailAccount);
 
+        const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
         let sentCount = 0;
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
-            
             for (const msg of pendingMessages) {
-                const result = await sendEmail(
-                    currentAccessToken, 
-                    lead.email, 
-                    msg.subject || 'Re: Conversation', 
-                    msg.content
-                );
-
-                if (result.success) {
-                    msg.status = 'sent';
-                    sentCount++;
-                } else {
-                    msg.status = 'failed';
-                }
+                const result = await sendEmail(currentAccessToken, lead.email, msg.subject || 'Re: Conversation', msg.content);
+                msg.status = result.success ? 'sent' : 'failed';
+                if (result.success) sentCount++;
             }
             await lead.save();
         }
-
         res.json({ success: true, sentCount });
     } catch (err) {
         console.error('Auto-send Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 });
+
 // ════════════════════════════════════════════
-//  SIMPLIFIED NOTIFICATIONS ENDPOINT
+//  NOTIFICATIONS
 // ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
     try {
-        console.log(`🔍 Fetching notifications for user: ${req.userId}`);
-        
-        const replyNotifications = await Message.find({
-            userId: req.userId,
-            sessionId: 'reply-notification'
-        }).sort({ createdAt: -1 });
-        
-        console.log(`✅ Found ${replyNotifications.length} reply notifications`);
-        const adminMessages = await Message.find({
-            userId: req.userId,
-            sessionId: 'admin-direct-message'
-        }).sort({ createdAt: -1 });
-        
-        console.log(`✅ Found ${adminMessages.length} admin messages`);
-        
-        const allNotifications = [...replyNotifications, ...adminMessages];
-        allNotifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        
+        const replyNotifications = await Message.find({ userId: req.userId, sessionId: 'reply-notification' }).sort({ createdAt: -1 });
+        const adminMessages      = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
+        const allNotifications   = [...replyNotifications, ...adminMessages].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         res.json(allNotifications);
-    } catch (err) {
-        console.error('❌ Error fetching notifications:', err);
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ════════════════════════════════════════════
-//  NYLAS AUTHENTICATION ROUTES (WITH BRIDGE)
+//  FIX 4: NYLAS CALLBACK — verifies refreshToken is saved
 // ════════════════════════════════════════════
-
 app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId = req.userId;
+    const userId      = req.userId;
     const randomState = uuidv4();
     stateStore[randomState] = userId;
-    
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
-
-    const url = getAuthUrl(randomState);
-    res.json({ url });
+    res.json({ url: getAuthUrl(randomState) });
 });
 
-// FIX 4: NYLAS CALLBACK
-// Added console.log to confirm refreshToken is being saved.
-// If you ever see "refreshToken saved: false" in logs, your
-// Nylas app scopes are missing offline_access.
 app.get('/api/auth/nylas/callback', async (req, res) => {
     const { code, state, error: oauthError } = req.query;
-
-    if (oauthError) {
-        return res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=false&error=' + oauthError);    }
-
-    if (!code || !state) {
-        return res.status(400).send('Missing required parameters.');
-    }
-
+    if (oauthError) return res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=false&error=' + oauthError);
+    if (!code || !state) return res.status(400).send('Missing required parameters.');
     const userId = stateStore[state];
-    if (!userId) {
-        return res.status(400).send('Session expired. Please try connecting again.');
-    }
-    
+    if (!userId) return res.status(400).send('Session expired. Please try connecting again.');
     delete stateStore[state];
+
     try {
-        const tokenData = await exchangeCodeForToken(code);
-        const accessToken = tokenData.access_token;
+        const tokenData    = await exchangeCodeForToken(code);
+        const accessToken  = tokenData.access_token;
         const refreshToken = tokenData.refresh_token;
-        const grantId = tokenData.grant_id; 
+        const grantId      = tokenData.grant_id;
 
         if (!refreshToken) {
-            console.error('❌ [NYLAS CALLBACK] No refresh_token returned from Nylas! Check your app scopes include offline_access.');
+            console.error('❌ [NYLAS CALLBACK] No refresh_token returned from Nylas! Check scopes include offline_access.');
         }
 
         let emailAddress = 'unknown@nylas.com';
-        try {
-            emailAddress = await getUserEmail(accessToken);
-        } catch (emailErr) {
-            console.warn(`⚠️ Could not retrieve email: ${emailErr.message}`);
-        }
+        try { emailAddress = await getUserEmail(accessToken); }
+        catch (emailErr) { console.warn(`⚠️ Could not retrieve email: ${emailErr.message}`); }
 
-        // 1. Update User's primary integration (Legacy support)
-        await User.findByIdAndUpdate(userId, { 
-            'nylasIntegration.accessToken': accessToken,
+        await User.findByIdAndUpdate(userId, {
+            'nylasIntegration.accessToken':  accessToken,
             'nylasIntegration.emailAddress': emailAddress,
-            'nylasIntegration.isConnected': true,
-            'nylasIntegration.connectedAt': new Date()
+            'nylasIntegration.isConnected':  true,
+            'nylasIntegration.connectedAt':  new Date()
         });
 
-        // 2. CREATE/UPDATE THE EMAIL ACCOUNT BRIDGE
         if (grantId) {
             const saved = await EmailAccount.findOneAndUpdate(
                 { nylasGrantId: grantId },
                 {
-                    userId: userId,
-                    emailAddress: emailAddress,
-                    isConnected: true,
-                    provider: 'gmail',
-                    accessToken: accessToken,
-                    refreshToken: refreshToken,
-                    tokenExpiry: new Date(Date.now() + 3600 * 1000),
-                    refreshFailCount: 0,      // reset on fresh connect
+                    userId,
+                    emailAddress,
+                    isConnected:      true,
+                    provider:         'gmail',
+                    accessToken,
+                    refreshToken,                        // always overwrite — new token on reconnect
+                    tokenExpiry:      new Date(Date.now() + 3600 * 1000),
+                    refreshFailCount: 0,                 // reset failure counter on fresh connect
                     lastRefreshError: null
                 },
                 { upsert: true, new: true }
             );
-            console.log(`✅ [AUTH] Linked Grant ${grantId} to User ${userId} — refreshToken saved: ${!!saved.refreshToken}`);
+            console.log(`✅ [AUTH] Grant ${grantId} linked to User ${userId} — refreshToken saved: ${!!saved.refreshToken}`);
         }
+
         res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
     } catch (err) {
         console.error(`❌ Nylas Callback Error: ${err.message}`);
@@ -874,27 +618,15 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  CHECK FOR NEW REPLIES (For Frontend Notification)
+//  OTHER ROUTES (unchanged)
 // ════════════════════════════════════════════
 app.get('/api/notifications/replies', verifyToken, async (req, res) => {
     try {
-        const repliedLeads = await Lead.find({ 
-            userId: req.userId, 
-            status: 'Replied' 
-        }).sort({ lastContactDate: -1 });
-        res.json({ 
-            count: repliedLeads.length,
-            leads: repliedLeads 
-        });
-    } catch (err) {
-        console.error('Error fetching replies:', err);
-        res.status(500).json({ message: 'Server Error' });
-    }
+        const repliedLeads = await Lead.find({ userId: req.userId, status: 'Replied' }).sort({ lastContactDate: -1 });
+        res.json({ count: repliedLeads.length, leads: repliedLeads });
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// ════════════════════════════════════════════
-//  CHAT ROUTE (THE AI ROUTER)
-// ════════════════════════════════════════════
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { message, history, sessionId } = req.body;
     const userId = req.userId;
@@ -903,92 +635,50 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
     try {
-        await new Message({
-            userId,
-            sessionId: currentSessionId,
-            role: 'user',
-            content: message,
-            title: message.substring(0, 30) + '...'
-        }).save();
-
+        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: message, title: message.substring(0, 30) + '...' }).save();
         let aiReply, updatedHistory;
         if (plan === 'free') {
             const result = await freeAI.generateFreeResponse(message, history || [], user);
-            aiReply = result.reply;            updatedHistory = result.updatedHistory;
-        } 
-        else if (plan === 'go') {
+            aiReply = result.reply; updatedHistory = result.updatedHistory;
+        } else if (plan === 'go') {
             try {
                 const result = await goAI.generateGoResponse(message, history || [], user);
                 aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
                 updatedHistory = result ? (result.updatedHistory || []) : [];
-            } catch (goError) {
-                aiReply = "⚠️ Go AI Service currently unavailable.";
-            }
-        } 
-        else {
-            const userProfile = {
-                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
-                userId: user._id.toString()
-            };
-            const result = await requestQueue.enqueue(async () => {
-                return await generateBusinessResponse(message, history || [], userProfile);
-            });
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
+            } catch (goError) { aiReply = "⚠️ Go AI Service currently unavailable."; }
+        } else {
+            const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
+            const result = await requestQueue.enqueue(async () => generateBusinessResponse(message, history || [], userProfile));
+            aiReply = result.reply; updatedHistory = result.updatedHistory;
         }
-
-        await new Message({
-            userId,
-            sessionId: currentSessionId,
-            role: 'ai',
-            content: aiReply
-        }).save();
-
+        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply }).save();
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
-
     } catch (error) {
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
 
-// ════════════════════════════════════════════
-//  GET LEADS FOR DASHBOARD
-// ════════════════════════════════════════════
 app.get('/api/leads', verifyToken, async (req, res) => {
     try {
         const leads = await Lead.find({ userId: req.userId }).sort({ createdAt: -1 });
         res.json(leads);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-// ════════════════════════════════════════════
-//  FEEDBACK ROUTE
-// ════════════════════════════════════════════
+
 app.post('/api/feedback', verifyToken, async (req, res) => {
     try {
         const { messageId, type } = req.body;
-        if (!messageId || !['like', 'dislike'].includes(type)) {
-            return res.status(400).json({ message: 'Invalid feedback data' });
-        }
+        if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });
         const message = await Message.findById(messageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
-        if (message.userId.toString() !== req.userId) {
-            return res.status(403).json({ message: 'Unauthorized' });
-        }
+        if (message.userId.toString() !== req.userId) return res.status(403).json({ message: 'Unauthorized' });
         message.feedback = message.feedback === type ? null : type;
         await message.save();
         res.json({ success: true, feedback: message.feedback });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error saving feedback' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error saving feedback' }); }
 });
 
-// ════════════════════════════════════════════
-//  OTHER PROTECTED API ROUTES
-// ════════════════════════════════════════════
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const sessions = await Message.aggregate([
@@ -998,21 +688,18 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
             { $sort: { lastUpdated: -1 } }
         ]);
         res.json(sessions);
-    } catch (error) {
-        res.status(500).json({ message: 'Server Error fetching sessions' });
-    }
+    } catch (error) { res.status(500).json({ message: 'Server Error fetching sessions' }); }
 });
 
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const messages = await Message.find({ userId: req.userId, sessionId: req.params.sessionId }).sort({ createdAt: 1 });
         res.json(messages);
-    } catch (error) {
-        res.status(500).json({ message: 'Server Error fetching history' });
-    }
+    } catch (error) { res.status(500).json({ message: 'Server Error fetching history' }); }
 });
 
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { dream, sessionId } = req.body;
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
+    const { dream, sessionId } = req.body;
     const userId = req.userId;
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
     const currentSessionId = sessionId || uuidv4();
@@ -1020,29 +707,25 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' }).save();
         const user = await User.findById(userId);
         const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(dream, [], userProfile); });
+        const result = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
-    } catch (error) {
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
+    } catch (error) { res.status(500).json({ message: error.message || 'Server Error' }); }
 });
 
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
+    const { followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
-    if (!followUpAnswer || !dreamDescription) { return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' }); }
+    if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
     const currentSessionId = sessionId || uuidv4();
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
         const user = await User.findById(userId);
         const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result = await requestQueue.enqueue(async () => { return await generateBusinessResponse(followUpAnswer, [], userProfile); });
+        const result = await requestQueue.enqueue(async () => generateBusinessResponse(followUpAnswer, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
-    } catch (error) {
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
+    } catch (error) { res.status(500).json({ message: error.message || 'Server Error' }); }
 });
 
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
@@ -1050,9 +733,7 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         const user = await User.findById(req.userId).select('-password');
         if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
@@ -1060,17 +741,16 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-        if (fullName) user.fullName = fullName;
-        if (primaryGoal) user.primaryGoal = primaryGoal;        if (skillLevel) user.skillLevel = skillLevel;
-        if (interests) user.interests = interests;
-        if (country) user.country = country;
-        if (bio) user.bio = bio;
+        if (fullName)       user.fullName       = fullName;
+        if (primaryGoal)    user.primaryGoal    = primaryGoal;
+        if (skillLevel)     user.skillLevel     = skillLevel;
+        if (interests)      user.interests      = interests;
+        if (country)        user.country        = country;
+        if (bio)            user.bio            = bio;
         if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
         res.json(user);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
 app.put('/api/auth/change-password', verifyToken, async (req, res) => {
@@ -1085,16 +765,13 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
         res.json({ message: 'Password updated successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
 app.put('/api/auth/change-email', verifyToken, changeEmail);
 app.put('/api/users/verify-age', verifyToken, verifyAge);
 app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
 
-// ADMIN ROUTES
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
 app.get('/api/admin/users', verifyToken, async (req, res) => {
@@ -1110,7 +787,8 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });        targetUser.isSuspended = !targetUser.isSuspended;
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+        targetUser.isSuspended    = !targetUser.isSuspended;
         targetUser.suspensionEnds = targetUser.isSuspended ? new Date('2099-12-31') : null;
         await targetUser.save();
         res.json({ message: 'Status updated' });
@@ -1152,19 +830,17 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        const newMessage = new Message({ userId: req.params.id, sessionId: 'admin-direct-message', role: 'ai', content: `[ADMIN MESSAGE]: ${messageContent}`, title: 'Direct Message from Admin' });
-        await newMessage.save();
+        await new Message({ userId: req.params.id, sessionId: 'admin-direct-message', role: 'ai', content: `[ADMIN MESSAGE]: ${messageContent}`, title: 'Direct Message from Admin' }).save();
         res.json({ message: 'Message sent successfully' });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// REPORTS
-app.post('/api/reports', verifyToken, async (req, res) => {    try {
+app.post('/api/reports', verifyToken, async (req, res) => {
+    try {
         const { subject, message } = req.body;
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-        const newReport = new Report({ userId: req.userId, username: user.username, subject, message });
-        await newReport.save();
+        await new Report({ userId: req.userId, username: user.username, subject, message }).save();
         res.json({ message: 'Report submitted successfully' });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
@@ -1177,30 +853,22 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 
-// NOTIFICATIONS COUNT
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
     try {
-        const adminCount = await Message.countDocuments({ 
-            userId: req.userId, 
-            sessionId: 'admin-direct-message' 
-        });
-        const replyCount = await Message.countDocuments({ 
-            userId: req.userId, 
-            sessionId: 'reply-notification'
-        });
+        const adminCount = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
+        const replyCount = await Message.countDocuments({ userId: req.userId, sessionId: 'reply-notification' });
         res.json({ count: adminCount + replyCount });
-    } catch (err) {
-        console.error('Error counting notifications:', err);
-        res.status(500).json({ message: 'Server Error counting notifications' });
-    }
+    } catch (err) { res.status(500).json({ message: 'Server Error counting notifications' }); }
 });
 
 // EXPIRY CHECK
 const scheduleExpiryCheck = async () => {
     try {
-        const now = new Date();
-        const result = await User.updateMany({ subscriptionTier: { $ne: 'free' }, subscriptionEndDate: { $lt: now } }, { subscriptionTier: 'free', subscriptionEndDate: null });
-        if (result.modifiedCount > 0) { console.log(`🔄 Downgraded ${result.modifiedCount} expired users`); }
+        const result = await User.updateMany(
+            { subscriptionTier: { $ne: 'free' }, subscriptionEndDate: { $lt: new Date() } },
+            { subscriptionTier: 'free', subscriptionEndDate: null }
+        );
+        if (result.modifiedCount > 0) console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
     } catch (err) { console.error('Error in expiry check:', err); }
 };
 setTimeout(() => { scheduleExpiryCheck(); setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000); }, 5000);
