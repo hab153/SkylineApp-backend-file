@@ -635,7 +635,8 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 
 // ════════════════════════════════════════════
 //  RECONNECT AND AUTO-SEND PENDING MESSAGES
-// ════════════════════════════════════════════app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
+// ════════════════════════════════════════════
+app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
     try {
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
