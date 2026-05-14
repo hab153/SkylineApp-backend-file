@@ -40,7 +40,7 @@ app.use(cors());
 const stateStore = {};
 
 // ════════════════════════════════════════════
-//  HELPER: REFRESH NYLAS TOKEN (AUTO-HEALING)
+//  HELPER: REFRESH NYLAS TOKEN (SAFE VERSION)
 // ════════════════════════════════════════════
 async function refreshNylasToken(emailAccount) {
     try {
@@ -52,31 +52,18 @@ async function refreshNylasToken(emailAccount) {
 
         const newAccessToken = response.data.access_token;
         
-        // Update the database with the new token and new expiry (1 hour from now)
+        // Update the database with the new token
         emailAccount.accessToken = newAccessToken;
         emailAccount.tokenExpiry = new Date(Date.now() + 3600 * 1000); 
         await emailAccount.save();
         
-        console.log(`🔄 [NYLAS] Token refreshed for User ${emailAccount.userId}`);
+        console.log(`🔄 [NYLAS] Token refreshed successfully.`);
         return newAccessToken;
     } catch (err) {
         console.error('❌ [NYLAS] Token Refresh Failed:', err.response?.status, err.response?.data);
         
-        // If 400 or 401, the refresh token is dead. Delete it to force reconnect.
-        if (err.response && (err.response.status === 400 || err.response.status === 401)) {
-            console.log('⚠️ [NYLAS] Refresh token invalid. Clearing stored credentials.');
-            
-            // 1. Delete the EmailAccount record
-            await EmailAccount.deleteOne({ _id: emailAccount._id });
-            
-            // 2. Update the legacy User model to reflect disconnected state
-            await User.findByIdAndUpdate(emailAccount.userId, {
-                'nylasIntegration.isConnected': false,
-                'nylasIntegration.accessToken': null,
-                'nylasIntegration.emailAddress': null
-            });
-        }
-        
+        // DO NOT DELETE THE ACCOUNT HERE.
+        // Just throw the error so the calling function knows it failed.
         throw err;
     }
 }
@@ -96,7 +83,8 @@ async function generateAutoReply(customerMessage, instructions, leadName) {
         const prompt = `
         You are an automated email assistant for ${leadName}.
         
-        STRICT INSTRUCTIONS:        ${instructions}
+        STRICT INSTRUCTIONS:
+        ${instructions}
 
         CUSTOMER MESSAGE:
         "${customerMessage}"
@@ -108,7 +96,6 @@ async function generateAutoReply(customerMessage, instructions, leadName) {
         
         RESPONSE:
         `;
-
         const response = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: "gpt-4o-mini",
             messages: [{ role: "user", content: prompt }],
@@ -145,7 +132,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
             const now = new Date();
             const endDate = new Date(user.subscriptionEndDate);
-            if (now > endDate) {                user.subscriptionTier = 'free';
+            if (now > endDate) {
+                user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
                 await user.save();
                 console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
@@ -157,7 +145,6 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         next();
     }
 };
-
 // ════════════════════════════════════════════
 //  WEBHOOK ROUTE - MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
@@ -194,7 +181,8 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             planType = payload.data?.meta?.plan;
         }
 
-        if (status === 'successful') {            console.log(`✅ Payment successful for txRef: ${txRef}`);
+        if (status === 'successful') {
+            console.log(`✅ Payment successful for txRef: ${txRef}`);
             if (!txRef) return res.status(400).send('Missing txRef');
             
             if (!planType) {
@@ -206,8 +194,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
             const user = await User.findOne({ lastTxRef: txRef });
             if (user) {
                 const endDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-                await User.findByIdAndUpdate(user._id, {
-                    subscriptionTier: planType, 
+                await User.findByIdAndUpdate(user._id, {                    subscriptionTier: planType, 
                     subscriptionEndDate: endDate,
                     lastTxRef: null
                 });
@@ -256,8 +243,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                 
                 // Fallback: Look up by "To" email address
                 if (!ownerUserId && toEmail) {
-                    const account = await EmailAccount.findOne({ emailAddress: toEmail.toLowerCase() });
-                    if (account) ownerUserId = account.userId;
+                    const account = await EmailAccount.findOne({ emailAddress: toEmail.toLowerCase() });                    if (account) ownerUserId = account.userId;
                 }
 
                 if (!ownerUserId) {
@@ -292,7 +278,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         notificationType: 'reply',
                         leadId: lead._id,
                         isRead: false
-                    });                    await notification.save();
+                    });
+                    await notification.save();
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
 
                     // 4. CHECK FOR AUTO-REPLY
@@ -305,8 +292,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                             const aiReply = await generateAutoReply(bodyText, lead.autoReplyInstructions, lead.name);
                             
                             if (aiReply) {
-                                console.log(`📤 [AUTO-REPLY] AI Generated Reply: "${aiReply.substring(0, 50)}..."`);
-                                
+                                console.log(`📤 [AUTO-REPLY] AI Generated Reply: "${aiReply.substring(0, 50)}..."`);                                
                                 // Get Fresh Token
                                 const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
                                 if (!emailAccount) {
@@ -341,7 +327,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                                     });
                                     await lead.save();
                                     console.log(`✅ [AUTO-REPLY] Sent successfully to ${lead.email}`);
-                                } else {                                    console.error(`❌ [AUTO-REPLY] Failed to send: ${result.error}`);
+                                } else {
+                                    console.error(`❌ [AUTO-REPLY] Failed to send: ${result.error}`);
                                 }
                             } else {
                                 console.log(`🔇 [AUTO-REPLY] AI returned NO_REPLY (Out of scope).`);
@@ -354,8 +341,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                     }
 
                 } else {
-                    console.warn(`⚠️ [WEBHOOK] No lead found for ${fromEmail} under User ${ownerUserId}`);
-                }
+                    console.warn(`⚠️ [WEBHOOK] No lead found for ${fromEmail} under User ${ownerUserId}`);                }
             }
             return res.status(200).send('OK');
         } catch (err) {
@@ -390,7 +376,8 @@ const verifyToken = (req, res, next) => {
         const secret = process.env.JWT_SECRET || 'secretkey';
         const decoded = jwt.verify(token, secret);
         req.userId = decoded.user.id;
-        next();    } catch (err) {
+        next();
+    } catch (err) {
         console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });
     }
@@ -403,8 +390,7 @@ const checkDailyLimit = async (req, res, next) => {
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (!user.usage) {
-            user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
-        }
+            user.usage = { dailyCallCount: 0, lastCallDate: new Date() };        }
         let limit = 30;
         if (user.subscriptionTier === 'go') limit = 18; 
         if (user.subscriptionTier === 'pro') limit = 40; 
@@ -439,7 +425,8 @@ const checkDailyLimit = async (req, res, next) => {
 
 // 1. GET CONVERSATIONS (Sidebar List)
 app.get('/api/conversations', verifyToken, async (req, res) => {
-    try {        const leads = await Lead.find({ userId: req.userId })
+    try {
+        const leads = await Lead.find({ userId: req.userId })
             .sort({ lastContactDate: -1 })
             .limit(50); 
 
@@ -452,8 +439,7 @@ app.get('/api/conversations', verifyToken, async (req, res) => {
             if (lastReply) {
                 // Strip HTML tags for clean preview
                 preview = lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50);
-            }
-            return {
+            }            return {
                 id: lead._id,
                 name: lead.name,
                 company: lead.company,
@@ -488,7 +474,8 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
 
         res.json({
             lead: {
-                id: lead._id,                name: lead.name,
+                id: lead._id,
+                name: lead.name,
                 email: lead.email,
                 company: lead.company,
                 status: lead.status,
@@ -502,7 +489,6 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // 3. RENAME CUSTOMER
 app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
     try {
@@ -537,7 +523,8 @@ app.put('/api/leads/:leadId/auto-reply', verifyToken, async (req, res) => {
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
-    }});
+    }
+});
 
 // ════════════════════════════════════════════
 //  BATCH SEND ROUTE (WITH AUTO-HEALING)
@@ -550,8 +537,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         
         if (!emailAccount) {
-            return res.status(401).json({ 
-                success: false, 
+            return res.status(401).json({                 success: false, 
                 error: 'NYLAS_DISCONNECTED', 
                 message: 'No connection found.' 
             });
@@ -586,7 +572,8 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 
                 if (!lead) {
-                    lead = new Lead({                        userId: req.userId,
+                    lead = new Lead({
+                        userId: req.userId,
                         name: leadData.name,
                         email: leadData.email,
                         company: leadData.company,
@@ -599,8 +586,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 }
                 
                 if (leadData.messages && leadData.messages.length > 0) {
-                    if (!lead.replies) lead.replies = [];
-                    lead.replies.push({
+                    if (!lead.replies) lead.replies = [];                    lead.replies.push({
                         date: now,
                         content: leadData.messages[0].body,
                         subject: leadData.messages[0].subject,
@@ -635,7 +621,8 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
             }
         }
 
-        res.json({             success: true, 
+        res.json({ 
+            success: true, 
             message: `Sent ${sentCount} emails.`, 
             errors: errors 
         });
@@ -648,8 +635,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 
 // ════════════════════════════════════════════
 //  RECONNECT AND AUTO-SEND PENDING MESSAGES
-// ════════════════════════════════════════════
-app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
+// ════════════════════════════════════════════app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
     try {
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
@@ -684,7 +670,8 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 
                 if (result.success) {
                     msg.status = 'sent';
-                    sentCount++;                } else {
+                    sentCount++;
+                } else {
                     msg.status = 'failed';
                 }
             }
@@ -697,7 +684,6 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // ════════════════════════════════════════════
 //  SIMPLIFIED NOTIFICATIONS ENDPOINT
 // ════════════════════════════════════════════
@@ -733,7 +719,8 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 
 app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId = req.userId;    const randomState = uuidv4();
+    const userId = req.userId;
+    const randomState = uuidv4();
     stateStore[randomState] = userId;
     
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
@@ -746,8 +733,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     const { code, state, error: oauthError } = req.query;
 
     if (oauthError) {
-        return res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=false&error=' + oauthError);
-    }
+        return res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=false&error=' + oauthError);    }
 
     if (!code || !state) {
         return res.status(400).send('Missing required parameters.');
@@ -782,7 +768,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 
         // 2. CREATE/UPDATE THE EMAIL ACCOUNT BRIDGE (THE FIX)
         if (grantId) {
-            await EmailAccount.findOneAndUpdate(                { nylasGrantId: grantId },
+            await EmailAccount.findOneAndUpdate(
+                { nylasGrantId: grantId },
                 {
                     userId: userId,
                     emailAddress: emailAddress,
@@ -796,7 +783,6 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             );
             console.log(`✅ [AUTH] Linked Grant ${grantId} to User ${userId}`);
         }
-
         res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
     } catch (err) {
         console.error(`❌ Nylas Callback Error: ${err.message}`);
@@ -831,7 +817,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     const currentSessionId = sessionId || uuidv4();
-    const user = await User.findById(userId);    const plan = user.subscriptionTier || 'free';
+    const user = await User.findById(userId);
+    const plan = user.subscriptionTier || 'free';
     try {
         await new Message({
             userId,
@@ -844,8 +831,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         let aiReply, updatedHistory;
         if (plan === 'free') {
             const result = await freeAI.generateFreeResponse(message, history || [], user);
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
+            aiReply = result.reply;            updatedHistory = result.updatedHistory;
         } 
         else if (plan === 'go') {
             try {
@@ -880,7 +866,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
 
     } catch (error) {
         console.error('Chat route error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });    }
+        res.status(500).json({ message: error.message || 'Server Error' });
+    }
 });
 
 // ════════════════════════════════════════════
@@ -894,7 +881,6 @@ app.get('/api/leads', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 // ════════════════════════════════════════════
 //  FEEDBACK ROUTE
 // ════════════════════════════════════════════
@@ -929,7 +915,8 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
             { $sort: { lastUpdated: -1 } }
         ]);
         res.json(sessions);
-    } catch (error) {        res.status(500).json({ message: 'Server Error fetching sessions' });
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error fetching sessions' });
     }
 });
 
@@ -942,8 +929,7 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
     }
 });
 
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { dream, sessionId } = req.body;
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {    const { dream, sessionId } = req.body;
     const userId = req.userId;
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
     const currentSessionId = sessionId || uuidv4();
@@ -978,7 +964,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
 
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
-        const user = await User.findById(req.userId).select('-password');        if (!user) return res.status(404).json({ message: 'User not found' });
+        const user = await User.findById(req.userId).select('-password');
+        if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
@@ -991,8 +978,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (fullName) user.fullName = fullName;
-        if (primaryGoal) user.primaryGoal = primaryGoal;
-        if (skillLevel) user.skillLevel = skillLevel;
+        if (primaryGoal) user.primaryGoal = primaryGoal;        if (skillLevel) user.skillLevel = skillLevel;
         if (interests) user.interests = interests;
         if (country) user.country = country;
         if (bio) user.bio = bio;
@@ -1027,7 +1013,8 @@ app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccou
 
 // ADMIN ROUTES
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);app.get('/api/admin/users', verifyToken, async (req, res) => {
+app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
+app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user || !user.isAdmin) return res.status(403).json({ message: 'Access denied. Admins only.' });
@@ -1040,8 +1027,7 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        targetUser.isSuspended = !targetUser.isSuspended;
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });        targetUser.isSuspended = !targetUser.isSuspended;
         targetUser.suspensionEnds = targetUser.isSuspended ? new Date('2099-12-31') : null;
         await targetUser.save();
         res.json({ message: 'Status updated' });
@@ -1076,7 +1062,8 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
-    try {        const admin = await User.findById(req.userId);
+    try {
+        const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
@@ -1089,8 +1076,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
 });
 
 // REPORTS
-app.post('/api/reports', verifyToken, async (req, res) => {
-    try {
+app.post('/api/reports', verifyToken, async (req, res) => {    try {
         const { subject, message } = req.body;
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
@@ -1125,6 +1111,7 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
+
 // EXPIRY CHECK
 const scheduleExpiryCheck = async () => {
     try {
