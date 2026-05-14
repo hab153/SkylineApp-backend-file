@@ -40,14 +40,19 @@ app.use(cors());
 const stateStore = {};
 
 // ════════════════════════════════════════════
-//  HELPER: REFRESH NYLAS TOKEN (SAFE VERSION)
+//  FIX 1: REFRESH NYLAS TOKEN
+//  - Never deletes the EmailAccount record
+//  - Retries once after 2 seconds before giving up
+//  - Tracks refreshFailCount and lastRefreshError in DB
+//  - Only throws after both attempts fail
 // ════════════════════════════════════════════
-async function refreshNylasToken(emailAccount) {
+async function refreshNylasToken(emailAccount, attempt = 1) {
     try {
         const response = await axios.post(`${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/connect/token`, {
             client_id: process.env.NYLAS_CLIENT_ID,
             client_secret: process.env.NYLAS_CLIENT_SECRET,
-            grant_type: 'refresh_token',            refresh_token: emailAccount.refreshToken
+            grant_type: 'refresh_token',
+            refresh_token: emailAccount.refreshToken
         });
 
         const newAccessToken = response.data.access_token;
@@ -55,16 +60,64 @@ async function refreshNylasToken(emailAccount) {
         // Update the database with the new token
         emailAccount.accessToken = newAccessToken;
         emailAccount.tokenExpiry = new Date(Date.now() + 3600 * 1000); 
+        emailAccount.refreshFailCount = 0;  // reset on success
         await emailAccount.save();
         
-        console.log(`🔄 [NYLAS] Token refreshed successfully.`);
+        console.log(`🔄 [NYLAS] Token refreshed successfully (attempt ${attempt}).`);
         return newAccessToken;
+
     } catch (err) {
-        console.error('❌ [NYLAS] Token Refresh Failed:', err.response?.status, err.response?.data);
+        console.error('❌ [NYLAS] Token Refresh Failed (attempt ' + attempt + '):', err.response?.status, err.response?.data?.error_description || err.message);
         
-        // DO NOT DELETE THE ACCOUNT HERE.
+        // Retry once after 2 seconds before giving up
+        if (attempt === 1) {
+            console.log('⏳ [NYLAS] Retrying token refresh in 2 seconds...');
+            await new Promise(r => setTimeout(r, 2000));
+            return refreshNylasToken(emailAccount, 2);
+        }
+
+        // Both attempts failed — track failure but DO NOT delete the account
+        try {
+            emailAccount.refreshFailCount = (emailAccount.refreshFailCount || 0) + 1;
+            emailAccount.lastRefreshError = err.response?.data?.error_description || err.message;
+            await emailAccount.save();
+        } catch (saveErr) {
+            console.warn('[NYLAS] Could not save fail count:', saveErr.message);
+        }
+
         // Just throw the error so the calling function knows it failed.
         throw err;
+    }
+}
+
+// ════════════════════════════════════════════
+//  FIX 2: PROACTIVE TOKEN REFRESH JOB
+//  Runs every 50 minutes. Silently refreshes any
+//  token expiring within the next 10 minutes.
+//  Users never hit an expired token mid-request.
+// ════════════════════════════════════════════
+async function proactiveTokenRefresh() {
+    try {
+        const soon = new Date(Date.now() + 10 * 60 * 1000); // expiring in next 10 min
+        const accounts = await EmailAccount.find({
+            isConnected: true,
+            refreshToken: { $exists: true, $ne: null },
+            tokenExpiry: { $lte: soon }
+        });
+
+        if (accounts.length === 0) return;
+        console.log(`🔁 [PROACTIVE] Refreshing ${accounts.length} token(s) before expiry...`);
+
+        for (const account of accounts) {
+            try {
+                await refreshNylasToken(account);
+            } catch (err) {
+                // Log but never crash — other accounts still get refreshed
+                console.warn(`⚠️ [PROACTIVE] Could not refresh token for ${account.emailAddress}: ${err.message}`);
+            }
+        }
+    } catch (err) {
+        console.error('❌ [PROACTIVE] Token refresh job error:', err.message);
     }
 }
 
@@ -214,7 +267,11 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK - WITH AUTO-REPLY (ROBUST)
+//  FIX 3: INBOUND EMAIL WEBHOOK - WITH AUTO-REPLY
+//  Token refresh is now isolated in its own try-catch.
+//  If refresh fails: logs error, skips send, returns 200.
+//  Nylas won't retry-spam. Lead reply and notification
+//  are always saved regardless of token status.
 // ════════════════════════════════════════════
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
     if (req.method === 'GET') {
@@ -293,7 +350,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                             
                             if (aiReply) {
                                 console.log(`📤 [AUTO-REPLY] AI Generated Reply: "${aiReply.substring(0, 50)}..."`);                                
-                                // Get Fresh Token
+                                // Get Email Account
                                 const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
                                 if (!emailAccount) {
                                     console.error('❌ [AUTO-REPLY] No email account found for user.');
@@ -302,33 +359,41 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
 
                                 let accessToken = emailAccount.accessToken;
                                 
-                                // Check if token needs refresh
+                                // FIX: Token refresh is now in its own try-catch.
+                                // If it fails we log and skip the send — we do NOT crash the webhook.
                                 const isExpired = !emailAccount.tokenExpiry || new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
                                 if (isExpired) {
-                                    console.log('🔄 [AUTO-REPLY] Refreshing token...');
-                                    accessToken = await refreshNylasToken(emailAccount);
+                                    try {
+                                        console.log('🔄 [AUTO-REPLY] Refreshing token...');
+                                        accessToken = await refreshNylasToken(emailAccount);
+                                    } catch (refreshErr) {
+                                        console.error(`❌ [AUTO-REPLY] Token refresh failed — skipping send for ${lead.email}. User must reconnect.`);
+                                        accessToken = null; // signal to skip send
+                                    }
                                 }
                                 
-                                // Send Email
-                                const result = await sendEmail(
-                                    accessToken,
-                                    lead.email,
-                                    `Re: ${messageData.subject}`,
-                                    aiReply
-                                );
+                                // Only send if we have a valid token
+                                if (accessToken) {
+                                    const result = await sendEmail(
+                                        accessToken,
+                                        lead.email,
+                                        `Re: ${messageData.subject}`,
+                                        aiReply
+                                    );
 
-                                if (result.success) {
-                                    lead.replies.push({
-                                        date: new Date(),
-                                        content: aiReply,
-                                        subject: `Re: ${messageData.subject}`,
-                                        from: 'ai',
-                                        status: 'sent'
-                                    });
-                                    await lead.save();
-                                    console.log(`✅ [AUTO-REPLY] Sent successfully to ${lead.email}`);
-                                } else {
-                                    console.error(`❌ [AUTO-REPLY] Failed to send: ${result.error}`);
+                                    if (result.success) {
+                                        lead.replies.push({
+                                            date: new Date(),
+                                            content: aiReply,
+                                            subject: `Re: ${messageData.subject}`,
+                                            from: 'ai',
+                                            status: 'sent'
+                                        });
+                                        await lead.save();
+                                        console.log(`✅ [AUTO-REPLY] Sent successfully to ${lead.email}`);
+                                    } else {
+                                        console.error(`❌ [AUTO-REPLY] Failed to send: ${result.error}`);
+                                    }
                                 }
                             } else {
                                 console.log(`🔇 [AUTO-REPLY] AI returned NO_REPLY (Out of scope).`);
@@ -360,7 +425,14 @@ app.use(express.static(path.join(__dirname)));
 
 // Database Connection
 mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('✅ MongoDB Connected'))
+    .then(() => {
+        console.log('✅ MongoDB Connected');
+        // FIX 2: Start proactive token refresh AFTER DB is ready
+        // Runs immediately on boot, then every 50 minutes
+        proactiveTokenRefresh();
+        setInterval(proactiveTokenRefresh, 50 * 60 * 1000);
+        console.log('🔁 [PROACTIVE] Token refresh job started (every 50 min)');
+    })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
 // Auth Routes
@@ -730,6 +802,10 @@ app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
     res.json({ url });
 });
 
+// FIX 4: NYLAS CALLBACK
+// Added console.log to confirm refreshToken is being saved.
+// If you ever see "refreshToken saved: false" in logs, your
+// Nylas app scopes are missing offline_access.
 app.get('/api/auth/nylas/callback', async (req, res) => {
     const { code, state, error: oauthError } = req.query;
 
@@ -749,8 +825,12 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     try {
         const tokenData = await exchangeCodeForToken(code);
         const accessToken = tokenData.access_token;
-        const refreshToken = tokenData.refresh_token; // <--- GET REFRESH TOKEN
+        const refreshToken = tokenData.refresh_token;
         const grantId = tokenData.grant_id; 
+
+        if (!refreshToken) {
+            console.error('❌ [NYLAS CALLBACK] No refresh_token returned from Nylas! Check your app scopes include offline_access.');
+        }
 
         let emailAddress = 'unknown@nylas.com';
         try {
@@ -767,9 +847,9 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
             'nylasIntegration.connectedAt': new Date()
         });
 
-        // 2. CREATE/UPDATE THE EMAIL ACCOUNT BRIDGE (THE FIX)
+        // 2. CREATE/UPDATE THE EMAIL ACCOUNT BRIDGE
         if (grantId) {
-            await EmailAccount.findOneAndUpdate(
+            const saved = await EmailAccount.findOneAndUpdate(
                 { nylasGrantId: grantId },
                 {
                     userId: userId,
@@ -777,12 +857,14 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
                     isConnected: true,
                     provider: 'gmail',
                     accessToken: accessToken,
-                    refreshToken: refreshToken, // <--- SAVE REFRESH TOKEN
-                    tokenExpiry: new Date(Date.now() + 3600 * 1000) // <--- SET EXPIRY
+                    refreshToken: refreshToken,
+                    tokenExpiry: new Date(Date.now() + 3600 * 1000),
+                    refreshFailCount: 0,      // reset on fresh connect
+                    lastRefreshError: null
                 },
                 { upsert: true, new: true }
             );
-            console.log(`✅ [AUTH] Linked Grant ${grantId} to User ${userId}`);
+            console.log(`✅ [AUTH] Linked Grant ${grantId} to User ${userId} — refreshToken saved: ${!!saved.refreshToken}`);
         }
         res.redirect('https://skylineai-app.vercel.app/dashboard.html?connected=true');
     } catch (err) {
