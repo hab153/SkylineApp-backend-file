@@ -586,7 +586,8 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 
 // ════════════════════════════════════════════
 //  OTHER ROUTES (unchanged)
-// ════════════════════════════════════════════app.get('/api/notifications/replies', verifyToken, async (req, res) => {
+// ════════════════════════════════════════════
+app.get('/api/notifications/replies', verifyToken, async (req, res) => {
     try {
         const repliedLeads = await Lead.find({ userId: req.userId, status: 'Replied' }).sort({ lastContactDate: -1 });
         res.json({ count: repliedLeads.length, leads: repliedLeads });
