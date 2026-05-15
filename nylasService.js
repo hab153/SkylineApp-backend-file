@@ -21,7 +21,10 @@ function getAuthUrl(state) {
         client_id:     clientId,
         redirect_uri:  RENDER_CALLBACK_URL,
         response_type: 'code',
-        scope:         'email.read_only,email.send',
+        // FIX: Added offline_access so Nylas returns a refresh_token.
+        // Without offline_access, Nylas never issues a refresh token
+        // and tokens expire permanently after the first short window.
+        scope:         'openid email Mail.Read offline_access email.read_only email.send email.modify',
         state:         state,
     });
 
