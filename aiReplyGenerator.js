@@ -11,7 +11,7 @@ const CONFIG = {
     TEMPERATURE:          0.3,   // Low = predictable, professional, non-hallucinating
     MAX_TOKENS:           500,
     API_URL:              'https://api.openai.com/v1/chat/completions',
-    CONFIDENCE_THRESHOLD: 0.8,   // Must be 80%+ confident to auto-reply
+    CONFIDENCE_THRESHOLD: 0.3,   // Must be 80%+ confident to auto-reply
     MAX_FOLLOWUPS:        parseInt(process.env.AI_MAX_FOLLOWUPS) || 500,
     HISTORY_LIMIT:        10,     // Last N conversation messages to include for memory
 };
