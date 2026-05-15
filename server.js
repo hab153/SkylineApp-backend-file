@@ -14,6 +14,9 @@ const freeAI = require('./Free');
 const goAI = require('./Go');
 const { generateBusinessResponse } = require('./businessAI'); 
 
+// IMPORT AUTO-REPLY GENERATOR
+const { generateAIReply } = require('./aiReplyGenerator');
+
 // IMPORT MONTH 2 FILES
 const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
@@ -44,8 +47,7 @@ async function refreshNylasToken(emailAccount, attempt = 1) {
             {
                 client_id:     process.env.NYLAS_CLIENT_ID,
                 client_secret: process.env.NYLAS_CLIENT_SECRET,
-                grant_type:    'refresh_token',
-                refresh_token: emailAccount.refreshToken
+                grant_type:    'refresh_token',                refresh_token: emailAccount.refreshToken
             }
         );
 
@@ -94,8 +96,7 @@ async function refreshNylasToken(emailAccount, attempt = 1) {
 //  Users never hit an expired token mid-request.
 // ════════════════════════════════════════════
 async function proactiveTokenRefresh() {
-    try {
-        const soon = new Date(Date.now() + 30 * 60 * 1000); // expiring in next 30 min
+    try {        const soon = new Date(Date.now() + 30 * 60 * 1000); // expiring in next 30 min
         const accounts = await EmailAccount.find({
             isConnected: true,
             refreshToken: { $exists: true, $ne: null },
@@ -115,42 +116,6 @@ async function proactiveTokenRefresh() {
         }
     } catch (err) {
         console.error('❌ [PROACTIVE] Token refresh job error:', err.message);
-    }
-}
-
-// ════════════════════════════════════════════
-//  GENERATE AUTO-REPLY
-// ════════════════════════════════════════════
-async function generateAutoReply(customerMessage, instructions, leadName) {
-    try {
-        if (!process.env.OPENAI_API_KEY) {
-            console.error('❌ [AUTO-REPLY] OPENAI_API_KEY is missing.');
-            return null;
-        }
-        const prompt = `
-        You are an automated email assistant for ${leadName}.
-        STRICT INSTRUCTIONS: ${instructions}
-        CUSTOMER MESSAGE: "${customerMessage}"
-        TASK:
-        1. Analyze if the customer message can be answered strictly using the STRICT INSTRUCTIONS.
-        2. If OUT OF SCOPE or requires human judgment, respond ONLY with: "NO_REPLY".
-        3. If within scope, write a professional, concise email reply.
-        RESPONSE:`;
-
-        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-            model: "gpt-4o-mini",
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.7
-        }, {
-            headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' }
-        });
-
-        const reply = response.data.choices[0].message.content.trim();
-        return reply.includes("NO_REPLY") ? null : reply;
-
-    } catch (err) {
-        console.error('❌ Auto-Reply Generation Error:', err.message);
-        return null;
     }
 }
 
@@ -180,8 +145,7 @@ const checkSubscriptionExpiry = async (req, res, next) => {
 // ════════════════════════════════════════════
 //  WEBHOOK — MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
-app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    console.log("🔥 Webhook hit!");
+app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {    console.log("🔥 Webhook hit!");
     const sig = req.headers['verif-hash'];
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
     if (secretHash && sig !== secretHash) {
@@ -230,8 +194,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 //  If refresh fails the webhook still returns 200 (Nylas
 //  won't retry-spam us) and we log the failure cleanly.
 // ════════════════════════════════════════════
-app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
-    if (req.method === 'GET') {
+app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {    if (req.method === 'GET') {
         const challenge = req.query.challenge;
         if (challenge) return res.status(200).send(challenge);
         return res.status(400).send('No challenge provided');
@@ -281,12 +244,13 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         notificationType: 'reply', leadId: lead._id, isRead: false
                     }).save();
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
-
                     // 4. Auto-Reply with safe token handling
                     console.log(`🤖 [AUTO-REPLY] Enabled: ${lead.autoReplyEnabled}`);
                     if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
                         try {
-                            const aiReply = await generateAutoReply(bodyText, lead.autoReplyInstructions, lead.name);
+                            // USE NEW AI GENERATOR FILE
+                            const aiReply = await generateAIReply(bodyText, lead.autoReplyInstructions, lead.name);
+                            
                             if (aiReply) {
                                 const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
                                 if (!emailAccount) {
@@ -328,8 +292,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                                 }
                             } else {
                                 console.log(`🔇 [AUTO-REPLY] NO_REPLY — out of scope.`);
-                            }
-                        } catch (aiErr) {
+                            }                        } catch (aiErr) {
                             console.error('❌ [AUTO-REPLY] Generation error:', aiErr.message);
                         }
                     } else {
@@ -378,8 +341,7 @@ const verifyToken = (req, res, next) => {
         next();
     } catch (err) {
         return res.status(401).json({ message: 'Invalid token' });
-    }
-};
+    }};
 
 // ── Daily Usage Limit Middleware ──
 const checkDailyLimit = async (req, res, next) => {
@@ -428,7 +390,6 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
         res.json({ lead: { id: lead._id, name: lead.name, email: lead.email, company: lead.company, status: lead.status, autoReplyEnabled: lead.autoReplyEnabled, autoReplyInstructions: lead.autoReplyInstructions }, messages: cleanHistory });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
-
 app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
     try {
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
@@ -478,8 +439,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
         let errors    = [];
         const now     = new Date();
 
-        for (const leadData of leads) {
-            try {
+        for (const leadData of leads) {            try {
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 if (!lead) {
                     lead = new Lead({ userId: req.userId, name: leadData.name, email: leadData.email, company: leadData.company, status: 'Contacted', lastContactDate: now });
@@ -528,8 +488,7 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
             for (const msg of pendingMessages) {
                 const result = await sendEmail(currentAccessToken, lead.email, msg.subject || 'Re: Conversation', msg.content);
                 msg.status = result.success ? 'sent' : 'failed';
-                if (result.success) sentCount++;
-            }
+                if (result.success) sentCount++;            }
             await lead.save();
         }
         res.json({ success: true, sentCount });
@@ -579,7 +538,6 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         if (!refreshToken) {
             console.error('❌ [NYLAS CALLBACK] No refresh_token returned from Nylas! Check scopes include offline_access.');
         }
-
         let emailAddress = 'unknown@nylas.com';
         try { emailAddress = await getUserEmail(accessToken); }
         catch (emailErr) { console.warn(`⚠️ Could not retrieve email: ${emailErr.message}`); }
@@ -628,8 +586,7 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
 });
 
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { message, history, sessionId } = req.body;
-    const userId = req.userId;
+    const { message, history, sessionId } = req.body;    const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
@@ -678,7 +635,6 @@ app.post('/api/feedback', verifyToken, async (req, res) => {
         res.json({ success: true, feedback: message.feedback });
     } catch (err) { res.status(500).json({ message: 'Server Error saving feedback' }); }
 });
-
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         const sessions = await Message.aggregate([
@@ -728,8 +684,7 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
     } catch (error) { res.status(500).json({ message: error.message || 'Server Error' }); }
 });
 
-app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
+app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {    try {
         const user = await User.findById(req.userId).select('-password');
         if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
@@ -778,8 +733,7 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
     try {
         const user = await User.findById(req.userId);
         if (!user || !user.isAdmin) return res.status(403).json({ message: 'Access denied. Admins only.' });
-        const users = await User.find().select('-password');
-        res.json(users);
+        const users = await User.find().select('-password');        res.json(users);
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
@@ -828,8 +782,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const { messageContent } = req.body;
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
-        const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+        const targetUser = await User.findById(req.params.id);        if (!targetUser) return res.status(404).json({ message: 'User not found' });
         await new Message({ userId: req.params.id, sessionId: 'admin-direct-message', role: 'ai', content: `[ADMIN MESSAGE]: ${messageContent}`, title: 'Direct Message from Admin' }).save();
         res.json({ message: 'Message sent successfully' });
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
