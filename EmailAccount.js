@@ -20,16 +20,20 @@ const EmailAccountSchema = new mongoose.Schema({
         lowercase: true,
         trim: true
     },
-    // ADD THESE TWO FIELDS
     accessToken: {
         type: String,
-        required: true
+        // FIX: removed required:true — token may be null during refresh failure.
+        // Blocking saves here causes the refreshFailCount to never persist.
+        default: null
     },
     refreshToken: {
         type: String,
-        required: true
+        // FIX: removed required:true — Nylas dev mode may not return a refresh
+        // token if offline_access scope was missing at connect time.
+        // Records without a refreshToken are now skipped by the proactive job.
+        default: null
     },
-    tokenExpiry: { // Optional: helpful to know when it expires
+    tokenExpiry: {
         type: Date
     },
     provider: {
@@ -41,7 +45,7 @@ const EmailAccountSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
-    // NEW FIELDS FOR RETRY LOGIC
+    // RETRY LOGIC FIELDS
     refreshFailCount: { 
         type: Number, 
         default: 0 
