@@ -8,6 +8,9 @@ const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/au
 
 /**
  * Generates the Nylas OAuth URL for the user to connect their email.
+ * FIX: Added access_type=offline as a separate URL parameter.
+ *      This is what tells Nylas to return a refresh_token.
+ *      offline_access in the scope string alone is NOT enough for Gmail/Google.
  * @param {string} state - A unique random UUID to prevent CSRF attacks
  */
 function getAuthUrl(state) {
@@ -21,10 +24,8 @@ function getAuthUrl(state) {
         client_id:     clientId,
         redirect_uri:  RENDER_CALLBACK_URL,
         response_type: 'code',
-        // FIX: Added offline_access so Nylas returns a refresh_token.
-        // Without offline_access, Nylas never issues a refresh token
-        // and tokens expire permanently after the first short window.
-        scope:         'openid email Mail.Read offline_access email.read_only email.send email.modify',
+        access_type:   'offline',  // FIX: Required to get a refresh_token from Nylas
+        scope:         'openid email email.read_only email.send email.modify',
         state:         state,
     });
 
@@ -35,7 +36,7 @@ function getAuthUrl(state) {
  * Exchanges the authorization code for an access token.
  * Called in server.js callback route.
  * @param {string} code - The code returned by Nylas after user authorizes
- * @returns {object} tokenData - Contains access_token, grant_id, email, etc.
+ * @returns {object} tokenData - Contains access_token, refresh_token, grant_id, etc.
  */
 async function exchangeCodeForToken(code) {
     try {
@@ -63,15 +64,13 @@ async function exchangeCodeForToken(code) {
 
 /**
  * Gets the user's email address from Nylas after token exchange.
- * FIX: Nylas V3 returns grant info directly in the token response (email field).
- * We use /v3/grants/me with the user's access token as a fallback.
+ * In Nylas V3, use /v3/grants/me with the user's access token.
+ * This is scoped to the user's token — not the app-level grants list.
  * @param {string} accessToken - The user's Nylas access token
  * @returns {string} email address
  */
 async function getUserEmail(accessToken) {
     try {
-        // FIX: In Nylas V3, use /v3/grants/me to get the authenticated grant's info
-        // This is scoped to the user's token — not the app-level grants list
         const response = await axios.get(
             `${NYLAS_API_BASE}/v3/grants/me`,
             {
@@ -95,9 +94,8 @@ async function getUserEmail(accessToken) {
 
 /**
  * Sends an email on behalf of the connected user via their grant.
- * FIX: Was using /v3/grants/me/messages/send — now uses the correct
- * Nylas V3 endpoint pattern with the user's access token as auth.
- * The "me" alias works when authenticated with a user-scoped token.
+ * Uses the correct Nylas V3 endpoint with the user's access token as auth.
+ * The "me" alias resolves to their grant when authenticated with a user-scoped token.
  * @param {string} accessToken - The user's stored Nylas access token
  * @param {string} to          - Recipient email address
  * @param {string} subject     - Email subject line
@@ -115,8 +113,6 @@ async function sendEmail(accessToken, to, subject, body) {
             },
             {
                 headers: {
-                    // FIX: Use the user's access token — not the app client secret
-                    // When the token is user-scoped, "me" resolves to their grant
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type':  'application/json',
                 },
@@ -140,8 +136,8 @@ async function sendEmail(accessToken, to, subject, body) {
 }
 
 /**
- * Reads recent emails from the user's inbox (for reply detection).
- * Used by replyHandler.js to poll for new messages.
+ * Reads recent emails from the user's inbox.
+ * Used for reply detection and polling.
  * @param {string} accessToken - The user's Nylas access token
  * @param {number} limit       - How many messages to fetch (default 10)
  */
@@ -150,7 +146,7 @@ async function getRecentEmails(accessToken, limit = 10) {
         const response = await axios.get(
             `${NYLAS_API_BASE}/v3/grants/me/messages`,
             {
-                params: { limit },
+                params:  { limit },
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type':  'application/json',
