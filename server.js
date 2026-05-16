@@ -47,7 +47,8 @@ async function refreshNylasToken(emailAccount, attempt = 1) {
             {
                 client_id:     process.env.NYLAS_CLIENT_ID,
                 client_secret: process.env.NYLAS_CLIENT_SECRET,
-                grant_type:    'refresh_token',                refresh_token: emailAccount.refreshToken
+                grant_type:    'refresh_token',
+                refresh_token: emailAccount.refreshToken
             }
         );
 
@@ -96,7 +97,8 @@ async function refreshNylasToken(emailAccount, attempt = 1) {
 //  Users never hit an expired token mid-request.
 // ════════════════════════════════════════════
 async function proactiveTokenRefresh() {
-    try {        const soon = new Date(Date.now() + 30 * 60 * 1000); // expiring in next 30 min
+    try {
+        const soon = new Date(Date.now() + 30 * 60 * 1000); // expiring in next 30 min
         const accounts = await EmailAccount.find({
             isConnected: true,
             refreshToken: { $exists: true, $ne: null },
@@ -145,7 +147,8 @@ const checkSubscriptionExpiry = async (req, res, next) => {
 // ════════════════════════════════════════════
 //  WEBHOOK — MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
-app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {    console.log("🔥 Webhook hit!");
+app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    console.log("🔥 Webhook hit!");
     const sig = req.headers['verif-hash'];
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
     if (secretHash && sig !== secretHash) {
@@ -189,12 +192,13 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 });
 
 // ════════════════════════════════════════════
-//  FIX 3: INBOUND EMAIL WEBHOOK
+//  FIX 3: INBOUND EMAIL WEBHOOK (UPDATED WITH FOLLOW-UP COUNT FIX)
 //  Token refresh is now wrapped in its own try-catch.
 //  If refresh fails the webhook still returns 200 (Nylas
 //  won't retry-spam us) and we log the failure cleanly.
 // ════════════════════════════════════════════
-app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {    if (req.method === 'GET') {
+app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
+    if (req.method === 'GET') {
         const challenge = req.query.challenge;
         if (challenge) return res.status(200).send(challenge);
         return res.status(400).send('No challenge provided');
@@ -231,6 +235,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                 if (lead) {
                     lead.status          = 'Replied';
                     lead.lastContactDate = new Date();
+                    lead.followUpCount = 0;  // reset — lead is active again
                     const bodyText       = messageData.body || messageData.snippet || '';
                     lead.replies         = lead.replies || [];
                     lead.replies.push({ date: new Date(), content: bodyText, from: 'lead', subject: messageData.subject });
@@ -244,7 +249,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                         notificationType: 'reply', leadId: lead._id, isRead: false
                     }).save();
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
-                    // 4. Auto-Reply with safe token handling
+                    
+                    // 4. Auto-Reply with safe token handling and FIXED follow-up count
                     console.log(`🤖 [AUTO-REPLY] Enabled: ${lead.autoReplyEnabled}`);
                     if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
                         try {
@@ -254,10 +260,17 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                                 content: msg.content
                             }));
 
-                            // CALL THE NEW AI GENERATOR
+                            // FIXED: Count only AI-initiated messages BEFORE the lead's last reply
+                            const lastLeadReplyIndex = lead.replies.map(r => r.from).lastIndexOf('lead');
+                            const followUpCount = lead.replies
+                                .slice(0, lastLeadReplyIndex)  // only look before this reply
+                                .filter(r => r.from === 'ai')
+                                .length;
+
+                            // CALL THE NEW AI GENERATOR WITH FIXED COUNT
                             const aiResult = await generateAIReply(bodyText, lead.autoReplyInstructions, lead.name, history, {
-                                mode: 'safe', // or 'draft'
-                                followUpCount: lead.replies.filter(r => r.from === 'ai').length
+                                mode: 'full',  // use full since lead is actively replying
+                                followUpCount: followUpCount
                             });
                             
                             // CHECK IF AI GENERATED A REPLY
@@ -292,7 +305,8 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                                             lead.replies.push({
                                                 date: new Date(), content: aiResult.reply,
                                                 subject: `Re: ${messageData.subject}`, from: 'ai', status: 'sent'
-                                            });                                            await lead.save();
+                                            });
+                                            await lead.save();
                                             console.log(`✅ [AUTO-REPLY] Sent to ${lead.email}`);
                                         } else {
                                             console.error(`❌ [AUTO-REPLY] Send failed: ${result.error}`);
@@ -341,7 +355,8 @@ mongoose.connect(process.env.MONGODB_URI)
 app.use('/api/auth', authRoutes);
 
 // ── Verify Token Middleware ──
-const verifyToken = (req, res, next) => {    const authHeader = req.headers['authorization'];
+const verifyToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(403).json({ message: 'No token provided' });
     try {
@@ -391,6 +406,7 @@ app.get('/api/conversations', verifyToken, async (req, res) => {
         res.json(conversations);
     } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
+
 app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
     try {
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
@@ -439,7 +455,8 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
 
         if (isExpired) {
             try {
-                currentAccessToken = await refreshNylasToken(emailAccount);            } catch (refreshErr) {
+                currentAccessToken = await refreshNylasToken(emailAccount);
+            } catch (refreshErr) {
                 return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'Session expired. Please reconnect.' });
             }
         }
@@ -488,7 +505,8 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 
         let currentAccessToken = emailAccount.accessToken;
         const isExpired = !emailAccount.tokenExpiry ||
-            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 15 * 60 * 1000);        if (isExpired) currentAccessToken = await refreshNylasToken(emailAccount);
+            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 15 * 60 * 1000);
+        if (isExpired) currentAccessToken = await refreshNylasToken(emailAccount);
 
         const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
         let sentCount = 0;
@@ -636,7 +654,8 @@ app.get('/api/leads', verifyToken, async (req, res) => {
 app.post('/api/feedback', verifyToken, async (req, res) => {
     try {
         const { messageId, type } = req.body;
-        if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });        const message = await Message.findById(messageId);
+        if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });
+        const message = await Message.findById(messageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
         if (message.userId.toString() !== req.userId) return res.status(403).json({ message: 'Unauthorized' });
         message.feedback = message.feedback === type ? null : type;
@@ -685,7 +704,8 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
     if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
     const currentSessionId = sessionId || uuidv4();
     try {
-        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();        const user = await User.findById(userId);
+        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
+        const user = await User.findById(userId);
         const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
         const result = await requestQueue.enqueue(async () => generateBusinessResponse(followUpAnswer, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
@@ -734,7 +754,8 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
 });
 
 app.put('/api/auth/change-email', verifyToken, changeEmail);
-app.put('/api/users/verify-age', verifyToken, verifyAge);app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
+app.put('/api/users/verify-age', verifyToken, verifyAge);
+app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
@@ -783,7 +804,8 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
         const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
-        res.json({ user: targetUser, messages: chatMessages });    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
+        res.json({ user: targetUser, messages: chatMessages });
+    } catch (err) { res.status(500).json({ message: 'Server Error' }); }
 });
 app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
     try {
@@ -832,7 +854,8 @@ const scheduleExpiryCheck = async () => {
             { subscriptionTier: 'free', subscriptionEndDate: null }
         );
         if (result.modifiedCount > 0) console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
-    } catch (err) { console.error('Error in expiry check:', err); }};
+    } catch (err) { console.error('Error in expiry check:', err); }
+};
 setTimeout(() => { scheduleExpiryCheck(); setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000); }, 5000);
 
 const PORT = process.env.PORT || 5001;
