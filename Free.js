@@ -2,10 +2,10 @@ const axios = require('axios');
 const dns   = require('dns').promises;
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
-const MAX_LEADS_RETURNED    = 5;
-const TAVILY_LIMIT          = 1000;
-const CONCURRENCY_LIMIT     = 2;              // [FIX-SPEED] Max parallel company pipelines
-const CACHE_TTL_MS          = 60 * 60 * 1000; // [FIX-COST] Cache research results for 1 hour
+const MAX_LEADS_RETURNED = 5;
+const TAVILY_LIMIT       = 1000;
+const CONCURRENCY_LIMIT  = 2;
+const CACHE_TTL_MS       = 60 * 60 * 1000;
 
 // ─── REASONING FILTER ──────────────────────────────────────────────────────────
 const REASONING_FILTER = `
@@ -16,7 +16,7 @@ const REASONING_FILTER = `
 4. Current year is 2026.
 `;
 
-// ─── BANNED WORDS ──────────────────────────────────────────────────────────────
+// ─── BANNED WORDS + STATS ─────────────────────────────────────────────────────
 const BANNED_WORDS = [
     'transformative','seamless','mission-critical','synergy','game-changer',
     'revolutionary','cutting-edge','innovative','disruptive','next-level',
@@ -32,14 +32,22 @@ const BANNED_WORDS = [
     'in today\'s world','in the current landscape','going forward'
 ];
 
+const BANNED_STATS_INSTRUCTION = `
+BANNED FABRICATED STATS — NEVER use:
+"30% increase", "3x growth", "50% faster", "double your revenue", "10x results",
+"proven results", "guaranteed ROI", "increase by X%", "save X hours".
+If you have no real stat, describe the MECHANISM instead.
+BAD:  "We increased leads by 30% for agencies like yours."
+GOOD: "We cut the time agencies spend on prospecting by replacing manual research with an automated pipeline."
+`;
+
 function buildBannedWordsInstruction() {
-    return `BANNED WORDS — NEVER use any of these: ${BANNED_WORDS.join(', ')}. Always replace with a specific, concrete fact.`;
+    return `BANNED WORDS — NEVER use: ${BANNED_WORDS.join(', ')}. Replace with specific facts.\n${BANNED_STATS_INSTRUCTION}`;
 }
 
 // ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────
 const tavilyQuota   = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 const openAiTracker = { totalCallsThisSession: 0, totalTokensThisSession: 0 };
-// [FIX-COST] Rough cost tracker — gpt-4o-mini ~$0.30/1M tokens blended
 const costTracker   = { estimatedUSDThisSession: 0 };
 
 function checkTavilyReset() {
@@ -57,15 +65,13 @@ function recordOpenAiUsage(tokensUsed) {
     costTracker.estimatedUSDThisSession  += (tokensUsed / 1_000_000) * 0.30;
 }
 
-// ─── [FIX-COST] IN-MEMORY RESEARCH CACHE ──────────────────────────────────────
-// Prevents re-searching the same domain within 1 hour. Kills duplicate Tavily spend.
+// ─── IN-MEMORY RESEARCH CACHE ──────────────────────────────────────────────────
 const researchCache = new Map();
-
 function getCachedResearch(domain) {
     const hit = researchCache.get(domain);
     if (!hit) return null;
     if (Date.now() - hit.timestamp > CACHE_TTL_MS) { researchCache.delete(domain); return null; }
-    console.log(`💾 [CACHE HIT] ${domain} — skipping Tavily searches`);
+    console.log(`💾 [CACHE HIT] ${domain}`);
     return hit.data;
 }
 function setCachedResearch(domain, data) {
@@ -98,65 +104,105 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
     }
 }
 
-// ─── EMAIL PATTERN GUESSER ─────────────────────────────────────────────────────
-// Returns ordered guesses from most-likely to least-likely corporate formats
+// ─── REAL EMAIL HUNTING SYSTEM ─────────────────────────────────────────────────
+function extractEmailsFromText(text, companyDomain) {
+    if (!text || !companyDomain) return { companyEmails: [], allEmails: [] };
+    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const allFound   = [...new Set(text.match(emailRegex) || [])];
+    const domainRoot = companyDomain.split('.')[0].toLowerCase();
+    const companyEmails = allFound.filter(e => {
+        const ed = e.split('@')[1]?.toLowerCase() || '';
+        return ed === companyDomain || ed.includes(domainRoot);
+    });
+    if (companyEmails.length > 0) {
+        console.log(`📧 [REGEX] Found ${companyEmails.length} real email(s) for ${companyDomain}:`, companyEmails);
+    }
+    return { companyEmails, allEmails: allFound };
+}
+
+async function huntRealEmails(companyName, domain, tavilyKey) {
+    if (getTavilyRemaining() <= 0) return { companyEmails: [], allEmails: [] };
+    console.log(`🎯 [EMAIL HUNT] ${companyName} @ ${domain}`);
+    const contactResults = await searchWithTavily(
+        `"${companyName}" "@${domain}" OR "contact" OR "email us" site:${domain}`,
+        tavilyKey, { maxResults: 3 }
+    );
+    const directoryResults = getTavilyRemaining() > 0
+        ? await searchWithTavily(
+            `"${companyName}" email "@${domain}" contact site:hunter.io OR site:rocketreach.co OR site:signalhire.com OR site:contactout.com`,
+            tavilyKey, { maxResults: 3 }
+          )
+        : [];
+    const allText = [...contactResults, ...directoryResults]
+        .map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+    const extracted = extractEmailsFromText(allText, domain);
+    if (extracted.companyEmails.length > 0) {
+        console.log(`✅ [EMAIL HUNT] Real emails found:`, extracted.companyEmails);
+    } else {
+        console.log(`⚠️ [EMAIL HUNT] No real emails found for ${domain}`);
+    }
+    return extracted;
+}
+
+function classifyEmail(email, domain) {
+    if (!email) return { type: 'none', label: 'Not found', trustLevel: 0 };
+    const localPart   = email.split('@')[0].toLowerCase();
+    const emailDomain = email.split('@')[1]?.toLowerCase();
+    const domainMatches = emailDomain === domain || emailDomain?.includes(domain.split('.')[0]);
+    const GENERIC_PREFIXES = ['contact','info','hello','sales','team','support','enquiries','enquiry','admin','office','mail','general','press','media'];
+    const isGeneric = GENERIC_PREFIXES.some(p => localPart === p || localPart.startsWith(p + '.'));
+    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain', trustLevel: 0 };
+    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
+    if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
+        return { type: 'confirmed-personal', label: '✓ Personal email (real)', trustLevel: 90 };
+    }
+    return { type: 'confirmed-other', label: '✓ Email (real)', trustLevel: 75 };
+}
+
 function guessEmailPatterns(fullName, domain) {
     if (!fullName || !domain) return [];
     const parts = fullName.toLowerCase().trim().split(/\s+/);
     if (parts.length < 2) return [`${parts[0]}@${domain}`];
     const [first, last] = [parts[0], parts[parts.length - 1]];
     return [
-        `${first}.${last}@${domain}`,       // john.smith@  ← most common globally
-        `${first}@${domain}`,               // john@
-        `${first[0]}${last}@${domain}`,     // jsmith@
-        `${first}${last[0]}@${domain}`,     // johns@
-        `${first}_${last}@${domain}`,       // john_smith@
-        `${last}.${first}@${domain}`,       // smith.john@
-        `${first[0]}.${last}@${domain}`,    // j.smith@
+        `${first}.${last}@${domain}`,
+        `${first}@${domain}`,
+        `${first[0]}${last}@${domain}`,
+        `${first}${last[0]}@${domain}`,
+        `${first}_${last}@${domain}`,
+        `${last}.${first}@${domain}`,
+        `${first[0]}.${last}@${domain}`,
     ];
 }
 
-// ─── [FIX-EMAIL-VERIFICATION] MX RECORD VALIDATOR ─────────────────────────────
-// DNS check: does this domain actually have a mail server?
-// If MX fails → bounce risk is HIGH. We flag it, not hide it.
+// ─── VALIDATION SYSTEMS ───────────────────────────────────────────────────────
 async function validateMX(domain) {
     try {
         const records = await dns.resolveMx(domain);
         return records && records.length > 0;
-    } catch {
-        return false;
-    }
+    } catch { return false; }
 }
 
-// ─── [FIX-EMAIL-VERIFICATION] EMAIL FORMAT VALIDATOR ──────────────────────────
 function isValidEmailFormat(email) {
     if (!email || typeof email !== 'string') return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 }
 
-// ─── [FIX-EMAIL-VERIFICATION] FREE EMAIL PROVIDER DETECTOR ───────────────────
 const FREE_EMAIL_PROVIDERS = new Set([
     'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
     'protonmail.com','aol.com','mail.com','yandex.com','zoho.com',
     'mailinator.com','guerrillamail.com','tempmail.com','throwam.com'
 ]);
-function isFreeEmailDomain(domain) {
-    return FREE_EMAIL_PROVIDERS.has(domain.toLowerCase());
-}
+function isFreeEmailDomain(domain) { return FREE_EMAIL_PROVIDERS.has(domain.toLowerCase()); }
 
-// ─── [FIX-DATA-QUALITY] HALLUCINATION DETECTOR ────────────────────────────────
-// Scans extracted data for red flags before it pollutes a lead object
 function detectHallucinations(companyName, extracted) {
     const flags = [];
-
     if (Array.isArray(extracted.employees)) {
         extracted.employees.forEach((emp, i) => {
-            // Flag: employee name contains the company name (GPT confusing entity)
             if (emp.name && companyName &&
                 emp.name.toLowerCase().includes(companyName.toLowerCase().split(' ')[0])) {
                 flags.push(`Employee[${i}] name contains company name: "${emp.name}"`);
             }
-            // Flag: employee email domain doesn't match company domain
             if (emp.email && extracted._domain) {
                 const emailDomain = emp.email.split('@')[1];
                 if (emailDomain && emailDomain !== extracted._domain &&
@@ -166,28 +212,21 @@ function detectHallucinations(companyName, extracted) {
             }
         });
     }
-
-    // Flag: mission sounds suspiciously generic
     if (extracted.mission) {
         const genericPhrases = ['helping businesses','empowering companies','world-class','innovative solutions','cutting-edge'];
         if (genericPhrases.some(p => extracted.mission.toLowerCase().includes(p))) {
-            flags.push(`Mission may be hallucinated/generic: "${extracted.mission}"`);
+            flags.push(`Mission may be generic/hallucinated: "${extracted.mission}"`);
         }
     }
-
-    // Flag: recentNews references old years (stale data)
     if (extracted.recentNews) {
         const yearMatch = extracted.recentNews.match(/\b(20\d{2})\b/);
         if (yearMatch && parseInt(yearMatch[1]) < 2023) {
-            flags.push(`recentNews appears stale (year ${yearMatch[1]}): "${extracted.recentNews}"`);
+            flags.push(`recentNews stale (${yearMatch[1]}): "${extracted.recentNews}"`);
         }
     }
-
     return flags;
 }
 
-// ─── [FIX-DATA-QUALITY] DATA COMPLETENESS SCORER (0-100) ─────────────────────
-// Used to skip companies with too little data and save quota
 function scoreDataCompleteness(extracted) {
     if (!extracted) return 0;
     let score = 0;
@@ -202,72 +241,136 @@ function scoreDataCompleteness(extracted) {
     return Math.min(score, 100);
 }
 
-// ─── [FIX-DEFENSIBILITY] LEAD QUALITY SCORER (0-100) ─────────────────────────
-// This score shows in the UI — gives users confidence in each lead
 function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, hasNews, hasMission, dataScore }) {
     let score = 0;
-    // Email quality (most impactful on deliverability)
-    if (emailConfidence === 'confirmed')              score += 35;
-    else if (emailConfidence === 'confirmed-generic') score += 25;
-    else if (emailConfidence === 'guessed-pattern')   score += 15;
-    else                                              score +=  5;
-
-    if (mxValid)        score += 20; // Domain actually receives mail
-    if (hasRealName)    score += 15; // Named contact = personalization possible
-    if (hasLinkedIn)    score += 10; // LinkedIn = can verify + connect
-    if (hasNews)        score += 10; // Active company = responsive to outreach
-    if (hasMission)     score +=  5; // Richer personalization context
-    if (dataScore > 60) score +=  5; // Bonus for high data completeness
-
+    if (emailConfidence === 'confirmed-personal')     score += 40;
+    else if (emailConfidence === 'confirmed-generic') score += 30;
+    else if (emailConfidence === 'confirmed-other')   score += 28;
+    else if (emailConfidence === 'guessed-pattern')   score += 12;
+    else                                              score +=  3;
+    if (mxValid)        score += 20;
+    if (hasRealName)    score += 15;
+    if (hasLinkedIn)    score += 10;
+    if (hasNews)        score += 10;
+    if (hasMission)     score +=  5;
+    if (dataScore > 60) score +=  5;
     return Math.min(score, 100);
 }
 
-// ─── [FIX-SPEED] CONCURRENCY POOL ─────────────────────────────────────────────
-// Processes N async tasks at a time. One failure doesn't kill the batch.
 async function runWithConcurrency(tasks, limit) {
     const results   = [];
     const executing = new Set();
-
     for (const task of tasks) {
         const promise = task()
             .then(result => { executing.delete(promise); return result; })
             .catch(()    => { executing.delete(promise); return null;   });
-
         results.push(promise);
         executing.add(promise);
-
         if (executing.size >= limit) await Promise.race(executing);
     }
-
     return Promise.allSettled(results);
 }
 
-// ─── COMPANY RESEARCH (Dual Search + Cache + Selective Deep Search) ────────────
+function cleanCompanyName(rawTitle) {
+    let name = rawTitle.split(/[|\-–]/)[0].trim();
+    name = name.replace(
+        /\b(Office|Offices|Ltd|LLC|Inc|Limited|PLC|Group|Agency|London|UK|US|USA|International|Global)\s*$/gi, ''
+    ).trim();
+    if (name.length > 40) name = name.substring(0, 40).trim();
+    const REJECT = ['home','about','contact','services','welcome','index'];
+    if (!name || REJECT.includes(name.toLowerCase())) return null;
+    return name;
+}
+
+// ─── MULTILINGUAL ENGINE ───────────────────────────────────────────────────────
+// FIX K: Detects the language of the user's message so emails are written
+// in the same language as the user's request. Uses Unicode script ranges
+// and word-frequency heuristics. Falls back to 'en' (English) if inconclusive.
+function _detectLanguage(message) {
+    if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
+
+    const text = message.trim();
+
+    // Script-based detection (Unicode ranges — highest confidence)
+    if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text)) {
+        if (/[\u0698\u06AF\u06CC\u06BE]/.test(text)) return { code: 'fa', name: 'Farsi',  rtl: true };
+        if (/[\u06C1\u06BE\u06D2]/.test(text))        return { code: 'ur', name: 'Urdu',   rtl: true };
+        return { code: 'ar', name: 'Arabic', rtl: true };
+    }
+    if (/[\u0590-\u05FF\uFB1D-\uFB4F]/.test(text))  return { code: 'he', name: 'Hebrew',   rtl: true  };
+    if (/[\u0400-\u04FF]/.test(text))                return { code: 'ru', name: 'Russian',  rtl: false };
+    if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) {
+        if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) return { code: 'ja', name: 'Japanese', rtl: false };
+        return { code: 'zh', name: 'Chinese', rtl: false };
+    }
+    if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text))  return { code: 'ja', name: 'Japanese', rtl: false };
+    if (/[\uAC00-\uD7AF\u1100-\u11FF]/.test(text))  return { code: 'ko', name: 'Korean',   rtl: false };
+    if (/[\u0900-\u097F]/.test(text))                return { code: 'hi', name: 'Hindi',    rtl: false };
+    if (/[\u0E00-\u0E7F]/.test(text))                return { code: 'th', name: 'Thai',     rtl: false };
+    if (/[\u0370-\u03FF]/.test(text))                return { code: 'el', name: 'Greek',    rtl: false };
+
+    // Latin-script language heuristics
+    const lower = text.toLowerCase();
+    const langPatterns = [
+        { code: 'es', name: 'Spanish',    rtl: false, pattern: /\b(gracias|hola|por favor|cómo|está|estás|que|también|sí|no|bien|buenas|buenos días|estimado|empresa|necesito|quiero|podría|tenemos|nuestro|sistema|equipo|proceso)\b/ },
+        { code: 'fr', name: 'French',     rtl: false, pattern: /\b(merci|bonjour|comment|est-ce|nous|vous|les|des|une|pour|avec|sur|mais|très|aussi|bien|notre|votre|pouvez|entreprise|besoin|système|équipe)\b/ },
+        { code: 'de', name: 'German',     rtl: false, pattern: /\b(danke|hallo|bitte|wie|haben|sind|kann|wir|das|die|der|und|nicht|ich|sie|mit|für|eine|unser|team|system|prozess|brauchen)\b/ },
+        { code: 'pt', name: 'Portuguese', rtl: false, pattern: /\b(obrigado|olá|como|temos|nosso|empresa|preciso|quero|poderia|sistema|equipe|processo|também|muito|para|com|por)\b/ },
+        { code: 'it', name: 'Italian',    rtl: false, pattern: /\b(grazie|ciao|come|abbiamo|nostro|azienda|bisogno|voglio|potrebbe|sistema|squadra|processo|anche|molto|per|con)\b/ },
+        { code: 'nl', name: 'Dutch',      rtl: false, pattern: /\b(bedankt|hallo|hoe|wij|onze|bedrijf|nodig|wil|zou|systeem|team|proces|ook|heel|voor|met)\b/ },
+        { code: 'pl', name: 'Polish',     rtl: false, pattern: /\b(dziękuję|cześć|jak|mamy|nasz|firma|potrzebuję|chcę|mógłby|system|zespół|proces|też|bardzo|dla|z)\b/ },
+        { code: 'tr', name: 'Turkish',    rtl: false, pattern: /\b(teşekkür|merhaba|nasıl|bizim|şirket|ihtiyaç|istiyorum|olur|sistem|ekip|süreç|ayrıca|çok|için|ile)\b/ },
+        { code: 'sv', name: 'Swedish',    rtl: false, pattern: /\b(tack|hej|hur|vi|vårt|företag|behöver|vill|skulle|system|team|process|också|mycket|för|med)\b/ },
+        { code: 'no', name: 'Norwegian',  rtl: false, pattern: /\b(takk|hei|hvordan|vi|vår|selskap|trenger|vil|ville|system|team|prosess|også|veldig|for|med)\b/ },
+        { code: 'da', name: 'Danish',     rtl: false, pattern: /\b(tak|hej|hvordan|vi|vores|virksomhed|behøver|vil|ville|system|team|proces|også|meget|for|med)\b/ },
+        { code: 'fi', name: 'Finnish',    rtl: false, pattern: /\b(kiitos|hei|miten|meillä|meidän|yritys|tarvitsen|haluan|voisi|järjestelmä|tiimi|prosessi|myös|paljon|varten)\b/ },
+        { code: 'id', name: 'Indonesian', rtl: false, pattern: /\b(terima kasih|halo|bagaimana|kami|perusahaan|butuh|ingin|bisa|sistem|tim|proses|juga|sangat|untuk|dengan)\b/ },
+        { code: 'ms', name: 'Malay',      rtl: false, pattern: /\b(terima kasih|hai|bagaimana|kami|syarikat|perlu|mahu|boleh|sistem|pasukan|proses|juga|sangat|untuk|dengan)\b/ },
+        { code: 'vi', name: 'Vietnamese', rtl: false, pattern: /\b(cảm ơn|xin chào|như thế nào|chúng tôi|công ty|cần|muốn|có thể|hệ thống|đội|quy trình|cũng|rất|cho|với)\b/ },
+    ];
+    for (const lang of langPatterns) {
+        if (lang.pattern.test(lower)) return { code: lang.code, name: lang.name, rtl: lang.rtl };
+    }
+
+    return { code: 'en', name: 'English', rtl: false };
+}
+
+// Builds the multilingual instruction block injected into email-writing prompts
+function _buildMultilingualEmailBlock(detectedLanguage) {
+    const rtlNote = detectedLanguage.rtl
+        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
+        : '';
+    return `
+MULTILINGUAL ENGINE — CRITICAL:
+The user's request was written in: ${detectedLanguage.name} (${detectedLanguage.code}).
+${rtlNote}
+
+ALL THREE EMAILS (initial, followup, breakup) MUST be written entirely in ${detectedLanguage.name}.
+RULES — NEVER VIOLATE:
+1. Write every word of every email in ${detectedLanguage.name}. No exceptions.
+2. Translate the subject line, salutation, body, CTA, and sign-off into ${detectedLanguage.name}.
+3. Do NOT mix languages. The emails must be 100% in ${detectedLanguage.name}.
+4. Maintain all tone, rhythm, banned-word, and sales-logic rules in ${detectedLanguage.name}.
+5. If ${detectedLanguage.name} is English, this rule has no additional effect — write normally.
+`;
+}
+
+// ─── COMPANY RESEARCH ─────────────────────────────────────────────────────────
 async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey, onProgress) {
-    // [FIX-COST] Cache check — skip if we already searched this domain recently
     const cached = getCachedResearch(domain);
     if (cached) return cached;
-
     if (getTavilyRemaining() <= 1) return null;
-
     try {
-        onProgress?.(`🔍 Searching info on ${companyName}...`);
-
-        // SEARCH 1: General info + public contact emails
+        onProgress?.(`🔍 Researching ${companyName}...`);
         const generalResults = await searchWithTavily(
             `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} OR site:linkedin.com OR site:crunchbase.com mission about 2025 2026`,
             tavilyKey, { maxResults: 5 }
         );
-
-        const generalSnippets = generalResults
-            .map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`)
-            .join('\n\n---\n\n');
-
-        // [FIX-COST] SELECTIVE DEEP SEARCH:
-        // Only fire employee search if general results are thin or lack email signals
-        const hasEmailSignal    = generalSnippets.includes('@') || generalSnippets.toLowerCase().includes('contact');
+        const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
+        const regexFromGeneral = extractEmailsFromText(generalText, domain);
+        const hasEmailSignal      = regexFromGeneral.companyEmails.length > 0 || generalSnippets.toLowerCase().includes('contact');
         const needsEmployeeSearch = generalResults.length < 3 || !hasEmailSignal;
-
         let employeeResults = [];
         if (needsEmployeeSearch && getTavilyRemaining() > 0) {
             onProgress?.(`👤 Finding decision-makers at ${companyName}...`);
@@ -276,44 +379,32 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
                 tavilyKey, { maxResults: 4 }
             );
         }
-
-        const allSnippets = [...generalResults, ...employeeResults]
-            .map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`)
-            .join('\n\n---\n\n');
-
+        const allText     = [...generalResults, ...employeeResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const regexFromAll = extractEmailsFromText(allText, domain);
+        const allSnippets  = [...generalResults, ...employeeResults]
+            .map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
         if (allSnippets.trim().length === 0) return null;
 
-        // EXTRACT structured data
         const extractPrompt = `${REASONING_FILTER}
-
-You are extracting verified contact intelligence for the company "${companyName}" (domain: ${domain}).
-
-Return ONLY valid JSON with this exact structure:
+Extract company intelligence for "${companyName}" (domain: ${domain}).
+Return ONLY valid JSON:
 {
   "mission": "one sentence company mission or null",
   "hq": "City, Country or null",
   "size": "1-10 | 11-50 | 51-200 | 200+ | unknown",
   "model": "B2B | B2C | SaaS | Services | E-commerce | Agency | unknown",
-  "recentNews": "one sentence about the most recent relevant company news or null",
-  "contactEmails": [
-    "Only generic role-based emails found in snippets: contact@, sales@, info@, hello@, support@, team@. Max 3. Empty array if none found."
-  ],
+  "recentNews": "one sentence most recent news or null",
+  "contactEmails": ["role-based emails literally found in text. Max 3. Empty array if none."],
   "employees": [
     {
-      "name": "Full Name — ONLY if explicitly mentioned by name in snippets. null otherwise.",
-      "role": "Their exact job title from snippets. CEO | Founder | Co-Founder | Director | VP | Manager | Head of X",
-      "email": "Their email IF explicitly found in snippets. null otherwise. NEVER invent.",
-      "linkedIn": "Their LinkedIn profile URL if found in snippets. null otherwise."
+      "name": "Full Name ONLY if explicitly in snippets. null otherwise. NEVER invent.",
+      "role": "Exact title: CEO | Founder | Co-Founder | Director | VP | Manager | Head of X",
+      "email": "Email ONLY if literally in snippets. null otherwise. NEVER invent or construct.",
+      "linkedIn": "LinkedIn URL if found. null otherwise."
     }
   ]
 }
-
-STRICT RULES:
-- contactEmails: ONLY emails literally visible in snippets. Do NOT construct them.
-- employees: ONLY real named humans explicitly mentioned. Max 3.
-- If a field is not in snippets, it is null. Never invent data.
-- Return ONLY the JSON object. No markdown, no explanation.
-
+CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.
 SNIPPETS:
 ${allSnippets}`;
 
@@ -323,94 +414,162 @@ ${allSnippets}`;
             max_tokens: 500,
             temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } });
-
         recordOpenAiUsage(res.data?.usage?.total_tokens || 0);
-
         const raw    = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
         const parsed = JSON.parse(raw);
-
-        // Attach domain for cross-validation
         parsed._domain = domain;
 
-        // [FIX-DATA-QUALITY] Hallucination scan
+        const allRealEmails = [...new Set([
+            ...regexFromAll.companyEmails,
+            ...(parsed.contactEmails || []),
+        ])].filter(isValidEmailFormat);
+        parsed.contactEmails = allRealEmails.filter(email => {
+            const ed = email.split('@')[1]?.toLowerCase();
+            return ed === domain || ed?.includes(domain.split('.')[0]);
+        });
+
+        if (Array.isArray(parsed.employees)) {
+            parsed.employees = parsed.employees.map(emp => {
+                if (emp.email) {
+                    const emailActuallyExists = allText.toLowerCase().includes(emp.email.toLowerCase());
+                    if (!emailActuallyExists) {
+                        console.warn(`🗑️ [REALITY CHECK] GPT invented email: ${emp.email} — removing`);
+                        emp.email = null;
+                    }
+                }
+                if (emp.name && !emp.email && domain) {
+                    emp.emailGuesses    = guessEmailPatterns(emp.name, domain);
+                    emp.emailConfidence = 'guessed-pattern';
+                } else if (emp.email) {
+                    emp.emailGuesses    = [emp.email];
+                    emp.emailConfidence = 'confirmed-personal';
+                }
+                return emp;
+            });
+        }
+
         const hallucinations = detectHallucinations(companyName, parsed);
         if (hallucinations.length > 0) {
-            console.warn(`⚠️ [HALLUCINATION FLAGS] ${companyName}:`, hallucinations);
+            console.warn(`⚠️ [HALLUCINATION] ${companyName}:`, hallucinations);
             parsed._hallucinationFlags = hallucinations;
-            // Remove employees that triggered hallucination flags
             if (Array.isArray(parsed.employees)) {
                 parsed.employees = parsed.employees.filter(emp => {
-                    const isSuspect = hallucinations.some(f => f.includes(emp.name));
+                    const isSuspect = hallucinations.some(f => emp.name && f.includes(emp.name));
                     if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
                     return !isSuspect;
                 });
             }
         }
 
-        // Enrich employees with pattern-guessed emails
-        if (Array.isArray(parsed.employees)) {
-            parsed.employees = parsed.employees.map(emp => {
-                if (emp.name && !emp.email && domain) {
-                    emp.emailGuesses    = guessEmailPatterns(emp.name, domain);
-                    emp.emailConfidence = 'guessed';
-                } else if (emp.email) {
-                    emp.emailGuesses    = [emp.email];
-                    emp.emailConfidence = 'confirmed';
-                }
-                return emp;
-            });
-        }
-
-        // [FIX-COST] Store in cache
+        parsed._regexEmails = regexFromAll.companyEmails;
         setCachedResearch(domain, parsed);
         return parsed;
-
     } catch (err) {
         console.warn(`[Research Error] ${err.message}`);
         return null;
     }
 }
 
-// ─── EMAIL SEQUENCE WRITER ─────────────────────────────────────────────────────
-async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey) {
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── EMAIL SEQUENCE WRITER ────────────────────────────────────────────────────
+// [UPGRADED] Now receives industry + businessModel + contactRole so every
+// email is written for THAT specific type of business — not generic copy
+// pasted across all leads. A plumber gets plumbing language. A SaaS founder
+// gets SaaS language. Each lead's message matches its own domain/context.
+// ═══════════════════════════════════════════════════════════════════════════════
+async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
     try {
         const companyName   = companyData.name;
-        const mission       = companyData.mission || null;
+        const mission       = companyData.mission   || null;
         const news          = companyData.recentNews || null;
+        const industry      = companyData.industry  || 'their industry';   // ← NEW
+        const businessModel = companyData.model     || 'unknown';          // ← NEW
         const senderName    = userProfile?.senderName || 'Alex';
-        const usp           = userProfile?.usp || 'We help businesses grow with AI automation.';
+        const usp           = userProfile?.usp || null;
         const contactName   = contactPerson?.name || null;
-        const contactRole   = contactPerson?.role || null;
+        const contactRole   = contactPerson?.role || null;                 // ← NEW used below
         const firstNameOnly = contactName ? contactName.split(' ')[0] : null;
 
-        const writePrompt = `${buildBannedWordsInstruction()}
+        const uspToUse = (usp && usp.trim().length > 10) ? usp
+            : 'We build done-for-you outreach pipelines that replace manual prospecting — so business owners spend time closing, not searching.';
 
-You are a world-class B2B cold email copywriter. Write a 3-email outreach sequence.
+        // ── [NEW] INDUSTRY PAIN POINT CONTEXT ─────────────────────────────────
+        // This block tells GPT what real daily pain looks like for THIS type of
+        // business. When mission/news are null, GPT uses this instead of going
+        // generic. Result: a plumber gets a plumber email, a SaaS founder gets
+        // a SaaS email — even with zero extra data found.
+        const industryContext = `
+INDUSTRY: ${industry}
+BUSINESS TYPE: ${businessModel}
+CONTACT ROLE: ${contactRole || 'Business Owner/Decision Maker'}
+
+INDUSTRY CONTEXT (use this when mission/news are not available):
+Write as if you genuinely understand the day-to-day reality of running a ${industry} ${businessModel} business.
+Think about: what does a ${contactRole || 'owner'} in ${industry} actually struggle with daily?
+What does their pipeline look like? What wastes their time? What keeps them up at night?
+Reference these realities naturally — do NOT mention this instruction in the email.
+The goal: the reader thinks "this person actually understands my world", not "this is a template."
+`;
+
+        // ── FIX K: Multilingual instruction block ─────────────────────────────
+        const multilingualBlock = _buildMultilingualEmailBlock(detectedLanguage);
+
+        const writePrompt = `${buildBannedWordsInstruction()}
+${multilingualBlock}
+
+You are a world-class B2B cold email copywriter who specialises in writing for specific industries.
+You NEVER write generic emails. Every word is tailored to the recipient's exact business type.
 
 TARGET COMPANY: ${companyName}
-${contactName ? `CONTACT: ${contactName} (${contactRole || 'Decision Maker'})` : 'CONTACT: General company contact'}
+${contactName ? `CONTACT: ${contactName} (${contactRole || 'Decision Maker'})` : `CONTACT: Decision maker at ${companyName}`}
 ${mission ? `COMPANY MISSION: ${mission}` : ''}
 ${news    ? `RECENT NEWS: ${news}` : ''}
 SENDER: ${senderName}
-VALUE PROP: ${usp}
+VALUE PROP: ${uspToUse}
+${industryContext}
 
-EMAIL 1 — INITIAL:
-- Subject: 4-6 words. Specific. References company or news. No generic openers.
-- Para 1: Hook using ${news || mission || `${companyName}'s work`}. 1-2 sentences.
-- Para 2: Connect "${usp}" to a specific result. No vague claims.
-- Para 3: One soft CTA. Example: "Worth 15 minutes this week?"
-- Salutation: "${firstNameOnly || 'Hi'}" — never "Dear" or "Hello Team".
-- Sign-off: Best, ${senderName}
+─── EMAIL 1 — INITIAL OUTREACH ───
+Subject: 4-6 words. Specific to ${companyName} or ${industry}. NOT generic.
+Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line. NEVER skip. NEVER "Dear".
 
-EMAIL 2 — FOLLOW-UP (3 days later):
-- Subject: "Re: " + Email 1 subject.
-- 2 paragraphs. New insight or relevant result. Re-state CTA. Max 4 sentences.
+Para 1 — Hook:
+${news    ? `Reference this news specifically: "${news}". Show you read it. 1-2 sentences.` :
+  mission ? `Reference this mission: "${mission}". Connect it to something real. 1-2 sentences.` :
+            `Reference a real, specific challenge that ${industry} ${businessModel} businesses face daily.
+             Do NOT say "I noticed you are growing" or anything vague.
+             Write something a ${contactRole || 'business owner'} in ${industry} would read and think "how did they know?"
+             1-2 sentences only.`}
 
-EMAIL 3 — BREAK-UP (7 days later):
-- Subject: "Closing my file on ${companyName}"
-- 3 sentences. No sell. Acknowledge timing. Leave door open gracefully.
+Para 2 — Value:
+Connect "${uspToUse}" to how it solves the specific problem you referenced.
+Describe the mechanism — what actually happens, step by step. One concrete sentence.
+NO invented stats. NO percentages. NO vague promises.
 
-NO banned words. Every sentence earns its place.
+Para 3 — CTA:
+One soft ask. "Worth 15 minutes this week?" — one sentence only.
+
+Sign-off: Best, ${senderName}
+
+─── EMAIL 2 — FOLLOW-UP (3 days later) ───
+Subject: "Re: " + Email 1 subject exactly.
+Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
+
+Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.
+Para 2: Re-state the ask in a fresh way. Max 2 sentences.
+Sign-off: Best, ${senderName}
+
+─── EMAIL 3 — BREAK-UP (7 days later) ───
+Subject: "Closing my file on ${companyName}"
+Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
+3 sentences total. Acknowledge timing. No sell. Leave door open gracefully.
+Sign-off: Best, ${senderName}
+
+HARD RULES:
+- Every email MUST open with the salutation line before any other text.
+- NEVER invent stats, percentages, or results.
+- NEVER use banned words.
+- NEVER write a generic email that could work for any industry — it must only work for ${industry}.
+- If you write something a plumber and a SaaS founder could both receive unchanged, rewrite it.
 
 Return ONLY valid JSON:
 {
@@ -422,12 +581,10 @@ Return ONLY valid JSON:
         const res = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: 'gpt-4o-mini',
             messages: [{ role: 'user', content: writePrompt }],
-            max_tokens: 700,
-            temperature: 0.65,
+            max_tokens: 900,
+            temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } });
-
         recordOpenAiUsage(res.data?.usage?.total_tokens || 0);
-
         const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
         return JSON.parse(raw);
 
@@ -435,50 +592,40 @@ Return ONLY valid JSON:
         console.warn(`[Email Gen Error] ${err.message}`);
         const name = contactPerson?.name?.split(' ')[0] || 'Hi';
         return {
-            initial:  { subject: `Quick thought on ${companyData.name}`, body: `${name},\n\nSaw what ${companyData.name} is building — worth a direct note.\n\n${userProfile?.usp || 'We help teams move faster.'}\n\nOpen to 15 minutes this week?\n\nBest,\n${userProfile?.senderName || 'Alex'}` },
-            followup: { subject: `Re: Quick thought on ${companyData.name}`, body: `${name},\n\nFloating this back up — wanted to share one result we've seen at similar companies.\n\nStill worth a chat?\n\nBest,\n${userProfile?.senderName || 'Alex'}` },
-            breakup:  { subject: `Closing my file on ${companyData.name}`, body: `${name},\n\nAssuming the timing isn't right — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${userProfile?.senderName || 'Alex'}` }
+            initial:  { subject: `Quick thought on ${companyData.name}`, body: `${name},\n\nSaw what ${companyData.name} is working on — worth a direct note.\n\n${userProfile?.usp || 'We build outreach pipelines that cut manual prospecting.'}\n\nOpen to 15 minutes this week?\n\nBest,\n${userProfile?.senderName || 'Alex'}` },
+            followup: { subject: `Re: Quick thought on ${companyData.name}`, body: `${name},\n\nFloating this back up — one thing I noticed about ${companyData.industry || 'your industry'} that felt relevant.\n\nStill worth a chat?\n\nBest,\n${userProfile?.senderName || 'Alex'}` },
+            breakup:  { subject: `Closing my file on ${companyData.name}`, body: `${name},\n\nAssuming timing isn't right — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${userProfile?.senderName || 'Alex'}` }
         };
     }
 }
 
 // ─── SINGLE COMPANY PIPELINE ───────────────────────────────────────────────────
-// Fully self-contained pipeline for one company.
-// Runs in parallel with other companies via runWithConcurrency.
-async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress) {
+async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
     try {
         let domain = '';
         try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
         if (!domain) return null;
-
-        // Skip results that landed on free email providers (junk results)
         if (isFreeEmailDomain(domain)) return null;
 
-        let companyName = result.title.split(/[|\-–]/)[0].trim();
-        if (companyName.length > 40) companyName = companyName.substring(0, 40).trim();
-        if (!companyName || companyName.toLowerCase() === 'home') return null;
+        const companyName = cleanCompanyName(result.title);
+        if (!companyName) return null;
 
         onProgress?.(`📋 Researching ${companyName}...`);
         console.log(`📋 Processing: ${companyName} (${domain})`);
 
-        // [FIX-SPEED] MX validation runs in parallel with company research
         const [companyData, mxValid] = await Promise.all([
             researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
             validateMX(domain)
         ]);
 
-        if (!mxValid) {
-            console.warn(`⚠️ [MX FAIL] ${domain} — no mail server found. High bounce risk.`);
-        }
+        if (!mxValid) console.warn(`⚠️ [MX FAIL] ${domain} — high bounce risk`);
 
-        // [FIX-DATA-QUALITY] Gate: skip low-data companies
         const dataScore = scoreDataCompleteness(companyData);
         if (dataScore < 10) {
-            console.warn(`🗑️ Skipping ${companyName} — data score too low (${dataScore}/100)`);
+            console.warn(`🗑️ Skipping ${companyName} — data score ${dataScore}/100`);
             return null;
         }
 
-        // Select best contact by preferred role
         let bestContact = null;
         const employees = companyData?.employees || [];
         if (employees.length > 0) {
@@ -489,48 +636,69 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ) || employees[0];
         }
 
-        // ── Resolve best email (priority chain) ──────────────────────────────
+        // ── EMAIL RESOLUTION: 6-tier priority chain ───────────────────────────
         let resolvedEmail   = null;
         let emailConfidence = 'guessed-fallback';
+        let emailLabel      = '⚠️ Unverified guess';
         let allEmailOptions = [];
+        const regexEmails   = companyData?._regexEmails || [];
 
-        if (bestContact?.email && isValidEmailFormat(bestContact.email)) {
-            resolvedEmail   = bestContact.email;
-            emailConfidence = 'confirmed';
-            allEmailOptions = [bestContact.email];
-        } else if (bestContact?.emailGuesses?.length > 0) {
-            resolvedEmail   = bestContact.emailGuesses[0];
-            emailConfidence = 'guessed-pattern';
-            allEmailOptions = bestContact.emailGuesses;
-        } else if (companyData?.contactEmails?.length > 0) {
-            const validContacts = companyData.contactEmails.filter(isValidEmailFormat);
-            if (validContacts.length > 0) {
-                resolvedEmail   = validContacts[0];
-                emailConfidence = 'confirmed-generic';
-                allEmailOptions = validContacts;
+        if (regexEmails.length > 0) {
+            const c = classifyEmail(regexEmails[0], domain);
+            resolvedEmail = regexEmails[0]; emailConfidence = c.type; emailLabel = c.label;
+            allEmailOptions = regexEmails;
+            console.log(`✅ [TIER 1/2] Regex email: ${resolvedEmail}`);
+        } else if (bestContact?.email && isValidEmailFormat(bestContact.email)) {
+            resolvedEmail = bestContact.email; emailConfidence = 'confirmed-personal';
+            emailLabel = '✓ Personal email (real)'; allEmailOptions = [bestContact.email];
+            console.log(`✅ [TIER 3] Reality-checked employee email: ${resolvedEmail}`);
+        } else if (getTavilyRemaining() > 0) {
+            onProgress?.(`🎯 Hunting real email for ${companyName}...`);
+            const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
+            if (huntResult.companyEmails.length > 0) {
+                const c = classifyEmail(huntResult.companyEmails[0], domain);
+                resolvedEmail = huntResult.companyEmails[0]; emailConfidence = c.type;
+                emailLabel = c.label; allEmailOptions = huntResult.companyEmails;
+                console.log(`✅ [TIER 4] Email hunt found: ${resolvedEmail}`);
             }
         }
 
-        if (!resolvedEmail || !isValidEmailFormat(resolvedEmail)) {
-            resolvedEmail   = `contact@${domain}`;
-            emailConfidence = 'guessed-fallback';
-            allEmailOptions = [`contact@${domain}`, `info@${domain}`, `hello@${domain}`];
+        if (!resolvedEmail && bestContact?.name) {
+            const guesses = guessEmailPatterns(bestContact.name, domain);
+            resolvedEmail = guesses[0]; emailConfidence = 'guessed-pattern';
+            emailLabel = '⚠️ Pattern guess (not verified)'; allEmailOptions = guesses;
+            console.log(`⚠️ [TIER 5] Pattern guess: ${resolvedEmail}`);
         }
 
-        onProgress?.(`✍️ Writing email sequence for ${companyName}...`);
+        if (!resolvedEmail || !isValidEmailFormat(resolvedEmail)) {
+            resolvedEmail = `contact@${domain}`; emailConfidence = 'guessed-fallback';
+            emailLabel = '⚠️ Unverified guess';
+            allEmailOptions = [`contact@${domain}`, `info@${domain}`, `hello@${domain}`];
+            console.log(`⚠️ [TIER 6] Fallback: ${resolvedEmail}`);
+        }
 
+        onProgress?.(`✍️ Writing emails for ${companyName}...`);
+
+        // ── [UPGRADED] Pass industry + model + contactRole into email writer ──
+        // This is what makes the message match the company's actual domain/world.
+        // A marketing agency gets agency language. A fintech founder gets fintech language.
         const emailSequence = await generateEmailsForLead(
-            { name: companyName, mission: companyData?.mission, recentNews: companyData?.recentNews },
-            bestContact,
+            {
+                name:        companyName,
+                mission:     companyData?.mission,
+                recentNews:  companyData?.recentNews,
+                industry:    intent.industry,        // ← from user's original request
+                model:       companyData?.model,     // ← B2B / SaaS / Agency etc from research
+            },
+            bestContact,   // ← includes role, used inside writer for role-specific pain points
             domain,
             userProfile,
-            apiKey
+            apiKey,
+            detectedLanguage  // ← FIX K: pass language so emails are written in user's language
         );
 
-        // [FIX-DEFENSIBILITY] Score lead quality for frontend badge
         const leadScore = scoreLeadQuality({
-            emailConfidence,
-            mxValid,
+            emailConfidence, mxValid,
             hasRealName:  !!bestContact?.name,
             hasLinkedIn:  !!bestContact?.linkedIn,
             hasNews:      !!companyData?.recentNews,
@@ -538,29 +706,28 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             dataScore
         });
 
-        console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] Score: ${leadScore}/100 MX: ${mxValid}`);
+        console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] Score:${leadScore}/100 MX:${mxValid}`);
 
         return {
-            // Contact
-            name:             bestContact?.name || companyName,
-            company:          companyName,
-            domain:           domain,
-            email:            resolvedEmail,
-            emailConfidence:  emailConfidence,
-            allEmailOptions:  allEmailOptions,
-            role:             bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
-            linkedIn:         bestContact?.linkedIn || null,
-            // Company
-            companySize:      companyData?.size || 'unknown',
-            companyModel:     companyData?.model || 'unknown',
-            hq:               companyData?.hq || null,
-            recentNews:       companyData?.recentNews || null,
-            // Quality signals (for frontend display)
-            leadScore:        leadScore,
-            mxValid:          mxValid,
-            dataScore:        dataScore,
+            name:            bestContact?.name || companyName,
+            company:         companyName,
+            domain:          domain,
+            email:           resolvedEmail,
+            emailConfidence: emailConfidence,
+            emailLabel:      emailLabel,
+            allEmailOptions: allEmailOptions,
+            role:            bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
+            linkedIn:        bestContact?.linkedIn || null,
+            companySize:     companyData?.size  || 'unknown',
+            companyModel:    companyData?.model || 'unknown',
+            industry:        intent.industry    || 'unknown',
+            hq:              companyData?.hq    || null,
+            recentNews:      companyData?.recentNews || null,
+            leadScore,
+            mxValid,
+            dataScore,
             hallucinationFlags: companyData?._hallucinationFlags || [],
-            // Email sequence
+            emailLanguage:   detectedLanguage.code,   // FIX K: recorded in lead output
             messages: [
                 { type: 'initial',  subject: emailSequence.initial.subject,  body: emailSequence.initial.body  },
                 { type: 'followup', subject: emailSequence.followup.subject, body: emailSequence.followup.body },
@@ -583,19 +750,21 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const apiKey    = process.env.OPENAI_API_KEY;
         const tavilyKey = process.env.TAVILY_API_KEY;
 
-        // ── STEP 1: Parse intent ──────────────────────────────────────────────
-        const intentPrompt = `Extract lead generation parameters from this message: "${message}".
+        // ── FIX K: Detect language of the incoming user message ───────────────
+        const detectedLanguage = _detectLanguage(message);
+        console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
+
+        const intentPrompt = `Extract lead generation parameters from: "${message}".
 Return ONLY valid JSON:
 {
   "target": "description of ideal customer or company type",
-  "industry": "specific industry or niche",
-  "location": "city, country, or region — null if not mentioned",
+  "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",
+  "location": "city, country, region — null if not mentioned",
   "preferredContact": "CEO | Founder | Marketing | Sales | Owner | Any"
 }
-If unsure, make a reasonable inference. Do not return null for target or industry.`;
+Never return null for target or industry. Infer from context.`;
 
         let intent = { target: 'small businesses', industry: 'general', location: null, preferredContact: 'Any' };
-
         try {
             const intentRes = await axios.post('https://api.openai.com/v1/chat/completions', {
                 model: 'gpt-4o-mini',
@@ -603,46 +772,40 @@ If unsure, make a reasonable inference. Do not return null for target or industr
                 max_tokens: 150,
                 temperature: 0.1,
             }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } });
-
             recordOpenAiUsage(intentRes.data?.usage?.total_tokens || 0);
             const raw    = intentRes.data.choices[0].message.content.replace(/```json|```/g, '');
             const parsed = JSON.parse(raw);
             intent = { ...intent, ...parsed };
             console.log(`🎯 Intent: ${JSON.stringify(intent)}`);
-        } catch (e) {
-            console.warn('[Intent Parse Failed] Using defaults:', e.message);
-        }
+        } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
 
-        // ── STEP 2: Search for companies ──────────────────────────────────────
         onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
-
         const locationClause = intent.location ? `"${intent.location}"` : '';
         const query = [
-            `"${intent.target}"`,
-            intent.industry,
-            locationClause,
+            `"${intent.target}"`, intent.industry, locationClause,
             'contact email CEO founder',
             'site:linkedin.com OR site:crunchbase.com OR site:apollo.io OR inurl:about OR inurl:team OR inurl:contact'
         ].filter(Boolean).join(' ');
 
-        console.log(`🔍 Search Query: ${query}`);
+        console.log(`🔍 Query: ${query}`);
         const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: 10 });
 
         if (rawResults.length === 0) {
             return {
-                reply: "No companies found for that search. Try narrowing the industry or adding a location.",
-                updatedHistory: [...history,
-                    { role: 'user', content: message },
-                    { role: 'assistant', content: 'No leads found.' }
-                ]
+                reply: "No companies found. Try narrowing the industry or adding a location.",
+                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No leads found.' }]
             };
         }
 
-        // ── STEP 3: Deduplicate and filter raw results ────────────────────────
-        const SKIP_DOMAINS = ['linkedin.com','crunchbase.com','apollo.io','hunter.io','yelp.com','clutch.co','g2.com','trustpilot.com'];
+        const SKIP_DOMAINS = [
+            'linkedin.com','crunchbase.com','apollo.io','hunter.io',
+            'yelp.com','clutch.co','g2.com','trustpilot.com',
+            'bark.com','bark.london','upwork.com','fiverr.com','peopleperhour.com',
+            'yell.com','thomsonlocal.com','checkatrade.com',
+            'directory.com','yellowpages.com','manta.com',
+        ];
         const seenDomains  = new Set();
         const cleanResults = [];
-
         for (const result of rawResults) {
             let domain = '';
             try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
@@ -650,37 +813,30 @@ If unsure, make a reasonable inference. Do not return null for target or industr
             if (SKIP_DOMAINS.some(d => domain.includes(d))) continue;
             seenDomains.add(domain);
             cleanResults.push({ ...result, _domain: domain });
-            if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break; // Buffer for pipeline failures
+            if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break;
         }
 
-        // ── STEP 4: [FIX-SPEED] Parallel pipeline with concurrency cap ────────
-        onProgress?.(`⚙️ Researching ${cleanResults.length} companies in parallel...`);
-
+        onProgress?.(`⚙️ Researching ${cleanResults.length} companies...`);
         const tasks = cleanResults.map(result => () =>
-            processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress)
+            // ── FIX K: Pass detectedLanguage through the pipeline ─────────────
+            processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
         );
-
         const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
 
-        // Collect, filter nulls, sort by score descending
         const leadsToReturn = settled
             .filter(r => r.status === 'fulfilled' && r.value !== null)
             .map(r => r.value)
-            .sort((a, b) => b.leadScore - a.leadScore) // [FIX-DEFENSIBILITY] Best leads first
+            .sort((a, b) => b.leadScore - a.leadScore)
             .slice(0, MAX_LEADS_RETURNED);
 
-        // ── STEP 5: Session cost report ───────────────────────────────────────
-        console.log(`🏁 Done. ${leadsToReturn.length} leads built.`);
-        console.log(`📊 GPT calls: ${openAiTracker.totalCallsThisSession} | Tokens: ${openAiTracker.totalTokensThisSession} | Cost: ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
-        console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit} used this month`);
+        console.log(`🏁 Done. ${leadsToReturn.length} leads.`);
+        console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | ${openAiTracker.totalTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
+        console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
         if (leadsToReturn.length === 0) {
             return {
-                reply: "Found companies but couldn't verify enough data to build leads. Try a different industry or location.",
-                updatedHistory: [...history,
-                    { role: 'user', content: message },
-                    { role: 'assistant', content: 'No leads extracted.' }
-                ]
+                reply: "Found companies but couldn't verify enough data. Try a different industry or location.",
+                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No leads extracted.' }]
             };
         }
 
@@ -694,10 +850,7 @@ If unsure, make a reasonable inference. Do not return null for target or industr
 
     } catch (error) {
         console.error('❌ [LEAD ENGINE] Fatal error:', error.message);
-        return {
-            reply: "An error occurred while generating leads. Please try again.",
-            updatedHistory: history
-        };
+        return { reply: "An error occurred. Please try again.", updatedHistory: history };
     }
 }
 
