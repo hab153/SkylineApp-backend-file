@@ -259,12 +259,12 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     let score = 0;
 
     // Founder identified: +25
-    if (contactRole && (contactRole.toLowerCase().includes(\'founder\') || contactRole.toLowerCase().includes(\'ceo\'))) {
+    if (contactRole && (contactRole.toLowerCase().includes('founder') || contactRole.toLowerCase().includes('ceo'))) {
         score += 25;
     }
 
     // Personal email: +25
-    if (emailConfidence === \'confirmed-personal\') {
+    if (emailConfidence === 'confirmed-personal') {
         score += 25;
     }
 
@@ -273,7 +273,7 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     // This would require passing the actual email to this function, or a specific flag from classifyEmail.
     // For now, we'll assume if it's a confirmed email and not unrelated, it gets this.
     // Let's add a small implicit bonus if the email is confirmed and matches the domain.
-    if (emailConfidence.startsWith(\'confirmed\') && emailConfidence !== \'unrelated-domain\') {
+    if (emailConfidence.startsWith('confirmed') && emailConfidence !== 'unrelated-domain') {
         score += 15; // This is a proxy for 'exact domain match'
     }
 
@@ -283,7 +283,7 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     }
 
     // Publicly visible: +10 (Assuming regex and hunt emails from company site are publicly visible)
-    if (emailSource === \'regex\' || emailSource === \'hunt\') {
+    if (emailSource === 'regex' || emailSource === 'hunt') {
         score += 10;
     }
 
@@ -293,12 +293,12 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     }
 
     // Generic inbox: -30
-    if (emailConfidence === \'confirmed-generic\') {
+    if (emailConfidence === 'confirmed-generic') {
         score -= 30;
     }
 
     // Fallback guess: -40
-    if (emailConfidence === \'guessed-fallback\') {
+    if (emailConfidence === 'guessed-fallback') {
         score -= 40;
     }
 
