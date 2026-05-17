@@ -1,5 +1,3 @@
-// This file will contain the updated lead engine code.
-
 const axios = require('axios');
 const dns   = require('dns').promises;
 
@@ -150,26 +148,14 @@ function classifyEmail(email, domain) {
     if (!email) return { type: 'none', label: 'Not found', trustLevel: 0 };
     const localPart   = email.split('@')[0].toLowerCase();
     const emailDomain = email.split('@')[1]?.toLowerCase();
-    const domainRoot = domain.split('.')[0].toLowerCase();
-    const domainMatches = emailDomain === domain || emailDomain?.includes(domainRoot);
+    const domainMatches = emailDomain === domain || emailDomain?.includes(domain.split('.')[0]);
     const GENERIC_PREFIXES = ['contact','info','hello','sales','team','support','enquiries','enquiry','admin','office','mail','general','press','media'];
     const isGeneric = GENERIC_PREFIXES.some(p => localPart === p || localPart.startsWith(p + '.'));
-
     if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain', trustLevel: 0 };
-
-    // Check for founder/CEO specific patterns (Tier 1)
-    if (localPart.includes('founder') || localPart.includes('ceo')) {
-        return { type: 'confirmed-founder-ceo', label: '✓ Founder/CEO email (real)', trustLevel: 100 };
-    }
-    // Check for personal work email patterns (Tier 2)
+    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
     if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
         return { type: 'confirmed-personal', label: '✓ Personal email (real)', trustLevel: 90 };
     }
-    // Check for generic inbox (Tier 4)
-    if (isGeneric) {
-        return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 40 };
-    }
-    // Other confirmed emails
     return { type: 'confirmed-other', label: '✓ Email (real)', trustLevel: 75 };
 }
 
@@ -255,64 +241,20 @@ function scoreDataCompleteness(extracted) {
     return Math.min(score, 100);
 }
 
-function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, hasNews, hasMission, dataScore, contactRole, emailSource }) {
+function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, hasNews, hasMission, dataScore }) {
     let score = 0;
-
-    // Founder identified: +25
-    if (contactRole && (contactRole.toLowerCase().includes('founder') || contactRole.toLowerCase().includes('ceo'))) {
-        score += 25;
-    }
-
-    // Personal email: +25
-    if (emailConfidence === 'confirmed-personal') {
-        score += 25;
-    }
-
-    // Exact domain match: +15 (This is implicitly handled if emailConfidence is not \'unrelated-domain\')
-    // We can add a small bonus if the email domain is exactly the company domain.
-    // This would require passing the actual email to this function, or a specific flag from classifyEmail.
-    // For now, we'll assume if it's a confirmed email and not unrelated, it gets this.
-    // Let's add a small implicit bonus if the email is confirmed and matches the domain.
-    if (emailConfidence.startsWith('confirmed') && emailConfidence !== 'unrelated-domain') {
-        score += 15; // This is a proxy for 'exact domain match'
-    }
-
-    // MX verified: +10
-    if (mxValid) {
-        score += 10;
-    }
-
-    // Publicly visible: +10 (Assuming regex and hunt emails from company site are publicly visible)
-    if (emailSource === 'regex' || emailSource === 'hunt') {
-        score += 10;
-    }
-
-    // Team page source: +10 (This would require more granular source tracking, for now, we'll assume if a bestContact is found, it's a good signal)
-    if (hasRealName) { // If we have a real name, it implies a source like a team page or LinkedIn
-        score += 10;
-    }
-
-    // Generic inbox: -30
-    if (emailConfidence === 'confirmed-generic') {
-        score -= 30;
-    }
-
-    // Fallback guess: -40
-    if (emailConfidence === 'guessed-fallback') {
-        score -= 40;
-    }
-
-    // Directory source: -50 (This would require huntRealEmails to explicitly mark results from directories)
-    // For now, we don't have a direct way to identify a 'directory source'.
-    // If huntRealEmails returns a low confidence email, it might implicitly be penalized by its confidence type.
-
-    // Other signals (adjusted to fit new scale if necessary)
-    if (hasLinkedIn)    score += 5;
-    if (hasNews)        score += 5;
-    if (hasMission)     score += 5;
-    if (dataScore > 60) score += 5;
-
-    return Math.min(Math.max(score, 0), 100); // Ensure score is between 0 and 100
+    if (emailConfidence === 'confirmed-personal')     score += 40;
+    else if (emailConfidence === 'confirmed-generic') score += 30;
+    else if (emailConfidence === 'confirmed-other')   score += 28;
+    else if (emailConfidence === 'guessed-pattern')   score += 12;
+    else                                              score +=  3;
+    if (mxValid)        score += 20;
+    if (hasRealName)    score += 15;
+    if (hasLinkedIn)    score += 10;
+    if (hasNews)        score += 10;
+    if (hasMission)     score +=  5;
+    if (dataScore > 60) score +=  5;
+    return Math.min(score, 100);
 }
 
 async function runWithConcurrency(tasks, limit) {
@@ -373,7 +315,7 @@ function _detectLanguage(message) {
         { code: 'nl', name: 'Dutch',      rtl: false, pattern: /\b(bedankt|hallo|hoe|wij|onze|bedrijf|nodig|wil|zou|systeem|team|proces|ook|heel|voor|met)\b/ },
         { code: 'pl', name: 'Polish',     rtl: false, pattern: /\b(dziękuję|cześć|jak|mamy|nasz|firma|potrzebuję|chcę|mógłby|system|zespół|proces|też|bardzo|dla|z)\b/ },
         { code: 'tr', name: 'Turkish',    rtl: false, pattern: /\b(teşekkür|merhaba|nasıl|bizim|şirket|ihtiyaç|istiyorum|olur|sistem|ekip|süreç|ayrıca|çok|için|ile)\b/ },
-        { code: 'sv', name: 'Swedish',    rtl: false, pattern: /\b(tack|hej|hur|vi|vårt|företag|behöver|vill|skulle|system|team|prosess|också|mycket|för|med)\b/ },
+        { code: 'sv', name: 'Swedish',    rtl: false, pattern: /\b(tack|hej|hur|vi|vårt|företag|behöver|vill|skulle|system|team|process|också|mycket|för|med)\b/ },
         { code: 'no', name: 'Norwegian',  rtl: false, pattern: /\b(takk|hei|hvordan|vi|vår|selskap|trenger|vil|ville|system|team|prosess|også|veldig|for|med)\b/ },
         { code: 'da', name: 'Danish',     rtl: false, pattern: /\b(tak|hej|hvordan|vi|vores|virksomhed|behøver|vil|ville|system|team|proces|også|meget|for|med)\b/ },
         { code: 'fi', name: 'Finnish',    rtl: false, pattern: /\b(kiitos|hei|miten|meillä|meidän|yritys|tarvitsen|haluan|voisi|järjestelmä|tiimi|prosessi|myös|paljon|varten)\b/ },
@@ -415,7 +357,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     try {
         onProgress?.(`🔍 Researching ${companyName}...`);
         const generalResults = await searchWithTavily(
-            `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} mission about team leadership 2025 2026`,
+            `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} OR site:linkedin.com OR site:crunchbase.com mission about 2025 2026`,
             tavilyKey, { maxResults: 5 }
         );
         const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
@@ -556,6 +498,7 @@ The goal: the reader thinks "this person actually understands my world", not "th
 
         const writePrompt = `${buildBannedWordsInstruction()}
 ${multilingualBlock}
+
 You are a world-class B2B cold email copywriter who specialises in writing for specific industries.
 You NEVER write generic emails. Every word is tailored to the recipient's exact business type.
 
@@ -675,96 +618,45 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ) || employees[0];
         }
 
-        // ── EMAIL RESOLUTION: Tiered priority chain ───────────────────────────
+        // ── EMAIL RESOLUTION: 6-tier priority chain ───────────────────────────
         let resolvedEmail   = null;
-        let emailConfidence = 'none';
-        let emailLabel      = 'Not found';
+        let emailConfidence = 'guessed-fallback';
+        let emailLabel      = '⚠️ Unverified guess';
         let allEmailOptions = [];
+        const regexEmails   = companyData?._regexEmails || [];
 
-        // TIER 1: Real emails found on page (regex from companyData)
-        const regexEmails = companyData?._regexEmails || [];
         if (regexEmails.length > 0) {
-            const classified = classifyEmail(regexEmails[0], domain);
-            if (classified.trustLevel >= 95) { // Tier 1 confidence
-                resolvedEmail = regexEmails[0];
-                emailConfidence = classified.type;
-                emailLabel = classified.label;
-                allEmailOptions = regexEmails;
-                console.log(`✅ [TIER 1] Regex email: ${resolvedEmail}`);
-            }
-        }
-
-        // TIER 2: Personal email matching (if bestContact has an email)
-        if (!resolvedEmail && bestContact?.email && isValidEmailFormat(bestContact.email)) {
-            const classified = classifyEmail(bestContact.email, domain);
-            if (classified.trustLevel >= 70) { // Tier 2 confidence
-                resolvedEmail = bestContact.email;
-                emailConfidence = classified.type;
-                emailLabel = classified.label;
-                allEmailOptions = [bestContact.email];
-                console.log(`✅ [TIER 2] Reality-checked employee email: ${resolvedEmail}`);
-            }
-        }
-
-        // TIER 2 (cont.): Guessed patterns (if bestContact name exists and no email yet)
-        if (!resolvedEmail && bestContact?.name) {
-            const guesses = guessEmailPatterns(bestContact.name, domain);
-            for (const guess of guesses) {
-                // For guessed patterns, we need to ensure MX validity and domain validity
-                // MX validation is already done at the company level (mxValid variable)
-                // Domain validity is handled by classifyEmail
-                const classified = classifyEmail(guess, domain);
-                if (classified.trustLevel >= 70 && mxValid) { // Tier 2 confidence and MX valid
-                    resolvedEmail = guess;
-                    emailConfidence = 'guessed-pattern'; // Specific type for guessed patterns
-                    emailLabel = '⚠️ Pattern guess (MX valid)';
-                    allEmailOptions = guesses;
-                    console.log(`⚠️ [TIER 2] Pattern guess: ${resolvedEmail}`);
-                    break;
-                }
-            }
-        }
-
-        // TIER 3: Linked Signals (currently covered by huntRealEmails, which searches broader)
-        // The current huntRealEmails function already searches external sources like hunter.io, rocketreach.co
-        // which can provide emails based on linked signals. We'll keep it as is for now,
-        // but ensure its results are classified and scored appropriately.
-        if (!resolvedEmail && getTavilyRemaining() > 0) {
+            const c = classifyEmail(regexEmails[0], domain);
+            resolvedEmail = regexEmails[0]; emailConfidence = c.type; emailLabel = c.label;
+            allEmailOptions = regexEmails;
+            console.log(`✅ [TIER 1/2] Regex email: ${resolvedEmail}`);
+        } else if (bestContact?.email && isValidEmailFormat(bestContact.email)) {
+            resolvedEmail = bestContact.email; emailConfidence = 'confirmed-personal';
+            emailLabel = '✓ Personal email (real)'; allEmailOptions = [bestContact.email];
+            console.log(`✅ [TIER 3] Reality-checked employee email: ${resolvedEmail}`);
+        } else if (getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting real email for ${companyName}...`);
             const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
             if (huntResult.companyEmails.length > 0) {
-                const classified = classifyEmail(huntResult.companyEmails[0], domain);
-                // Only use if confidence is reasonable, as huntRealEmails can return various types
-                if (classified.trustLevel >= 60) { // Assuming Tier 3/4 confidence for hunt results
-                    resolvedEmail = huntResult.companyEmails[0];
-                    emailConfidence = classified.type;
-                    emailLabel = classified.label;
-                    allEmailOptions = huntResult.companyEmails;
-                    console.log(`✅ [TIER 3/4] Email hunt found: ${resolvedEmail}`);
-                }
+                const c = classifyEmail(huntResult.companyEmails[0], domain);
+                resolvedEmail = huntResult.companyEmails[0]; emailConfidence = c.type;
+                emailLabel = c.label; allEmailOptions = huntResult.companyEmails;
+                console.log(`✅ [TIER 4] Email hunt found: ${resolvedEmail}`);
             }
         }
 
-        // TIER 4: Generic Emails
-        if (!resolvedEmail) {
-            const genericEmails = [`info@${domain}`, `contact@${domain}`, `hello@${domain}`, `team@${domain}`];
-            for (const genericEmail of genericEmails) {
-                const classified = classifyEmail(genericEmail, domain);
-                if (classified.trustLevel >= 30 && mxValid) { // Tier 4 confidence and MX valid
-                    resolvedEmail = genericEmail;
-                    emailConfidence = classified.type;
-                    emailLabel = classified.label;
-                    allEmailOptions = [genericEmail];
-                    console.log(`⚠️ [TIER 4] Generic fallback: ${resolvedEmail}`);
-                    break;
-                }
-            }
+        if (!resolvedEmail && bestContact?.name) {
+            const guesses = guessEmailPatterns(bestContact.name, domain);
+            resolvedEmail = guesses[0]; emailConfidence = 'guessed-pattern';
+            emailLabel = '⚠️ Pattern guess (not verified)'; allEmailOptions = guesses;
+            console.log(`⚠️ [TIER 5] Pattern guess: ${resolvedEmail}`);
         }
 
-        // TIER 5: No Result / Low Confidence
-        if (!resolvedEmail || !isValidEmailFormat(resolvedEmail) || classifyEmail(resolvedEmail, domain).trustLevel < 50) {
-            console.log(`❌ [TIER 5] No reliable email found for ${companyName}. Rejecting lead.`);
-            return null; // Reject lead if no reliable email found
+        if (!resolvedEmail || !isValidEmailFormat(resolvedEmail)) {
+            resolvedEmail = `contact@${domain}`; emailConfidence = 'guessed-fallback';
+            emailLabel = '⚠️ Unverified guess';
+            allEmailOptions = [`contact@${domain}`, `info@${domain}`, `hello@${domain}`];
+            console.log(`⚠️ [TIER 6] Fallback: ${resolvedEmail}`);
         }
 
         onProgress?.(`✍️ Writing emails for ${companyName}...`);
@@ -784,26 +676,13 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             detectedLanguage
         );
 
-        let emailSource = null;
-        if (emailConfidence === 'confirmed-founder-ceo' || emailConfidence === 'confirmed-personal' || emailConfidence === 'confirmed-other') {
-            emailSource = 'regex'; // Direct extraction from page
-        } else if (emailConfidence === 'guessed-pattern') {
-            emailSource = 'guess'; // Pattern-based guess
-        } else if (emailConfidence.includes('hunt')) { // Emails found via huntRealEmails
-            emailSource = 'hunt';
-        } else if (emailConfidence === 'confirmed-generic') {
-            emailSource = 'generic'; // Generic inbox fallback
-        }
-
         const leadScore = scoreLeadQuality({
             emailConfidence, mxValid,
             hasRealName:  !!bestContact?.name,
             hasLinkedIn:  !!bestContact?.linkedIn,
             hasNews:      !!companyData?.recentNews,
             hasMission:   !!companyData?.mission,
-            dataScore,
-            contactRole:  bestContact?.role,
-            emailSource:  emailSource
+            dataScore
         });
 
         console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] Score:${leadScore}/100 MX:${mxValid}`);
@@ -915,62 +794,55 @@ Never return null for target or industry. Infer from context.`;
             let domain = '';
             try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
             if (!domain || seenDomains.has(domain)) continue;
-            if (SKIP_DOMAINS.some(d => domain.includes(d))) {
-                console.log(`🗑️ Skipping known bad domain: ${domain}`);
-                continue;
-            }
+            if (SKIP_DOMAINS.some(d => domain.includes(d))) continue;
             seenDomains.add(domain);
-            cleanResults.push(result);
+            cleanResults.push({ ...result, _domain: domain });
+            if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break;
         }
 
-        console.log(`✨ CLEAN RESULTS (${cleanResults.length}):`, cleanResults.map(r => r.url));
+        console.log(`✅ Clean results after filter: ${cleanResults.length}`);
 
         if (cleanResults.length === 0) {
             return {
-                reply: "No relevant company websites found. Try a different search query.",
-                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No clean leads found.' }]
+                reply: "Found results but all were directory sites. Try a more specific industry or location.",
+                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No leads after filtering.' }]
             };
         }
 
-        onProgress?.(`Processing ${cleanResults.length} companies...`);
-
-        const companyTasks = cleanResults.slice(0, MAX_LEADS_RETURNED).map(result =>
-            () => processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
+        onProgress?.(`⚙️ Researching ${cleanResults.length} companies...`);
+        const tasks = cleanResults.map(result => () =>
+            processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
         );
+        const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
 
-        const processedLeads = (await runWithConcurrency(companyTasks, CONCURRENCY_LIMIT))
-            .filter(res => res.status === 'fulfilled' && res.value !== null)
-            .map(res => res.value);
+        const leadsToReturn = settled
+            .filter(r => r.status === 'fulfilled' && r.value !== null)
+            .map(r => r.value)
+            .sort((a, b) => b.leadScore - a.leadScore)
+            .slice(0, MAX_LEADS_RETURNED);
 
-        const filteredLeads = processedLeads.filter(lead => lead.leadScore >= 50);
+        console.log(`🏁 Done. ${leadsToReturn.length} leads.`);
+        console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | ${openAiTracker.totalTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
+        console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
-        console.log(`✅ Pipeline finished. Found ${filteredLeads.length} qualified leads.`);
-
-        if (filteredLeads.length === 0) {
+        if (leadsToReturn.length === 0) {
             return {
-                reply: "No qualified leads found with a score of 50 or higher. Try refining your search criteria.",
-                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No qualified leads found.' }]
+                reply: "Found companies but couldn't verify enough data. Try a different industry or location.",
+                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No leads extracted.' }]
             };
         }
 
-        const replyText = `Found ${filteredLeads.length} qualified leads. Here are the top results:\n\n` +
-            filteredLeads.map(lead => {
-                const contactInfo = lead.email ? `${lead.email} (Confidence: ${lead.emailConfidence}, Score: ${lead.leadScore}/100)` : 'No email found';
-                return `**${lead.company}** (${lead.domain})\nRole: ${lead.role}\nContact: ${lead.name}\nEmail: ${contactInfo}\nNews: ${lead.recentNews || 'N/A'}\nLinkedIn: ${lead.linkedIn || 'N/A'}\n`;
-            }).join('\n---\n\n');
-
         return {
-            reply: replyText,
-            leads: filteredLeads,
-            updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: replyText }]
+            reply: JSON.stringify(leadsToReturn),
+            updatedHistory: [...history,
+                { role: 'user', content: message },
+                { role: 'assistant', content: `[Generated ${leadsToReturn.length} leads]` }
+            ]
         };
 
-    } catch (err) {
-        console.error('🔴 [LEAD ENGINE] Unhandled error:', err);
-        return {
-            reply: `An unexpected error occurred: ${err.message}`,
-            updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: `Error: ${err.message}` }]
-        };
+    } catch (error) {
+        console.error('❌ [LEAD ENGINE] Fatal error:', error.message);
+        return { reply: "An error occurred. Please try again.", updatedHistory: history };
     }
 }
 
