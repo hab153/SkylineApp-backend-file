@@ -283,15 +283,11 @@ function cleanCompanyName(rawTitle) {
 }
 
 // ─── MULTILINGUAL ENGINE ───────────────────────────────────────────────────────
-// FIX K: Detects the language of the user's message so emails are written
-// in the same language as the user's request. Uses Unicode script ranges
-// and word-frequency heuristics. Falls back to 'en' (English) if inconclusive.
 function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
 
     const text = message.trim();
 
-    // Script-based detection (Unicode ranges — highest confidence)
     if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text)) {
         if (/[\u0698\u06AF\u06CC\u06BE]/.test(text)) return { code: 'fa', name: 'Farsi',  rtl: true };
         if (/[\u06C1\u06BE\u06D2]/.test(text))        return { code: 'ur', name: 'Urdu',   rtl: true };
@@ -309,7 +305,6 @@ function _detectLanguage(message) {
     if (/[\u0E00-\u0E7F]/.test(text))                return { code: 'th', name: 'Thai',     rtl: false };
     if (/[\u0370-\u03FF]/.test(text))                return { code: 'el', name: 'Greek',    rtl: false };
 
-    // Latin-script language heuristics
     const lower = text.toLowerCase();
     const langPatterns = [
         { code: 'es', name: 'Spanish',    rtl: false, pattern: /\b(gracias|hola|por favor|cómo|está|estás|que|también|sí|no|bien|buenas|buenos días|estimado|empresa|necesito|quiero|podría|tenemos|nuestro|sistema|equipo|proceso)\b/ },
@@ -335,7 +330,6 @@ function _detectLanguage(message) {
     return { code: 'en', name: 'English', rtl: false };
 }
 
-// Builds the multilingual instruction block injected into email-writing prompts
 function _buildMultilingualEmailBlock(detectedLanguage) {
     const rtlNote = detectedLanguage.rtl
         ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
@@ -470,34 +464,23 @@ ${allSnippets}`;
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // ─── EMAIL SEQUENCE WRITER ────────────────────────────────────────────────────
-// [UPGRADED] Now receives industry + businessModel + contactRole so every
-// email is written for THAT specific type of business — not generic copy
-// pasted across all leads. A plumber gets plumbing language. A SaaS founder
-// gets SaaS language. Each lead's message matches its own domain/context.
-// ═══════════════════════════════════════════════════════════════════════════════
 async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
     try {
         const companyName   = companyData.name;
         const mission       = companyData.mission   || null;
         const news          = companyData.recentNews || null;
-        const industry      = companyData.industry  || 'their industry';   // ← NEW
-        const businessModel = companyData.model     || 'unknown';          // ← NEW
+        const industry      = companyData.industry  || 'their industry';
+        const businessModel = companyData.model     || 'unknown';
         const senderName    = userProfile?.senderName || 'Alex';
         const usp           = userProfile?.usp || null;
         const contactName   = contactPerson?.name || null;
-        const contactRole   = contactPerson?.role || null;                 // ← NEW used below
+        const contactRole   = contactPerson?.role || null;
         const firstNameOnly = contactName ? contactName.split(' ')[0] : null;
 
         const uspToUse = (usp && usp.trim().length > 10) ? usp
             : 'We build done-for-you outreach pipelines that replace manual prospecting — so business owners spend time closing, not searching.';
 
-        // ── [NEW] INDUSTRY PAIN POINT CONTEXT ─────────────────────────────────
-        // This block tells GPT what real daily pain looks like for THIS type of
-        // business. When mission/news are null, GPT uses this instead of going
-        // generic. Result: a plumber gets a plumber email, a SaaS founder gets
-        // a SaaS email — even with zero extra data found.
         const industryContext = `
 INDUSTRY: ${industry}
 BUSINESS TYPE: ${businessModel}
@@ -511,7 +494,6 @@ Reference these realities naturally — do NOT mention this instruction in the e
 The goal: the reader thinks "this person actually understands my world", not "this is a template."
 `;
 
-        // ── FIX K: Multilingual instruction block ─────────────────────────────
         const multilingualBlock = _buildMultilingualEmailBlock(detectedLanguage);
 
         const writePrompt = `${buildBannedWordsInstruction()}
@@ -679,22 +661,19 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 
         onProgress?.(`✍️ Writing emails for ${companyName}...`);
 
-        // ── [UPGRADED] Pass industry + model + contactRole into email writer ──
-        // This is what makes the message match the company's actual domain/world.
-        // A marketing agency gets agency language. A fintech founder gets fintech language.
         const emailSequence = await generateEmailsForLead(
             {
                 name:        companyName,
                 mission:     companyData?.mission,
                 recentNews:  companyData?.recentNews,
-                industry:    intent.industry,        // ← from user's original request
-                model:       companyData?.model,     // ← B2B / SaaS / Agency etc from research
+                industry:    intent.industry,
+                model:       companyData?.model,
             },
-            bestContact,   // ← includes role, used inside writer for role-specific pain points
+            bestContact,
             domain,
             userProfile,
             apiKey,
-            detectedLanguage  // ← FIX K: pass language so emails are written in user's language
+            detectedLanguage
         );
 
         const leadScore = scoreLeadQuality({
@@ -727,7 +706,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             mxValid,
             dataScore,
             hallucinationFlags: companyData?._hallucinationFlags || [],
-            emailLanguage:   detectedLanguage.code,   // FIX K: recorded in lead output
+            emailLanguage:   detectedLanguage.code,
             messages: [
                 { type: 'initial',  subject: emailSequence.initial.subject,  body: emailSequence.initial.body  },
                 { type: 'followup', subject: emailSequence.followup.subject, body: emailSequence.followup.body },
@@ -750,7 +729,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const apiKey    = process.env.OPENAI_API_KEY;
         const tavilyKey = process.env.TAVILY_API_KEY;
 
-        // ── FIX K: Detect language of the incoming user message ───────────────
         const detectedLanguage = _detectLanguage(message);
         console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
 
@@ -781,14 +759,20 @@ Never return null for target or industry. Infer from context.`;
 
         onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
         const locationClause = intent.location ? `"${intent.location}"` : '';
+
+        // ── FIX: Removed site:linkedin/crunchbase/apollo from query.
+        // Those domains were being returned by Tavily and then immediately
+        // killed by SKIP_DOMAINS — resulting in 0 cleanResults every time.
+        // Now we target actual company websites via inurl: patterns only.
         const query = [
             `"${intent.target}"`, intent.industry, locationClause,
             'contact email CEO founder',
-            'site:linkedin.com OR site:crunchbase.com OR site:apollo.io OR inurl:about OR inurl:team OR inurl:contact'
+            'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us'
         ].filter(Boolean).join(' ');
 
         console.log(`🔍 Query: ${query}`);
         const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: 10 });
+        console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
 
         if (rawResults.length === 0) {
             return {
@@ -816,9 +800,17 @@ Never return null for target or industry. Infer from context.`;
             if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break;
         }
 
+        console.log(`✅ Clean results after filter: ${cleanResults.length}`);
+
+        if (cleanResults.length === 0) {
+            return {
+                reply: "Found results but all were directory sites. Try a more specific industry or location.",
+                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No leads after filtering.' }]
+            };
+        }
+
         onProgress?.(`⚙️ Researching ${cleanResults.length} companies...`);
         const tasks = cleanResults.map(result => () =>
-            // ── FIX K: Pass detectedLanguage through the pipeline ─────────────
             processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
         );
         const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
