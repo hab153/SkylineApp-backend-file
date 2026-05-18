@@ -12,15 +12,47 @@ const CACHE_TTL_MS       = 60 * 60 * 1000;
 const CURRENT_YEAR       = new Date().getFullYear();
 const MAX_MESSAGE_LENGTH = 800;
 
-// NEW: Minimum confidence score to pass a lead through
+// Minimum confidence score to pass a lead through
 const EMAIL_CONFIDENCE_THRESHOLD = 28; // confirmed-generic(30) and above pass; guessed-pattern(12) blocked
 
-// ─── NEW: OUTPUT QUANTITY CONTROL CONSTANTS ───────────────────────────────────
+// ─── OUTPUT QUANTITY CONTROL CONSTANTS ───────────────────────────────────────
 // Enforces the CRITICAL OUTPUT QUANTITY RULE across the entire pipeline.
-// These are the hard bounds that govern how many leads are returned.
-const QUANTITY_RULE_HARD_MIN     = 2;   // never return fewer than 2 if 2 real leads exist
-const QUANTITY_RULE_ABSOLUTE_MIN = 1;   // if only 1 verified lead exists in reality, return 1
-const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED; // default when user specifies no count
+const QUANTITY_RULE_HARD_MIN     = 2;
+const QUANTITY_RULE_ABSOLUTE_MIN = 1;
+const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;
+
+// ─── UPGRADE v2: ROLE PRIORITY MAP ───────────────────────────────────────────
+// Used by _pickBestContact() to rank decision-makers by seniority.
+// Lower number = higher priority. Preserved: original fallback to employees[0].
+const ROLE_PRIORITY = {
+    'ceo':         1,
+    'founder':     2,
+    'co-founder':  2,
+    'co founder':  2,
+    'owner':       3,
+    'director':    4,
+    'vp':          5,
+    'vice president': 5,
+    'head of':     6,
+    'manager':     7,
+    'marketing':   8,
+    'sales':       9,
+};
+
+// ─── UPGRADE v2: DOMAIN REPUTATION BLOCKLIST ─────────────────────────────────
+// Known low-quality, spam-heavy, or irrelevant TLDs/domains added as an extra
+// rejection gate in validateEmailFull(). Purely additive — does not touch any
+// existing validation layer. Empty set = no extra blocking beyond existing logic.
+const REPUTATION_BLOCKED_DOMAINS = new Set([
+    // placeholder — operators can extend this list
+    // e.g. 'examplebadactor.com',
+]);
+
+// ─── UPGRADE v2: SEARCH DIVERSIFICATION STRATEGIES ───────────────────────────
+// Used by _buildSearchQueries() to generate multiple Tavily query variants
+// for a given intent. The pipeline tries the primary query first; if the clean
+// result pool is thin (< MIN_POOL_SIZE), it falls back to alternates.
+const MIN_POOL_SIZE = 3; // if < 3 clean results from primary, attempt fallback query
 
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
@@ -88,7 +120,7 @@ const costTracker = { estimatedUSDThisSession: 0 };
 function checkTavilyReset() {
     const ONE_MONTH = 30 * 24 * 60 * 60 * 1000;
     if (Date.now() - tavilyQuota.lastReset >= ONE_MONTH) {
-        tavilyQuota.used = 0;
+        tavilyQuota.used      = 0;
         tavilyQuota.lastReset = Date.now();
     }
 }
@@ -112,6 +144,11 @@ function recordOpenAiUsage(inputTokens = 0, outputTokens = 0, model = 'gpt-4o-mi
 
 // ─── PERSISTENT DOMAIN DEDUP ──────────────────────────────────────────────────
 const globalSeenDomains = new Set();
+
+// ─── UPGRADE v2: PERSISTENT COMPANY NAME DEDUP ───────────────────────────────
+// Prevents the same company from appearing under two different domains.
+// Purely additive — does not change domain dedup logic above.
+const globalSeenCompanyNames = new Set();
 
 // ─── IN-MEMORY RESEARCH CACHE ─────────────────────────────────────────────────
 const researchCache = new Map();
@@ -164,12 +201,33 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
     }, `Tavily:${query.slice(0, 40)}`) ?? [];
 }
 
+// ─── UPGRADE v2: SEARCH QUERY DIVERSIFICATION ────────────────────────────────
+// Builds a primary and a fallback query string for a given lead-gen intent.
+// The fallback uses an alternative phrasing to improve recall when the primary
+// search returns a thin pool. Both queries are built from the SAME intent object
+// so they stay 100% within the user's specified constraints.
+//
+// Preserved: the original query construction in _runLeadGenPipeline() is left
+// intact and used as the primary. This function generates the fallback only.
+//
+function _buildFallbackQuery(intent) {
+    const locationClause = intent.location ? `"${intent.location}"` : '';
+    // Alternative phrasing: drop "contact email CEO founder" and use site: hints
+    return [
+        intent.industry,
+        intent.target,
+        locationClause,
+        'company website official',
+        'inurl:about OR inurl:team',
+    ].filter(Boolean).join(' ');
+}
+
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
 function extractEmailsFromText(text, companyDomain) {
     if (!text || !companyDomain) return { companyEmails: [], allEmails: [] };
-    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-    const allFound   = [...new Set(text.match(emailRegex) || [])];
-    const domainRoot = companyDomain.split('.')[0].toLowerCase();
+    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const allFound      = [...new Set(text.match(emailRegex) || [])];
+    const domainRoot    = companyDomain.split('.')[0].toLowerCase();
     const companyEmails = allFound.filter(e => {
         const ed = e.split('@')[1]?.toLowerCase() || '';
         return ed === companyDomain || ed.includes(domainRoot);
@@ -195,7 +253,7 @@ async function huntRealEmails(companyName, domain, tavilyKey) {
           )
         : [];
 
-    const allText  = [...contactResults, ...directoryResults]
+    const allText   = [...contactResults, ...directoryResults]
         .map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
     const extracted = extractEmailsFromText(allText, domain);
 
@@ -254,8 +312,7 @@ function _DEAD_guessEmailPatterns_DO_NOT_USE(fullName, domain) {
     ];
 }
 
-// ─── NEW: DISPOSABLE / SPAM DOMAIN BLOCKLIST ──────────────────────────────────
-// Expanded blocklist of domains known to produce spam-trap or disposable addresses
+// ─── DISPOSABLE / SPAM DOMAIN BLOCKLIST ──────────────────────────────────────
 const DISPOSABLE_DOMAINS = new Set([
     'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
     'yopmail.com','trashmail.com','fakeinbox.com','sharklasers.com',
@@ -272,7 +329,7 @@ function isDisposableDomain(domain) {
     return DISPOSABLE_DOMAINS.has(domain.toLowerCase());
 }
 
-// ─── NEW: SMTP PROBE ──────────────────────────────────────────────────────────
+// ─── SMTP PROBE ───────────────────────────────────────────────────────────────
 // Performs a non-sending SMTP handshake to probe whether a mailbox likely exists.
 // Does NOT send any email. Uses RCPT TO: check only.
 // Returns: 'valid' | 'invalid' | 'unknown' (greylisted/timeout/blocked)
@@ -282,9 +339,8 @@ async function smtpProbeEmail(email, domain) {
         const mxRecords = await dns.resolveMx(domain);
         if (!mxRecords || mxRecords.length === 0) return 'unknown';
 
-        // Sort by priority (lowest = preferred)
-        const sorted    = mxRecords.sort((a, b) => a.priority - b.priority);
-        const mxHost    = sorted[0].exchange;
+        const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
+        const mxHost = sorted[0].exchange;
 
         return await new Promise((resolve) => {
             const timeout = setTimeout(() => {
@@ -293,9 +349,9 @@ async function smtpProbeEmail(email, domain) {
                 resolve('unknown');
             }, 8000);
 
-            const socket  = net.createConnection(25, mxHost);
-            let   buffer  = '';
-            let   stage   = 0;
+            const socket = net.createConnection(25, mxHost);
+            let   buffer = '';
+            let   stage  = 0;
 
             socket.on('error', (err) => {
                 clearTimeout(timeout);
@@ -306,22 +362,19 @@ async function smtpProbeEmail(email, domain) {
             socket.on('data', (chunk) => {
                 buffer += chunk.toString();
                 const lines = buffer.split('\r\n');
-                buffer = lines.pop(); // keep incomplete line
+                buffer = lines.pop();
 
                 for (const line of lines) {
                     if (!line) continue;
                     const code = parseInt(line.slice(0, 3), 10);
 
                     if (stage === 0 && code === 220) {
-                        // Server greeted us — send EHLO
                         socket.write(`EHLO mailcheck.local\r\n`);
                         stage = 1;
                     } else if (stage === 1 && (code === 250 || code === 220)) {
-                        // EHLO accepted — send MAIL FROM
                         socket.write(`MAIL FROM:<probe@mailcheck.local>\r\n`);
                         stage = 2;
                     } else if (stage === 2 && code === 250) {
-                        // MAIL FROM accepted — send RCPT TO
                         socket.write(`RCPT TO:<${email}>\r\n`);
                         stage = 3;
                     } else if (stage === 3) {
@@ -335,12 +388,10 @@ async function smtpProbeEmail(email, domain) {
                             console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);
                             resolve('invalid');
                         } else {
-                            // 4xx = greylisted/deferred, 421 = try later, etc.
                             console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
                             resolve('unknown');
                         }
                     } else if (code >= 500) {
-                        // Hard server error — abort
                         clearTimeout(timeout);
                         socket.destroy();
                         resolve('unknown');
@@ -360,7 +411,7 @@ async function smtpProbeEmail(email, domain) {
     }
 }
 
-// ─── NEW: FULL EMAIL VALIDATION PIPELINE ─────────────────────────────────────
+// ─── FULL EMAIL VALIDATION PIPELINE ──────────────────────────────────────────
 // Runs every discovered email through a multi-layer validation stack.
 // Returns enriched result with verdict, confidence score, and reason.
 //
@@ -372,9 +423,12 @@ async function smtpProbeEmail(email, domain) {
 //   0–29   : Fails domain check, disposable, or SMTP-rejected — BLOCKED
 //
 async function validateEmailFull(email, domain) {
+    // UPGRADE v2: normalise email before all checks
+    const normalisedEmail = (typeof email === 'string') ? email.toLowerCase().trim() : email;
+
     const result = {
-        email,
-        verdict:         'rejected', // 'verified' | 'probable' | 'rejected'
+        email:           normalisedEmail,
+        verdict:         'rejected',
         confidenceScore: 0,
         smtpResult:      null,
         mxValid:         false,
@@ -385,13 +439,13 @@ async function validateEmailFull(email, domain) {
     };
 
     // Layer 1 — Syntax
-    if (!isValidEmailFormat(email)) {
+    if (!isValidEmailFormat(normalisedEmail)) {
         result.reason = 'Invalid syntax';
         return result;
     }
     result.syntaxValid = true;
 
-    const emailDomain = email.split('@')[1]?.toLowerCase();
+    const emailDomain = normalisedEmail.split('@')[1]?.toLowerCase();
     if (!emailDomain) { result.reason = 'No domain in email'; return result; }
 
     // Layer 2 — Disposable domain check
@@ -401,15 +455,21 @@ async function validateEmailFull(email, domain) {
         return result;
     }
 
-    // Layer 3 — Free email provider check (already handled upstream but double-gate here)
+    // Layer 3 — Free email provider check
     if (isFreeEmailDomain(emailDomain)) {
         result.reason = 'Free email provider';
         return result;
     }
 
+    // UPGRADE v2 — Layer 3b: Reputation blocklist (additive gate)
+    if (REPUTATION_BLOCKED_DOMAINS.has(emailDomain)) {
+        result.reason = 'Domain on reputation blocklist';
+        return result;
+    }
+
     // Layer 4 — Domain match to company
-    const domainRoot    = domain.split('.')[0].toLowerCase();
-    result.domainMatch  = emailDomain === domain || emailDomain.includes(domainRoot);
+    const domainRoot   = domain.split('.')[0].toLowerCase();
+    result.domainMatch = emailDomain === domain || emailDomain.includes(domainRoot);
     if (!result.domainMatch) {
         result.reason = `Domain mismatch: ${emailDomain} vs ${domain}`;
         return result;
@@ -423,19 +483,19 @@ async function validateEmailFull(email, domain) {
     }
 
     // Layer 6 — Classify email type
-    const classification = classifyEmail(email, domain);
+    const classification = classifyEmail(normalisedEmail, domain);
 
-    // Layer 7 — SMTP probe (best-effort; many servers block port 25 — treat unknown as probable)
+    // Layer 7 — SMTP probe
     let smtpResult = 'unknown';
     try {
-        smtpResult = await smtpProbeEmail(email, emailDomain);
+        smtpResult = await smtpProbeEmail(normalisedEmail, emailDomain);
     } catch (e) {
         console.warn(`[SMTP PROBE CATCH] ${e.message}`);
     }
     result.smtpResult = smtpResult;
 
     if (smtpResult === 'invalid') {
-        result.reason         = 'SMTP probe: mailbox does not exist';
+        result.reason          = 'SMTP probe: mailbox does not exist';
         result.confidenceScore = 0;
         return result;
     }
@@ -452,8 +512,6 @@ async function validateEmailFull(email, domain) {
             result.reason          = 'SMTP-confirmed role/generic email';
         }
     } else {
-        // smtpResult === 'unknown' (server blocked probe or greylisted)
-        // Still usable — most enterprise mail servers block port 25 probes
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 65;
             result.verdict         = 'probable';
@@ -472,14 +530,14 @@ async function validateEmailFull(email, domain) {
     return result;
 }
 
-// ─── NEW: MULTI-EMAIL VALIDATION & RANKING ────────────────────────────────────
+// ─── MULTI-EMAIL VALIDATION & RANKING ────────────────────────────────────────
 // Takes a list of raw discovered emails, validates each one,
 // returns them sorted by confidence score, filtered by threshold.
 async function rankAndFilterEmails(emails, domain) {
     if (!emails || emails.length === 0) return [];
 
-    // Deduplicate first
-    const unique = [...new Set(emails.map(e => e.toLowerCase().trim()))];
+    // UPGRADE v2: normalise before dedup
+    const unique = [...new Set(emails.map(e => (typeof e === 'string' ? e.toLowerCase().trim() : e)))];
 
     console.log(`🔬 [VALIDATOR] Running full pipeline on ${unique.length} email(s) for ${domain}`);
 
@@ -590,6 +648,39 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     return Math.max(0, Math.min(score, 100));
 }
 
+// ─── UPGRADE v2: ROLE PRIORITY PICKER ────────────────────────────────────────
+// Selects the highest-seniority employee from the array as the best contact.
+// Falls back to the original employees[0] logic if no role matches the map.
+// Preserved: preferredContact override from intent still applied first (identical
+// to original behaviour), then role-priority ranking as tiebreaker.
+//
+function _pickBestContact(employees, preferredContact) {
+    if (!employees || employees.length === 0) return null;
+
+    const preferred = (preferredContact || '').toLowerCase().trim();
+
+    // Original behaviour: preferred role from intent takes priority
+    if (preferred && preferred !== 'any') {
+        const match = employees.find(e =>
+            e.role && e.role.toLowerCase().includes(preferred)
+        );
+        if (match) return match;
+    }
+
+    // UPGRADE v2: rank remaining by ROLE_PRIORITY map
+    const ranked = [...employees].sort((a, b) => {
+        const aRole = (a.role || '').toLowerCase();
+        const bRole = (b.role || '').toLowerCase();
+
+        const aScore = Object.entries(ROLE_PRIORITY).find(([key]) => aRole.includes(key))?.[1] ?? 99;
+        const bScore = Object.entries(ROLE_PRIORITY).find(([key]) => bRole.includes(key))?.[1] ?? 99;
+
+        return aScore - bScore;
+    });
+
+    return ranked[0];
+}
+
 // ─── CONCURRENCY ──────────────────────────────────────────────────────────────
 async function runWithConcurrency(tasks, limit) {
     const results   = [];
@@ -688,25 +779,16 @@ RULES — NEVER VIOLATE:
 `;
 }
 
-// ─── NEW: OUTPUT QUANTITY CONTROL — _parseRequestedCount ─────────────────────
+// ─── OUTPUT QUANTITY CONTROL — _parseRequestedCount ──────────────────────────
 // Extracts the user-requested lead/email count from the raw message.
 // Supports numeric words (one → 10), digit strings, and common phrasings.
 // Returns a bounded integer or null if no count was specified.
-//
-// Preserved: zero impact on any existing function. Pure addition.
-//
-// Examples:
-//   "find me 3 leads in London"           → 3
-//   "get 10 emails for marketing agencies" → 10
-//   "find five companies in NYC"           → 5
-//   "give me leads for SaaS companies"     → null (no count → use default)
 //
 function _parseRequestedCount(message) {
     if (!message || typeof message !== 'string') return null;
 
     const lower = message.toLowerCase();
 
-    // Map written-out numbers to integers (up to twenty for practical coverage)
     const wordToNum = {
         'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
         'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
@@ -715,8 +797,6 @@ function _parseRequestedCount(message) {
         'nineteen': 19, 'twenty': 20,
     };
 
-    // Pattern 1: digit immediately followed by a lead/email/contact keyword
-    // e.g. "find 5 leads", "get me 3 emails", "show 10 contacts"
     const digitPattern = /\b(\d{1,3})\s*(?:leads?|emails?|contacts?|companies|companies'|results?|prospects?)\b/i;
     const digitMatch   = message.match(digitPattern);
     if (digitMatch) {
@@ -727,8 +807,6 @@ function _parseRequestedCount(message) {
         }
     }
 
-    // Pattern 2: "give/find/get/show me N" where N is a digit
-    // e.g. "give me 7 UK agencies", "find me 4 plumbers"
     const givePattern = /\b(?:give|find|get|show|fetch|pull|return|bring)\s+(?:me\s+)?(\d{1,3})\b/i;
     const giveMatch   = message.match(givePattern);
     if (giveMatch) {
@@ -739,8 +817,6 @@ function _parseRequestedCount(message) {
         }
     }
 
-    // Pattern 3: written-out number word before a lead/email/contact keyword
-    // e.g. "find five companies", "get me ten leads"
     for (const [word, num] of Object.entries(wordToNum)) {
         const wordPattern = new RegExp(
             `\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i'
@@ -751,7 +827,6 @@ function _parseRequestedCount(message) {
         }
     }
 
-    // Pattern 4: "top N" phrasing — e.g. "top 5 agencies"
     const topPattern = /\btop\s+(\d{1,3})\b/i;
     const topMatch   = message.match(topPattern);
     if (topMatch) {
@@ -762,53 +837,32 @@ function _parseRequestedCount(message) {
         }
     }
 
-    // No count found — caller uses default
     console.log(`🔢 [QUANTITY PARSER] No count specified — will use default (${QUANTITY_RULE_DEFAULT_MAX})`);
     return null;
 }
 
-// ─── NEW: OUTPUT QUANTITY CONTROL — _applyOutputQuantityRules ────────────────
+// ─── OUTPUT QUANTITY CONTROL — _applyOutputQuantityRules ─────────────────────
 // Enforces the CRITICAL OUTPUT QUANTITY RULE on a sorted array of verified leads.
-//
-// PRIORITY ORDER (per spec):
-//   Accuracy > Validity > Minimum threshold > Requested quantity
-//
-// Rules applied:
-//   1. Never exceed requestedMax (hard ceiling)
-//   2. Apply HARD_MIN of 2 if at least 2 real verified leads exist
-//   3. If only 1 verified lead exists, return 1 (ABSOLUTE_MIN)
-//   4. Never fabricate, duplicate, or inflate to meet quota
-//   5. If 0 verified leads exist, return [] — caller handles empty state
-//
-// Parameters:
-//   leads        — array of fully-processed, sorted lead objects (already validated)
-//   requestedMax — integer from _parseRequestedCount(), or QUANTITY_RULE_DEFAULT_MAX
-//
-// Returns: final bounded lead array ready for output
 //
 function _applyOutputQuantityRules(leads, requestedMax) {
     if (!Array.isArray(leads)) return [];
 
     const totalVerified = leads.length;
-    const cap           = Math.min(requestedMax, QUANTITY_RULE_DEFAULT_MAX); // never exceed system max either
+    const cap           = Math.min(requestedMax, QUANTITY_RULE_DEFAULT_MAX);
 
     console.log(`📐 [QUANTITY RULES] Verified: ${totalVerified} | Requested max: ${requestedMax} | System cap: ${QUANTITY_RULE_DEFAULT_MAX} | Effective cap: ${cap}`);
 
-    // Rule: 0 verified → return empty (no fabrication)
     if (totalVerified === 0) {
         console.log(`📐 [QUANTITY RULES] 0 verified leads — returning empty array`);
         return [];
     }
 
-    // Rule: 1 verified → return 1 (ABSOLUTE_MIN, can't fabricate a second)
     if (totalVerified === 1) {
         console.log(`📐 [QUANTITY RULES] Only 1 verified lead exists — returning 1 (absolute minimum)`);
         return [leads[0]];
     }
 
-    // Rule: apply HARD_MIN of 2 — if user asked for fewer than 2 but 2+ exist,
-    //       we still return 2 (data integrity platform returns what's real, min 2)
-    const effectiveMin = QUANTITY_RULE_HARD_MIN; // 2
+    const effectiveMin = QUANTITY_RULE_HARD_MIN;
     const sliceTo      = Math.max(effectiveMin, Math.min(cap, totalVerified));
 
     const final = leads.slice(0, sliceTo);
@@ -1064,7 +1118,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
             );
         }
 
-        const allText    = [...generalResults, ...employeeResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const allText     = [...generalResults, ...employeeResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
         const allSnippets = [...generalResults, ...employeeResults]
             .map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
         const regexFromAll = extractEmailsFromText(allText, domain);
@@ -1131,9 +1185,6 @@ ${allSnippets}`;
                         emp.email = null;
                     }
                 }
-                // NOTE: emailGuesses / guessEmailPatterns REMOVED.
-                // Employees without a source-confirmed email are flagged as unresolved.
-                // The validation pipeline will handle them — no patterns constructed here.
                 if (emp.email) {
                     emp.emailConfidence = 'confirmed-personal';
                 } else {
@@ -1307,15 +1358,17 @@ Return ONLY valid JSON:
 }
 
 // ─── SINGLE COMPANY PIPELINE ──────────────────────────────────────────────────
-// UPGRADED EMAIL RESOLUTION CHAIN:
+// EMAIL RESOLUTION CHAIN:
 //
 //   TIER 1 — Regex-extracted emails from search snippets → validated by full pipeline
 //   TIER 2 — Reality-checked employee email from GPT extract → validated by full pipeline
 //   TIER 3 — huntRealEmails (contact/directory search) → validated by full pipeline
 //   TIER 4 — REMOVED (was: guessEmailPatterns fallback — fabricated, never verified)
 //
-// If no email passes the validation threshold → lead is REJECTED with clear log.
-// Quality > quantity. No fake data passes through.
+// UPGRADE v2 changes:
+//   - _pickBestContact() replaces inline employees[0] fallback
+//   - globalSeenCompanyNames dedup added
+//   - emailValidation metadata block preserved + extended with normalised email
 //
 async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
     try {
@@ -1326,6 +1379,14 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 
         const companyName = cleanCompanyName(result.title);
         if (!companyName) return null;
+
+        // UPGRADE v2: company name dedup (catches same company on two domains)
+        const companyKey = companyName.toLowerCase().replace(/\s+/g, '');
+        if (globalSeenCompanyNames.has(companyKey)) {
+            console.log(`⏭️ [COMPANY DEDUP] Skipping duplicate company: ${companyName}`);
+            return null;
+        }
+        globalSeenCompanyNames.add(companyKey);
 
         onProgress?.(`📋 Researching ${companyName}...`);
         console.log(`📋 Processing: ${companyName} (${domain})`);
@@ -1346,19 +1407,12 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             return null;
         }
 
-        let bestContact = null;
-        const employees = companyData?.employees || [];
-        if (employees.length > 0) {
-            const preferred = intent.preferredContact?.toLowerCase();
-            bestContact = employees.find(e =>
-                e.role && preferred && preferred !== 'any' &&
-                e.role.toLowerCase().includes(preferred)
-            ) || employees[0];
-        }
+        const employees  = companyData?.employees || [];
+
+        // UPGRADE v2: use role-priority picker instead of raw employees[0]
+        const bestContact = _pickBestContact(employees, intent.preferredContact);
 
         // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
-        // Gather every source-confirmed email: regex hits, GPT-confirmed employee emails,
-        // and contact page emails. We do NOT include pattern-guessed emails.
         const candidateEmails = [
             ...(companyData?._regexEmails || []),
             ...(companyData?.contactEmails || []),
@@ -1392,10 +1446,9 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             return null;
         }
 
-        // Best email = highest confidence score
-        const topEmail       = validatedEmails[0];
-        const resolvedEmail  = topEmail.email;
-        const classification = classifyEmail(resolvedEmail, domain);
+        const topEmail        = validatedEmails[0];
+        const resolvedEmail   = topEmail.email;
+        const classification  = classifyEmail(resolvedEmail, domain);
         const emailConfidence = classification.type;
         const emailLabel      = classification.label;
         const allEmailOptions = validatedEmails.map(v => v.email);
@@ -1438,7 +1491,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             email:              resolvedEmail,
             emailConfidence,
             emailLabel,
-            emailValidation: {                          // expose validation metadata to frontend
+            emailValidation: {
                 confidenceScore: topEmail.confidenceScore,
                 verdict:         topEmail.verdict,
                 smtpResult:      topEmail.smtpResult,
@@ -1471,16 +1524,21 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 }
 
 // ─── LEAD GEN PIPELINE ────────────────────────────────────────────────────────
-// UPGRADED: now parses user-requested count from message and applies
-// _applyOutputQuantityRules() at the final output stage.
-// All existing logic is 100% preserved. The quantity control is an additive layer
-// applied AFTER leads are collected and sorted — it only trims the final slice.
+// UPGRADE v2 additions (all additive, zero change to existing logic):
+//   1. _buildFallbackQuery() triggered when primary pool is thin (< MIN_POOL_SIZE)
+//   2. globalSeenCompanyNames reset at pipeline start for fresh session runs
+//   3. Session quota summary exposed in the return object as _meta
+//   4. All existing quantity control (_parseRequestedCount, _applyOutputQuantityRules) preserved
 //
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
 
-    // ── NEW: Parse user-requested quantity before pipeline starts ─────────────
-    // This is purely additive — it has zero effect on the search, research,
-    // validation, or email generation logic below.
+    // ── UPGRADE v2: reset company name dedup for each fresh pipeline run ──────
+    // Domain dedup (globalSeenDomains) is intentionally left persistent across
+    // runs (existing behaviour). Company name dedup resets per-pipeline so a
+    // new search for the same industry doesn't get blocked by a prior run.
+    globalSeenCompanyNames.clear();
+
+    // ── Parse user-requested quantity ─────────────────────────────────────────
     const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
     console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads (parsed from message)`);
 
@@ -1519,15 +1577,12 @@ Never return null for target or industry. Infer from context.`;
     onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
     const locationClause = intent.location ? `"${intent.location}"` : '';
 
-    // ── NEW: Scale raw search pool to requested count ─────────────────────────
-    // If user requests fewer leads we still fetch a reasonable pool (capped at system max + buffer)
-    // so the validation pipeline has enough candidates after rejections.
-    // This prevents under-fetching when the user asks for 2 but we'd normally fetch 10.
     const searchPoolSize = Math.min(
-        Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3), // always fetch a buffer above requested
-        15 // hard ceiling on raw search results to avoid quota burn
+        Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3),
+        15
     );
 
+    // ── PRIMARY QUERY (unchanged from original) ───────────────────────────────
     const query = [
         `"${intent.target}"`, intent.industry, locationClause,
         'contact email CEO founder',
@@ -1538,7 +1593,31 @@ Never return null for target or industry. Infer from context.`;
     const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: searchPoolSize });
     console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
 
-    if (rawResults.length === 0) {
+    // ── UPGRADE v2: FALLBACK QUERY when primary pool is thin ─────────────────
+    // Only triggers if primary results are fewer than MIN_POOL_SIZE AND there is
+    // still Tavily quota available. Purely additive — does not alter any result
+    // that came from the primary query.
+    let fallbackResults = [];
+    if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
+        console.log(`⚡ [FALLBACK QUERY] Primary pool thin (${rawResults.length}/${MIN_POOL_SIZE}) — trying fallback query`);
+        const fallbackQuery = _buildFallbackQuery(intent);
+        console.log(`🔍 Fallback Query: ${fallbackQuery}`);
+        try {
+            fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, { maxResults: searchPoolSize });
+            console.log(`🔎 FALLBACK RESULTS (${fallbackResults.length}):`, fallbackResults.map(r => r.url));
+        } catch (fbErr) {
+            console.warn(`⚠️ [FALLBACK QUERY] Failed: ${fbErr.message}`);
+        }
+    }
+
+    // ── MERGE PRIMARY + FALLBACK (deduplicated by URL) ────────────────────────
+    const seenUrls    = new Set(rawResults.map(r => r.url));
+    const mergedRaw   = [
+        ...rawResults,
+        ...fallbackResults.filter(r => !seenUrls.has(r.url)),
+    ];
+
+    if (mergedRaw.length === 0) {
         return {
             reply:          'No companies found. Try narrowing the industry or adding a location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
@@ -1554,7 +1633,7 @@ Never return null for target or industry. Infer from context.`;
     ];
 
     const cleanResults = [];
-    for (const result of rawResults) {
+    for (const result of mergedRaw) {
         let domain = '';
         try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
         if (!domain)                                                  continue;
@@ -1562,7 +1641,7 @@ Never return null for target or industry. Infer from context.`;
         if (SKIP_DOMAINS.some(d => domain.includes(d)))              continue;
         globalSeenDomains.add(domain);
         cleanResults.push({ ...result, _domain: domain });
-        if (cleanResults.length >= requestedCount + 5) break; // buffer above requested for pipeline rejections
+        if (cleanResults.length >= requestedCount + 5) break;
     }
 
     console.log(`✅ Clean results after filter: ${cleanResults.length}`);
@@ -1580,18 +1659,27 @@ Never return null for target or industry. Infer from context.`;
     );
     const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
 
-    // ── All validated leads, sorted by quality score ──────────────────────────
     const allVerifiedLeads = settled
         .filter(r => r.status === 'fulfilled' && r.value !== null)
         .map(r => r.value)
         .sort((a, b) => b.leadScore - a.leadScore);
 
-    // ── NEW: Apply CRITICAL OUTPUT QUANTITY RULE ──────────────────────────────
-    // This is the only place leadsToReturn is now determined.
-    // Replaces the previous hard .slice(0, MAX_LEADS_RETURNED) with the bounded,
-    // rule-compliant version that respects user-requested count while enforcing
-    // hard minimums and prohibiting fabrication.
+    // ── Apply CRITICAL OUTPUT QUANTITY RULE ───────────────────────────────────
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
+
+    // ── UPGRADE v2: build session meta for optional frontend consumption ──────
+    const _meta = {
+        tavilyUsed:       tavilyQuota.used,
+        tavilyRemaining:  getTavilyRemaining(),
+        openAiCalls:      openAiTracker.totalCallsThisSession,
+        openAiInputTokens:  openAiTracker.totalInputTokensThisSession,
+        openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,
+        estimatedCostUSD: parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
+        totalVerified:    allVerifiedLeads.length,
+        totalReturned:    leadsToReturn.length,
+        requestedCount,
+        fallbackUsed:     fallbackResults.length > 0,
+    };
 
     console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
     console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
@@ -1601,6 +1689,7 @@ Never return null for target or industry. Infer from context.`;
         return {
             reply:          'Found companies but no emails passed verification. Try a different industry or location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No verified leads.' }],
+            _meta,
         };
     }
 
@@ -1611,10 +1700,15 @@ Never return null for target or industry. Infer from context.`;
             { role: 'user',      content: safeMessage },
             { role: 'assistant', content: `[Generated ${leadsToReturn.length} verified leads]` },
         ],
+        _meta,
     };
 }
 
 // ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
+// Preserved 100%: function signature, return shape, all intent branches,
+// all existing environment variables (OPENAI_API_KEY, TAVILY_API_KEY).
+// UPGRADE v2: _meta passthrough added to lead_gen return (non-breaking addition).
+//
 async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
         console.log('🟢 [AI ENGINE] Pipeline started...');
@@ -1671,6 +1765,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
+        // INTENT.CHAT (default)
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
             reply,
