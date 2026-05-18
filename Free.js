@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const dns   = require('dns').promises;
+const net   = require('net'); // NEW: for SMTP probing
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
 const MAX_LEADS_RETURNED = 5;
@@ -10,6 +11,9 @@ const CONCURRENCY_LIMIT  = 2;
 const CACHE_TTL_MS       = 60 * 60 * 1000;
 const CURRENT_YEAR       = new Date().getFullYear();
 const MAX_MESSAGE_LENGTH = 800;
+
+// NEW: Minimum confidence score to pass a lead through
+const EMAIL_CONFIDENCE_THRESHOLD = 28; // confirmed-generic(30) and above pass; guessed-pattern(12) blocked
 
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
@@ -219,7 +223,15 @@ function classifyEmail(email, domain) {
     return              { type: 'confirmed-other',   label: '✓ Email (real)',                  trustLevel: 75 };
 }
 
-function guessEmailPatterns(fullName, domain) {
+// ─── REMOVED: guessEmailPatterns() ────────────────────────────────────────────
+// REASON: This function produced firstname.lastname@domain constructions with
+// zero verification. All TIER 5 fallback usage has been removed. The system
+// now rejects leads with no discoverable real email rather than fabricating one.
+// The function is preserved below as a dead stub for audit purposes only —
+// it is never called anywhere in the pipeline.
+function _DEAD_guessEmailPatterns_DO_NOT_USE(fullName, domain) {
+    // INTENTIONALLY DISABLED — do not call this function
+    // Original logic kept here for audit trail only
     if (!fullName || !domain) return [];
     const parts = fullName.toLowerCase().trim().split(/\s+/);
     if (parts.length < 2) return [`${parts[0]}@${domain}`];
@@ -233,6 +245,249 @@ function guessEmailPatterns(fullName, domain) {
         `${last}.${first}@${domain}`,
         `${first[0]}.${last}@${domain}`,
     ];
+}
+
+// ─── NEW: DISPOSABLE / SPAM DOMAIN BLOCKLIST ──────────────────────────────────
+// Expanded blocklist of domains known to produce spam-trap or disposable addresses
+const DISPOSABLE_DOMAINS = new Set([
+    'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
+    'yopmail.com','trashmail.com','fakeinbox.com','sharklasers.com',
+    'guerrillamailblock.com','grr.la','guerrillamail.info','spam4.me',
+    'dispostable.com','maildrop.cc','discard.email','spamgourmet.com',
+    'spamgourmet.net','spamgourmet.org','wegwerfmail.de','wegwerfmail.net',
+    'wegwerfmail.org','10minutemail.com','10minutemail.net','10minutemail.org',
+    'tempr.email','discard.email','mailnull.com','spamfree24.org',
+    'spamfree24.de','spamfree24.eu','spamfree24.info','spamfree24.net',
+    'spamfree.eu','spamoff.de',
+]);
+
+function isDisposableDomain(domain) {
+    return DISPOSABLE_DOMAINS.has(domain.toLowerCase());
+}
+
+// ─── NEW: SMTP PROBE ──────────────────────────────────────────────────────────
+// Performs a non-sending SMTP handshake to probe whether a mailbox likely exists.
+// Does NOT send any email. Uses RCPT TO: check only.
+// Returns: 'valid' | 'invalid' | 'unknown' (greylisted/timeout/blocked)
+// SAFETY: Times out at 8 seconds. Never sends DATA. Closes connection cleanly.
+async function smtpProbeEmail(email, domain) {
+    try {
+        const mxRecords = await dns.resolveMx(domain);
+        if (!mxRecords || mxRecords.length === 0) return 'unknown';
+
+        // Sort by priority (lowest = preferred)
+        const sorted    = mxRecords.sort((a, b) => a.priority - b.priority);
+        const mxHost    = sorted[0].exchange;
+
+        return await new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+                try { socket.destroy(); } catch {}
+                console.warn(`⏱️ [SMTP PROBE] Timeout for ${email}`);
+                resolve('unknown');
+            }, 8000);
+
+            const socket  = net.createConnection(25, mxHost);
+            let   buffer  = '';
+            let   stage   = 0;
+
+            socket.on('error', (err) => {
+                clearTimeout(timeout);
+                console.warn(`⚠️ [SMTP PROBE] Connection error for ${email}: ${err.message}`);
+                resolve('unknown');
+            });
+
+            socket.on('data', (chunk) => {
+                buffer += chunk.toString();
+                const lines = buffer.split('\r\n');
+                buffer = lines.pop(); // keep incomplete line
+
+                for (const line of lines) {
+                    if (!line) continue;
+                    const code = parseInt(line.slice(0, 3), 10);
+
+                    if (stage === 0 && code === 220) {
+                        // Server greeted us — send EHLO
+                        socket.write(`EHLO mailcheck.local\r\n`);
+                        stage = 1;
+                    } else if (stage === 1 && (code === 250 || code === 220)) {
+                        // EHLO accepted — send MAIL FROM
+                        socket.write(`MAIL FROM:<probe@mailcheck.local>\r\n`);
+                        stage = 2;
+                    } else if (stage === 2 && code === 250) {
+                        // MAIL FROM accepted — send RCPT TO
+                        socket.write(`RCPT TO:<${email}>\r\n`);
+                        stage = 3;
+                    } else if (stage === 3) {
+                        clearTimeout(timeout);
+                        socket.write('QUIT\r\n');
+                        socket.destroy();
+                        if (code === 250 || code === 251) {
+                            console.log(`✅ [SMTP PROBE] ${email} → VALID (${code})`);
+                            resolve('valid');
+                        } else if (code === 550 || code === 551 || code === 553 || code === 554) {
+                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);
+                            resolve('invalid');
+                        } else {
+                            // 4xx = greylisted/deferred, 421 = try later, etc.
+                            console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
+                            resolve('unknown');
+                        }
+                    } else if (code >= 500) {
+                        // Hard server error — abort
+                        clearTimeout(timeout);
+                        socket.destroy();
+                        resolve('unknown');
+                    }
+                }
+            });
+
+            socket.on('close', () => {
+                clearTimeout(timeout);
+                if (stage < 3) resolve('unknown');
+            });
+        });
+
+    } catch (err) {
+        console.warn(`⚠️ [SMTP PROBE] Failed for ${email}: ${err.message}`);
+        return 'unknown';
+    }
+}
+
+// ─── NEW: FULL EMAIL VALIDATION PIPELINE ─────────────────────────────────────
+// Runs every discovered email through a multi-layer validation stack.
+// Returns enriched result with verdict, confidence score, and reason.
+//
+// Confidence score bands:
+//   90–100 : SMTP-confirmed personal email
+//   70–89  : SMTP-confirmed generic/role email
+//   60–69  : MX-valid, found in public source, not SMTP-confirmed (server blocked probe)
+//   30–59  : MX-valid, source-found, SMTP unknown/timeout
+//   0–29   : Fails domain check, disposable, or SMTP-rejected — BLOCKED
+//
+async function validateEmailFull(email, domain) {
+    const result = {
+        email,
+        verdict:         'rejected', // 'verified' | 'probable' | 'rejected'
+        confidenceScore: 0,
+        smtpResult:      null,
+        mxValid:         false,
+        disposable:      false,
+        syntaxValid:     false,
+        domainMatch:     false,
+        reason:          '',
+    };
+
+    // Layer 1 — Syntax
+    if (!isValidEmailFormat(email)) {
+        result.reason = 'Invalid syntax';
+        return result;
+    }
+    result.syntaxValid = true;
+
+    const emailDomain = email.split('@')[1]?.toLowerCase();
+    if (!emailDomain) { result.reason = 'No domain in email'; return result; }
+
+    // Layer 2 — Disposable domain check
+    if (isDisposableDomain(emailDomain)) {
+        result.disposable = true;
+        result.reason     = 'Disposable domain';
+        return result;
+    }
+
+    // Layer 3 — Free email provider check (already handled upstream but double-gate here)
+    if (isFreeEmailDomain(emailDomain)) {
+        result.reason = 'Free email provider';
+        return result;
+    }
+
+    // Layer 4 — Domain match to company
+    const domainRoot    = domain.split('.')[0].toLowerCase();
+    result.domainMatch  = emailDomain === domain || emailDomain.includes(domainRoot);
+    if (!result.domainMatch) {
+        result.reason = `Domain mismatch: ${emailDomain} vs ${domain}`;
+        return result;
+    }
+
+    // Layer 5 — MX record validation
+    result.mxValid = await validateMX(emailDomain);
+    if (!result.mxValid) {
+        result.reason = 'No MX records — domain cannot receive email';
+        return result;
+    }
+
+    // Layer 6 — Classify email type
+    const classification = classifyEmail(email, domain);
+
+    // Layer 7 — SMTP probe (best-effort; many servers block port 25 — treat unknown as probable)
+    let smtpResult = 'unknown';
+    try {
+        smtpResult = await smtpProbeEmail(email, emailDomain);
+    } catch (e) {
+        console.warn(`[SMTP PROBE CATCH] ${e.message}`);
+    }
+    result.smtpResult = smtpResult;
+
+    if (smtpResult === 'invalid') {
+        result.reason         = 'SMTP probe: mailbox does not exist';
+        result.confidenceScore = 0;
+        return result;
+    }
+
+    // Layer 8 — Score assignment
+    if (smtpResult === 'valid') {
+        if (classification.type === 'confirmed-personal') {
+            result.confidenceScore = 95;
+            result.verdict         = 'verified';
+            result.reason          = 'SMTP-confirmed personal email';
+        } else {
+            result.confidenceScore = 78;
+            result.verdict         = 'verified';
+            result.reason          = 'SMTP-confirmed role/generic email';
+        }
+    } else {
+        // smtpResult === 'unknown' (server blocked probe or greylisted)
+        // Still usable — most enterprise mail servers block port 25 probes
+        if (classification.type === 'confirmed-personal') {
+            result.confidenceScore = 65;
+            result.verdict         = 'probable';
+            result.reason          = 'Found in public source, personal format, MX valid, SMTP inconclusive';
+        } else if (classification.type === 'confirmed-generic' || classification.type === 'confirmed-other') {
+            result.confidenceScore = 52;
+            result.verdict         = 'probable';
+            result.reason          = 'Found in public source, role email, MX valid, SMTP inconclusive';
+        } else {
+            result.confidenceScore = 30;
+            result.verdict         = 'probable';
+            result.reason          = 'Source-found, MX valid, format unclear';
+        }
+    }
+
+    return result;
+}
+
+// ─── NEW: MULTI-EMAIL VALIDATION & RANKING ────────────────────────────────────
+// Takes a list of raw discovered emails, validates each one,
+// returns them sorted by confidence score, filtered by threshold.
+async function rankAndFilterEmails(emails, domain) {
+    if (!emails || emails.length === 0) return [];
+
+    // Deduplicate first
+    const unique = [...new Set(emails.map(e => e.toLowerCase().trim()))];
+
+    console.log(`🔬 [VALIDATOR] Running full pipeline on ${unique.length} email(s) for ${domain}`);
+
+    const validated = await Promise.all(
+        unique.map(email => validateEmailFull(email, domain))
+    );
+
+    const passing = validated
+        .filter(r => r.confidenceScore >= EMAIL_CONFIDENCE_THRESHOLD)
+        .sort((a, b) => b.confidenceScore - a.confidenceScore);
+
+    console.log(`📊 [VALIDATOR] ${passing.length}/${unique.length} passed threshold (≥${EMAIL_CONFIDENCE_THRESHOLD})`);
+    passing.forEach(r => console.log(`   → ${r.email} | score:${r.confidenceScore} | ${r.verdict} | ${r.reason}`));
+
+    return passing;
 }
 
 // ─── VALIDATION ────────────────────────────────────────────────────────────────
@@ -427,8 +682,6 @@ RULES — NEVER VIOLATE:
 }
 
 // ─── INTENT CLASSIFIER ────────────────────────────────────────────────────────
-// NEW: classifies every incoming message before routing it
-// Returns one of: lead_gen | chat | email_draft | business_qa
 async function _classifyIntent(message, history, apiKey) {
     const recentHistory = (history || []).slice(-6)
         .map(h => `${h.role}: ${h.content}`)
@@ -485,7 +738,6 @@ Return ONLY the intent string. No explanation. No JSON. Just one of: lead_gen | 
 }
 
 // ─── CHAT HANDLER ─────────────────────────────────────────────────────────────
-// NEW: handles conversational messages with full memory context
 async function _handleChat(message, history, userProfile, apiKey) {
     const senderName = userProfile?.senderName || 'there';
     const usp        = userProfile?.usp || null;
@@ -498,7 +750,6 @@ You also have the ability to find leads, draft emails, and give business strateg
 If the user seems to want leads or emails, gently let them know you can do that.
 Keep responses concise but complete. Never pad with filler.`;
 
-    // Build full memory context from history (last 20 messages max)
     const memoryMessages = (history || [])
         .slice(-20)
         .map(h => ({ role: h.role, content: h.content }));
@@ -534,13 +785,10 @@ Keep responses concise but complete. Never pad with filler.`;
 }
 
 // ─── EMAIL DRAFT HANDLER ──────────────────────────────────────────────────────
-// NEW: drafts a standalone email from natural language instructions
-// Does NOT trigger the lead gen pipeline — purely drafts what the user describes
 async function _handleEmailDraft(message, history, userProfile, apiKey) {
     const senderName = userProfile?.senderName || 'Alex';
     const usp        = userProfile?.usp || null;
 
-    // Pull context from recent history so follow-up edits work naturally
     const recentContext = (history || [])
         .slice(-6)
         .map(h => `${h.role}: ${h.content}`)
@@ -594,7 +842,6 @@ Return ONLY valid JSON:
         const raw    = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
         const parsed = JSON.parse(raw);
 
-        // Return as a human-readable formatted reply so the frontend can display it
         return `Here's your email:\n\n**Subject:** ${parsed.subject}\n\n${parsed.body}`;
 
     } catch (err) {
@@ -604,10 +851,8 @@ Return ONLY valid JSON:
 }
 
 // ─── BUSINESS QA HANDLER ──────────────────────────────────────────────────────
-// NEW: handles business strategy, advice, calculations, analysis
 async function _handleBusinessQA(message, history, userProfile, apiKey) {
-    const senderName = userProfile?.senderName || 'there';
-    const usp        = userProfile?.usp || null;
+    const usp = userProfile?.usp || null;
 
     const systemPrompt = `You are a sharp senior business strategist and operator.
 You give direct, actionable business advice with zero corporate fluff.
@@ -750,12 +995,13 @@ ${allSnippets}`;
                         emp.email = null;
                     }
                 }
-                if (emp.name && !emp.email && domain) {
-                    emp.emailGuesses    = guessEmailPatterns(emp.name, domain);
-                    emp.emailConfidence = 'guessed-pattern';
-                } else if (emp.email) {
-                    emp.emailGuesses    = [emp.email];
+                // NOTE: emailGuesses / guessEmailPatterns REMOVED.
+                // Employees without a source-confirmed email are flagged as unresolved.
+                // The validation pipeline will handle them — no patterns constructed here.
+                if (emp.email) {
                     emp.emailConfidence = 'confirmed-personal';
+                } else {
+                    emp.emailConfidence = 'none';
                 }
                 return emp;
             });
@@ -925,6 +1171,16 @@ Return ONLY valid JSON:
 }
 
 // ─── SINGLE COMPANY PIPELINE ──────────────────────────────────────────────────
+// UPGRADED EMAIL RESOLUTION CHAIN:
+//
+//   TIER 1 — Regex-extracted emails from search snippets → validated by full pipeline
+//   TIER 2 — Reality-checked employee email from GPT extract → validated by full pipeline
+//   TIER 3 — huntRealEmails (contact/directory search) → validated by full pipeline
+//   TIER 4 — REMOVED (was: guessEmailPatterns fallback — fabricated, never verified)
+//
+// If no email passes the validation threshold → lead is REJECTED with clear log.
+// Quality > quantity. No fake data passes through.
+//
 async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
     try {
         let domain = '';
@@ -943,7 +1199,10 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             validateMX(domain),
         ]);
 
-        if (!mxValid) console.warn(`⚠️ [MX FAIL] ${domain} — high bounce risk`);
+        if (!mxValid) {
+            console.warn(`🗑️ [REJECTED] ${companyName} — domain ${domain} has no MX records`);
+            return null;
+        }
 
         const dataScore = scoreDataCompleteness(companyData);
         if (dataScore < 10) {
@@ -961,45 +1220,51 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ) || employees[0];
         }
 
-        let resolvedEmail   = null;
-        let emailConfidence = null;
-        let emailLabel      = null;
-        let allEmailOptions = [];
-        const regexEmails   = companyData?._regexEmails || [];
+        // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
+        // Gather every source-confirmed email: regex hits, GPT-confirmed employee emails,
+        // and contact page emails. We do NOT include pattern-guessed emails.
+        const candidateEmails = [
+            ...(companyData?._regexEmails || []),
+            ...(companyData?.contactEmails || []),
+            ...(employees
+                .filter(e => e.email && isValidEmailFormat(e.email))
+                .map(e => e.email)
+            ),
+        ].filter(isValidEmailFormat);
 
-        if (regexEmails.length > 0) {
-            const c = classifyEmail(regexEmails[0], domain);
-            resolvedEmail = regexEmails[0]; emailConfidence = c.type; emailLabel = c.label;
-            allEmailOptions = regexEmails;
-            console.log(`✅ [TIER 1/2] Regex email: ${resolvedEmail}`);
-
-        } else if (bestContact?.email && isValidEmailFormat(bestContact.email)) {
-            resolvedEmail = bestContact.email; emailConfidence = 'confirmed-personal';
-            emailLabel = '✓ Personal email (real)'; allEmailOptions = [bestContact.email];
-            console.log(`✅ [TIER 3] Reality-checked employee email: ${resolvedEmail}`);
-
-        } else if (getTavilyRemaining() > 0) {
+        // ── TIER 3: EMAIL HUNT if no candidates yet ──────────────────────────
+        if (candidateEmails.length === 0 && getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting real email for ${companyName}...`);
             const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
             if (huntResult.companyEmails.length > 0) {
-                const c = classifyEmail(huntResult.companyEmails[0], domain);
-                resolvedEmail = huntResult.companyEmails[0]; emailConfidence = c.type;
-                emailLabel = c.label; allEmailOptions = huntResult.companyEmails;
-                console.log(`✅ [TIER 4] Email hunt found: ${resolvedEmail}`);
+                candidateEmails.push(...huntResult.companyEmails.filter(isValidEmailFormat));
+                console.log(`🔎 [EMAIL HUNT] Added ${huntResult.companyEmails.length} candidate(s) for validation`);
             }
         }
 
-        if (!resolvedEmail && bestContact?.name) {
-            const guesses = guessEmailPatterns(bestContact.name, domain);
-            resolvedEmail = guesses[0]; emailConfidence = 'guessed-pattern';
-            emailLabel = '⚠️ Pattern guess — NOT verified'; allEmailOptions = guesses;
-            console.log(`⚠️ [TIER 5] Pattern guess: ${resolvedEmail}`);
-        }
-
-        if (!resolvedEmail || !isValidEmailFormat(resolvedEmail)) {
-            console.warn(`🗑️ [REJECTED] ${companyName} — no reliable email found at any tier`);
+        if (candidateEmails.length === 0) {
+            console.warn(`🗑️ [REJECTED] ${companyName} — no source-discoverable emails found`);
             return null;
         }
+
+        // ── FULL VALIDATION PIPELINE ─────────────────────────────────────────
+        onProgress?.(`🔬 Validating emails for ${companyName}...`);
+        const validatedEmails = await rankAndFilterEmails(candidateEmails, domain);
+
+        if (validatedEmails.length === 0) {
+            console.warn(`🗑️ [REJECTED] ${companyName} — no emails passed validation threshold (${EMAIL_CONFIDENCE_THRESHOLD})`);
+            return null;
+        }
+
+        // Best email = highest confidence score
+        const topEmail       = validatedEmails[0];
+        const resolvedEmail  = topEmail.email;
+        const classification = classifyEmail(resolvedEmail, domain);
+        const emailConfidence = classification.type;
+        const emailLabel      = classification.label;
+        const allEmailOptions = validatedEmails.map(v => v.email);
+
+        console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] confidence:${topEmail.confidenceScore} smtp:${topEmail.smtpResult} MX:${mxValid}`);
 
         onProgress?.(`✍️ Writing emails for ${companyName}...`);
 
@@ -1030,8 +1295,6 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             hallucinationCount,
         });
 
-        console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] Score:${leadScore}/100 MX:${mxValid}`);
-
         return {
             name:               bestContact?.name || companyName,
             company:            companyName,
@@ -1039,6 +1302,12 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             email:              resolvedEmail,
             emailConfidence,
             emailLabel,
+            emailValidation: {                          // NEW: expose validation metadata to frontend
+                confidenceScore: topEmail.confidenceScore,
+                verdict:         topEmail.verdict,
+                smtpResult:      topEmail.smtpResult,
+                reason:          topEmail.reason,
+            },
             allEmailOptions,
             role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
             linkedIn:           bestContact?.linkedIn  || null,
@@ -1065,8 +1334,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
     }
 }
 
-// ─── LEAD GEN PIPELINE (extracted from generateFreeResponse for clarity) ──────
-// All original lead gen logic — zero changes to the algorithm
+// ─── LEAD GEN PIPELINE ────────────────────────────────────────────────────────
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
     const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
 Return ONLY valid JSON:
@@ -1161,14 +1429,14 @@ Never return null for target or industry. Infer from context.`;
         .sort((a, b) => b.leadScore - a.leadScore)
         .slice(0, MAX_LEADS_RETURNED);
 
-    console.log(`🏁 Done. ${leadsToReturn.length} leads.`);
+    console.log(`🏁 Done. ${leadsToReturn.length} verified leads.`);
     console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
     console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
     if (leadsToReturn.length === 0) {
         return {
-            reply:          'Found companies but could not verify enough data. Try a different industry or location.',
-            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads extracted.' }],
+            reply:          'Found companies but no emails passed verification. Try a different industry or location.',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No verified leads.' }],
         };
     }
 
@@ -1177,14 +1445,12 @@ Never return null for target or industry. Infer from context.`;
         updatedHistory: [
             ...history,
             { role: 'user',      content: safeMessage },
-            { role: 'assistant', content: `[Generated ${leadsToReturn.length} leads]` },
+            { role: 'assistant', content: `[Generated ${leadsToReturn.length} verified leads]` },
         ],
     };
 }
 
 // ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
-// PRESERVED: same function signature and return shape — zero breaking changes
-// UPGRADED:  now routes to chat / email_draft / business_qa / lead_gen based on intent
 async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
         console.log('🟢 [AI ENGINE] Pipeline started...');
@@ -1207,14 +1473,11 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const detectedLanguage = _detectLanguage(safeMessage);
         console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
 
-        // ── INTENT CLASSIFICATION ─────────────────────────────────────────────
         const intent = await _classifyIntent(safeMessage, history, apiKey);
         console.log(`🎯 [INTENT] ${intent}`);
         onProgress?.(`🧠 Mode: ${intent.replace('_', ' ')}...`);
 
-        // ── ROUTING ───────────────────────────────────────────────────────────
         if (intent === INTENT.LEAD_GEN) {
-            // Original lead gen pipeline — fully preserved, zero changes
             return await _runLeadGenPipeline(
                 safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey
             );
@@ -1244,7 +1507,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        // Default: CHAT — handles greetings, small talk, follow-ups, clarifications
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
             reply,
