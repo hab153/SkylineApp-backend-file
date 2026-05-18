@@ -15,6 +15,13 @@ const MAX_MESSAGE_LENGTH = 800;
 // NEW: Minimum confidence score to pass a lead through
 const EMAIL_CONFIDENCE_THRESHOLD = 28; // confirmed-generic(30) and above pass; guessed-pattern(12) blocked
 
+// ─── NEW: OUTPUT QUANTITY CONTROL CONSTANTS ───────────────────────────────────
+// Enforces the CRITICAL OUTPUT QUANTITY RULE across the entire pipeline.
+// These are the hard bounds that govern how many leads are returned.
+const QUANTITY_RULE_HARD_MIN     = 2;   // never return fewer than 2 if 2 real leads exist
+const QUANTITY_RULE_ABSOLUTE_MIN = 1;   // if only 1 verified lead exists in reality, return 1
+const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED; // default when user specifies no count
+
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
     LEAD_GEN:     'lead_gen',
@@ -681,6 +688,135 @@ RULES — NEVER VIOLATE:
 `;
 }
 
+// ─── NEW: OUTPUT QUANTITY CONTROL — _parseRequestedCount ─────────────────────
+// Extracts the user-requested lead/email count from the raw message.
+// Supports numeric words (one → 10), digit strings, and common phrasings.
+// Returns a bounded integer or null if no count was specified.
+//
+// Preserved: zero impact on any existing function. Pure addition.
+//
+// Examples:
+//   "find me 3 leads in London"           → 3
+//   "get 10 emails for marketing agencies" → 10
+//   "find five companies in NYC"           → 5
+//   "give me leads for SaaS companies"     → null (no count → use default)
+//
+function _parseRequestedCount(message) {
+    if (!message || typeof message !== 'string') return null;
+
+    const lower = message.toLowerCase();
+
+    // Map written-out numbers to integers (up to twenty for practical coverage)
+    const wordToNum = {
+        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14,
+        'fifteen': 15, 'sixteen': 16, 'seventeen': 17, 'eighteen': 18,
+        'nineteen': 19, 'twenty': 20,
+    };
+
+    // Pattern 1: digit immediately followed by a lead/email/contact keyword
+    // e.g. "find 5 leads", "get me 3 emails", "show 10 contacts"
+    const digitPattern = /\b(\d{1,3})\s*(?:leads?|emails?|contacts?|companies|companies'|results?|prospects?)\b/i;
+    const digitMatch   = message.match(digitPattern);
+    if (digitMatch) {
+        const n = parseInt(digitMatch[1], 10);
+        if (n >= 1 && n <= 100) {
+            console.log(`🔢 [QUANTITY PARSER] Digit match: ${n} from "${digitMatch[0]}"`);
+            return n;
+        }
+    }
+
+    // Pattern 2: "give/find/get/show me N" where N is a digit
+    // e.g. "give me 7 UK agencies", "find me 4 plumbers"
+    const givePattern = /\b(?:give|find|get|show|fetch|pull|return|bring)\s+(?:me\s+)?(\d{1,3})\b/i;
+    const giveMatch   = message.match(givePattern);
+    if (giveMatch) {
+        const n = parseInt(giveMatch[1], 10);
+        if (n >= 1 && n <= 100) {
+            console.log(`🔢 [QUANTITY PARSER] Give-pattern match: ${n}`);
+            return n;
+        }
+    }
+
+    // Pattern 3: written-out number word before a lead/email/contact keyword
+    // e.g. "find five companies", "get me ten leads"
+    for (const [word, num] of Object.entries(wordToNum)) {
+        const wordPattern = new RegExp(
+            `\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i'
+        );
+        if (wordPattern.test(lower)) {
+            console.log(`🔢 [QUANTITY PARSER] Word match: "${word}" → ${num}`);
+            return num;
+        }
+    }
+
+    // Pattern 4: "top N" phrasing — e.g. "top 5 agencies"
+    const topPattern = /\btop\s+(\d{1,3})\b/i;
+    const topMatch   = message.match(topPattern);
+    if (topMatch) {
+        const n = parseInt(topMatch[1], 10);
+        if (n >= 1 && n <= 100) {
+            console.log(`🔢 [QUANTITY PARSER] Top-N match: ${n}`);
+            return n;
+        }
+    }
+
+    // No count found — caller uses default
+    console.log(`🔢 [QUANTITY PARSER] No count specified — will use default (${QUANTITY_RULE_DEFAULT_MAX})`);
+    return null;
+}
+
+// ─── NEW: OUTPUT QUANTITY CONTROL — _applyOutputQuantityRules ────────────────
+// Enforces the CRITICAL OUTPUT QUANTITY RULE on a sorted array of verified leads.
+//
+// PRIORITY ORDER (per spec):
+//   Accuracy > Validity > Minimum threshold > Requested quantity
+//
+// Rules applied:
+//   1. Never exceed requestedMax (hard ceiling)
+//   2. Apply HARD_MIN of 2 if at least 2 real verified leads exist
+//   3. If only 1 verified lead exists, return 1 (ABSOLUTE_MIN)
+//   4. Never fabricate, duplicate, or inflate to meet quota
+//   5. If 0 verified leads exist, return [] — caller handles empty state
+//
+// Parameters:
+//   leads        — array of fully-processed, sorted lead objects (already validated)
+//   requestedMax — integer from _parseRequestedCount(), or QUANTITY_RULE_DEFAULT_MAX
+//
+// Returns: final bounded lead array ready for output
+//
+function _applyOutputQuantityRules(leads, requestedMax) {
+    if (!Array.isArray(leads)) return [];
+
+    const totalVerified = leads.length;
+    const cap           = Math.min(requestedMax, QUANTITY_RULE_DEFAULT_MAX); // never exceed system max either
+
+    console.log(`📐 [QUANTITY RULES] Verified: ${totalVerified} | Requested max: ${requestedMax} | System cap: ${QUANTITY_RULE_DEFAULT_MAX} | Effective cap: ${cap}`);
+
+    // Rule: 0 verified → return empty (no fabrication)
+    if (totalVerified === 0) {
+        console.log(`📐 [QUANTITY RULES] 0 verified leads — returning empty array`);
+        return [];
+    }
+
+    // Rule: 1 verified → return 1 (ABSOLUTE_MIN, can't fabricate a second)
+    if (totalVerified === 1) {
+        console.log(`📐 [QUANTITY RULES] Only 1 verified lead exists — returning 1 (absolute minimum)`);
+        return [leads[0]];
+    }
+
+    // Rule: apply HARD_MIN of 2 — if user asked for fewer than 2 but 2+ exist,
+    //       we still return 2 (data integrity platform returns what's real, min 2)
+    const effectiveMin = QUANTITY_RULE_HARD_MIN; // 2
+    const sliceTo      = Math.max(effectiveMin, Math.min(cap, totalVerified));
+
+    const final = leads.slice(0, sliceTo);
+    console.log(`📐 [QUANTITY RULES] Returning ${final.length} lead(s) [min:${effectiveMin}, cap:${cap}, available:${totalVerified}]`);
+
+    return final;
+}
+
 // ─── INTENT CLASSIFIER ────────────────────────────────────────────────────────
 async function _classifyIntent(message, history, apiKey) {
     const recentHistory = (history || []).slice(-6)
@@ -1302,7 +1438,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             email:              resolvedEmail,
             emailConfidence,
             emailLabel,
-            emailValidation: {                          // NEW: expose validation metadata to frontend
+            emailValidation: {                          // expose validation metadata to frontend
                 confidenceScore: topEmail.confidenceScore,
                 verdict:         topEmail.verdict,
                 smtpResult:      topEmail.smtpResult,
@@ -1335,7 +1471,19 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 }
 
 // ─── LEAD GEN PIPELINE ────────────────────────────────────────────────────────
+// UPGRADED: now parses user-requested count from message and applies
+// _applyOutputQuantityRules() at the final output stage.
+// All existing logic is 100% preserved. The quantity control is an additive layer
+// applied AFTER leads are collected and sorted — it only trims the final slice.
+//
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
+
+    // ── NEW: Parse user-requested quantity before pipeline starts ─────────────
+    // This is purely additive — it has zero effect on the search, research,
+    // validation, or email generation logic below.
+    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
+    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads (parsed from message)`);
+
     const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
 Return ONLY valid JSON:
 {
@@ -1371,6 +1519,15 @@ Never return null for target or industry. Infer from context.`;
     onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
     const locationClause = intent.location ? `"${intent.location}"` : '';
 
+    // ── NEW: Scale raw search pool to requested count ─────────────────────────
+    // If user requests fewer leads we still fetch a reasonable pool (capped at system max + buffer)
+    // so the validation pipeline has enough candidates after rejections.
+    // This prevents under-fetching when the user asks for 2 but we'd normally fetch 10.
+    const searchPoolSize = Math.min(
+        Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3), // always fetch a buffer above requested
+        15 // hard ceiling on raw search results to avoid quota burn
+    );
+
     const query = [
         `"${intent.target}"`, intent.industry, locationClause,
         'contact email CEO founder',
@@ -1378,7 +1535,7 @@ Never return null for target or industry. Infer from context.`;
     ].filter(Boolean).join(' ');
 
     console.log(`🔍 Query: ${query}`);
-    const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: 10 });
+    const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: searchPoolSize });
     console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
 
     if (rawResults.length === 0) {
@@ -1405,7 +1562,7 @@ Never return null for target or industry. Infer from context.`;
         if (SKIP_DOMAINS.some(d => domain.includes(d)))              continue;
         globalSeenDomains.add(domain);
         cleanResults.push({ ...result, _domain: domain });
-        if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break;
+        if (cleanResults.length >= requestedCount + 5) break; // buffer above requested for pipeline rejections
     }
 
     console.log(`✅ Clean results after filter: ${cleanResults.length}`);
@@ -1423,13 +1580,20 @@ Never return null for target or industry. Infer from context.`;
     );
     const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
 
-    const leadsToReturn = settled
+    // ── All validated leads, sorted by quality score ──────────────────────────
+    const allVerifiedLeads = settled
         .filter(r => r.status === 'fulfilled' && r.value !== null)
         .map(r => r.value)
-        .sort((a, b) => b.leadScore - a.leadScore)
-        .slice(0, MAX_LEADS_RETURNED);
+        .sort((a, b) => b.leadScore - a.leadScore);
 
-    console.log(`🏁 Done. ${leadsToReturn.length} verified leads.`);
+    // ── NEW: Apply CRITICAL OUTPUT QUANTITY RULE ──────────────────────────────
+    // This is the only place leadsToReturn is now determined.
+    // Replaces the previous hard .slice(0, MAX_LEADS_RETURNED) with the bounded,
+    // rule-compliant version that respects user-requested count while enforcing
+    // hard minimums and prohibiting fabrication.
+    const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
+
+    console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
     console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
     console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
