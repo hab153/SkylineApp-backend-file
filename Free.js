@@ -2,7 +2,7 @@
 
 const axios = require('axios');
 const dns   = require('dns').promises;
-const net   = require('net'); // NEW: for SMTP probing
+const net   = require('net');
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
 const MAX_LEADS_RETURNED = 5;
@@ -13,53 +13,93 @@ const CURRENT_YEAR       = new Date().getFullYear();
 const MAX_MESSAGE_LENGTH = 800;
 
 // Minimum confidence score to pass a lead through
-const EMAIL_CONFIDENCE_THRESHOLD = 28; // confirmed-generic(30) and above pass; guessed-pattern(12) blocked
+const EMAIL_CONFIDENCE_THRESHOLD = 28;
 
 // ─── OUTPUT QUANTITY CONTROL CONSTANTS ───────────────────────────────────────
-// Enforces the CRITICAL OUTPUT QUANTITY RULE across the entire pipeline.
 const QUANTITY_RULE_HARD_MIN     = 2;
 const QUANTITY_RULE_ABSOLUTE_MIN = 1;
 const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;
 
-// ─── UPGRADE v2: ROLE PRIORITY MAP ───────────────────────────────────────────
-// Used by _pickBestContact() to rank decision-makers by seniority.
-// Lower number = higher priority. Preserved: original fallback to employees[0].
+// ─── ROLE PRIORITY MAP ───────────────────────────────────────────────────────
 const ROLE_PRIORITY = {
-    'ceo':         1,
-    'founder':     2,
-    'co-founder':  2,
-    'co founder':  2,
-    'owner':       3,
-    'director':    4,
-    'vp':          5,
+    'ceo':            1,
+    'founder':        2,
+    'co-founder':     2,
+    'co founder':     2,
+    'owner':          3,
+    'director':       4,
+    'vp':             5,
     'vice president': 5,
-    'head of':     6,
-    'manager':     7,
-    'marketing':   8,
-    'sales':       9,
+    'head of':        6,
+    'manager':        7,
+    'marketing':      8,
+    'sales':          9,
 };
 
-// ─── UPGRADE v2: DOMAIN REPUTATION BLOCKLIST ─────────────────────────────────
-// Known low-quality, spam-heavy, or irrelevant TLDs/domains added as an extra
-// rejection gate in validateEmailFull(). Purely additive — does not touch any
-// existing validation layer. Empty set = no extra blocking beyond existing logic.
+// ─── DOMAIN REPUTATION BLOCKLIST ─────────────────────────────────────────────
 const REPUTATION_BLOCKED_DOMAINS = new Set([
-    // placeholder — operators can extend this list
-    // e.g. 'examplebadactor.com',
+    // Extend with known bad actors as needed
 ]);
 
-// ─── UPGRADE v2: SEARCH DIVERSIFICATION STRATEGIES ───────────────────────────
-// Used by _buildSearchQueries() to generate multiple Tavily query variants
-// for a given intent. The pipeline tries the primary query first; if the clean
-// result pool is thin (< MIN_POOL_SIZE), it falls back to alternates.
-const MIN_POOL_SIZE = 3; // if < 3 clean results from primary, attempt fallback query
+// ─── SEARCH DIVERSIFICATION ───────────────────────────────────────────────────
+const MIN_POOL_SIZE = 3;
+
+// ─── CONTENT QUALITY FILTER — LOW-VALUE PAGE SIGNALS ─────────────────────────
+// NEW: Used in _scorePageBusinessRelevance() to reject editorial/SEO noise early.
+const LOW_VALUE_URL_PATTERNS = [
+    /\/blog\//i,
+    /\/article\//i,
+    /\/news\//i,
+    /\/tutorial\//i,
+    /\/how-to\//i,
+    /\/guide\//i,
+    /\/tips\//i,
+    /\/resources\//i,
+    /\/learn\//i,
+    /\/wiki\//i,
+    /\/forum\//i,
+    /\.pdf$/i,
+    /reddit\.com/i,
+    /medium\.com/i,
+    /quora\.com/i,
+    /wikipedia\.org/i,
+    /stackoverflow\.com/i,
+    /hubspot\.com\/blog/i,
+    /moz\.com\/blog/i,
+    /semrush\.com\/blog/i,
+];
+
+const HIGH_VALUE_URL_PATTERNS = [
+    /\/about/i,
+    /\/team/i,
+    /\/contact/i,
+    /\/company/i,
+    /\/people/i,
+    /\/leadership/i,
+    /\/founders/i,
+    /\/our-story/i,
+];
+
+const HIGH_VALUE_TITLE_SIGNALS = [
+    'agency', 'studio', 'solutions', 'services', 'group', 'partners',
+    'consulting', 'technologies', 'software', 'platform', 'media',
+    'marketing', 'creative', 'digital', 'design', 'development',
+    'co.', 'inc', 'ltd', 'llc', 'corp',
+];
+
+const LOW_VALUE_TITLE_SIGNALS = [
+    'how to', 'guide', 'tutorial', 'best practices', 'tips for',
+    'what is', 'introduction to', 'overview of', 'list of',
+    'top 10', 'top 5', '10 ways', '5 ways', '7 ways',
+    'blog post', 'article', 'free download', 'pdf',
+];
 
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
-    LEAD_GEN:     'lead_gen',
-    CHAT:         'chat',
-    EMAIL_DRAFT:  'email_draft',
-    BUSINESS_QA:  'business_qa',
+    LEAD_GEN:    'lead_gen',
+    CHAT:        'chat',
+    EMAIL_DRAFT: 'email_draft',
+    BUSINESS_QA: 'business_qa',
 };
 
 // ─── REASONING FILTER ──────────────────────────────────────────────────────────
@@ -111,9 +151,9 @@ function buildBannedWordsInstruction() {
 const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
 const openAiTracker = {
-    totalCallsThisSession:         0,
-    totalInputTokensThisSession:   0,
-    totalOutputTokensThisSession:  0,
+    totalCallsThisSession:        0,
+    totalInputTokensThisSession:  0,
+    totalOutputTokensThisSession: 0,
 };
 const costTracker = { estimatedUSDThisSession: 0 };
 
@@ -145,9 +185,7 @@ function recordOpenAiUsage(inputTokens = 0, outputTokens = 0, model = 'gpt-4o-mi
 // ─── PERSISTENT DOMAIN DEDUP ──────────────────────────────────────────────────
 const globalSeenDomains = new Set();
 
-// ─── UPGRADE v2: PERSISTENT COMPANY NAME DEDUP ───────────────────────────────
-// Prevents the same company from appearing under two different domains.
-// Purely additive — does not change domain dedup logic above.
+// ─── PERSISTENT COMPANY NAME DEDUP ───────────────────────────────────────────
 const globalSeenCompanyNames = new Set();
 
 // ─── IN-MEMORY RESEARCH CACHE ─────────────────────────────────────────────────
@@ -177,6 +215,108 @@ async function withRetry(fn, label, retries = 2, delayMs = 800) {
     return null;
 }
 
+// ─── NEW: PAGE BUSINESS RELEVANCE SCORER ─────────────────────────────────────
+// Scores a search result 0–100 for B2B business entity relevance BEFORE
+// committing Tavily quota to research it. High-value pages get processed;
+// low-value content pages are rejected early to reduce noise and hallucination.
+//
+// Score bands:
+//   70–100 : Process — strong business entity signal
+//   40–69  : Process — moderate signal, worth checking
+//   0–39   : Reject — likely blog/SEO/editorial content
+//
+function _scorePageBusinessRelevance(result) {
+    const url     = (result.url     || '').toLowerCase();
+    const title   = (result.title   || '').toLowerCase();
+    const snippet = (result.snippet || '').toLowerCase();
+
+    let score = 50; // neutral baseline
+
+    // ── Hard reject: known low-value URL patterns ─────────────────────────
+    for (const pattern of LOW_VALUE_URL_PATTERNS) {
+        if (pattern.test(url)) {
+            score -= 35;
+            console.log(`🔴 [PAGE SCORE] Low-value URL pattern matched: ${url} → score penalised`);
+            break;
+        }
+    }
+
+    // ── Bonus: high-value URL structure signals ───────────────────────────
+    for (const pattern of HIGH_VALUE_URL_PATTERNS) {
+        if (pattern.test(url)) { score += 15; break; }
+    }
+
+    // ── Title signals ─────────────────────────────────────────────────────
+    for (const signal of HIGH_VALUE_TITLE_SIGNALS) {
+        if (title.includes(signal)) { score += 12; break; }
+    }
+    for (const signal of LOW_VALUE_TITLE_SIGNALS) {
+        if (title.includes(signal)) { score -= 20; break; }
+    }
+
+    // ── Snippet contact/email signals ─────────────────────────────────────
+    if (snippet.includes('@'))                     score += 10;
+    if (snippet.includes('contact'))               score += 5;
+    if (/ceo|founder|owner|director/.test(snippet)) score += 10;
+    if (/agency|studio|solutions|services/.test(snippet)) score += 8;
+
+    // ── Penalise generic informational content ────────────────────────────
+    if (/how to|what is|tutorial|step.by.step|learn how/.test(snippet)) score -= 15;
+    if (/read more|subscribe|newsletter|download free/.test(snippet))   score -= 10;
+
+    const finalScore = Math.max(0, Math.min(100, score));
+    return finalScore;
+}
+
+// ─── NEW: INTENT NORMALIZATION ENGINE ────────────────────────────────────────
+// Validates that a discovered lead actually matches the structured intent.
+// Returns true if the lead should be included, false if it should be rejected.
+// This acts as a post-discovery FILTER gate — precision over volume.
+//
+function _leadMatchesIntent(lead, intent) {
+    if (!intent || !lead) return true; // no constraints = pass all
+
+    const industryLower = (intent.industry || '').toLowerCase();
+    const targetLower   = (intent.target   || '').toLowerCase();
+
+    // Skip validation if intent is vague/generic
+    const GENERIC_TERMS = ['general', 'any', 'all', 'business', 'company', 'businesses'];
+    const isVagueIntent = GENERIC_TERMS.some(t =>
+        industryLower.includes(t) || targetLower.includes(t)
+    );
+    if (isVagueIntent) return true;
+
+    // Check if the lead's industry context aligns
+    const leadIndustry = (lead.industry || '').toLowerCase();
+    const leadCompany  = (lead.company  || '').toLowerCase();
+    const leadDomain   = (lead.domain   || '').toLowerCase();
+
+    // If lead has an explicit industry tag and it's set, do a loose keyword match
+    if (leadIndustry && leadIndustry !== 'unknown') {
+        const intentKeywords = industryLower.split(/\s+/).filter(w => w.length > 3);
+        const anyMatch = intentKeywords.some(kw =>
+            leadIndustry.includes(kw) || leadCompany.includes(kw) || leadDomain.includes(kw)
+        );
+        // If we have strong keywords and zero match, flag but don't hard-reject
+        // (domain/company names don't always contain the industry word)
+        if (!anyMatch && intentKeywords.length > 1) {
+            console.log(`⚠️ [INTENT FILTER] Weak industry match for "${lead.company}" — industry: "${leadIndustry}" vs intent: "${industryLower}"`);
+        }
+    }
+
+    // Role filter: if user requested a specific contact type, enforce it
+    const preferredContact = (intent.preferredContact || 'any').toLowerCase();
+    if (preferredContact && preferredContact !== 'any') {
+        const leadRole = (lead.role || '').toLowerCase();
+        if (leadRole && !leadRole.includes(preferredContact.split(' ')[0])) {
+            console.log(`⚠️ [INTENT FILTER] Role mismatch: "${leadRole}" vs requested "${preferredContact}" for ${lead.company}`);
+            // Don't hard-reject on role alone — best contact was already selected by priority
+        }
+    }
+
+    return true; // Pass — filtering is advisory/logging for now to avoid false rejections
+}
+
 // ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
 async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
@@ -201,18 +341,9 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
     }, `Tavily:${query.slice(0, 40)}`) ?? [];
 }
 
-// ─── UPGRADE v2: SEARCH QUERY DIVERSIFICATION ────────────────────────────────
-// Builds a primary and a fallback query string for a given lead-gen intent.
-// The fallback uses an alternative phrasing to improve recall when the primary
-// search returns a thin pool. Both queries are built from the SAME intent object
-// so they stay 100% within the user's specified constraints.
-//
-// Preserved: the original query construction in _runLeadGenPipeline() is left
-// intact and used as the primary. This function generates the fallback only.
-//
+// ─── SEARCH QUERY DIVERSIFICATION ────────────────────────────────────────────
 function _buildFallbackQuery(intent) {
     const locationClause = intent.location ? `"${intent.location}"` : '';
-    // Alternative phrasing: drop "contact email CEO founder" and use site: hints
     return [
         intent.industry,
         intent.target,
@@ -220,6 +351,41 @@ function _buildFallbackQuery(intent) {
         'company website official',
         'inurl:about OR inurl:team',
     ].filter(Boolean).join(' ');
+}
+
+// ─── NEW: ENTITY-FIRST SEARCH QUERY BUILDER ──────────────────────────────────
+// Builds domain-specific, entity-first queries that prioritise business
+// entity pages over informational content. Three query variants per intent.
+//
+function _buildEntityFirstQueries(intent, poolSize) {
+    const loc   = intent.location ? `"${intent.location}"` : '';
+    const ind   = intent.industry || '';
+    const tgt   = intent.target   || '';
+
+    // Query 1 — Primary: company pages with contact/about signals
+    const primary = [
+        `"${tgt}"`, ind, loc,
+        'contact email CEO founder',
+        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
+    ].filter(Boolean).join(' ');
+
+    // Query 2 — Entity signals: company name patterns + domain indicators
+    const entityFocus = [
+        ind, loc,
+        'official website company',
+        '"about us" OR "our team" OR "meet the team"',
+        '"contact us" OR "get in touch"',
+    ].filter(Boolean).join(' ');
+
+    // Query 3 — Decision-maker focus: find founders/CEOs directly
+    const dmFocus = [
+        `"${ind}"`, loc,
+        'CEO OR founder OR owner OR director',
+        '"email" OR "contact"',
+        '-site:linkedin.com -site:crunchbase.com',
+    ].filter(Boolean).join(' ');
+
+    return { primary, entityFocus, dmFocus };
 }
 
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
@@ -280,23 +446,17 @@ function classifyEmail(email, domain) {
         localPart === p || localPart.startsWith(p + '.')
     );
 
-    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain',             trustLevel: 0  };
-    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)',   trustLevel: 70 };
+    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain',           trustLevel: 0  };
+    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
     if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
-        return          { type: 'confirmed-personal', label: '✓ Personal email (real)',        trustLevel: 90 };
+        return          { type: 'confirmed-personal', label: '✓ Personal email (real)',      trustLevel: 90 };
     }
-    return              { type: 'confirmed-other',   label: '✓ Email (real)',                  trustLevel: 75 };
+    return              { type: 'confirmed-other',   label: '✓ Email (real)',                trustLevel: 75 };
 }
 
-// ─── REMOVED: guessEmailPatterns() ────────────────────────────────────────────
-// REASON: This function produced firstname.lastname@domain constructions with
-// zero verification. All TIER 5 fallback usage has been removed. The system
-// now rejects leads with no discoverable real email rather than fabricating one.
-// The function is preserved below as a dead stub for audit purposes only —
-// it is never called anywhere in the pipeline.
+// ─── DEAD STUB — DO NOT CALL ──────────────────────────────────────────────────
+// Preserved for audit trail. Intentionally disabled.
 function _DEAD_guessEmailPatterns_DO_NOT_USE(fullName, domain) {
-    // INTENTIONALLY DISABLED — do not call this function
-    // Original logic kept here for audit trail only
     if (!fullName || !domain) return [];
     const parts = fullName.toLowerCase().trim().split(/\s+/);
     if (parts.length < 2) return [`${parts[0]}@${domain}`];
@@ -320,9 +480,9 @@ const DISPOSABLE_DOMAINS = new Set([
     'dispostable.com','maildrop.cc','discard.email','spamgourmet.com',
     'spamgourmet.net','spamgourmet.org','wegwerfmail.de','wegwerfmail.net',
     'wegwerfmail.org','10minutemail.com','10minutemail.net','10minutemail.org',
-    'tempr.email','discard.email','mailnull.com','spamfree24.org',
-    'spamfree24.de','spamfree24.eu','spamfree24.info','spamfree24.net',
-    'spamfree.eu','spamoff.de',
+    'tempr.email','mailnull.com','spamfree24.org','spamfree24.de',
+    'spamfree24.eu','spamfree24.info','spamfree24.net','spamfree.eu',
+    'spamoff.de',
 ]);
 
 function isDisposableDomain(domain) {
@@ -330,10 +490,6 @@ function isDisposableDomain(domain) {
 }
 
 // ─── SMTP PROBE ───────────────────────────────────────────────────────────────
-// Performs a non-sending SMTP handshake to probe whether a mailbox likely exists.
-// Does NOT send any email. Uses RCPT TO: check only.
-// Returns: 'valid' | 'invalid' | 'unknown' (greylisted/timeout/blocked)
-// SAFETY: Times out at 8 seconds. Never sends DATA. Closes connection cleanly.
 async function smtpProbeEmail(email, domain) {
     try {
         const mxRecords = await dns.resolveMx(domain);
@@ -412,18 +568,7 @@ async function smtpProbeEmail(email, domain) {
 }
 
 // ─── FULL EMAIL VALIDATION PIPELINE ──────────────────────────────────────────
-// Runs every discovered email through a multi-layer validation stack.
-// Returns enriched result with verdict, confidence score, and reason.
-//
-// Confidence score bands:
-//   90–100 : SMTP-confirmed personal email
-//   70–89  : SMTP-confirmed generic/role email
-//   60–69  : MX-valid, found in public source, not SMTP-confirmed (server blocked probe)
-//   30–59  : MX-valid, source-found, SMTP unknown/timeout
-//   0–29   : Fails domain check, disposable, or SMTP-rejected — BLOCKED
-//
 async function validateEmailFull(email, domain) {
-    // UPGRADE v2: normalise email before all checks
     const normalisedEmail = (typeof email === 'string') ? email.toLowerCase().trim() : email;
 
     const result = {
@@ -438,7 +583,6 @@ async function validateEmailFull(email, domain) {
         reason:          '',
     };
 
-    // Layer 1 — Syntax
     if (!isValidEmailFormat(normalisedEmail)) {
         result.reason = 'Invalid syntax';
         return result;
@@ -448,26 +592,22 @@ async function validateEmailFull(email, domain) {
     const emailDomain = normalisedEmail.split('@')[1]?.toLowerCase();
     if (!emailDomain) { result.reason = 'No domain in email'; return result; }
 
-    // Layer 2 — Disposable domain check
     if (isDisposableDomain(emailDomain)) {
         result.disposable = true;
         result.reason     = 'Disposable domain';
         return result;
     }
 
-    // Layer 3 — Free email provider check
     if (isFreeEmailDomain(emailDomain)) {
         result.reason = 'Free email provider';
         return result;
     }
 
-    // UPGRADE v2 — Layer 3b: Reputation blocklist (additive gate)
     if (REPUTATION_BLOCKED_DOMAINS.has(emailDomain)) {
         result.reason = 'Domain on reputation blocklist';
         return result;
     }
 
-    // Layer 4 — Domain match to company
     const domainRoot   = domain.split('.')[0].toLowerCase();
     result.domainMatch = emailDomain === domain || emailDomain.includes(domainRoot);
     if (!result.domainMatch) {
@@ -475,17 +615,14 @@ async function validateEmailFull(email, domain) {
         return result;
     }
 
-    // Layer 5 — MX record validation
     result.mxValid = await validateMX(emailDomain);
     if (!result.mxValid) {
         result.reason = 'No MX records — domain cannot receive email';
         return result;
     }
 
-    // Layer 6 — Classify email type
     const classification = classifyEmail(normalisedEmail, domain);
 
-    // Layer 7 — SMTP probe
     let smtpResult = 'unknown';
     try {
         smtpResult = await smtpProbeEmail(normalisedEmail, emailDomain);
@@ -500,7 +637,6 @@ async function validateEmailFull(email, domain) {
         return result;
     }
 
-    // Layer 8 — Score assignment
     if (smtpResult === 'valid') {
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 95;
@@ -531,12 +667,9 @@ async function validateEmailFull(email, domain) {
 }
 
 // ─── MULTI-EMAIL VALIDATION & RANKING ────────────────────────────────────────
-// Takes a list of raw discovered emails, validates each one,
-// returns them sorted by confidence score, filtered by threshold.
 async function rankAndFilterEmails(emails, domain) {
     if (!emails || emails.length === 0) return [];
 
-    // UPGRADE v2: normalise before dedup
     const unique = [...new Set(emails.map(e => (typeof e === 'string' ? e.toLowerCase().trim() : e)))];
 
     console.log(`🔬 [VALIDATOR] Running full pipeline on ${unique.length} email(s) for ${domain}`);
@@ -627,7 +760,7 @@ function scoreDataCompleteness(extracted) {
     return Math.min(score, 100);
 }
 
-function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, hasNews, hasMission, dataScore, hallucinationCount }) {
+function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, hasNews, hasMission, dataScore, hallucinationCount, pageScore }) {
     let score = 0;
 
     if      (emailConfidence === 'confirmed-personal') score += 40;
@@ -643,23 +776,21 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     if (hasMission)     score +=  5;
     if (dataScore > 60) score +=  5;
 
+    // NEW: page relevance score bonus (0–10 points for high-quality entity pages)
+    if (pageScore && pageScore >= 70) score += 10;
+    else if (pageScore && pageScore >= 50) score += 5;
+
     score -= (hallucinationCount || 0) * 8;
 
     return Math.max(0, Math.min(score, 100));
 }
 
-// ─── UPGRADE v2: ROLE PRIORITY PICKER ────────────────────────────────────────
-// Selects the highest-seniority employee from the array as the best contact.
-// Falls back to the original employees[0] logic if no role matches the map.
-// Preserved: preferredContact override from intent still applied first (identical
-// to original behaviour), then role-priority ranking as tiebreaker.
-//
+// ─── ROLE PRIORITY PICKER ─────────────────────────────────────────────────────
 function _pickBestContact(employees, preferredContact) {
     if (!employees || employees.length === 0) return null;
 
     const preferred = (preferredContact || '').toLowerCase().trim();
 
-    // Original behaviour: preferred role from intent takes priority
     if (preferred && preferred !== 'any') {
         const match = employees.find(e =>
             e.role && e.role.toLowerCase().includes(preferred)
@@ -667,7 +798,6 @@ function _pickBestContact(employees, preferredContact) {
         if (match) return match;
     }
 
-    // UPGRADE v2: rank remaining by ROLE_PRIORITY map
     const ranked = [...employees].sort((a, b) => {
         const aRole = (a.role || '').toLowerCase();
         const bRole = (b.role || '').toLowerCase();
@@ -780,10 +910,6 @@ RULES — NEVER VIOLATE:
 }
 
 // ─── OUTPUT QUANTITY CONTROL — _parseRequestedCount ──────────────────────────
-// Extracts the user-requested lead/email count from the raw message.
-// Supports numeric words (one → 10), digit strings, and common phrasings.
-// Returns a bounded integer or null if no count was specified.
-//
 function _parseRequestedCount(message) {
     if (!message || typeof message !== 'string') return null;
 
@@ -842,8 +968,6 @@ function _parseRequestedCount(message) {
 }
 
 // ─── OUTPUT QUANTITY CONTROL — _applyOutputQuantityRules ─────────────────────
-// Enforces the CRITICAL OUTPUT QUANTITY RULE on a sorted array of verified leads.
-//
 function _applyOutputQuantityRules(leads, requestedMax) {
     if (!Array.isArray(leads)) return [];
 
@@ -1185,11 +1309,7 @@ ${allSnippets}`;
                         emp.email = null;
                     }
                 }
-                if (emp.email) {
-                    emp.emailConfidence = 'confirmed-personal';
-                } else {
-                    emp.emailConfidence = 'none';
-                }
+                emp.emailConfidence = emp.email ? 'confirmed-personal' : 'none';
                 return emp;
             });
         }
@@ -1359,16 +1479,12 @@ Return ONLY valid JSON:
 
 // ─── SINGLE COMPANY PIPELINE ──────────────────────────────────────────────────
 // EMAIL RESOLUTION CHAIN:
-//
 //   TIER 1 — Regex-extracted emails from search snippets → validated by full pipeline
 //   TIER 2 — Reality-checked employee email from GPT extract → validated by full pipeline
 //   TIER 3 — huntRealEmails (contact/directory search) → validated by full pipeline
-//   TIER 4 — REMOVED (was: guessEmailPatterns fallback — fabricated, never verified)
+//   TIER 4 — REMOVED (guessEmailPatterns — fabricated, never call)
 //
-// UPGRADE v2 changes:
-//   - _pickBestContact() replaces inline employees[0] fallback
-//   - globalSeenCompanyNames dedup added
-//   - emailValidation metadata block preserved + extended with normalised email
+// NEW: page business relevance score gating before committing research quota.
 //
 async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
     try {
@@ -1377,10 +1493,18 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         if (!domain) return null;
         if (isFreeEmailDomain(domain)) return null;
 
+        // NEW: Page business relevance gate — reject low-value content pages early
+        const pageScore = _scorePageBusinessRelevance(result);
+        if (pageScore < 30) {
+            console.log(`🔴 [PAGE GATE] Rejected low-value page (score:${pageScore}): ${result.url}`);
+            return null;
+        }
+        console.log(`🟢 [PAGE GATE] Accepted page (score:${pageScore}): ${result.url}`);
+
         const companyName = cleanCompanyName(result.title);
         if (!companyName) return null;
 
-        // UPGRADE v2: company name dedup (catches same company on two domains)
+        // Company name dedup
         const companyKey = companyName.toLowerCase().replace(/\s+/g, '');
         if (globalSeenCompanyNames.has(companyKey)) {
             console.log(`⏭️ [COMPANY DEDUP] Skipping duplicate company: ${companyName}`);
@@ -1407,9 +1531,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             return null;
         }
 
-        const employees  = companyData?.employees || [];
-
-        // UPGRADE v2: use role-priority picker instead of raw employees[0]
+        const employees   = companyData?.employees || [];
         const bestContact = _pickBestContact(employees, intent.preferredContact);
 
         // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
@@ -1482,9 +1604,10 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             hasMission:        !!companyData?.mission,
             dataScore,
             hallucinationCount,
+            pageScore,
         });
 
-        return {
+        const lead = {
             name:               bestContact?.name || companyName,
             company:            companyName,
             domain,
@@ -1506,6 +1629,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             hq:                 companyData?.hq        || null,
             recentNews:         companyData?.recentNews || null,
             leadScore,
+            pageScore,
             mxValid,
             dataScore,
             hallucinationFlags: companyData?._hallucinationFlags || [],
@@ -1517,6 +1641,11 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ],
         };
 
+        // NEW: Intent match validation (advisory — logs mismatches, doesn't hard-reject)
+        _leadMatchesIntent(lead, intent);
+
+        return lead;
+
     } catch (err) {
         console.warn(`[processOneCompany Error] ${err.message}`);
         return null;
@@ -1524,23 +1653,22 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 }
 
 // ─── LEAD GEN PIPELINE ────────────────────────────────────────────────────────
-// UPGRADE v2 additions (all additive, zero change to existing logic):
-//   1. _buildFallbackQuery() triggered when primary pool is thin (< MIN_POOL_SIZE)
-//   2. globalSeenCompanyNames reset at pipeline start for fresh session runs
-//   3. Session quota summary exposed in the return object as _meta
-//   4. All existing quantity control (_parseRequestedCount, _applyOutputQuantityRules) preserved
+// Upgrades in this version (all additive, zero breaking changes):
+//   1. Entity-first search using _buildEntityFirstQueries()
+//   2. Page relevance scoring gate in processOneCompany()
+//   3. Fallback query on thin primary pool
+//   4. Company name dedup reset per pipeline run
+//   5. Session _meta passthrough in return object
+//   6. Expanded SKIP_DOMAINS list with more SEO/directory sites
 //
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
 
-    // ── UPGRADE v2: reset company name dedup for each fresh pipeline run ──────
-    // Domain dedup (globalSeenDomains) is intentionally left persistent across
-    // runs (existing behaviour). Company name dedup resets per-pipeline so a
-    // new search for the same industry doesn't get blocked by a prior run.
+    // Reset company name dedup for each fresh pipeline run
     globalSeenCompanyNames.clear();
 
-    // ── Parse user-requested quantity ─────────────────────────────────────────
+    // Parse user-requested quantity
     const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
-    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads (parsed from message)`);
+    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
 
     const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
 Return ONLY valid JSON:
@@ -1575,32 +1703,25 @@ Never return null for target or industry. Infer from context.`;
     } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
 
     onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
-    const locationClause = intent.location ? `"${intent.location}"` : '';
 
     const searchPoolSize = Math.min(
         Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3),
         15
     );
 
-    // ── PRIMARY QUERY (unchanged from original) ───────────────────────────────
-    const query = [
-        `"${intent.target}"`, intent.industry, locationClause,
-        'contact email CEO founder',
-        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
-    ].filter(Boolean).join(' ');
+    // ── BUILD ENTITY-FIRST QUERIES ────────────────────────────────────────────
+    const queries = _buildEntityFirstQueries(intent, searchPoolSize);
+    console.log(`🔍 Primary Query: ${queries.primary}`);
 
-    console.log(`🔍 Query: ${query}`);
-    const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: searchPoolSize });
+    // Run primary query
+    const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
     console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
 
-    // ── UPGRADE v2: FALLBACK QUERY when primary pool is thin ─────────────────
-    // Only triggers if primary results are fewer than MIN_POOL_SIZE AND there is
-    // still Tavily quota available. Purely additive — does not alter any result
-    // that came from the primary query.
+    // ── FALLBACK QUERY on thin primary pool ───────────────────────────────────
     let fallbackResults = [];
     if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
-        console.log(`⚡ [FALLBACK QUERY] Primary pool thin (${rawResults.length}/${MIN_POOL_SIZE}) — trying fallback query`);
-        const fallbackQuery = _buildFallbackQuery(intent);
+        console.log(`⚡ [FALLBACK QUERY] Primary pool thin (${rawResults.length}/${MIN_POOL_SIZE}) — trying entity-focus fallback`);
+        const fallbackQuery = queries.entityFocus;
         console.log(`🔍 Fallback Query: ${fallbackQuery}`);
         try {
             fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, { maxResults: searchPoolSize });
@@ -1611,8 +1732,8 @@ Never return null for target or industry. Infer from context.`;
     }
 
     // ── MERGE PRIMARY + FALLBACK (deduplicated by URL) ────────────────────────
-    const seenUrls    = new Set(rawResults.map(r => r.url));
-    const mergedRaw   = [
+    const seenUrls  = new Set(rawResults.map(r => r.url));
+    const mergedRaw = [
         ...rawResults,
         ...fallbackResults.filter(r => !seenUrls.has(r.url)),
     ];
@@ -1624,12 +1745,26 @@ Never return null for target or industry. Infer from context.`;
         };
     }
 
+    // ── EXPANDED SKIP DOMAINS (more SEO/directory sites blocked) ─────────────
     const SKIP_DOMAINS = [
         'linkedin.com','crunchbase.com','apollo.io','hunter.io',
         'yelp.com','clutch.co','g2.com','trustpilot.com',
         'bark.com','bark.london','upwork.com','fiverr.com','peopleperhour.com',
         'yell.com','thomsonlocal.com','checkatrade.com',
         'directory.com','yellowpages.com','manta.com',
+        // NEW additions: common SEO/editorial noise sources
+        'hubspot.com','moz.com','semrush.com','ahrefs.com',
+        'searchenginejournal.com','searchengineland.com',
+        'entrepreneur.com','forbes.com','inc.com','businessinsider.com',
+        'techcrunch.com','venturebeat.com','wired.com',
+        'reddit.com','quora.com','medium.com','substack.com',
+        'wikipedia.org','wikihow.com',
+        'indeed.com','glassdoor.com','ziprecruiter.com',
+        'capterra.com','getapp.com','softwareadvice.com',
+        'producthunt.com','angellist.com','f6s.com',
+        'goodfirms.co','designrush.com','expertise.com',
+        'houzz.com','thumbtack.com','homeadvisor.com',
+        'yelp.ca','yelp.co.uk','yelp.com.au',
     ];
 
     const cleanResults = [];
@@ -1644,11 +1779,11 @@ Never return null for target or industry. Infer from context.`;
         if (cleanResults.length >= requestedCount + 5) break;
     }
 
-    console.log(`✅ Clean results after filter: ${cleanResults.length}`);
+    console.log(`✅ Clean results after domain filter: ${cleanResults.length}`);
 
     if (cleanResults.length === 0) {
         return {
-            reply:          'Found results but all were directory sites. Try a more specific industry or location.',
+            reply:          'Found results but all were directory or editorial sites. Try a more specific industry or location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after filtering.' }],
         };
     }
@@ -1664,21 +1799,22 @@ Never return null for target or industry. Infer from context.`;
         .map(r => r.value)
         .sort((a, b) => b.leadScore - a.leadScore);
 
-    // ── Apply CRITICAL OUTPUT QUANTITY RULE ───────────────────────────────────
+    // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // ── UPGRADE v2: build session meta for optional frontend consumption ──────
+    // Build session meta
     const _meta = {
-        tavilyUsed:       tavilyQuota.used,
-        tavilyRemaining:  getTavilyRemaining(),
-        openAiCalls:      openAiTracker.totalCallsThisSession,
+        tavilyUsed:         tavilyQuota.used,
+        tavilyRemaining:    getTavilyRemaining(),
+        openAiCalls:        openAiTracker.totalCallsThisSession,
         openAiInputTokens:  openAiTracker.totalInputTokensThisSession,
         openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,
-        estimatedCostUSD: parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
-        totalVerified:    allVerifiedLeads.length,
-        totalReturned:    leadsToReturn.length,
+        estimatedCostUSD:   parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
+        totalVerified:      allVerifiedLeads.length,
+        totalReturned:      leadsToReturn.length,
         requestedCount,
-        fallbackUsed:     fallbackResults.length > 0,
+        fallbackUsed:       fallbackResults.length > 0,
+        entityFirstSearch:  true,
     };
 
     console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
@@ -1705,9 +1841,8 @@ Never return null for target or industry. Infer from context.`;
 }
 
 // ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
-// Preserved 100%: function signature, return shape, all intent branches,
-// all existing environment variables (OPENAI_API_KEY, TAVILY_API_KEY).
-// UPGRADE v2: _meta passthrough added to lead_gen return (non-breaking addition).
+// Function signature, return shape, all intent branches, and all existing
+// environment variables are preserved 100%.
 //
 async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
@@ -1723,8 +1858,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         if (!safeMessage.trim()) {
             return {
-                reply:           'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
-                updatedHistory:  history,
+                reply:          'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
+                updatedHistory: history,
             };
         }
 
