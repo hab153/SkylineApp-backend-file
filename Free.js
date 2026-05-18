@@ -8,8 +8,16 @@ const MAX_LEADS_RETURNED = 5;
 const TAVILY_LIMIT       = 1000;
 const CONCURRENCY_LIMIT  = 2;
 const CACHE_TTL_MS       = 60 * 60 * 1000;
-const CURRENT_YEAR       = new Date().getFullYear(); // FIX [LOW-7]: no hardcoded year
-const MAX_MESSAGE_LENGTH = 800;                       // FIX [LOW-14]: input guard
+const CURRENT_YEAR       = new Date().getFullYear();
+const MAX_MESSAGE_LENGTH = 800;
+
+// ─── INTENT TYPES ─────────────────────────────────────────────────────────────
+const INTENT = {
+    LEAD_GEN:     'lead_gen',
+    CHAT:         'chat',
+    EMAIL_DRAFT:  'email_draft',
+    BUSINESS_QA:  'business_qa',
+};
 
 // ─── REASONING FILTER ──────────────────────────────────────────────────────────
 const REASONING_FILTER = `
@@ -21,7 +29,6 @@ const REASONING_FILTER = `
 `;
 
 // ─── BANNED WORDS ─────────────────────────────────────────────────────────────
-// FIX [LOW-11]: split into categories for cleaner prompt injection
 const BANNED_ADJECTIVES = [
     'transformative','seamless','mission-critical','synergy','game-changer',
     'revolutionary','cutting-edge','innovative','disruptive','next-level',
@@ -60,7 +67,6 @@ function buildBannedWordsInstruction() {
 // ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────
 const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
-// FIX [LOW-10]: track input and output tokens separately for accurate cost
 const openAiTracker = {
     totalCallsThisSession:         0,
     totalInputTokensThisSession:   0,
@@ -78,8 +84,6 @@ function checkTavilyReset() {
 function getTavilyRemaining() { checkTavilyReset(); return tavilyQuota.limit - tavilyQuota.used; }
 function recordTavilyUsage()  { tavilyQuota.used += 1; }
 
-// FIX [LOW-10]: model-aware pricing; gpt-4o-mini $0.15 in / $0.60 out per M tokens
-//               gpt-4o $2.50 in / $10.00 out per M tokens
 function recordOpenAiUsage(inputTokens = 0, outputTokens = 0, model = 'gpt-4o-mini') {
     openAiTracker.totalCallsThisSession         += 1;
     openAiTracker.totalInputTokensThisSession   += inputTokens;
@@ -96,7 +100,6 @@ function recordOpenAiUsage(inputTokens = 0, outputTokens = 0, model = 'gpt-4o-mi
 }
 
 // ─── PERSISTENT DOMAIN DEDUP ──────────────────────────────────────────────────
-// FIX [MEDIUM-8]: session-level dedup so repeated searches never re-process a domain
 const globalSeenDomains = new Set();
 
 // ─── IN-MEMORY RESEARCH CACHE ─────────────────────────────────────────────────
@@ -113,7 +116,6 @@ function setCachedResearch(domain, data) {
 }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
-// FIX [CRITICAL-3]: retry on transient failures for all external calls
 async function withRetry(fn, label, retries = 2, delayMs = 800) {
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
@@ -217,8 +219,6 @@ function classifyEmail(email, domain) {
     return              { type: 'confirmed-other',   label: '✓ Email (real)',                  trustLevel: 75 };
 }
 
-// FIX [CRITICAL-4]: guessEmailPatterns is kept for internal use but Tier 5 leads
-// are now flagged with a low score and never silently mixed with real leads.
 function guessEmailPatterns(fullName, domain) {
     if (!fullName || !domain) return [];
     const parts = fullName.toLowerCase().trim().split(/\s+/);
@@ -323,14 +323,12 @@ function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, 
     if (hasMission)     score +=  5;
     if (dataScore > 60) score +=  5;
 
-    // FIX [MEDIUM-6]: penalise hallucination flags in the numeric score
     score -= (hallucinationCount || 0) * 8;
 
     return Math.max(0, Math.min(score, 100));
 }
 
 // ─── CONCURRENCY ──────────────────────────────────────────────────────────────
-// FIX [MEDIUM-9]: log individual promise failures instead of silently returning null
 async function runWithConcurrency(tasks, limit) {
     const results   = [];
     const executing = new Set();
@@ -350,10 +348,8 @@ async function runWithConcurrency(tasks, limit) {
 }
 
 // ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────
-// FIX [MEDIUM-5]: no longer strips valid business words like Agency/Group/Global
 function cleanCompanyName(rawTitle) {
     let name = rawTitle.split(/[|\-–]/)[0].trim();
-    // Only strip true legal suffixes, not meaningful brand words
     name = name.replace(
         /\b(Ltd|LLC|Inc|Limited|PLC)\s*$/gi, ''
     ).trim();
@@ -364,13 +360,9 @@ function cleanCompanyName(rawTitle) {
 }
 
 // ─── MULTILINGUAL ENGINE ──────────────────────────────────────────────────────
-// FIX [LOW-13]: improved mixed-script handling — test Unicode blocks first,
-// then fall through to keyword patterns only for Latin-script languages
 function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
 
-    // Strip ASCII (URLs, code, numbers) before testing Unicode ranges so a
-    // Latin business name embedded in a non-Latin message doesn't throw us off
     const unicodeText = message.replace(/[\x00-\x7F]+/g, ' ').trim();
 
     if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(unicodeText)) {
@@ -390,7 +382,6 @@ function _detectLanguage(message) {
     if (/[\u0E00-\u0E7F]/.test(unicodeText))               return { code: 'th', name: 'Thai',     rtl: false };
     if (/[\u0370-\u03FF]/.test(unicodeText))               return { code: 'el', name: 'Greek',    rtl: false };
 
-    // Latin-script languages — keyword scan on the full message (lowercased)
     const lower = message.toLowerCase();
     const langPatterns = [
         { code: 'es', name: 'Spanish',    rtl: false, pattern: /\b(gracias|hola|por favor|cómo|también|sí|buenas|estimado|empresa|necesito|quiero|podría|tenemos|nuestro|sistema|equipo|proceso)\b/ },
@@ -433,6 +424,234 @@ RULES — NEVER VIOLATE:
 4. Maintain all tone, rhythm, banned-word, and sales-logic rules in ${detectedLanguage.name}.
 5. If ${detectedLanguage.name} is English, this rule has no additional effect — write normally.
 `;
+}
+
+// ─── INTENT CLASSIFIER ────────────────────────────────────────────────────────
+// NEW: classifies every incoming message before routing it
+// Returns one of: lead_gen | chat | email_draft | business_qa
+async function _classifyIntent(message, history, apiKey) {
+    const recentHistory = (history || []).slice(-6)
+        .map(h => `${h.role}: ${h.content}`)
+        .join('\n');
+
+    const classifyPrompt = `You are an intent classifier for an AI assistant.
+Classify the user message into EXACTLY ONE of these intents:
+
+1. "lead_gen"    — user wants to find leads, prospect companies, get contacts, find businesses to outreach
+2. "email_draft" — user wants to write, draft, compose, or improve an email (NOT find leads)
+3. "business_qa" — user wants business advice, strategy, analysis, calculations, or professional Q&A
+4. "chat"        — anything else: greetings, small talk, general questions, follow-up clarifications
+
+RECENT CONVERSATION:
+${recentHistory || 'None'}
+
+USER MESSAGE: "${message}"
+
+Rules:
+- If the message mentions finding companies, leads, prospects, outreach targets → "lead_gen"
+- If the message says write/draft/compose/fix/improve an email → "email_draft"
+- If the message asks for business advice, strategy, metrics, pricing, sales tips → "business_qa"
+- Greetings like "hi", "hello", "thanks", "what can you do" → "chat"
+- Short follow-up messages after a lead_gen result (like "give me more" or "try another industry") → "lead_gen"
+
+Return ONLY the intent string. No explanation. No JSON. Just one of: lead_gen | email_draft | business_qa | chat`;
+
+    try {
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages:    [{ role: 'user', content: classifyPrompt }],
+            max_tokens:  10,
+            temperature: 0.0,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
+
+        if (!res) return INTENT.CHAT;
+
+        recordOpenAiUsage(
+            res.data?.usage?.prompt_tokens     || 0,
+            res.data?.usage?.completion_tokens || 0,
+            'gpt-4o-mini'
+        );
+
+        const raw = res.data.choices[0].message.content.trim().toLowerCase();
+        if (raw.includes('lead_gen'))    return INTENT.LEAD_GEN;
+        if (raw.includes('email_draft')) return INTENT.EMAIL_DRAFT;
+        if (raw.includes('business_qa')) return INTENT.BUSINESS_QA;
+        return INTENT.CHAT;
+
+    } catch (err) {
+        console.warn('[Intent Classify Failed]:', err.message);
+        return INTENT.CHAT;
+    }
+}
+
+// ─── CHAT HANDLER ─────────────────────────────────────────────────────────────
+// NEW: handles conversational messages with full memory context
+async function _handleChat(message, history, userProfile, apiKey) {
+    const senderName = userProfile?.senderName || 'there';
+    const usp        = userProfile?.usp || null;
+
+    const systemPrompt = `You are an intelligent AI assistant and business operator.
+You help with conversations, answer questions, give advice, and assist with business tasks.
+You are direct, sharp, and genuinely helpful — not corporate or robotic.
+${usp ? `The user's business value proposition is: "${usp}". Reference this naturally when relevant.` : ''}
+You also have the ability to find leads, draft emails, and give business strategy advice.
+If the user seems to want leads or emails, gently let them know you can do that.
+Keep responses concise but complete. Never pad with filler.`;
+
+    // Build full memory context from history (last 20 messages max)
+    const memoryMessages = (history || [])
+        .slice(-20)
+        .map(h => ({ role: h.role, content: h.content }));
+
+    const messages = [
+        { role: 'system',  content: systemPrompt },
+        ...memoryMessages,
+        { role: 'user',    content: message },
+    ];
+
+    try {
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages,
+            max_tokens:  600,
+            temperature: 0.7,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:chat');
+
+        if (!res) return 'I had trouble responding — please try again.';
+
+        recordOpenAiUsage(
+            res.data?.usage?.prompt_tokens     || 0,
+            res.data?.usage?.completion_tokens || 0,
+            'gpt-4o-mini'
+        );
+
+        return res.data.choices[0].message.content.trim();
+
+    } catch (err) {
+        console.warn('[Chat Handler Error]:', err.message);
+        return 'Something went wrong. Please try again.';
+    }
+}
+
+// ─── EMAIL DRAFT HANDLER ──────────────────────────────────────────────────────
+// NEW: drafts a standalone email from natural language instructions
+// Does NOT trigger the lead gen pipeline — purely drafts what the user describes
+async function _handleEmailDraft(message, history, userProfile, apiKey) {
+    const senderName = userProfile?.senderName || 'Alex';
+    const usp        = userProfile?.usp || null;
+
+    // Pull context from recent history so follow-up edits work naturally
+    const recentContext = (history || [])
+        .slice(-6)
+        .map(h => `${h.role}: ${h.content}`)
+        .join('\n');
+
+    const draftPrompt = `${buildBannedWordsInstruction()}
+
+You are a world-class B2B email copywriter.
+Write the email the user is asking for based on their instructions below.
+
+SENDER NAME: ${senderName}
+${usp ? `SENDER VALUE PROP: ${usp}` : ''}
+
+RECENT CONTEXT:
+${recentContext || 'None'}
+
+USER INSTRUCTION: "${message}"
+
+Rules:
+- Write a complete, ready-to-send email
+- Subject line must be specific and compelling (4-7 words)
+- Never use banned adjectives or phrases listed above
+- Never invent stats or percentages
+- Opening line must hook immediately — no "I hope this finds you well"
+- CTA must be one soft, specific ask
+- Sign off with: Best, ${senderName}
+- Keep total length under 150 words unless the user asks for longer
+
+Return ONLY valid JSON:
+{
+  "subject": "string",
+  "body": "string"
+}`;
+
+    try {
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o',
+            messages:    [{ role: 'user', content: draftPrompt }],
+            max_tokens:  600,
+            temperature: 0.7,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:emaildraft');
+
+        if (!res) throw new Error('Draft returned null');
+
+        recordOpenAiUsage(
+            res.data?.usage?.prompt_tokens     || 0,
+            res.data?.usage?.completion_tokens || 0,
+            'gpt-4o'
+        );
+
+        const raw    = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
+        const parsed = JSON.parse(raw);
+
+        // Return as a human-readable formatted reply so the frontend can display it
+        return `Here's your email:\n\n**Subject:** ${parsed.subject}\n\n${parsed.body}`;
+
+    } catch (err) {
+        console.warn('[Email Draft Error]:', err.message);
+        return 'I had trouble drafting that email. Can you give me a bit more detail about who it\'s for and what you want to say?';
+    }
+}
+
+// ─── BUSINESS QA HANDLER ──────────────────────────────────────────────────────
+// NEW: handles business strategy, advice, calculations, analysis
+async function _handleBusinessQA(message, history, userProfile, apiKey) {
+    const senderName = userProfile?.senderName || 'there';
+    const usp        = userProfile?.usp || null;
+
+    const systemPrompt = `You are a sharp senior business strategist and operator.
+You give direct, actionable business advice with zero corporate fluff.
+You think like a founder, operator, and growth expert simultaneously.
+${usp ? `The user runs a business with this value proposition: "${usp}". Use this as context when relevant.` : ''}
+When answering:
+- Be specific and concrete — no vague generalities
+- Use frameworks only when they genuinely help
+- Give a direct recommendation, not just options
+- If you need more information to give a good answer, ask one focused question
+- Never pad responses with filler sentences`;
+
+    const memoryMessages = (history || [])
+        .slice(-12)
+        .map(h => ({ role: h.role, content: h.content }));
+
+    const messages = [
+        { role: 'system',  content: systemPrompt },
+        ...memoryMessages,
+        { role: 'user',    content: message },
+    ];
+
+    try {
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o',
+            messages,
+            max_tokens:  800,
+            temperature: 0.5,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:businessqa');
+
+        if (!res) return 'I had trouble with that — please try again.';
+
+        recordOpenAiUsage(
+            res.data?.usage?.prompt_tokens     || 0,
+            res.data?.usage?.completion_tokens || 0,
+            'gpt-4o'
+        );
+
+        return res.data.choices[0].message.content.trim();
+
+    } catch (err) {
+        console.warn('[Business QA Error]:', err.message);
+        return 'Something went wrong. Please try again.';
+    }
 }
 
 // ─── COMPANY RESEARCH ─────────────────────────────────────────────────────────
@@ -494,8 +713,6 @@ CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or 
 SNIPPETS:
 ${allSnippets}`;
 
-        // FIX [CRITICAL-2]: use gpt-4o-mini for extraction (fast, cheap, structured)
-        // gpt-4o is reserved for email generation (quality-critical output)
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: extractPrompt }],
@@ -663,7 +880,6 @@ Return ONLY valid JSON:
   "breakup":  { "subject": "string", "body": "string" }
 }`;
 
-        // FIX [CRITICAL-2]: email generation uses gpt-4o for highest-quality output
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
             messages:    [{ role: 'user', content: writePrompt }],
@@ -685,7 +901,6 @@ Return ONLY valid JSON:
     } catch (err) {
         console.warn(`[Email Gen Error] ${err.message}`);
 
-        // FIX [LOW-12]: fallback emails are now industry-aware, not generic templates
         const name     = contactPerson?.name?.split(' ')[0] || 'Hi';
         const industry = companyData.industry || 'your sector';
         const company  = companyData.name     || 'your business';
@@ -746,30 +961,23 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ) || employees[0];
         }
 
-        // ── EMAIL RESOLUTION: 5-tier priority chain ──────────────────────────
-        // FIX [CRITICAL-1]: Tier 6 (contact@domain fallback) is REMOVED.
-        // The system prompt requires rejecting leads with low email confidence.
-        // If nothing above Tier 5 is found, the lead is rejected entirely.
         let resolvedEmail   = null;
         let emailConfidence = null;
         let emailLabel      = null;
         let allEmailOptions = [];
         const regexEmails   = companyData?._regexEmails || [];
 
-        // Tier 1/2: regex-found email from snippets
         if (regexEmails.length > 0) {
             const c = classifyEmail(regexEmails[0], domain);
             resolvedEmail = regexEmails[0]; emailConfidence = c.type; emailLabel = c.label;
             allEmailOptions = regexEmails;
             console.log(`✅ [TIER 1/2] Regex email: ${resolvedEmail}`);
 
-        // Tier 3: reality-checked employee email confirmed in text
         } else if (bestContact?.email && isValidEmailFormat(bestContact.email)) {
             resolvedEmail = bestContact.email; emailConfidence = 'confirmed-personal';
             emailLabel = '✓ Personal email (real)'; allEmailOptions = [bestContact.email];
             console.log(`✅ [TIER 3] Reality-checked employee email: ${resolvedEmail}`);
 
-        // Tier 4: deep email hunt via Tavily
         } else if (getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting real email for ${companyName}...`);
             const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
@@ -781,7 +989,6 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             }
         }
 
-        // Tier 5: pattern guess — kept but clearly flagged; lead score will reflect it
         if (!resolvedEmail && bestContact?.name) {
             const guesses = guessEmailPatterns(bestContact.name, domain);
             resolvedEmail = guesses[0]; emailConfidence = 'guessed-pattern';
@@ -789,7 +996,6 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             console.log(`⚠️ [TIER 5] Pattern guess: ${resolvedEmail}`);
         }
 
-        // FIX [CRITICAL-1]: no Tier 6. Reject the lead entirely if still no email.
         if (!resolvedEmail || !isValidEmailFormat(resolvedEmail)) {
             console.warn(`🗑️ [REJECTED] ${companyName} — no reliable email found at any tier`);
             return null;
@@ -821,7 +1027,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             hasNews:           !!companyData?.recentNews,
             hasMission:        !!companyData?.mission,
             dataScore,
-            hallucinationCount, // FIX [MEDIUM-6]
+            hallucinationCount,
         });
 
         console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] Score:${leadScore}/100 MX:${mxValid}`);
@@ -859,31 +1065,10 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
     }
 }
 
-// ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
-async function generateFreeResponse(message, history, userProfile, onProgress) {
-    try {
-        console.log('🟢 [LEAD ENGINE] Pipeline started...');
-        onProgress?.('🧠 Understanding your request...');
-
-        const apiKey    = process.env.OPENAI_API_KEY;
-        const tavilyKey = process.env.TAVILY_API_KEY;
-
-        // FIX [LOW-14]: truncate excessively long messages before they hit the intent prompt
-        const safeMessage = typeof message === 'string'
-            ? message.slice(0, MAX_MESSAGE_LENGTH)
-            : '';
-
-        if (!safeMessage.trim()) {
-            return {
-                reply:           'Please describe the type of leads you are looking for.',
-                updatedHistory:  history,
-            };
-        }
-
-        const detectedLanguage = _detectLanguage(safeMessage);
-        console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
-
-        const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
+// ─── LEAD GEN PIPELINE (extracted from generateFreeResponse for clarity) ──────
+// All original lead gen logic — zero changes to the algorithm
+async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
+    const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
 Return ONLY valid JSON:
 {
   "target": "description of ideal customer or company type",
@@ -893,111 +1078,185 @@ Return ONLY valid JSON:
 }
 Never return null for target or industry. Infer from context.`;
 
-        let intent = { target: 'small businesses', industry: 'general', location: null, preferredContact: 'Any' };
-        try {
-            const intentRes = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-                model:       'gpt-4o-mini',
-                messages:    [{ role: 'user', content: intentPrompt }],
-                max_tokens:  150,
-                temperature: 0.1,
-            }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
+    let intent = { target: 'small businesses', industry: 'general', location: null, preferredContact: 'Any' };
+    try {
+        const intentRes = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o-mini',
+            messages:    [{ role: 'user', content: intentPrompt }],
+            max_tokens:  150,
+            temperature: 0.1,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
 
-            if (intentRes) {
-                recordOpenAiUsage(
-                    intentRes.data?.usage?.prompt_tokens     || 0,
-                    intentRes.data?.usage?.completion_tokens || 0,
-                    'gpt-4o-mini'
-                );
-                const raw    = intentRes.data.choices[0].message.content.replace(/```json|```/g, '');
-                const parsed = JSON.parse(raw);
-                intent = { ...intent, ...parsed };
-                console.log(`🎯 Intent: ${JSON.stringify(intent)}`);
-            }
-        } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
-
-        onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
-        const locationClause = intent.location ? `"${intent.location}"` : '';
-
-        const query = [
-            `"${intent.target}"`, intent.industry, locationClause,
-            'contact email CEO founder',
-            'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
-        ].filter(Boolean).join(' ');
-
-        console.log(`🔍 Query: ${query}`);
-        const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: 10 });
-        console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
-
-        if (rawResults.length === 0) {
-            return {
-                reply:          'No companies found. Try narrowing the industry or adding a location.',
-                updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
-            };
+        if (intentRes) {
+            recordOpenAiUsage(
+                intentRes.data?.usage?.prompt_tokens     || 0,
+                intentRes.data?.usage?.completion_tokens || 0,
+                'gpt-4o-mini'
+            );
+            const raw    = intentRes.data.choices[0].message.content.replace(/```json|```/g, '');
+            const parsed = JSON.parse(raw);
+            intent = { ...intent, ...parsed };
+            console.log(`🎯 Intent: ${JSON.stringify(intent)}`);
         }
+    } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
 
-        const SKIP_DOMAINS = [
-            'linkedin.com','crunchbase.com','apollo.io','hunter.io',
-            'yelp.com','clutch.co','g2.com','trustpilot.com',
-            'bark.com','bark.london','upwork.com','fiverr.com','peopleperhour.com',
-            'yell.com','thomsonlocal.com','checkatrade.com',
-            'directory.com','yellowpages.com','manta.com',
-        ];
+    onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
+    const locationClause = intent.location ? `"${intent.location}"` : '';
 
-        const cleanResults = [];
-        for (const result of rawResults) {
-            let domain = '';
-            try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
-            if (!domain)                                                  continue;
-            if (globalSeenDomains.has(domain))                           continue; // FIX [MEDIUM-8]
-            if (SKIP_DOMAINS.some(d => domain.includes(d)))              continue;
-            globalSeenDomains.add(domain);
-            cleanResults.push({ ...result, _domain: domain });
-            if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break;
-        }
+    const query = [
+        `"${intent.target}"`, intent.industry, locationClause,
+        'contact email CEO founder',
+        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
+    ].filter(Boolean).join(' ');
 
-        console.log(`✅ Clean results after filter: ${cleanResults.length}`);
+    console.log(`🔍 Query: ${query}`);
+    const rawResults = await searchWithTavily(query, tavilyKey, { maxResults: 10 });
+    console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
 
-        if (cleanResults.length === 0) {
-            return {
-                reply:          'Found results but all were directory sites. Try a more specific industry or location.',
-                updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after filtering.' }],
-            };
-        }
-
-        onProgress?.(`⚙️ Researching ${cleanResults.length} companies...`);
-        const tasks = cleanResults.map(result => () =>
-            processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
-        );
-        const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
-
-        const leadsToReturn = settled
-            .filter(r => r.status === 'fulfilled' && r.value !== null)
-            .map(r => r.value)
-            .sort((a, b) => b.leadScore - a.leadScore)
-            .slice(0, MAX_LEADS_RETURNED);
-
-        console.log(`🏁 Done. ${leadsToReturn.length} leads.`);
-        console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
-        console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
-
-        if (leadsToReturn.length === 0) {
-            return {
-                reply:          'Found companies but could not verify enough data. Try a different industry or location.',
-                updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads extracted.' }],
-            };
-        }
-
+    if (rawResults.length === 0) {
         return {
-            reply: JSON.stringify(leadsToReturn),
+            reply:          'No companies found. Try narrowing the industry or adding a location.',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
+        };
+    }
+
+    const SKIP_DOMAINS = [
+        'linkedin.com','crunchbase.com','apollo.io','hunter.io',
+        'yelp.com','clutch.co','g2.com','trustpilot.com',
+        'bark.com','bark.london','upwork.com','fiverr.com','peopleperhour.com',
+        'yell.com','thomsonlocal.com','checkatrade.com',
+        'directory.com','yellowpages.com','manta.com',
+    ];
+
+    const cleanResults = [];
+    for (const result of rawResults) {
+        let domain = '';
+        try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
+        if (!domain)                                                  continue;
+        if (globalSeenDomains.has(domain))                           continue;
+        if (SKIP_DOMAINS.some(d => domain.includes(d)))              continue;
+        globalSeenDomains.add(domain);
+        cleanResults.push({ ...result, _domain: domain });
+        if (cleanResults.length >= MAX_LEADS_RETURNED + 3) break;
+    }
+
+    console.log(`✅ Clean results after filter: ${cleanResults.length}`);
+
+    if (cleanResults.length === 0) {
+        return {
+            reply:          'Found results but all were directory sites. Try a more specific industry or location.',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after filtering.' }],
+        };
+    }
+
+    onProgress?.(`⚙️ Researching ${cleanResults.length} companies...`);
+    const tasks = cleanResults.map(result => () =>
+        processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
+    );
+    const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
+
+    const leadsToReturn = settled
+        .filter(r => r.status === 'fulfilled' && r.value !== null)
+        .map(r => r.value)
+        .sort((a, b) => b.leadScore - a.leadScore)
+        .slice(0, MAX_LEADS_RETURNED);
+
+    console.log(`🏁 Done. ${leadsToReturn.length} leads.`);
+    console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
+    console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
+
+    if (leadsToReturn.length === 0) {
+        return {
+            reply:          'Found companies but could not verify enough data. Try a different industry or location.',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads extracted.' }],
+        };
+    }
+
+    return {
+        reply: JSON.stringify(leadsToReturn),
+        updatedHistory: [
+            ...history,
+            { role: 'user',      content: safeMessage },
+            { role: 'assistant', content: `[Generated ${leadsToReturn.length} leads]` },
+        ],
+    };
+}
+
+// ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
+// PRESERVED: same function signature and return shape — zero breaking changes
+// UPGRADED:  now routes to chat / email_draft / business_qa / lead_gen based on intent
+async function generateFreeResponse(message, history, userProfile, onProgress) {
+    try {
+        console.log('🟢 [AI ENGINE] Pipeline started...');
+        onProgress?.('🧠 Understanding your request...');
+
+        const apiKey    = process.env.OPENAI_API_KEY;
+        const tavilyKey = process.env.TAVILY_API_KEY;
+
+        const safeMessage = typeof message === 'string'
+            ? message.slice(0, MAX_MESSAGE_LENGTH)
+            : '';
+
+        if (!safeMessage.trim()) {
+            return {
+                reply:           'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
+                updatedHistory:  history,
+            };
+        }
+
+        const detectedLanguage = _detectLanguage(safeMessage);
+        console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
+
+        // ── INTENT CLASSIFICATION ─────────────────────────────────────────────
+        const intent = await _classifyIntent(safeMessage, history, apiKey);
+        console.log(`🎯 [INTENT] ${intent}`);
+        onProgress?.(`🧠 Mode: ${intent.replace('_', ' ')}...`);
+
+        // ── ROUTING ───────────────────────────────────────────────────────────
+        if (intent === INTENT.LEAD_GEN) {
+            // Original lead gen pipeline — fully preserved, zero changes
+            return await _runLeadGenPipeline(
+                safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey
+            );
+        }
+
+        if (intent === INTENT.EMAIL_DRAFT) {
+            const reply = await _handleEmailDraft(safeMessage, history, userProfile, apiKey);
+            return {
+                reply,
+                updatedHistory: [
+                    ...history,
+                    { role: 'user',      content: safeMessage },
+                    { role: 'assistant', content: reply },
+                ],
+            };
+        }
+
+        if (intent === INTENT.BUSINESS_QA) {
+            const reply = await _handleBusinessQA(safeMessage, history, userProfile, apiKey);
+            return {
+                reply,
+                updatedHistory: [
+                    ...history,
+                    { role: 'user',      content: safeMessage },
+                    { role: 'assistant', content: reply },
+                ],
+            };
+        }
+
+        // Default: CHAT — handles greetings, small talk, follow-ups, clarifications
+        const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
+        return {
+            reply,
             updatedHistory: [
                 ...history,
                 { role: 'user',      content: safeMessage },
-                { role: 'assistant', content: `[Generated ${leadsToReturn.length} leads]` },
+                { role: 'assistant', content: reply },
             ],
         };
 
     } catch (error) {
-        console.error('❌ [LEAD ENGINE] Fatal error:', error.message);
+        console.error('❌ [AI ENGINE] Fatal error:', error.message);
         return { reply: 'An error occurred. Please try again.', updatedHistory: history };
     }
 }
