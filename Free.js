@@ -1856,7 +1856,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         return await _handleChat(safeMessage, history, userProfile, apiKey);
     }
 
-    // Extract standard parameters for search    const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
+    // Extract standard parameters for search    
+    const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
 Return ONLY valid JSON:
 {
   "target": "description of ideal customer or company type",
