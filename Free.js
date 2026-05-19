@@ -1321,8 +1321,7 @@ ${allSnippets}`;
             messages:    [{ role: 'user', content: extractPrompt }],
             max_tokens:  500,
             temperature: 0.0,
-        }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
-        if (!res) return null;
+        }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');        if (!res) return null;
 
         recordOpenAiUsage(
             res.data?.usage?.prompt_tokens     || 0,
@@ -1370,8 +1369,8 @@ ${allSnippets}`;
         return parsed;
 
     } catch (err) {
-        console.warn(`[Research Error] ${err.message}`);        return null;
-    }
+        console.warn(`[Research Error] ${err.message}`);
+        return null;    }
 }
 
 // ─── ✍️ DEEP PERSONALIZATION ENGINE — CONTEXT GENERATOR ──────────────────────
@@ -1419,8 +1418,8 @@ const OUTREACH_STRATEGIES = {
         variationTest: ['Subject: Quick question about [Company] growth', 'Subject: Idea for [Company] user retention']
     },
     'agency_owner_acquisition': {
-        id: 'agency_owner_acquisition',        persona: 'agency_owner',
-        angle: 'Client Acquisition & Retention',
+        id: 'agency_owner_acquisition',
+        persona: 'agency_owner',        angle: 'Client Acquisition & Retention',
         painPoints: ['Scope creep', 'Client churn', 'Resource allocation', 'Billing delays'],
         timing: { initial: 'Mon/Thu 9AM', followup1: 'Wed 11AM', followup2: 'Next Mon 9AM' },
         variationTest: ['Subject: Helping [Company] land more clients', 'Subject: Streamlining [Company] client onboarding']
@@ -1468,8 +1467,8 @@ function selectOutreachStrategy(userPersona, industry, role) {
     if (industry && strategy.painPoints) {
         // Add industry-specific pain points if available
         const industryPains = {
-            'SaaS': ['Churn', 'CAC', 'Adoption'],            'Agency': ['Scope Creep', 'Retention', 'Billing'],
-            'E-commerce': ['Cart Abandonment', 'Logistics', 'Returns'],
+            'SaaS': ['Churn', 'CAC', 'Adoption'],
+            'Agency': ['Scope Creep', 'Retention', 'Billing'],            'E-commerce': ['Cart Abandonment', 'Logistics', 'Returns'],
             'Consulting': ['Utilization', 'Win Rate', 'Knowledge'],
             'Manufacturing': ['Supply Chain', 'Quality', 'Downtime'],
             'Healthcare': ['Scheduling', 'Compliance', 'Burnout']
@@ -1517,8 +1516,8 @@ OUTREACH STRATEGY:
             signalContext = `
 BUYING SIGNAL DETECTED:
 - TYPE: ${topSignal.type.toUpperCase()}
-- DESCRIPTION: ${topSignal.description}- DATE: ${topSignal.date}
-- URL: ${topSignal.url}
+- DESCRIPTION: ${topSignal.description}
+- DATE: ${topSignal.date}- URL: ${topSignal.url}
 
 INSTRUCTION: Use this signal as the PRIMARY HOOK in Email 1. Connect our value prop to this specific event.
 `;
@@ -1566,8 +1565,8 @@ One soft ask. "Worth 15 minutes this week?" — one sentence only.
 Sign-off: Best, ${senderName}
 ─── EMAIL 2 — FOLLOW-UP (3 days later) ───
 Subject: "Re: " + Email 1 subject exactly.
-Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} related to ${outreachStrategy.angle} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.
-Para 2: Re-state the ask in a fresh way, emphasizing the benefit of ${outreachStrategy.angle}. Max 2 sentences.
+Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
+Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} related to ${outreachStrategy.angle} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.Para 2: Re-state the ask in a fresh way, emphasizing the benefit of ${outreachStrategy.angle}. Max 2 sentences.
 Sign-off: Best, ${senderName}
 
 ─── EMAIL 3 — BREAK-UP (7 days later) ───
@@ -1611,7 +1610,8 @@ Return ONLY valid JSON:
         console.warn(`[Email Gen Error] ${err.message}`);
 
         const name     = contactPerson?.name?.split(' ')[0] || 'Hi';
-        const industry = companyData.industry || 'your sector';        const company  = companyData.name     || 'your business';
+        const industry = companyData.industry || 'your sector';
+        const company  = companyData.name     || 'your business';
         const sender   = userProfile?.senderName || 'Alex';
         const usp      = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
         return {
@@ -1664,8 +1664,7 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
             validateMX(domain),
         ]);
-        if (!mxValid) {
-            return null;
+        if (!mxValid) {            return null;
         }
         const dataScore = scoreDataCompleteness(companyData);
         if (dataScore < 10) {
@@ -1707,7 +1706,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
         if (candidateEmails.length === 0 && getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting real email for ${companyName}...`);
             const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
-            if (huntResult.companyEmails.length > 0) {                candidateEmails.push(...huntResult.companyEmails.filter(isValidEmailFormat));
+            if (huntResult.companyEmails.length > 0) {
+                candidateEmails.push(...huntResult.companyEmails.filter(isValidEmailFormat));
             }
         }
 
@@ -1758,11 +1758,12 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
                 mission:     companyData?.mission,
                 recentNews:  companyData?.recentNews,
                 industry:    intent.industry,
-                model:       companyData?.model,            },
+                model:       companyData?.model,
+            },
             bestContact,
             domain,
-            userProfile,
-            apiKey,            detectedLanguage,
+            userProfile,            apiKey,
+            detectedLanguage,
             outreachStrategy,
             buyingSignals
         );
@@ -1807,11 +1808,12 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             hq:                 companyData?.hq        || null,
             recentNews:         companyData?.recentNews || null,
             trustScore,         // New Unified Score
-            confidenceLevel,    // New Unified Level            pageScore,
+            confidenceLevel,    // New Unified Level
+            pageScore,
             mxValid,
-            dataScore,
-            hallucinationFlags: companyData?._hallucinationFlags || [],
-            emailLanguage:      detectedLanguage.code,            outreachStrategy:   outreachStrategy.id, // Store strategy ID
+            dataScore,            hallucinationFlags: companyData?._hallucinationFlags || [],
+            emailLanguage:      detectedLanguage.code,
+            outreachStrategy:   outreachStrategy.id, // Store strategy ID
             buyingSignals:      buyingSignals, // Store detected signals
             messages: [
                 { type: 'initial',  subject: emailSequence.initial.subject,  body: emailSequence.initial.body  },
@@ -1843,7 +1845,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     // 1. DEEP INTENT ANALYSIS (Includes Persona Detection)
     const deepIntent = await _analyzeDeepIntent(safeMessage, history, apiKey);
     const userPersona = deepIntent.user_persona || 'general';
-        if (deepIntent.icp_mismatch) {
+    if (deepIntent.icp_mismatch) {
         return {
             reply: 'Your request is a bit too broad. To find the right leads, could you specify the industry or company size you are targeting?',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'Request too broad.' }],
@@ -1856,12 +1858,12 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         return await _handleChat(safeMessage, history, userProfile, apiKey);
     }
 
-    // Extract standard parameters for search    
+    // Extract standard parameters for search
     const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
-Return ONLY valid JSON:
-{
+Return ONLY valid JSON:{
   "target": "description of ideal customer or company type",
-  "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",  "location": "city, country, region — null if not mentioned",
+  "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",
+  "location": "city, country, region — null if not mentioned",
   "preferredContact": "CEO | Founder | Marketing | Sales | Owner | Any"
 }
 Never return null for target or industry. Infer from context.`;
@@ -1893,7 +1895,7 @@ Never return null for target or industry. Infer from context.`;
         15
     );
     const queries = _buildEntityFirstQueries(intent, searchPoolSize);
-        const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
+    const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
     let fallbackResults = [];
     if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
         const fallbackQuery = queries.entityFocus;
@@ -1905,12 +1907,13 @@ Never return null for target or industry. Infer from context.`;
     const seenUrls  = new Set(rawResults.map(r => r.url));
     const mergedRaw = [
         ...rawResults,
-        ...fallbackResults.filter(r => !seenUrls.has(r.url)),    ];
-
+        ...fallbackResults.filter(r => !seenUrls.has(r.url)),
+    ];
     if (mergedRaw.length === 0) {
         return {
             reply:          'No companies found. Try narrowing the industry or adding a location.',
-            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],        };
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
+        };
     }
 
     // 🌐 APPLY SOURCE QUALITY FILTERING EARLY
@@ -1953,13 +1956,14 @@ Never return null for target or industry. Infer from context.`;
     const _meta = {
         tavilyUsed:         tavilyQuota.used,
         tavilyRemaining:    getTavilyRemaining(),
-        openAiCalls:        openAiTracker.totalCallsThisSession,        openAiInputTokens:  openAiTracker.totalInputTokensThisSession,
-        openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,
-        estimatedCostUSD:   parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
+        openAiCalls:        openAiTracker.totalCallsThisSession,
+        openAiInputTokens:  openAiTracker.totalInputTokensThisSession,
+        openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,        estimatedCostUSD:   parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
         totalVerified:      allVerifiedLeads.length,
         totalReturned:      leadsToReturn.length,
         requestedCount,
-        buyingIntent:       deepIntent.buying_intent,        urgency:            deepIntent.urgency,
+        buyingIntent:       deepIntent.buying_intent,
+        urgency:            deepIntent.urgency,
         userPersona:        userPersona,
     };
     if (leadsToReturn.length === 0) {
@@ -2001,13 +2005,14 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         const detectedLanguage = _detectLanguage(safeMessage);
 
-        // Deep Intent Analysis determines the path        const deepIntent = await _analyzeDeepIntent(safeMessage, history, apiKey);
-        
-        if (deepIntent.primary_intent === INTENT.LEAD_GEN) {
+        // Deep Intent Analysis determines the path
+        const deepIntent = await _analyzeDeepIntent(safeMessage, history, apiKey);
+                if (deepIntent.primary_intent === INTENT.LEAD_GEN) {
             return await _runLeadGenPipeline(
                 safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey
             );
         }
+
         if (deepIntent.primary_intent === INTENT.EMAIL_DRAFT) {
             const reply = await _handleEmailDraft(safeMessage, history, userProfile, apiKey);
             return {
