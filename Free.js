@@ -67,7 +67,7 @@ const SOURCE_TIERS = {
     },
     TIER_2_SILVER: {
         name: 'Professional Network/Database',
-        domains: ['linkedin.com', 'crunchbase.com', 'angellist.com', 'wellfound.com'],
+        domains: ['linkedin.com', 'crunchbase.com', 'angellist.com', 'wellfound.com', 'pitchbook.com'],
         trustScore: 70,
         priority: 2
     },
@@ -87,16 +87,19 @@ const SOURCE_TIERS = {
             'searchenginejournal.com', 'entrepreneur.com', 'forbes.com',
             'inc.com', 'businessinsider.com', 'techcrunch.com',
             'reddit.com', 'quora.com', 'medium.com', 'substack.com',
-            'wikipedia.org', 'wikihow.com', 'indeed.com', 'glassdoor.com'
+            'wikipedia.org', 'wikihow.com', 'indeed.com', 'glassdoor.com',
+            // Added common listicle/spam domains that were blocking results
+            'growthlist.co', 'bookyourdata.com', 'capchase.com', 'getleadwave.io', 
+            'openvc.app', 'fundraiseinsider.com', 'datarade.ai'
         ],
         patterns: [
             /top\s*\d+/i, /best\s*\d+/i, /list\s*of/i, /review/i,
-            /affiliate/i, /sponsored/i, /ad/i
+            /affiliate/i, /sponsored/i, /ad/i, /buy-email-list/i
         ],
-        trustScore: 0,
-        priority: 99
+        trustScore: 0,        priority: 99
     }
 };
+
 // ─── 🧍 REAL PERSON DISCOVERY ENGINE — HIERARCHY MAP ─────────────────────────
 const ROLE_HIERARCHY = {
     'ceo':            { level: 1, dept: 'executive', title: 'Chief Executive Officer', focus: 'strategy,revenue,growth' },
@@ -142,10 +145,10 @@ const MIN_POOL_SIZE = 3;
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
     LEAD_GEN:    'lead_gen',
-    CHAT:        'chat',
-    EMAIL_DRAFT: 'email_draft',
+    CHAT:        'chat',    EMAIL_DRAFT: 'email_draft',
     BUSINESS_QA: 'business_qa',
 };
+
 // ─── REASONING FILTER ──────────────────────────────────────────────────────────
 const REASONING_FILTER = `
 ⚠️ REASONING FILTER — NON-NEGOTIABLE:
@@ -191,10 +194,10 @@ function buildBannedWordsInstruction() {
 const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
 const openAiTracker = {
-    totalCallsThisSession:        0,
-    totalInputTokensThisSession:  0,
+    totalCallsThisSession:        0,    totalInputTokensThisSession:  0,
     totalOutputTokensThisSession: 0,
-};const costTracker = { estimatedUSDThisSession: 0 };
+};
+const costTracker = { estimatedUSDThisSession: 0 };
 
 function checkTavilyReset() {
     const ONE_MONTH = 30 * 24 * 60 * 60 * 1000;
@@ -240,10 +243,10 @@ function setCachedResearch(domain, data) {
 }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
-async function withRetry(fn, label, retries = 2, delayMs = 800) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
+async function withRetry(fn, label, retries = 2, delayMs = 800) {    for (let attempt = 0; attempt <= retries; attempt++) {
         try {
-            return await fn();        } catch (err) {
+            return await fn();
+        } catch (err) {
             const isLast = attempt === retries;
             console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
             if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
@@ -289,10 +292,10 @@ function _classifySourceQuality(url, title, snippet) {
             return { tier: 'TIER_3', score: 40, reason: 'Company Blog/News' };
         }
     }
-
     // 5. Default: Unknown/Generic
     return { tier: 'UNKNOWN', score: 50, reason: 'Generic Source' };
 }
+
 // ─── PAGE BUSINESS RELEVANCE SCORER ──────────────────────────────────────────
 function _scorePageBusinessRelevance(result) {
     const url     = (result.url     || '').toLowerCase();
@@ -338,9 +341,9 @@ function _scorePageBusinessRelevance(result) {
 
     if (/how to|what is|tutorial|step.by.step|learn how/.test(snippet)) score -= 15;
     if (/read more|subscribe|newsletter|download free/.test(snippet))   score -= 10;
-
     return Math.max(0, Math.min(100, score));
 }
+
 // ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
 async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
@@ -371,10 +374,12 @@ function _buildEntityFirstQueries(intent, poolSize) {
     const ind   = intent.industry || '';
     const tgt   = intent.target   || '';
 
+    // IMPROVED: Focus on funding/news/hiring to avoid listicles
     const primary = [
         `"${tgt}"`, ind, loc,
-        'contact email CEO founder',
-        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
+        'raised funding OR series A OR seed round OR hiring OR jobs',
+        '-site:linkedin.com -site:crunchbase.com -site:glassdoor.com -site:indeed.com',
+        '-"list of" -"top 10" -"best companies"',
     ].filter(Boolean).join(' ');
 
     const entityFocus = [
@@ -383,14 +388,15 @@ function _buildEntityFirstQueries(intent, poolSize) {
         '"about us" OR "our team" OR "meet the team"',
         '"contact us" OR "get in touch"',
     ].filter(Boolean).join(' ');
+    
     const dmFocus = [
-        `"${ind}"`, loc,
-        'CEO OR founder OR owner OR director',
+        `"${ind}"`, loc,        'CEO OR founder OR owner OR director',
         '"email" OR "contact"',
         '-site:linkedin.com -site:crunchbase.com',
     ].filter(Boolean).join(' ');
 
-    return { primary, entityFocus, dmFocus };}
+    return { primary, entityFocus, dmFocus };
+}
 
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
 function extractEmailsFromText(text, companyDomain) {
@@ -433,13 +439,13 @@ function classifyEmail(email, domain) {
     const GENERIC_PREFIXES = [
         'contact','info','hello','sales','team','support',
         'enquiries','enquiry','admin','office','mail','general',
-        'press','media',
-    ];
+        'press','media',    ];
     const isGeneric = GENERIC_PREFIXES.some(p =>
         localPart === p || localPart.startsWith(p + '.')
     );
 
-    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain',           trustLevel: 0  };    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
+    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain',           trustLevel: 0  };
+    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
     if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
         return          { type: 'confirmed-personal', label: '✓ Personal email (real)',      trustLevel: 90 };
     }
@@ -482,13 +488,13 @@ async function smtpProbeEmail(email, domain) {
             let   stage  = 0;
 
             socket.on('error', (err) => {
-                clearTimeout(timeout);
-                resolve('unknown');
+                clearTimeout(timeout);                resolve('unknown');
             });
 
             socket.on('data', (chunk) => {
                 buffer += chunk.toString();
-                const lines = buffer.split('\r\n');                buffer = lines.pop();
+                const lines = buffer.split('\r\n');
+                buffer = lines.pop();
 
                 for (const line of lines) {
                     if (!line) continue;
@@ -531,13 +537,13 @@ async function smtpProbeEmail(email, domain) {
 // ─── CATCH-ALL DETECTION ─────────────────────────────────────────────────────
 async function isCatchAllDomain(domain) {
     const randomString = Math.random().toString(36).substring(7);
-    const fakeEmail = `${randomString}@${domain}`;
-    const result = await smtpProbeEmail(fakeEmail, domain);
+    const fakeEmail = `${randomString}@${domain}`;    const result = await smtpProbeEmail(fakeEmail, domain);
     return result !== 'invalid';
 }
 
 // ─── 📧 EMAIL VERIFICATION ENGINE — MULTI-SOURCE VALIDATION ──────────────────
-async function validateEmailFull(email, domain, sourceTier = 'UNKNOWN', patternType = 'none') {    const normalisedEmail = (typeof email === 'string') ? email.toLowerCase().trim() : email;
+async function validateEmailFull(email, domain, sourceTier = 'UNKNOWN', patternType = 'none') {
+    const normalisedEmail = (typeof email === 'string') ? email.toLowerCase().trim() : email;
 
     const result = {
         email:           normalisedEmail,
@@ -580,13 +586,13 @@ async function validateEmailFull(email, domain, sourceTier = 'UNKNOWN', patternT
     result.domainMatch = emailDomain === domain || emailDomain.includes(domainRoot);
     if (!result.domainMatch) {
         result.reason = `Domain mismatch: ${emailDomain} vs ${domain}`;
-        return result;
-    }
+        return result;    }
 
     result.mxValid = await validateMX(emailDomain);
     if (!result.mxValid) {
         result.reason = 'No MX records — domain cannot receive email';
-        return result;    }
+        return result;
+    }
 
     const classification = classifyEmail(normalisedEmail, domain);
     const isCatchAll = await isCatchAllDomain(domain);
@@ -630,12 +636,12 @@ async function validateEmailFull(email, domain, sourceTier = 'UNKNOWN', patternT
     else if (sourceTier === 'TIER_2') score += 10;
     else if (sourceTier === 'TIER_3') score += 5;
     else if (sourceTier === 'HARD_BLOCK') score = 0; // Should have been filtered earlier
-
     // 5. Role Classification Adjustment
     if (classification.type === 'confirmed-personal') score += 10;
     else if (classification.type === 'confirmed-generic') score += 5;
 
-    result.confidenceScore = Math.min(100, score);    // Determine Verdict
+    result.confidenceScore = Math.min(100, score);
+    // Determine Verdict
     if (result.confidenceScore >= 80) {
         result.verdict = 'verified';
         result.reason = 'High confidence: Valid format, MX, and strong source/pattern signals';
@@ -678,13 +684,13 @@ async function validateMX(domain) {
     } catch { return false; }
 }
 
-function isValidEmailFormat(email) {
-    if (!email || typeof email !== 'string') return false;
+function isValidEmailFormat(email) {    if (!email || typeof email !== 'string') return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 }
 const FREE_EMAIL_PROVIDERS = new Set([
     'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
-    'protonmail.com','aol.com','mail.com','yandex.com','zoho.com',    'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
+    'protonmail.com','aol.com','mail.com','yandex.com','zoho.com',
+    'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
 ]);
 function isFreeEmailDomain(domain) { return FREE_EMAIL_PROVIDERS.has(domain.toLowerCase()); }
 
@@ -727,12 +733,12 @@ function scoreDataCompleteness(extracted) {
     if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;
     if (extracted.size       && extracted.size        !== 'unknown') score += 10;
     if (extracted.model      && extracted.model       !== 'unknown') score += 10;
-    if (extracted.recentNews)                                        score += 15;
-    if (extracted.contactEmails?.length > 0)                         score += 15;
+    if (extracted.recentNews)                                        score += 15;    if (extracted.contactEmails?.length > 0)                         score += 15;
     if (extracted.employees?.length > 0)                             score += 15;
     if (extracted.employees?.some(e => e.email))                     score += 10;
     return Math.min(score, 100);
 }
+
 // ─── 🧠 LEAD CONFIDENCE MODEL — UNIFIED TRUST SCORE ──────────────────────────
 function calculateFinalTrustScore({ 
     emailValidation, 
@@ -776,13 +782,13 @@ function calculateFinalTrustScore({
 function getConfidenceLevel(score) {
     if (score >= 75) return 'HIGH';
     if (score >= 40) return 'MEDIUM';
-    return 'LOW';
-}
+    return 'LOW';}
 
 // ─── 🧍 REAL PERSON DISCOVERY ENGINE — CONTACT PICKER ────────────────────────
 function _pickBestContact(employees, preferredContact, userPersona) {
     if (!employees || employees.length === 0) return null;
-    const preferred = (preferredContact || '').toLowerCase().trim();    // 1. Try to match preferred contact exactly
+    const preferred = (preferredContact || '').toLowerCase().trim();
+    // 1. Try to match preferred contact exactly
     if (preferred && preferred !== 'any') {
         const match = employees.find(e =>
             e.role && e.role.toLowerCase().includes(preferred)
@@ -825,13 +831,13 @@ async function runWithConcurrency(tasks, limit) {
     }
     return Promise.allSettled(results);
 }
-
 // ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────
 function cleanCompanyName(rawTitle) {
     let name = rawTitle.split(/[|\-–]/)[0].trim();
     name = name.replace(/\b(Ltd|LLC|Inc|Limited|PLC)\s*$/gi, '').trim();
     if (name.length > 50) name = name.substring(0, 50).trim();
-    const REJECT = ['home','about','contact','services','welcome','index'];    if (!name || REJECT.includes(name.toLowerCase())) return null;
+    const REJECT = ['home','about','contact','services','welcome','index'];
+    if (!name || REJECT.includes(name.toLowerCase())) return null;
     return name;
 }
 
@@ -874,13 +880,13 @@ function _detectLanguage(message) {
         { code: 'fi', name: 'Finnish',    rtl: false, pattern: /\b(kiitos|hei|miten|meillä|meidän|yritys|tarvitsen|haluan|voisi|järjestelmä|tiimi|prosessi|myös|paljon|varten)\b/ },
         { code: 'id', name: 'Indonesian', rtl: false, pattern: /\b(terima kasih|halo|bagaimana|kami|perusahaan|butuh|ingin|bisa|sistem|tim|proses|juga|sangat|untuk|dengan)\b/ },
         { code: 'ms', name: 'Malay',      rtl: false, pattern: /\b(terima kasih|hai|bagaimana|kami|syarikat|perlu|mahu|boleh|sistem|pasukan|proses|juga|sangat|untuk|dengan)\b/ },
-        { code: 'vi', name: 'Vietnamese', rtl: false, pattern: /\b(cảm ơn|xin chào|chúng tôi|công ty|cần|muốn|có thể|hệ thống|đội|quy trình|cũng|rất|cho|với)\b/ },
-    ];
+        { code: 'vi', name: 'Vietnamese', rtl: false, pattern: /\b(cảm ơn|xin chào|chúng tôi|công ty|cần|muốn|có thể|hệ thống|đội|quy trình|cũng|rất|cho|với)\b/ },    ];
     for (const lang of langPatterns) {
         if (lang.pattern.test(lower)) return { code: lang.code, name: lang.name, rtl: lang.rtl };
     }
     return { code: 'en', name: 'English', rtl: false };
 }
+
 function _buildMultilingualEmailBlock(detectedLanguage) {
     const rtlNote = detectedLanguage.rtl
         ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
@@ -923,13 +929,13 @@ function _parseRequestedCount(message) {
     const giveMatch   = message.match(givePattern);
     if (giveMatch) {
         const n = parseInt(giveMatch[1], 10);
-        if (n >= 1 && n <= 100) return n;
-    }
+        if (n >= 1 && n <= 100) return n;    }
 
     for (const [word, num] of Object.entries(wordToNum)) {
         const wordPattern = new RegExp(`\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i');
         if (wordPattern.test(lower)) return num;
-    }    const topPattern = /\btop\s+(\d{1,3})\b/i;
+    }
+    const topPattern = /\btop\s+(\d{1,3})\b/i;
     const topMatch   = message.match(topPattern);
     if (topMatch) {
         const n = parseInt(topMatch[1], 10);
@@ -972,13 +978,13 @@ Return ONLY valid JSON:
   "primary_intent": "lead_gen" | "email_draft" | "business_qa" | "chat",
   "user_persona": "saas_founder" | "agency_owner" | "recruiter" | "consultant" | "general",
   "buying_intent": "high" | "medium" | "low" | "none",
-  "urgency": "high" | "medium" | "low",
-  "outbound_readiness": boolean,
+  "urgency": "high" | "medium" | "low",  "outbound_readiness": boolean,
   "icp_mismatch": boolean,
   "reasoning": "Brief explanation"}
 Rules:
 - "user_persona": Infer from context. E.g., if they mention "clients" and "projects", likely "agency_owner". If "users" and "product", likely "saas_founder".- "icp_mismatch": True if request is too vague.
-`;    try {
+`;
+    try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: prompt }],
@@ -1021,13 +1027,13 @@ function _validateICP(lead, userPersona) {
         const sizeMatch = rules.company_sizes.some(s => leadSize.includes(s) || s.includes(leadSize));
         if (!sizeMatch) {
             // Soft fail for size, just log it, don't hard reject unless strict
-            console.log(`⚠️ [ICP] Size mismatch: ${leadSize} not in preferred ${rules.company_sizes}`);
-        }
+            console.log(`⚠️ [ICP] Size mismatch: ${leadSize} not in preferred ${rules.company_sizes}`);        }
     }
     // 3. Business Model Check
     if (leadModel && leadModel !== 'unknown') {
         const modelMatch = rules.business_models.some(m => leadModel.includes(m) || m.includes(leadModel));
-        if (!modelMatch) {             return { valid: false, reason: `Model mismatch: Company is '${leadModel}', but ICP for ${userPersona} targets ${rules.business_models.join(', ')}` };
+        if (!modelMatch) {
+             return { valid: false, reason: `Model mismatch: Company is '${leadModel}', but ICP for ${userPersona} targets ${rules.business_models.join(', ')}` };
         }
     }
 
@@ -1071,12 +1077,12 @@ Keep responses concise but complete. Never pad with filler.`;
             'gpt-4o-mini'
         );
         return res.data.choices[0].message.content.trim();
-
     } catch (err) {
         console.warn('[Chat Handler Error]:', err.message);
         return 'Something went wrong. Please try again.';
     }
 }
+
 // ─── EMAIL DRAFT HANDLER ──────────────────────────────────────────────────────
 async function _handleEmailDraft(message, history, userProfile, apiKey) {
     const senderName = userProfile?.senderName || 'Alex';
@@ -1119,13 +1125,13 @@ Return ONLY valid JSON:
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
-            messages:    [{ role: 'user', content: draftPrompt }],
-            max_tokens:  600,
+            messages:    [{ role: 'user', content: draftPrompt }],            max_tokens:  600,
             temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:emaildraft');
 
         if (!res) throw new Error('Draft returned null');
-        recordOpenAiUsage(            res.data?.usage?.prompt_tokens     || 0,
+        recordOpenAiUsage(
+            res.data?.usage?.prompt_tokens     || 0,
             res.data?.usage?.completion_tokens || 0,
             'gpt-4o'
         );
@@ -1168,13 +1174,13 @@ When answering:
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
             messages,
-            max_tokens:  800,
-            temperature: 0.5,
+            max_tokens:  800,            temperature: 0.5,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:businessqa');
 
         if (!res) return 'I had trouble with that — please try again.';
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,            res.data?.usage?.completion_tokens || 0,
+            res.data?.usage?.prompt_tokens     || 0,
+            res.data?.usage?.completion_tokens || 0,
             'gpt-4o'
         );
 
@@ -1217,13 +1223,13 @@ function _inferEmailPattern(knownEmployees, targetName, domain) {
     switch(mode) {
         case 'first.last': generatedLocal = `${targetFirst}.${targetLast}`; break;
         case 'flast': generatedLocal = `${targetFirst[0]}${targetLast}`; break;
-        case 'firstl': generatedLocal = `${targetFirst}${targetLast[0]}`; break;
-        case 'first_last': generatedLocal = `${targetFirst}_${targetLast}`; break;
+        case 'firstl': generatedLocal = `${targetFirst}${targetLast[0]}`; break;        case 'first_last': generatedLocal = `${targetFirst}_${targetLast}`; break;
         case 'first': generatedLocal = `${targetFirst}`; break;
         default: return null;
     }
     return `${generatedLocal}@${domain}`;
 }
+
 // ─── ⚡ SIGNAL DETECTION ENGINE — BUYING SIGNALS ─────────────────────────────
 async function detectBuyingSignals(companyName, domain, tavilyKey) {
     if (getTavilyRemaining() <= 0) return [];
@@ -1267,12 +1273,12 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     if (getTavilyRemaining() <= 1) return null;
     try {
         onProgress?.(`🔍 Researching ${companyName}...`);
-
         const generalResults = await searchWithTavily(
             `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} OR site:linkedin.com OR site:crunchbase.com mission about ${CURRENT_YEAR}`,
             tavilyKey, { maxResults: 5 }
         );
-        const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');        const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
+        const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
         const regexFromGeneral = extractEmailsFromText(generalText, domain);
 
         const hasEmailSignal      = regexFromGeneral.companyEmails.length > 0 || generalSnippets.toLowerCase().includes('contact');
@@ -1315,13 +1321,13 @@ CRITICAL: Focus on finding REAL HUMANS with specific roles.Return ONLY valid JSO
 }
 SNIPPETS:
 ${allSnippets}`;
-
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: extractPrompt }],
             max_tokens:  500,
             temperature: 0.0,
-        }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');        if (!res) return null;
+        }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
+        if (!res) return null;
 
         recordOpenAiUsage(
             res.data?.usage?.prompt_tokens     || 0,
@@ -1364,13 +1370,13 @@ ${allSnippets}`;
             }
         }
 
-        parsed._regexEmails = regexFromAll.companyEmails;
-        setCachedResearch(domain, parsed);
+        parsed._regexEmails = regexFromAll.companyEmails;        setCachedResearch(domain, parsed);
         return parsed;
 
     } catch (err) {
         console.warn(`[Research Error] ${err.message}`);
-        return null;    }
+        return null;
+    }
 }
 
 // ─── ✍️ DEEP PERSONALIZATION ENGINE — CONTEXT GENERATOR ──────────────────────
@@ -1413,13 +1419,13 @@ const OUTREACH_STRATEGIES = {
         id: 'saas_founder_growth',
         persona: 'saas_founder',
         angle: 'Growth & Scaling',
-        painPoints: ['Churn reduction', 'User acquisition cost', 'Feature adoption', 'Scaling infrastructure'],
-        timing: { initial: 'Tue/Wed 10AM', followup1: 'Fri 2PM', followup2: 'Next Tue 10AM' },
+        painPoints: ['Churn reduction', 'User acquisition cost', 'Feature adoption', 'Scaling infrastructure'],        timing: { initial: 'Tue/Wed 10AM', followup1: 'Fri 2PM', followup2: 'Next Tue 10AM' },
         variationTest: ['Subject: Quick question about [Company] growth', 'Subject: Idea for [Company] user retention']
     },
     'agency_owner_acquisition': {
         id: 'agency_owner_acquisition',
-        persona: 'agency_owner',        angle: 'Client Acquisition & Retention',
+        persona: 'agency_owner',
+        angle: 'Client Acquisition & Retention',
         painPoints: ['Scope creep', 'Client churn', 'Resource allocation', 'Billing delays'],
         timing: { initial: 'Mon/Thu 9AM', followup1: 'Wed 11AM', followup2: 'Next Mon 9AM' },
         variationTest: ['Subject: Helping [Company] land more clients', 'Subject: Streamlining [Company] client onboarding']
@@ -1462,13 +1468,13 @@ function selectOutreachStrategy(userPersona, industry, role) {
 
     const strategyKey = strategyMap[userPersona] || 'general_decision_maker';
     const strategy = OUTREACH_STRATEGIES[strategyKey];
-
     // Customize angle based on industry if possible
     if (industry && strategy.painPoints) {
         // Add industry-specific pain points if available
         const industryPains = {
             'SaaS': ['Churn', 'CAC', 'Adoption'],
-            'Agency': ['Scope Creep', 'Retention', 'Billing'],            'E-commerce': ['Cart Abandonment', 'Logistics', 'Returns'],
+            'Agency': ['Scope Creep', 'Retention', 'Billing'],
+            'E-commerce': ['Cart Abandonment', 'Logistics', 'Returns'],
             'Consulting': ['Utilization', 'Win Rate', 'Knowledge'],
             'Manufacturing': ['Supply Chain', 'Quality', 'Downtime'],
             'Healthcare': ['Scheduling', 'Compliance', 'Burnout']
@@ -1511,13 +1517,13 @@ OUTREACH STRATEGY:
 
         // Integrate Buying Signals
         let signalContext = '';
-        if (buyingSignals && buyingSignals.length > 0) {
-            const topSignal = buyingSignals[0];
+        if (buyingSignals && buyingSignals.length > 0) {            const topSignal = buyingSignals[0];
             signalContext = `
 BUYING SIGNAL DETECTED:
 - TYPE: ${topSignal.type.toUpperCase()}
 - DESCRIPTION: ${topSignal.description}
-- DATE: ${topSignal.date}- URL: ${topSignal.url}
+- DATE: ${topSignal.date}
+- URL: ${topSignal.url}
 
 INSTRUCTION: Use this signal as the PRIMARY HOOK in Email 1. Connect our value prop to this specific event.
 `;
@@ -1561,12 +1567,12 @@ NO invented stats. NO percentages. NO vague promises.
 
 Para 3 — CTA:
 One soft ask. "Worth 15 minutes this week?" — one sentence only.
-
 Sign-off: Best, ${senderName}
 ─── EMAIL 2 — FOLLOW-UP (3 days later) ───
 Subject: "Re: " + Email 1 subject exactly.
 Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
-Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} related to ${outreachStrategy.angle} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.Para 2: Re-state the ask in a fresh way, emphasizing the benefit of ${outreachStrategy.angle}. Max 2 sentences.
+Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} related to ${outreachStrategy.angle} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.
+Para 2: Re-state the ask in a fresh way, emphasizing the benefit of ${outreachStrategy.angle}. Max 2 sentences.
 Sign-off: Best, ${senderName}
 
 ─── EMAIL 3 — BREAK-UP (7 days later) ───
@@ -1609,13 +1615,13 @@ Return ONLY valid JSON:
     } catch (err) {
         console.warn(`[Email Gen Error] ${err.message}`);
 
-        const name     = contactPerson?.name?.split(' ')[0] || 'Hi';
-        const industry = companyData.industry || 'your sector';
+        const name     = contactPerson?.name?.split(' ')[0] || 'Hi';        const industry = companyData.industry || 'your sector';
         const company  = companyData.name     || 'your business';
         const sender   = userProfile?.senderName || 'Alex';
         const usp      = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
         return {
-            initial: {                subject: `One thought on ${company}`,
+            initial: {
+                subject: `One thought on ${company}`,
                 body:    `${name},\n\nRunning a ${industry} business means most of your day goes to work that doesn't directly close deals.\n\n${usp}\n\nWorth 15 minutes this week?\n\nBest,\n${sender}`,
             },
             followup: {
@@ -1658,13 +1664,13 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             return null;
         }
         globalSeenCompanyNames.add(companyKey);
-
         onProgress?.(`📋 Researching ${companyName}...`);
         const [companyData, mxValid] = await Promise.all([
             researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
             validateMX(domain),
         ]);
-        if (!mxValid) {            return null;
+        if (!mxValid) {
+            return null;
         }
         const dataScore = scoreDataCompleteness(companyData);
         if (dataScore < 10) {
@@ -1677,10 +1683,17 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
         // 🧍 USE NEW REAL PERSON DISCOVERY ENGINE
         const bestContact = _pickBestContact(employees, intent.preferredContact, userPersona);
 
-        // Reject if no clear role/person found
-        if (!bestContact || !bestContact.name || !bestContact.role) {
-            console.log(`🟡 [UNCLEAR ROLE] Rejected due to missing name or role: ${companyName}`);
-            return null;
+        // FIX: If no clear role/person found, try to infer or use default for small startups
+        if (!bestContact || !bestContact.name) {
+            console.log(`🟡 [UNCLEAR ROLE] No clear contact found for ${companyName}. Attempting fallback.`);
+            // If we have a company name but no person, we can't send a personalized email easily.
+            // However, if we have a name but no role, we can assume Founder/CEO for small companies.
+            if (bestContact && bestContact.name && !bestContact.role) {
+                 bestContact.role = 'Founder'; // Default assumption for early-stage
+                 console.log(`ℹ️ [ASSUMPTION] Assuming role 'Founder' for ${bestContact.name}`);
+            } else {
+                return null;
+            }
         }
 
         // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
@@ -1701,7 +1714,6 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
                 console.log(`🧠 [PATTERN INFERENCE] Generated: ${inferredEmail} for ${bestContact.name}`);
             }
         }
-
         // ── TIER 3: EMAIL HUNT if still no candidates ───────────────────────
         if (candidateEmails.length === 0 && getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting real email for ${companyName}...`);
@@ -1713,7 +1725,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
 
         if (candidateEmails.length === 0) {
             console.log(`🟡 [NO EMAIL] Rejected due to no email found: ${companyName}`);
-            return null;        }
+            return null;
+        }
         // ── FULL VALIDATION PIPELINE WITH SOURCE TIER ────────────────────────
         onProgress?.(`🔬 Validating emails for ${companyName}...`);
         
@@ -1749,8 +1762,7 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
         // 🧾 SELECT OUTREACH STRATEGY
         const outreachStrategy = selectOutreachStrategy(userPersona, intent.industry, bestContact.role);
 
-        // ⚡ DETECT BUYING SIGNALS
-        const buyingSignals = await detectBuyingSignals(companyName, domain, tavilyKey);
+        // ⚡ DETECT BUYING SIGNALS        const buyingSignals = await detectBuyingSignals(companyName, domain, tavilyKey);
 
         const emailSequence = await generateEmailsForLead(
             {
@@ -1762,7 +1774,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             },
             bestContact,
             domain,
-            userProfile,            apiKey,
+            userProfile,
+            apiKey,
             detectedLanguage,
             outreachStrategy,
             buyingSignals
@@ -1798,8 +1811,7 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
                 verdict:         topEmail.verdict,
                 smtpResult:      topEmail.smtpResult,
                 reason:          topEmail.reason,
-            },
-            allEmailOptions,
+            },            allEmailOptions,
             role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
             linkedIn:           bestContact?.linkedIn  || null,
             companySize:        companyData?.size      || 'unknown',
@@ -1811,7 +1823,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             confidenceLevel,    // New Unified Level
             pageScore,
             mxValid,
-            dataScore,            hallucinationFlags: companyData?._hallucinationFlags || [],
+            dataScore,
+            hallucinationFlags: companyData?._hallucinationFlags || [],
             emailLanguage:      detectedLanguage.code,
             outreachStrategy:   outreachStrategy.id, // Store strategy ID
             buyingSignals:      buyingSignals, // Store detected signals
@@ -1847,8 +1860,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     const userPersona = deepIntent.user_persona || 'general';
     if (deepIntent.icp_mismatch) {
         return {
-            reply: 'Your request is a bit too broad. To find the right leads, could you specify the industry or company size you are targeting?',
-            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'Request too broad.' }],
+            reply: 'Your request is a bit too broad. To find the right leads, could you specify the industry or company size you are targeting?',            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'Request too broad.' }],
         };
     }
 
@@ -1860,7 +1872,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     // Extract standard parameters for search
     const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
-Return ONLY valid JSON:{
+Return ONLY valid JSON:
+{
   "target": "description of ideal customer or company type",
   "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",
   "location": "city, country, region — null if not mentioned",
@@ -1896,8 +1909,7 @@ Never return null for target or industry. Infer from context.`;
     );
     const queries = _buildEntityFirstQueries(intent, searchPoolSize);
     const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
-    let fallbackResults = [];
-    if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
+    let fallbackResults = [];    if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
         const fallbackQuery = queries.entityFocus;
         try {
             fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, { maxResults: searchPoolSize });
@@ -1909,6 +1921,7 @@ Never return null for target or industry. Infer from context.`;
         ...rawResults,
         ...fallbackResults.filter(r => !seenUrls.has(r.url)),
     ];
+
     if (mergedRaw.length === 0) {
         return {
             reply:          'No companies found. Try narrowing the industry or adding a location.',
@@ -1945,8 +1958,7 @@ Never return null for target or industry. Infer from context.`;
     const tasks = cleanResults.map(result => () =>
         processOneCompany(result, intent, userPersona, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
     );
-    const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
-    const allVerifiedLeads = settled
+    const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);    const allVerifiedLeads = settled
         .filter(r => r.status === 'fulfilled' && r.value !== null)
         .map(r => r.value)
         .sort((a, b) => b.trustScore - a.trustScore); // Sort by new Trust Score
@@ -1958,7 +1970,8 @@ Never return null for target or industry. Infer from context.`;
         tavilyRemaining:    getTavilyRemaining(),
         openAiCalls:        openAiTracker.totalCallsThisSession,
         openAiInputTokens:  openAiTracker.totalInputTokensThisSession,
-        openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,        estimatedCostUSD:   parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
+        openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,
+        estimatedCostUSD:   parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
         totalVerified:      allVerifiedLeads.length,
         totalReturned:      leadsToReturn.length,
         requestedCount,
@@ -1995,7 +2008,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const safeMessage = typeof message === 'string'
             ? message.slice(0, MAX_MESSAGE_LENGTH)
             : '';
-
         if (!safeMessage.trim()) {
             return {
                 reply:          'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
@@ -2007,7 +2019,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         // Deep Intent Analysis determines the path
         const deepIntent = await _analyzeDeepIntent(safeMessage, history, apiKey);
-                if (deepIntent.primary_intent === INTENT.LEAD_GEN) {
+        
+        if (deepIntent.primary_intent === INTENT.LEAD_GEN) {
             return await _runLeadGenPipeline(
                 safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey
             );
@@ -2043,8 +2056,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             reply,
             updatedHistory: [
                 ...history,
-                { role: 'user',      content: safeMessage },
-                { role: 'assistant', content: reply },
+                { role: 'user',      content: safeMessage },                { role: 'assistant', content: reply },
             ],
         };
 
