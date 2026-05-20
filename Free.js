@@ -320,9 +320,6 @@ function _layer3_Filter(rawCandidates, intent) {    console.log(`🧹 [FILTERING
         // Basic Validity
         if (domain.includes('.') === false) continue;
 
-        // Relevance Check (Simple keyword match on title/snippet if available, 
-        // but here we rely on the structure passed from discovery)
-        
         seenDomains.add(domain);
         filtered.push({
             company: candidate.company,
@@ -341,10 +338,10 @@ async function _layer4_Inference(filteredCompanies, apiKey) {
     console.log(`🧠 [INFERENCE] Analyzing intelligence for ${filteredCompanies.length} companies...`);
     
     const tasks = filteredCompanies.map(async (company) => {
-        // Check Cache        const cached = getCachedResearch(company.domain);
+        // Check Cache
+        const cached = getCachedResearch(company.domain);
         if (cached) {
-            return {
-                company: company.company,
+            return {                company: company.company,
                 intelligence: cached.intelligence,
                 source_url: company.source_url
             };
@@ -353,7 +350,6 @@ async function _layer4_Inference(filteredCompanies, apiKey) {
         // Construct Prompt for Intelligence Extraction
         const prompt = `${REASONING_FILTER}
 Analyze the company: ${company.company} (${company.domain}).
-Search snippets are not available here, so use your knowledge base BUT stick to general truths about this specific brand if known, or generic industry standards if unknown.
 Return ONLY valid JSON:
 {
   "domain": "${company.domain}",
@@ -390,11 +386,11 @@ Return ONLY valid JSON:
             setCachedResearch(company.domain, { intelligence, timestamp: Date.now() });
 
             return {
-                company: company.company,                intelligence: intelligence,
+                company: company.company,
+                intelligence: intelligence,
                 source_url: company.source_url
             };
-        } catch (e) {
-            console.warn(`[Inference Error] ${company.company}:`, e.message);
+        } catch (e) {            console.warn(`[Inference Error] ${company.company}:`, e.message);
             return null;
         }
     });
@@ -440,10 +436,10 @@ If no specific person is found, return name as "Decision Maker" and role as "${t
                 max_tokens: 150,
                 temperature: 0.1,
             }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:ContactID');
+
             if (!res) return null;
             recordOpenAiUsage(res.data?.usage?.prompt_tokens || 0, res.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
-            
-            const raw = res.data.choices[0].message.content.replace(/```json|```/g, '').trim();
+                        const raw = res.data.choices[0].message.content.replace(/```json|```/g, '').trim();
             const contactData = JSON.parse(raw);
 
             return {
@@ -488,11 +484,11 @@ function extractEmailsFromText(text, companyDomain) {
 async function huntRealEmails(companyName, domain, tavilyKey) {
     if (getTavilyRemaining() <= 0) return { companyEmails: [], allEmails: [] };
     
-    const contactResults = await searchWithTavily(        `"${companyName}" "@${domain}" OR "contact" OR "email us" site:${domain}`,
+    const contactResults = await searchWithTavily(
+        `"${companyName}" "@${domain}" OR "contact" OR "email us" site:${domain}`,
         tavilyKey, { maxResults: 3 }
     );
-    
-    const allText = contactResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const allText = contactResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
     return extractEmailsFromText(allText, domain);
 }
 
@@ -525,19 +521,9 @@ async function validateMX(domain) {
     } catch { return false; }
 }
 
-async function smtpProbeEmail(email, domain) {
-    // Simplified probe for stability - returns 'unknown' often if ports blocked
-    try {
-        const mxRecords = await dns.resolveMx(domain);
-        if (!mxRecords || mxRecords.length === 0) return 'unknown';
-        // Actual SMTP socket connection is risky in serverless/limited envs, 
-        // so we rely heavily on MX + Pattern matching for confidence.
-        return 'unknown'; 
-    } catch { return 'unknown'; }
-}
-
 // ─── LAYER 6: EMAIL DISCOVERY LAYER ───────────────────────────────────────────
-async function _layer6_EmailDiscovery(contactItems, tavilyKey) {    console.log(`📧 [EMAIL DISCOVERY] Hunting emails for ${contactItems.length} contacts...`);
+async function _layer6_EmailDiscovery(contactItems, tavilyKey) {
+    console.log(`📧 [EMAIL DISCOVERY] Hunting emails for ${contactItems.length} contacts...`);
 
     const tasks = contactItems.map(async (item) => {
         const { company, contact, source_url } = item;
@@ -552,7 +538,6 @@ async function _layer6_EmailDiscovery(contactItems, tavilyKey) {    console.log(
         let bestEmail = null;
         let emailType = 'none';
         let discoverySource = 'none';
-
         if (huntResult.companyEmails.length > 0) {
             bestEmail = huntResult.companyEmails[0];
             emailType = 'found';
@@ -586,6 +571,7 @@ async function _layer6_EmailDiscovery(contactItems, tavilyKey) {    console.log(
 // ─── LAYER 7: VERIFICATION LAYER ──────────────────────────────────────────────
 async function _layer7_Verification(emailItems) {
     console.log(`🛡️ [VERIFICATION] Validating ${emailItems.length} emails...`);
+
     const tasks = emailItems.map(async (item) => {
         const { email, company, contact, domain: sourceUrl } = item;
         let domain = '';
@@ -600,8 +586,7 @@ async function _layer7_Verification(emailItems) {
             reason: ''
         };
 
-        if (!email) {
-            verification.status = 'NO_EMAIL';
+        if (!email) {            verification.status = 'NO_EMAIL';
             verification.reason = 'No email discovered';
             return { ...item, verification };
         }
@@ -635,7 +620,8 @@ async function _layer7_Verification(emailItems) {
         
         let score = 0;
         if (classification.type === 'confirmed-personal') score = 0.90;
-        else if (classification.type === 'confirmed-generic') score = 0.75;        else if (item.email_type === 'generated_pattern') score = 0.40;
+        else if (classification.type === 'confirmed-generic') score = 0.75;
+        else if (item.email_type === 'generated_pattern') score = 0.40;
         else score = 0.30;
 
         verification.confidence = score;
@@ -649,7 +635,6 @@ async function _layer7_Verification(emailItems) {
     // Filter out completely invalid ones
     return results.filter(r => r.verification.status !== 'INVALID' && r.verification.status !== 'NO_EMAIL');
 }
-
 // ─── LAYER 8: CONFIDENCE, RANKING & CLASSIFICATION ────────────────────────────
 function _layer8_RankAndClassify(verifiedItems, intent) {
     console.log(`🏆 [RANKING] Scoring and Ranking ${verifiedItems.length} leads...`);
@@ -684,7 +669,8 @@ function _layer8_RankAndClassify(verifiedItems, intent) {
         else if (tier === 'COOL') classification = 'PROBABLE';
         else if (verification.status === 'PROBABLE') classification = 'EMAIL_FOUND';
         
-        return {            ...item,
+        return {
+            ...item,
             ranking_score: parseFloat(overallConfidence.toFixed(2)),
             tier,
             classification,
@@ -698,9 +684,7 @@ function _layer8_RankAndClassify(verifiedItems, intent) {
     return scoredLeads;
 }
 
-// ─── EMAIL SEQUENCE WRITER (Unchanged Logic) ──────────────────────────────────
-async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
-    // ... (Same implementation as original code to preserve email quality) ...
+// ─── EMAIL SEQUENCE WRITER (Unchanged Logic) ──────────────────────────────────async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
     try {
         const companyName   = companyData.name;
         const mission       = companyData.mission   || null;
@@ -734,6 +718,7 @@ Return ONLY valid JSON:
   "followup": { "subject": "string", "body": "string" },
   "breakup":  { "subject": "string", "body": "string" }
 }`;
+
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
             messages:    [{ role: 'user', content: writePrompt }],
@@ -748,8 +733,7 @@ Return ONLY valid JSON:
         return JSON.parse(raw);
 
     } catch (err) {
-        // Fallback emails
-        const name = contactPerson?.name?.split(' ')[0] || 'Hi';
+        // Fallback emails        const name = contactPerson?.name?.split(' ')[0] || 'Hi';
         const sender = userProfile?.senderName || 'Alex';
         return {
             initial: { subject: `Question for ${companyData.name}`, body: `${name},\n\nQuick question about your process.\n\nBest,\n${sender}` },
@@ -782,7 +766,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     // 2. DISCOVERY LAYER
     const rawCandidates = await _layer2_Discovery(intent, tavilyKey);
 
-    onProgress?.('🧹 Layer 3: Filtering Noise...');    // 3. FILTERING LAYER
+    onProgress?.('🧹 Layer 3: Filtering Noise...');
+    // 3. FILTERING LAYER
     const filteredCandidates = _layer3_Filter(rawCandidates, intent);
     if (filteredCandidates.length === 0) {
         return { reply: 'No suitable companies found after filtering.', updatedHistory: history };
@@ -797,8 +782,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     const contactItems = await _layer5_ContactIdentification(enrichedCompanies, tavilyKey, apiKey);
 
     onProgress?.('📧 Layer 6: Discovering Emails...');
-    // 6. EMAIL DISCOVERY LAYER
-    const emailItems = await _layer6_EmailDiscovery(contactItems, tavilyKey);
+    // 6. EMAIL DISCOVERY LAYER    const emailItems = await _layer6_EmailDiscovery(contactItems, tavilyKey);
 
     onProgress?.('🛡️ Layer 7: Verifying Data...');
     // 7. VERIFICATION LAYER
@@ -831,7 +815,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         };
 
         const emailSequence = await generateEmailsForLead(
-            companyData,             lead.contact, 
+            companyData, 
+            lead.contact, 
             lead.intelligence?.domain || lead.source_url, 
             userProfile, 
             apiKey, 
@@ -846,8 +831,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             emailConfidence: lead.verification.status,
             emailLabel: lead.verification.reason,
             role: lead.contact.role,
-            linkedIn: null, // Could be extracted in Layer 5 if needed
-            companySize: lead.intelligence?.company_stage || 'unknown',
+            linkedIn: null, // Could be extracted in Layer 5 if needed            companySize: lead.intelligence?.company_stage || 'unknown',
             companyModel: lead.intelligence?.business_model || 'unknown',
             industry: lead.intelligence?.industry || intent.industry,
             hq: null,
@@ -880,6 +864,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         fallbackUsed:       false,
         entityFirstSearch:  true,
     };
+
     return {
         reply: JSON.stringify(finalLeads),
         updatedHistory: [
@@ -891,11 +876,11 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     };
 }
 
-// ─── HANDLERS FOR OTHER INTENTS (Unchanged) ───────────────────────────────────
+// ─── HANDLERS FOR OTHER INTENTS ───────────────────────────────────────────────
+
 async function _handleChat(message, history, userProfile, apiKey) {
     const senderName = userProfile?.senderName || 'there';
-    const systemPrompt = `You are an intelligent AI assistant. Direct and helpful.`;
-    const messages = [
+    const systemPrompt = `You are an intelligent AI assistant. Direct and helpful.`;    const messages = [
         { role: 'system', content: systemPrompt },
         ...history.slice(-10),
         { role: 'user', content: message }
@@ -911,7 +896,67 @@ async function _handleChat(message, history, userProfile, apiKey) {
 }
 
 async function _handleEmailDraft(message, history, userProfile, apiKey) {
-    return "Email drafting is handled within the Lead Gen pipeline or via specific intent.";
+    const senderName = userProfile?.senderName || 'Alex';
+    const usp        = userProfile?.usp || null;
+
+    const recentContext = (history || [])
+        .slice(-6)
+        .map(h => `${h.role}: ${h.content}`)
+        .join('\n');
+
+    const draftPrompt = `${buildBannedWordsInstruction()}
+
+You are a world-class B2B email copywriter.
+Write the email the user is asking for based on their instructions below.
+
+SENDER NAME: ${senderName}
+${usp ? `SENDER VALUE PROP: ${usp}` : ''}
+
+RECENT CONTEXT:
+${recentContext || 'None'}
+
+USER INSTRUCTION: "${message}"
+
+Rules:
+- Write a complete, ready-to-send email
+- Subject line must be specific and compelling (4-7 words)
+- Never use banned adjectives or phrases listed above
+- Never invent stats or percentages
+- Opening line must hook immediately — no "I hope this finds you well"
+- CTA must be one soft, specific ask
+- Sign off with: Best, ${senderName}
+- Keep total length under 150 words unless the user asks for longer
+
+Return ONLY valid JSON:
+{
+  "subject": "string",  "body": "string"
+}`;
+
+    try {
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model:       'gpt-4o',
+            messages:    [{ role: 'user', content: draftPrompt }],
+            max_tokens:  600,
+            temperature: 0.7,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:emaildraft');
+
+        if (!res) throw new Error('Draft returned null');
+
+        recordOpenAiUsage(
+            res.data?.usage?.prompt_tokens     || 0,
+            res.data?.usage?.completion_tokens || 0,
+            'gpt-4o'
+        );
+
+        const raw    = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
+        const parsed = JSON.parse(raw);
+
+        return `Here's your email:\n\n**Subject:** ${parsed.subject}\n\n${parsed.body}`;
+
+    } catch (err) {
+        console.warn('[Email Draft Error]:', err.message);
+        return 'I had trouble drafting that email. Can you give me a bit more detail about who it\'s for and what you want to say?';
+    }
 }
 
 async function _handleBusinessQA(message, history, userProfile, apiKey) {
@@ -930,10 +975,10 @@ async function _handleBusinessQA(message, history, userProfile, apiKey) {
         return res.data.choices[0].message.content.trim();
     } catch (err) { return 'Something went wrong.'; }
 }
+
 async function _classifyIntent(message, history, apiKey) {
     // Simple heuristic classifier to route to Lead Gen vs others
-    const lower = message.toLowerCase();
-    if (lower.includes('find') || lower.includes('leads') || lower.includes('prospects') || lower.includes('companies') || lower.includes('list of')) {
+    const lower = message.toLowerCase();    if (lower.includes('find') || lower.includes('leads') || lower.includes('prospects') || lower.includes('companies') || lower.includes('list of')) {
         return INTENT.LEAD_GEN;
     }
     if (lower.includes('write') || lower.includes('draft') || lower.includes('email')) {
@@ -979,10 +1024,10 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             const reply = await _handleBusinessQA(safeMessage, history, userProfile, apiKey);
             return { reply, updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }] };
         }
+
         // INTENT.CHAT
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return { reply, updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }] };
-
     } catch (error) {
         console.error('❌ [AI ENGINE] Fatal error:', error.message);
         return { reply: 'An error occurred. Please try again.', updatedHistory: history };
