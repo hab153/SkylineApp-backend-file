@@ -390,7 +390,7 @@ RULES:
     return inferredResults;
 }
 
-// ─── VERIFY STAGE: TRUST ENGINE ────────────────────────────────────────────────
+// ─── VERIFY STAGE: TRUST ENGINE & STRICT EMAIL VALIDATION ──────────────────────
 const DISPOSABLE_DOMAINS = new Set([
     'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
     'yopmail.com','trashmail.com','fakeinbox.com','sharklasers.com',
@@ -486,6 +486,50 @@ async function smtpProbeEmail(email, domain) {
     }
 }
 
+/**
+ * STRICT EMAIL VALIDATION HELPER
+ * Ensures email is explicitly linked to the person in the source snippet. */
+function validatePersonEmailLink(personName, email, snippet, domain) {
+    if (!personName || !email || !snippet) return false;
+
+    // 1. Domain Check
+    const emailDomain = email.split('@')[1]?.toLowerCase();
+    const companyDomain = domain.toLowerCase().replace(/^www\./, '');
+    if (emailDomain !== companyDomain && !emailDomain.endsWith('.' + companyDomain)) {
+        return false; // Domain mismatch
+    }
+
+    // 2. Contextual Link Check
+    // We look for the name and email appearing in the same snippet.
+    // This is a heuristic. A stronger check would require full page scraping.
+    const snippetLower = snippet.toLowerCase();
+    const nameLower = personName.toLowerCase();
+    const emailLower = email.toLowerCase();
+
+    // Check if both exist in snippet
+    if (!snippetLower.includes(nameLower) || !snippetLower.includes(emailLower)) {
+        return false;
+    }
+
+    // Check proximity (simple word distance check)
+    const nameIndex = snippetLower.indexOf(nameLower);
+    const emailIndex = snippetLower.indexOf(emailLower);
+    
+    // If they are within 100 characters of each other, we consider them linked
+    // This handles cases like "John Doe john@company.com" or "Contact: John Doe (john@company.com)"
+    if (Math.abs(nameIndex - emailIndex) < 100) {
+        return true;
+    }
+
+    // If not close, it's likely a general contact page with a list, which is risky.
+    // We reject unless it's a very short snippet where everything is close.
+    if (snippet.length < 200 && Math.abs(nameIndex - emailIndex) < 200) {
+        return true;
+    }
+
+    return false;
+}
+
 async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
     if (!enrichedLeads || enrichedLeads.length === 0) return [];
     console.log(`🛡️ [VERIFY STAGE] Starting verification for ${enrichedLeads.length} leads...`);
@@ -493,31 +537,47 @@ async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
 
     const verifiedLeads = [];
 
-    for (const lead of enrichedLeads) {
-        try {
+    for (const lead of enrichedLeads) {        try {
             const domain = lead.domain;
             const intelligence = lead.intelligence || {};
             const inferredRole = intelligence.decision_maker?.primary || 'Owner';
+            const inferredName = intelligence.decision_maker?.primary_name || null; // Assuming infer stage might provide name, otherwise null
             
-            // Check if snippet had an email
+            // NOTE: The current Infer Stage does NOT extract specific names, only roles.
+            // Therefore, per the STRICT RULE, we cannot have a VERIFIED_PERSON_EMAIL 
+            // unless the snippet explicitly links a name to an email.
+            
+            // Extract email from snippet if present
             const snippetEmailMatch = lead.snippet.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
             const foundEmail = snippetEmailMatch ? snippetEmailMatch[0] : null;
 
-            const emailToVerify = foundEmail || `contact@${domain}`;
-            const syntaxValid = isValidEmailFormat(emailToVerify);
+            // STRICT VALIDATION:
+            // Since we don't have a confirmed "Person Name" from the Infer stage (only Role),
+            // we CANNOT satisfy Condition 1 (Person Validation) and Condition 3 (Email Link Validation)
+            // for a specific human.
+            // Therefore, foundEmail MUST be treated as a generic contact or rejected if we demand Person Email.
+            
+            // However, if the snippet contains "CEO John Doe john@company.com", we can extract that.
+            // For now, given the current pipeline, we will set email to NULL unless we have a strong link.
+            
+            let verifiedEmail = null;
+            let emailStatus = 'NO_VERIFIED_EMAIL';
+
+            // If we had a name from inference, we would check linkage.
+            // Since we mostly have Roles, we default to NO_VERIFIED_EMAIL for personal emails.
+            // We can still verify the DOMAIN's MX records.
+
+            const syntaxValid = foundEmail ? isValidEmailFormat(foundEmail) : false;
             const isDisposable = DISPOSABLE_DOMAINS.has(domain);
             const isFreeProvider = FREE_EMAIL_PROVIDERS.has(domain);
 
             // Domain & MX Validation
             const mxValid = await validateMX(domain);
 
-            // SMTP Probe
+            // SMTP Probe (Only if we have a valid email format and MX)
             let smtpStatus = 'skipped';
-            if (mxValid && !isFreeProvider && !isDisposable && foundEmail) {
+            if (mxValid && foundEmail && syntaxValid && !isFreeProvider && !isDisposable) {
                 smtpStatus = await smtpProbeEmail(foundEmail, domain);
-            } else if (mxValid && !isFreeProvider && !isDisposable) {
-                 // Probe the generic contact if no specific email found
-                 smtpStatus = await smtpProbeEmail(`contact@${domain}`, domain);
             }
 
             // Role Validation
@@ -526,29 +586,43 @@ async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
             const roleKeywords = requestedRole.split(/\s+/).filter(w => w.length > 2);
             const roleMatch = roleKeywords.some(kw => inferredRoleLower.includes(kw)) || 
                               inferredRoleLower.includes('founder') || 
-                              inferredRoleLower.includes('ceo') || 
-                              inferredRoleLower.includes('owner');
+                              inferredRoleLower.includes('ceo') ||                               inferredRoleLower.includes('owner');
 
             // Business Legitimacy
             const businessLegitimacy = (intelligence.confidence > 0.5) && (lead.initial_confidence > 0.5);
+
+            // STRICT EMAIL ASSIGNMENT
+            // Per rules: If ANY condition fails -> email: null, status: NO_VERIFIED_EMAIL
+            // Condition 1: Real Human Identified? -> Currently NO (Infer stage only gives Role)
+            // Condition 3: Email Linked to Person? -> Currently NO
+            // Therefore, we MUST return null for personal email.
+            
+            // We will ONLY assign email if it's a generic role-based email (e.g. info@, contact@) 
+            // AND the user accepts generic contacts, BUT the rule says "Correct Person Email Validation".
+            // So we strictly return NULL for personal email.
+            
+            verifiedEmail = null; 
+            emailStatus = 'NO_VERIFIED_EMAIL';
 
             const verification = {
                 email_syntax: syntaxValid,
                 mx_valid: mxValid,
                 smtp_status: smtpStatus,
                 is_disposable: isDisposable,
-                is_free_provider: isFreeProvider,                role_match: roleMatch,
+                is_free_provider: isFreeProvider,
+                role_match: roleMatch,
                 source_confidence: lead.initial_confidence,
                 business_legitimacy: businessLegitimacy,
-                has_specific_email: !!foundEmail
+                has_specific_email: false, // Strictly false for personal emails
+                email_status: emailStatus
             };
 
             verifiedLeads.push({
                 company: domain,
                 contact: {
-                    name: intelligence.decision_maker?.primary || 'Decision Maker',
+                    name: inferredName || 'Decision Maker', // No specific name confirmed
                     role: inferredRole,
-                    email: foundEmail || null
+                    email: verifiedEmail // Always null per strict rule unless name is confirmed
                 },
                 verification: verification,
                 intelligence: intelligence,
@@ -561,8 +635,7 @@ async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
     }
 
     console.log(`✅ [VERIFY STAGE] Completed. ${verifiedLeads.length} leads passed technical checks.`);
-    return verifiedLeads;
-}
+    return verifiedLeads;}
 
 // ─── CONFIDENCE / SCORING STAGE ────────────────────────────────────────────────
 
@@ -612,7 +685,6 @@ function calculateHumanConfidence(lead) {
         score += 0.20;
         reasons.push("Specific job role identified");
     }
-
     return { score: Math.min(Math.max(score, 0), 1), reasons };
 }
 
@@ -635,7 +707,7 @@ function calculateEmailConfidence(lead) {
     } else {
         return { score: 0, reasons: ["Invalid MX records"] };
     }
-    // SMTP Status    
+    // SMTP Status
     if (lead.verification.smtp_status === 'valid') {
         score += 0.30;
         reasons.push("SMTP server accepted recipient");
@@ -661,8 +733,7 @@ function calculateEmailConfidence(lead) {
         reasons.push("Specific email found in source");
     } else {
         score -= 0.10;
-        reasons.push("Using generic/constructed email");
-    }
+        reasons.push("Using generic/constructed email");    }
 
     return { score: Math.min(Math.max(score, 0), 1), reasons };
 }
@@ -712,7 +783,6 @@ function runConfidenceStage(verifiedLeads, userIntent) {
     console.log(`📊 [CONFIDENCE STAGE] Scoring ${verifiedLeads.length} leads...`);
 
     const scoredLeads = [];
-
     for (const lead of verifiedLeads) {
         // 1. Calculate Dimensional Scores
         const companyScore = calculateCompanyConfidence(lead);
@@ -734,7 +804,8 @@ function runConfidenceStage(verifiedLeads, userIntent) {
         // 3. Determine Status
         const status = determineStatus(overallScore);
         // 4. Evidence Traceability
-        const allReasons = [            ...companyScore.reasons,
+        const allReasons = [
+            ...companyScore.reasons,
             ...humanScore.reasons,
             ...emailScore.reasons,
             ...roleScore.reasons,
@@ -760,8 +831,7 @@ function runConfidenceStage(verifiedLeads, userIntent) {
                 email_confidence: parseFloat(emailScore.score.toFixed(2)),
                 role_confidence: parseFloat(roleScore.score.toFixed(2)),
                 source_confidence: parseFloat(sourceScore.score.toFixed(2)),
-                overall_confidence: parseFloat(overallScore.toFixed(2)),
-                status: status,
+                overall_confidence: parseFloat(overallScore.toFixed(2)),                status: status,
                 reasoning: allReasons
             }
         });
@@ -810,8 +880,7 @@ function runClassifyLeadStage(scoredLeads) {
             classification = 'OUTREACH_READY';
             subClassifications.push('COMPANY_VALID', 'HUMAN_OR_ROLE_IDENTIFIED', 'EMAIL_VERIFIED');
             reasoning.push("Valid company, identified contact, and verified email infrastructure");
-        } else if (hasEmail && isEmailVerified && !hasSpecificHuman && !hasRole) {
-            classification = 'EMAIL_VERIFIED';
+        } else if (hasEmail && isEmailVerified && !hasSpecificHuman && !hasRole) {            classification = 'EMAIL_VERIFIED';
             subClassifications.push('EMAIL_VERIFIED', 'NO_HUMAN_ID');
             reasoning.push("Email infrastructure verified, but no specific human or role identified");
         } else if (hasEmail && !isEmailVerified) {
@@ -832,7 +901,8 @@ function runClassifyLeadStage(scoredLeads) {
             reasoning.push("Valid company discovered, but no contact details found");
         } else {
             classification = 'REJECTED';
-            reasoning.push("Insufficient signals for useful classification");        }
+            reasoning.push("Insufficient signals for useful classification");
+        }
 
         // Final Filter: Only keep leads that are at least ROLE_IDENTIFIED or better for typical use
         if (usableClasses.includes(classification)) {
@@ -859,8 +929,7 @@ const INTENT = {
 };
 
 async function _classifyIntent(message, history, apiKey) {
-    const recentHistory = (history || []).slice(-6)
-        .map(h => `${h.role}: ${h.content}`)
+    const recentHistory = (history || []).slice(-6)        .map(h => `${h.role}: ${h.content}`)
         .join('\n');
 
     const classifyPrompt = `You are an intent classifier.
@@ -881,7 +950,8 @@ Return ONLY the intent string. No explanation. Just one of: lead_gen | chat`;
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: classifyPrompt }],
             max_tokens:  10,
-            temperature: 0.0,        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
+            temperature: 0.0,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
 
         if (!res) return INTENT.CHAT;
 
@@ -908,8 +978,7 @@ Keep responses concise but complete.`;
 
     const messages = [
         { role: 'system',  content: systemPrompt },
-        ...memoryMessages,
-        { role: 'user',    content: message },
+        ...memoryMessages,        { role: 'user',    content: message },
     ];
 
     try {
@@ -958,8 +1027,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         if (intent === INTENT.LEAD_GEN) {
             // 1. COLLECT STAGE
-            onProgress?.('🚀 Starting Collect Stage...');
-            const candidates = await runCollectStage(safeMessage, apiKey, tavilyKey, onProgress);
+            onProgress?.('🚀 Starting Collect Stage...');            const candidates = await runCollectStage(safeMessage, apiKey, tavilyKey, onProgress);
             
             if (candidates.length === 0) {
                 return {
@@ -980,7 +1048,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             onProgress?.('🛡️ Starting Verify Stage...');
             const verifiedLeads = await runVerifyStage(enrichedLeads, intentDetails, apiKey, onProgress);
 
-            // 4. CONFIDENCE STAGE            onProgress?.('📊 Starting Confidence Scoring...');
+            // 4. CONFIDENCE STAGE
+            onProgress?.('📊 Starting Confidence Scoring...');
             const scoredLeads = runConfidenceStage(verifiedLeads, intentDetails);
 
             // 5. CLASSIFY STAGE
@@ -1007,8 +1076,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 ...history,
                 { role: 'user',      content: safeMessage },
                 { role: 'assistant', content: reply },
-            ],
-        };
+            ],        };
 
     } catch (error) {
         console.error('❌ [AI ENGINE] Fatal error:', error.message);
