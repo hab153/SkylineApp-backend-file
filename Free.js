@@ -635,7 +635,8 @@ function calculateEmailConfidence(lead) {
     } else {
         return { score: 0, reasons: ["Invalid MX records"] };
     }
-    // SMTP Status    if (lead.verification.smtp_status === 'valid') {
+    // SMTP Status    
+    if (lead.verification.smtp_status === 'valid') {
         score += 0.30;
         reasons.push("SMTP server accepted recipient");
     } else if (lead.verification.smtp_status === 'invalid') {
