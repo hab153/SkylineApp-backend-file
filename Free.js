@@ -831,7 +831,8 @@ async function runWithConcurrency(tasks, limit) {
     return Promise.allSettled(results);
 }
 
-// ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────function cleanCompanyName(rawTitle) {
+// ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────
+function cleanCompanyName(rawTitle) {
     let name = rawTitle.split(/[|\-–]/)[0].trim();
     name = name.replace(/\b(Ltd|LLC|Inc|Limited|PLC)\s*$/gi, '').trim();
     if (name.length > 50) name = name.substring(0, 50).trim();
