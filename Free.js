@@ -684,7 +684,8 @@ function _layer8_RankAndClassify(verifiedItems, intent) {
     return scoredLeads;
 }
 
-// ─── EMAIL SEQUENCE WRITER (Unchanged Logic) ──────────────────────────────────async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
+// ─── EMAIL SEQUENCE WRITER (Unchanged Logic) ──────────────────────────────────
+async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
     try {
         const companyName   = companyData.name;
         const mission       = companyData.mission   || null;
