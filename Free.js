@@ -635,7 +635,8 @@ function calculateEmailConfidence(lead) {
     } else {
         return { score: 0, reasons: ["Invalid MX records"] };
     }
-    // SMTP Status    if (lead.verification.smtp_status === 'valid') {
+    // SMTP Status    
+    if (lead.verification.smtp_status === 'valid') {
         score += 0.30;
         reasons.push("SMTP server accepted recipient");
     } else if (lead.verification.smtp_status === 'invalid') {
@@ -684,7 +685,8 @@ function calculateRoleConfidence(lead, userIntent) {
         score += 0.10;
         reasons.push("High-priority decision maker role");
     }
-    return { score: Math.min(Math.max(score, 0), 1), reasons };
+    return { 
+    : Math.min(Math.max(score, 0), 1), reasons };
 }
 
 function calculateSourceConfidence(lead) {
