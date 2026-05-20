@@ -12,11 +12,11 @@ const CACHE_TTL_MS       = 60 * 60 * 1000;
 const CURRENT_YEAR       = new Date().getFullYear();
 const MAX_MESSAGE_LENGTH = 800;
 
-// Minimum confidence score to pass a lead through
-const EMAIL_CONFIDENCE_THRESHOLD = 25;
+// Minimum confidence score to pass a lead through (LOWERED to allow more leads)
+const EMAIL_CONFIDENCE_THRESHOLD = 15;
 
 // ─── OUTPUT QUANTITY CONTROL CONSTANTS ───────────────────────────────────────
-const QUANTITY_RULE_HARD_MIN     = 2;
+const QUANTITY_RULE_HARD_MIN     = 1; // Ensure at least 1 result if possible
 const QUANTITY_RULE_ABSOLUTE_MIN = 1;
 const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;
 
@@ -88,7 +88,6 @@ const SOURCE_TIERS = {
             'inc.com', 'businessinsider.com', 'techcrunch.com',
             'reddit.com', 'quora.com', 'medium.com', 'substack.com',
             'wikipedia.org', 'wikihow.com', 'indeed.com', 'glassdoor.com',
-            // Added common listicle/spam domains that were blocking results
             'growthlist.co', 'bookyourdata.com', 'capchase.com', 'getleadwave.io', 
             'openvc.app', 'fundraiseinsider.com', 'datarade.ai'
         ],
@@ -96,8 +95,8 @@ const SOURCE_TIERS = {
             /top\s*\d+/i, /best\s*\d+/i, /list\s*of/i, /review/i,
             /affiliate/i, /sponsored/i, /ad/i, /buy-email-list/i
         ],
-        trustScore: 0,        priority: 99
-    }
+        trustScore: 0,
+        priority: 99    }
 };
 
 // ─── 🧍 REAL PERSON DISCOVERY ENGINE — HIERARCHY MAP ─────────────────────────
@@ -145,8 +144,8 @@ const MIN_POOL_SIZE = 3;
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
     LEAD_GEN:    'lead_gen',
-    CHAT:        'chat',    EMAIL_DRAFT: 'email_draft',
-    BUSINESS_QA: 'business_qa',
+    CHAT:        'chat',
+    EMAIL_DRAFT: 'email_draft',    BUSINESS_QA: 'business_qa',
 };
 
 // ─── REASONING FILTER ──────────────────────────────────────────────────────────
@@ -194,8 +193,8 @@ function buildBannedWordsInstruction() {
 const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
 const openAiTracker = {
-    totalCallsThisSession:        0,    totalInputTokensThisSession:  0,
-    totalOutputTokensThisSession: 0,
+    totalCallsThisSession:        0,
+    totalInputTokensThisSession:  0,    totalOutputTokensThisSession: 0,
 };
 const costTracker = { estimatedUSDThisSession: 0 };
 
@@ -243,8 +242,8 @@ function setCachedResearch(domain, data) {
 }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
-async function withRetry(fn, label, retries = 2, delayMs = 800) {    for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
+async function withRetry(fn, label, retries = 2, delayMs = 800) {
+    for (let attempt = 0; attempt <= retries; attempt++) {        try {
             return await fn();
         } catch (err) {
             const isLast = attempt === retries;
@@ -292,8 +291,8 @@ function _classifySourceQuality(url, title, snippet) {
             return { tier: 'TIER_3', score: 40, reason: 'Company Blog/News' };
         }
     }
-    // 5. Default: Unknown/Generic
-    return { tier: 'UNKNOWN', score: 50, reason: 'Generic Source' };
+
+    // 5. Default: Unknown/Generic    return { tier: 'UNKNOWN', score: 50, reason: 'Generic Source' };
 }
 
 // ─── PAGE BUSINESS RELEVANCE SCORER ──────────────────────────────────────────
@@ -341,8 +340,8 @@ function _scorePageBusinessRelevance(result) {
 
     if (/how to|what is|tutorial|step.by.step|learn how/.test(snippet)) score -= 15;
     if (/read more|subscribe|newsletter|download free/.test(snippet))   score -= 10;
-    return Math.max(0, Math.min(100, score));
-}
+
+    return Math.max(0, Math.min(100, score));}
 
 // ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
 async function searchWithTavily(query, tavilyKey, options = {}) {
@@ -390,8 +389,8 @@ function _buildEntityFirstQueries(intent, poolSize) {
     ].filter(Boolean).join(' ');
     
     const dmFocus = [
-        `"${ind}"`, loc,        'CEO OR founder OR owner OR director',
-        '"email" OR "contact"',
+        `"${ind}"`, loc,
+        'CEO OR founder OR owner OR director',        '"email" OR "contact"',
         '-site:linkedin.com -site:crunchbase.com',
     ].filter(Boolean).join(' ');
 
@@ -439,8 +438,8 @@ function classifyEmail(email, domain) {
     const GENERIC_PREFIXES = [
         'contact','info','hello','sales','team','support',
         'enquiries','enquiry','admin','office','mail','general',
-        'press','media',    ];
-    const isGeneric = GENERIC_PREFIXES.some(p =>
+        'press','media',
+    ];    const isGeneric = GENERIC_PREFIXES.some(p =>
         localPart === p || localPart.startsWith(p + '.')
     );
 
@@ -488,8 +487,8 @@ async function smtpProbeEmail(email, domain) {
             let   stage  = 0;
 
             socket.on('error', (err) => {
-                clearTimeout(timeout);                resolve('unknown');
-            });
+                clearTimeout(timeout);
+                resolve('unknown');            });
 
             socket.on('data', (chunk) => {
                 buffer += chunk.toString();
@@ -537,8 +536,8 @@ async function smtpProbeEmail(email, domain) {
 // ─── CATCH-ALL DETECTION ─────────────────────────────────────────────────────
 async function isCatchAllDomain(domain) {
     const randomString = Math.random().toString(36).substring(7);
-    const fakeEmail = `${randomString}@${domain}`;    const result = await smtpProbeEmail(fakeEmail, domain);
-    return result !== 'invalid';
+    const fakeEmail = `${randomString}@${domain}`;
+    const result = await smtpProbeEmail(fakeEmail, domain);    return result !== 'invalid';
 }
 
 // ─── 📧 EMAIL VERIFICATION ENGINE — MULTI-SOURCE VALIDATION ──────────────────
@@ -586,8 +585,8 @@ async function validateEmailFull(email, domain, sourceTier = 'UNKNOWN', patternT
     result.domainMatch = emailDomain === domain || emailDomain.includes(domainRoot);
     if (!result.domainMatch) {
         result.reason = `Domain mismatch: ${emailDomain} vs ${domain}`;
-        return result;    }
-
+        return result;
+    }
     result.mxValid = await validateMX(emailDomain);
     if (!result.mxValid) {
         result.reason = 'No MX records — domain cannot receive email';
@@ -648,7 +647,7 @@ async function validateEmailFull(email, domain, sourceTier = 'UNKNOWN', patternT
     } else if (result.confidenceScore >= 50) {
         result.verdict = 'probable';
         result.reason = 'Medium confidence: Valid format and MX, but weak SMTP or source signals';
-    } else if (result.confidenceScore >= 25) {
+    } else if (result.confidenceScore >= 15) { // LOWERED THRESHOLD FOR RISKY
         result.verdict = 'risky';
         result.reason = 'Low confidence: Valid format, but high risk due to catch-all or low-quality source';
     } else {
@@ -684,8 +683,8 @@ async function validateMX(domain) {
     } catch { return false; }
 }
 
-function isValidEmailFormat(email) {    if (!email || typeof email !== 'string') return false;
-    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
+function isValidEmailFormat(email) {
+    if (!email || typeof email !== 'string') return false;    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 }
 const FREE_EMAIL_PROVIDERS = new Set([
     'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
@@ -733,8 +732,8 @@ function scoreDataCompleteness(extracted) {
     if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;
     if (extracted.size       && extracted.size        !== 'unknown') score += 10;
     if (extracted.model      && extracted.model       !== 'unknown') score += 10;
-    if (extracted.recentNews)                                        score += 15;    if (extracted.contactEmails?.length > 0)                         score += 15;
-    if (extracted.employees?.length > 0)                             score += 15;
+    if (extracted.recentNews)                                        score += 15;
+    if (extracted.contactEmails?.length > 0)                         score += 15;    if (extracted.employees?.length > 0)                             score += 15;
     if (extracted.employees?.some(e => e.email))                     score += 10;
     return Math.min(score, 100);
 }
@@ -762,7 +761,7 @@ function calculateFinalTrustScore({
     // 3. Email Confidence (0-25 points)
     if (emailValidation?.confidenceScore >= 80) score += 25;
     else if (emailValidation?.confidenceScore >= 50) score += 15;
-    else if (emailValidation?.confidenceScore >= 25) score += 5;
+    else if (emailValidation?.confidenceScore >= 15) score += 5; // LOWERED THRESHOLD
     else score += 0;
 
     // 4. Company Legitimacy (0-15 points)
@@ -782,8 +781,8 @@ function calculateFinalTrustScore({
 function getConfidenceLevel(score) {
     if (score >= 75) return 'HIGH';
     if (score >= 40) return 'MEDIUM';
-    return 'LOW';}
-
+    return 'LOW';
+}
 // ─── 🧍 REAL PERSON DISCOVERY ENGINE — CONTACT PICKER ────────────────────────
 function _pickBestContact(employees, preferredContact, userPersona) {
     if (!employees || employees.length === 0) return null;
@@ -831,8 +830,8 @@ async function runWithConcurrency(tasks, limit) {
     }
     return Promise.allSettled(results);
 }
-// ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────
-function cleanCompanyName(rawTitle) {
+
+// ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────function cleanCompanyName(rawTitle) {
     let name = rawTitle.split(/[|\-–]/)[0].trim();
     name = name.replace(/\b(Ltd|LLC|Inc|Limited|PLC)\s*$/gi, '').trim();
     if (name.length > 50) name = name.substring(0, 50).trim();
@@ -880,8 +879,8 @@ function _detectLanguage(message) {
         { code: 'fi', name: 'Finnish',    rtl: false, pattern: /\b(kiitos|hei|miten|meillä|meidän|yritys|tarvitsen|haluan|voisi|järjestelmä|tiimi|prosessi|myös|paljon|varten)\b/ },
         { code: 'id', name: 'Indonesian', rtl: false, pattern: /\b(terima kasih|halo|bagaimana|kami|perusahaan|butuh|ingin|bisa|sistem|tim|proses|juga|sangat|untuk|dengan)\b/ },
         { code: 'ms', name: 'Malay',      rtl: false, pattern: /\b(terima kasih|hai|bagaimana|kami|syarikat|perlu|mahu|boleh|sistem|pasukan|proses|juga|sangat|untuk|dengan)\b/ },
-        { code: 'vi', name: 'Vietnamese', rtl: false, pattern: /\b(cảm ơn|xin chào|chúng tôi|công ty|cần|muốn|có thể|hệ thống|đội|quy trình|cũng|rất|cho|với)\b/ },    ];
-    for (const lang of langPatterns) {
+        { code: 'vi', name: 'Vietnamese', rtl: false, pattern: /\b(cảm ơn|xin chào|chúng tôi|công ty|cần|muốn|có thể|hệ thống|đội|quy trình|cũng|rất|cho|với)\b/ },
+    ];    for (const lang of langPatterns) {
         if (lang.pattern.test(lower)) return { code: lang.code, name: lang.name, rtl: lang.rtl };
     }
     return { code: 'en', name: 'English', rtl: false };
@@ -929,8 +928,8 @@ function _parseRequestedCount(message) {
     const giveMatch   = message.match(givePattern);
     if (giveMatch) {
         const n = parseInt(giveMatch[1], 10);
-        if (n >= 1 && n <= 100) return n;    }
-
+        if (n >= 1 && n <= 100) return n;
+    }
     for (const [word, num] of Object.entries(wordToNum)) {
         const wordPattern = new RegExp(`\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i');
         if (wordPattern.test(lower)) return num;
@@ -978,8 +977,8 @@ Return ONLY valid JSON:
   "primary_intent": "lead_gen" | "email_draft" | "business_qa" | "chat",
   "user_persona": "saas_founder" | "agency_owner" | "recruiter" | "consultant" | "general",
   "buying_intent": "high" | "medium" | "low" | "none",
-  "urgency": "high" | "medium" | "low",  "outbound_readiness": boolean,
-  "icp_mismatch": boolean,
+  "urgency": "high" | "medium" | "low",
+  "outbound_readiness": boolean,  "icp_mismatch": boolean,
   "reasoning": "Brief explanation"}
 Rules:
 - "user_persona": Infer from context. E.g., if they mention "clients" and "projects", likely "agency_owner". If "users" and "product", likely "saas_founder".- "icp_mismatch": True if request is too vague.
@@ -1027,8 +1026,8 @@ function _validateICP(lead, userPersona) {
         const sizeMatch = rules.company_sizes.some(s => leadSize.includes(s) || s.includes(leadSize));
         if (!sizeMatch) {
             // Soft fail for size, just log it, don't hard reject unless strict
-            console.log(`⚠️ [ICP] Size mismatch: ${leadSize} not in preferred ${rules.company_sizes}`);        }
-    }
+            console.log(`⚠️ [ICP] Size mismatch: ${leadSize} not in preferred ${rules.company_sizes}`);
+        }    }
     // 3. Business Model Check
     if (leadModel && leadModel !== 'unknown') {
         const modelMatch = rules.business_models.some(m => leadModel.includes(m) || m.includes(leadModel));
@@ -1125,8 +1124,8 @@ Return ONLY valid JSON:
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
-            messages:    [{ role: 'user', content: draftPrompt }],            max_tokens:  600,
-            temperature: 0.7,
+            messages:    [{ role: 'user', content: draftPrompt }],
+            max_tokens:  600,            temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:emaildraft');
 
         if (!res) throw new Error('Draft returned null');
@@ -1174,8 +1173,8 @@ When answering:
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o',
             messages,
-            max_tokens:  800,            temperature: 0.5,
-        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:businessqa');
+            max_tokens:  800,
+            temperature: 0.5,        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:businessqa');
 
         if (!res) return 'I had trouble with that — please try again.';
         recordOpenAiUsage(
@@ -1223,8 +1222,8 @@ function _inferEmailPattern(knownEmployees, targetName, domain) {
     switch(mode) {
         case 'first.last': generatedLocal = `${targetFirst}.${targetLast}`; break;
         case 'flast': generatedLocal = `${targetFirst[0]}${targetLast}`; break;
-        case 'firstl': generatedLocal = `${targetFirst}${targetLast[0]}`; break;        case 'first_last': generatedLocal = `${targetFirst}_${targetLast}`; break;
-        case 'first': generatedLocal = `${targetFirst}`; break;
+        case 'firstl': generatedLocal = `${targetFirst}${targetLast[0]}`; break;
+        case 'first_last': generatedLocal = `${targetFirst}_${targetLast}`; break;        case 'first': generatedLocal = `${targetFirst}`; break;
         default: return null;
     }
     return `${generatedLocal}@${domain}`;
@@ -1321,8 +1320,8 @@ CRITICAL: Focus on finding REAL HUMANS with specific roles.Return ONLY valid JSO
 }
 SNIPPETS:
 ${allSnippets}`;
-        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
+
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {            model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: extractPrompt }],
             max_tokens:  500,
             temperature: 0.0,
@@ -1370,8 +1369,8 @@ ${allSnippets}`;
             }
         }
 
-        parsed._regexEmails = regexFromAll.companyEmails;        setCachedResearch(domain, parsed);
-        return parsed;
+        parsed._regexEmails = regexFromAll.companyEmails;
+        setCachedResearch(domain, parsed);        return parsed;
 
     } catch (err) {
         console.warn(`[Research Error] ${err.message}`);
@@ -1419,8 +1418,8 @@ const OUTREACH_STRATEGIES = {
         id: 'saas_founder_growth',
         persona: 'saas_founder',
         angle: 'Growth & Scaling',
-        painPoints: ['Churn reduction', 'User acquisition cost', 'Feature adoption', 'Scaling infrastructure'],        timing: { initial: 'Tue/Wed 10AM', followup1: 'Fri 2PM', followup2: 'Next Tue 10AM' },
-        variationTest: ['Subject: Quick question about [Company] growth', 'Subject: Idea for [Company] user retention']
+        painPoints: ['Churn reduction', 'User acquisition cost', 'Feature adoption', 'Scaling infrastructure'],
+        timing: { initial: 'Tue/Wed 10AM', followup1: 'Fri 2PM', followup2: 'Next Tue 10AM' },        variationTest: ['Subject: Quick question about [Company] growth', 'Subject: Idea for [Company] user retention']
     },
     'agency_owner_acquisition': {
         id: 'agency_owner_acquisition',
@@ -1468,8 +1467,8 @@ function selectOutreachStrategy(userPersona, industry, role) {
 
     const strategyKey = strategyMap[userPersona] || 'general_decision_maker';
     const strategy = OUTREACH_STRATEGIES[strategyKey];
-    // Customize angle based on industry if possible
-    if (industry && strategy.painPoints) {
+
+    // Customize angle based on industry if possible    if (industry && strategy.painPoints) {
         // Add industry-specific pain points if available
         const industryPains = {
             'SaaS': ['Churn', 'CAC', 'Adoption'],
@@ -1517,8 +1516,8 @@ OUTREACH STRATEGY:
 
         // Integrate Buying Signals
         let signalContext = '';
-        if (buyingSignals && buyingSignals.length > 0) {            const topSignal = buyingSignals[0];
-            signalContext = `
+        if (buyingSignals && buyingSignals.length > 0) {
+            const topSignal = buyingSignals[0];            signalContext = `
 BUYING SIGNAL DETECTED:
 - TYPE: ${topSignal.type.toUpperCase()}
 - DESCRIPTION: ${topSignal.description}
@@ -1615,8 +1614,8 @@ Return ONLY valid JSON:
     } catch (err) {
         console.warn(`[Email Gen Error] ${err.message}`);
 
-        const name     = contactPerson?.name?.split(' ')[0] || 'Hi';        const industry = companyData.industry || 'your sector';
-        const company  = companyData.name     || 'your business';
+        const name     = contactPerson?.name?.split(' ')[0] || 'Hi';
+        const industry = companyData.industry || 'your sector';        const company  = companyData.name     || 'your business';
         const sender   = userProfile?.senderName || 'Alex';
         const usp      = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
         return {
@@ -1664,8 +1663,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             return null;
         }
         globalSeenCompanyNames.add(companyKey);
-        onProgress?.(`📋 Researching ${companyName}...`);
-        const [companyData, mxValid] = await Promise.all([
+
+        onProgress?.(`📋 Researching ${companyName}...`);        const [companyData, mxValid] = await Promise.all([
             researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
             validateMX(domain),
         ]);
@@ -1723,6 +1722,18 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
             }
         }
 
+        // FALLBACK: If still no emails, use generic info@ or hello@ if domain is valid
+        if (candidateEmails.length === 0) {
+            const genericEmails = [`info@${domain}`, `hello@${domain}`, `contact@${domain}`];
+            for (const genEmail of genericEmails) {
+                if (isValidEmailFormat(genEmail)) {
+                    candidateEmails.push(genEmail);
+                    console.log(`ℹ️ [FALLBACK] Added generic email: ${genEmail}`);
+                    break; // Just add one generic email as fallback
+                }
+            }
+        }
+
         if (candidateEmails.length === 0) {
             console.log(`🟡 [NO EMAIL] Rejected due to no email found: ${companyName}`);
             return null;
@@ -1749,10 +1760,10 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
              emailConfidenceType = 'guessed-pattern';
         }
 
-        // Aggressive Rejection: Reject generic emails from low-tier sources
-        if (emailConfidenceType === 'confirmed-generic' && (sourceTier === 'TIER_3' || sourceTier === 'UNKNOWN')) {
-            console.log(`🟡 [GENERIC EMAIL] Rejected generic email from low-tier source: ${companyName}`);
-            return null;
+        // RELAXED: Allow generic emails from low-tier sources if no other option exists
+        // Previously rejected generic emails from Tier 3/Unknown. Now we allow them if they are the only option.
+        if (emailConfidenceType === 'confirmed-generic' && (sourceTier === 'TIER_3' || sourceTier === 'UNKNOWN')) {            console.log(`ℹ️ [GENERIC EMAIL] Accepted generic email from low-tier source as fallback: ${companyName}`);
+            // Do not return null here anymore
         }
 
         const emailLabel      = topEmail.reason;
@@ -1762,7 +1773,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
         // 🧾 SELECT OUTREACH STRATEGY
         const outreachStrategy = selectOutreachStrategy(userPersona, intent.industry, bestContact.role);
 
-        // ⚡ DETECT BUYING SIGNALS        const buyingSignals = await detectBuyingSignals(companyName, domain, tavilyKey);
+        // ⚡ DETECT BUYING SIGNALS
+        const buyingSignals = await detectBuyingSignals(companyName, domain, tavilyKey);
 
         const emailSequence = await generateEmailsForLead(
             {
@@ -1793,12 +1805,12 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
         });
         const confidenceLevel = getConfidenceLevel(trustScore);
 
-        // Aggressive Rejection: Reject LOW confidence leads
+        // RELAXED: Accept MEDIUM and LOW confidence leads to ensure output
+        // Previously rejected LOW. Now we accept MEDIUM and LOW.
         if (confidenceLevel === 'LOW') {
-            console.log(`🟡 [LOW CONFIDENCE] Rejected low confidence lead (score:${trustScore}): ${companyName}`);
-            return null;
+            console.log(`ℹ️ [LOW CONFIDENCE] Accepted low confidence lead (score:${trustScore}) to ensure output: ${companyName}`);
+            // Do not return null here anymore
         }
-
         const lead = {
             name:               bestContact?.name || companyName,
             company:            companyName,
@@ -1811,7 +1823,8 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
                 verdict:         topEmail.verdict,
                 smtpResult:      topEmail.smtpResult,
                 reason:          topEmail.reason,
-            },            allEmailOptions,
+            },
+            allEmailOptions,
             role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
             linkedIn:           bestContact?.linkedIn  || null,
             companySize:        companyData?.size      || 'unknown',
@@ -1847,7 +1860,6 @@ async function processOneCompany(result, intent, userPersona, tavilyKey, apiKey,
         return null;
     }
 }
-
 // ─── LEAD GEN PIPELINE ────────────────────────────────────────────────────────
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
 
@@ -1860,7 +1872,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     const userPersona = deepIntent.user_persona || 'general';
     if (deepIntent.icp_mismatch) {
         return {
-            reply: 'Your request is a bit too broad. To find the right leads, could you specify the industry or company size you are targeting?',            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'Request too broad.' }],
+            reply: 'Your request is a bit too broad. To find the right leads, could you specify the industry or company size you are targeting?',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'Request too broad.' }],
         };
     }
 
@@ -1896,8 +1909,7 @@ Never return null for target or industry. Infer from context.`;
                 'gpt-4o-mini'
             );
             const raw    = intentRes.data.choices[0].message.content.replace(/```json|```/g, '');
-            const parsed = JSON.parse(raw);
-            intent = { ...intent, ...parsed };
+            const parsed = JSON.parse(raw);            intent = { ...intent, ...parsed };
         }
     } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
 
@@ -1909,7 +1921,8 @@ Never return null for target or industry. Infer from context.`;
     );
     const queries = _buildEntityFirstQueries(intent, searchPoolSize);
     const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
-    let fallbackResults = [];    if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
+    let fallbackResults = [];
+    if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
         const fallbackQuery = queries.entityFocus;
         try {
             fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, { maxResults: searchPoolSize });
@@ -1945,8 +1958,7 @@ Never return null for target or industry. Infer from context.`;
 
         globalSeenDomains.add(domain);
         cleanResults.push({ ...result, _domain: domain, _sourceTier: sourceInfo.tier });
-        if (cleanResults.length >= requestedCount + 5) break;
-    }
+        if (cleanResults.length >= requestedCount + 5) break;    }
 
     if (cleanResults.length === 0) {
         return {
@@ -1958,7 +1970,8 @@ Never return null for target or industry. Infer from context.`;
     const tasks = cleanResults.map(result => () =>
         processOneCompany(result, intent, userPersona, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
     );
-    const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);    const allVerifiedLeads = settled
+    const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
+    const allVerifiedLeads = settled
         .filter(r => r.status === 'fulfilled' && r.value !== null)
         .map(r => r.value)
         .sort((a, b) => b.trustScore - a.trustScore); // Sort by new Trust Score
@@ -1994,8 +2007,7 @@ Never return null for target or industry. Infer from context.`;
             { role: 'assistant', content: `[Generated ${leadsToReturn.length} verified leads]` },
         ],
         _meta,
-    };
-}
+    };}
 
 // ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
 async function generateFreeResponse(message, history, userProfile, onProgress) {
@@ -2008,6 +2020,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const safeMessage = typeof message === 'string'
             ? message.slice(0, MAX_MESSAGE_LENGTH)
             : '';
+
         if (!safeMessage.trim()) {
             return {
                 reply:          'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
@@ -2043,8 +2056,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             return {
                 reply,
                 updatedHistory: [
-                    ...history,
-                    { role: 'user',      content: safeMessage },
+                    ...history,                    { role: 'user',      content: safeMessage },
                     { role: 'assistant', content: reply },
                 ],
             };
@@ -2056,7 +2068,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             reply,
             updatedHistory: [
                 ...history,
-                { role: 'user',      content: safeMessage },                { role: 'assistant', content: reply },
+                { role: 'user',      content: safeMessage },
+                { role: 'assistant', content: reply },
             ],
         };
 
