@@ -145,7 +145,8 @@ function buildBannedWordsInstruction() {
     ].join('\n');
 }
 
-// ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
+// ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────
+const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
 const openAiTracker = {
     totalCallsThisSession:        0,
