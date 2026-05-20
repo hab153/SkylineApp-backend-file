@@ -635,8 +635,7 @@ function calculateEmailConfidence(lead) {
     } else {
         return { score: 0, reasons: ["Invalid MX records"] };
     }
-    // SMTP Status    
-    if (lead.verification.smtp_status === 'valid') {
+    // SMTP Status    if (lead.verification.smtp_status === 'valid') {
         score += 0.30;
         reasons.push("SMTP server accepted recipient");
     } else if (lead.verification.smtp_status === 'invalid') {
@@ -747,11 +746,13 @@ function runConfidenceStage(verifiedLeads, userIntent) {
             continue;
         }
 
+        // FIX: Ensure verification object is passed through to the next stage
         scoredLeads.push({
             company: lead.company,
             contact: lead.contact,
             source_url: lead.source_url,
             intelligence: lead.intelligence,
+            verification: lead.verification, // CRITICAL FIX: Pass verification data
             confidence: {
                 company_confidence: parseFloat(companyScore.score.toFixed(2)),
                 human_confidence: parseFloat(humanScore.score.toFixed(2)),
@@ -781,8 +782,9 @@ function runClassifyLeadStage(scoredLeads) {
 
     for (const lead of scoredLeads) {
         const c = lead.confidence;
-        const contact = lead.contact;
-        const verification = lead.verification;
+        const contact = lead.contact;        // FIX: Safely access verification, defaulting to empty object if missing
+        const verification = lead.verification || {}; 
+
         let classification = 'REJECTED';
         const subClassifications = [];
         const reasoning = [];
@@ -792,7 +794,7 @@ function runClassifyLeadStage(scoredLeads) {
         const hasSpecificHuman = c.human_confidence > 0.6 && contact.name && contact.name !== 'Decision Maker' && contact.name !== 'Owner';
         const hasRole = contact.role && contact.role !== 'Decision Maker';
         const hasEmail = verification.has_specific_email || (contact.email && isValidEmailFormat(contact.email));
-        const isEmailVerified = c.email_confidence > 0.7 && verification.mx_valid && (verification.smtp_status === 'valid' || verification.smtp_status === 'unknown'); // Unknown is acceptable for strong match if MX valid
+        const isEmailVerified = c.email_confidence > 0.7 && verification.mx_valid && (verification.smtp_status === 'valid' || verification.smtp_status === 'unknown');
         const isOutreachReady = c.overall_confidence >= 0.66 && hasCompany && (hasSpecificHuman || hasRole) && hasEmail;
 
         // --- Classification Logic (Conservative / Lowest Certainty) ---
@@ -805,22 +807,18 @@ function runClassifyLeadStage(scoredLeads) {
             subClassifications.push('COMPANY_VALID', 'HUMAN_OR_ROLE_IDENTIFIED', 'EMAIL_VERIFIED');
             reasoning.push("Valid company, identified contact, and verified email infrastructure");
         } else if (hasEmail && isEmailVerified && !hasSpecificHuman && !hasRole) {
-            // Email exists and works, but we don't know who it belongs to specifically
             classification = 'EMAIL_VERIFIED';
             subClassifications.push('EMAIL_VERIFIED', 'NO_HUMAN_ID');
             reasoning.push("Email infrastructure verified, but no specific human or role identified");
         } else if (hasEmail && !isEmailVerified) {
-            // Email found but not technically verified (no MX/SMTP check passed strongly)
             classification = 'EMAIL_FOUND';
             subClassifications.push('EMAIL_FOUND', 'NOT_VERIFIED');
             reasoning.push("Email address found in source, but technical verification incomplete");
         } else if (hasSpecificHuman && !hasEmail) {
-            // We know who they are, but don't have an email
             classification = 'HUMAN_IDENTIFIED';
             subClassifications.push('HUMAN_IDENTIFIED', 'EMAIL_MISSING');
             reasoning.push(`Specific individual (${contact.name}) identified, but no email found`);
         } else if (hasRole && !hasSpecificHuman && !hasEmail) {
-            // We know the role exists (e.g. "Head of Sales") but no name or email
             classification = 'ROLE_IDENTIFIED';
             subClassifications.push('ROLE_IDENTIFIED', 'NO_HUMAN', 'NO_EMAIL');
             reasoning.push(`Role (${contact.role}) identified, but no specific name or email`);
@@ -832,15 +830,14 @@ function runClassifyLeadStage(scoredLeads) {
             classification = 'REJECTED';
             reasoning.push("Insufficient signals for useful classification");
         }
-        // Final Filter: Only keep leads that are at least ROLE_IDENTIFIED or better for typical use
-        // If you want to see Company Only leads, remove this check.
-        const usableClasses = ['OUTREACH_READY', 'EMAIL_VERIFIED', 'EMAIL_FOUND', 'HUMAN_IDENTIFIED', 'ROLE_IDENTIFIED'];
+
+        // Final Filter: Only keep leads that are at least ROLE_IDENTIFIED or better for typical use        const usableClasses = ['OUTREACH_READY', 'EMAIL_VERIFIED', 'EMAIL_FOUND', 'HUMAN_IDENTIFIED', 'ROLE_IDENTIFIED'];
         
         if (usableClasses.includes(classification)) {
             lead.classification = {
                 classification: classification,
                 sub_classifications: subClassifications,
-                certainty: c.overall_confidence, // Mirror overall confidence as certainty
+                certainty: c.overall_confidence,
                 reasoning: reasoning
             };
             classifiedLeads.push(lead);
@@ -881,9 +878,9 @@ Return ONLY the intent string. No explanation. Just one of: lead_gen | chat`;
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: classifyPrompt }],
-            max_tokens:  10,            temperature: 0.0,
+            max_tokens:  10,
+            temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
-
         if (!res) return INTENT.CHAT;
 
         const raw = res.data.choices[0].message.content.trim().toLowerCase();
@@ -930,9 +927,9 @@ Keep responses concise but complete.`;
         return 'Something went wrong. Please try again.';
     }
 }
+
 // ─── MAIN EXPORT: generateFreeResponse ─────────────────────────────────────────
-async function generateFreeResponse(message, history, userProfile, onProgress) {
-    try {
+async function generateFreeResponse(message, history, userProfile, onProgress) {    try {
         console.log('🟢 [AI ENGINE] Pipeline started...');
         onProgress?.('🧠 Understanding your request...');
 
@@ -979,9 +976,9 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             // 3. VERIFY STAGE
             onProgress?.('🛡️ Starting Verify Stage...');
             const verifiedLeads = await runVerifyStage(enrichedLeads, intentDetails, apiKey, onProgress);
+
             // 4. CONFIDENCE STAGE
-            onProgress?.('📊 Starting Confidence Scoring...');
-            const scoredLeads = runConfidenceStage(verifiedLeads, intentDetails);
+            onProgress?.('📊 Starting Confidence Scoring...');            const scoredLeads = runConfidenceStage(verifiedLeads, intentDetails);
 
             // 5. CLASSIFY STAGE
             onProgress?.('🏷️ Starting Lead Classification...');
