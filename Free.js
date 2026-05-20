@@ -781,9 +781,12 @@ function runClassifyLeadStage(scoredLeads) {
     
     const classifiedLeads = [];
 
+    // FIX: Define usableClasses here so it's accessible
+    const usableClasses = ['OUTREACH_READY', 'EMAIL_VERIFIED', 'EMAIL_FOUND', 'HUMAN_IDENTIFIED', 'ROLE_IDENTIFIED'];
     for (const lead of scoredLeads) {
         const c = lead.confidence;
-        const contact = lead.contact;        // FIX: Safely access verification, defaulting to empty object if missing
+        const contact = lead.contact;
+        // FIX: Safely access verification, defaulting to empty object if missing
         const verification = lead.verification || {}; 
 
         let classification = 'REJECTED';
@@ -829,11 +832,9 @@ function runClassifyLeadStage(scoredLeads) {
             reasoning.push("Valid company discovered, but no contact details found");
         } else {
             classification = 'REJECTED';
-            reasoning.push("Insufficient signals for useful classification");
-        }
+            reasoning.push("Insufficient signals for useful classification");        }
 
-        // Final Filter: Only keep leads that are at least ROLE_IDENTIFIED or better for typical use        const usableClasses = ['OUTREACH_READY', 'EMAIL_VERIFIED', 'EMAIL_FOUND', 'HUMAN_IDENTIFIED', 'ROLE_IDENTIFIED'];
-        
+        // Final Filter: Only keep leads that are at least ROLE_IDENTIFIED or better for typical use
         if (usableClasses.includes(classification)) {
             lead.classification = {
                 classification: classification,
@@ -880,8 +881,8 @@ Return ONLY the intent string. No explanation. Just one of: lead_gen | chat`;
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: classifyPrompt }],
             max_tokens:  10,
-            temperature: 0.0,
-        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
+            temperature: 0.0,        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
+
         if (!res) return INTENT.CHAT;
 
         const raw = res.data.choices[0].message.content.trim().toLowerCase();
@@ -930,7 +931,8 @@ Keep responses concise but complete.`;
 }
 
 // ─── MAIN EXPORT: generateFreeResponse ─────────────────────────────────────────
-async function generateFreeResponse(message, history, userProfile, onProgress) {    try {
+async function generateFreeResponse(message, history, userProfile, onProgress) {
+    try {
         console.log('🟢 [AI ENGINE] Pipeline started...');
         onProgress?.('🧠 Understanding your request...');
 
@@ -978,8 +980,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             onProgress?.('🛡️ Starting Verify Stage...');
             const verifiedLeads = await runVerifyStage(enrichedLeads, intentDetails, apiKey, onProgress);
 
-            // 4. CONFIDENCE STAGE
-            onProgress?.('📊 Starting Confidence Scoring...');            const scoredLeads = runConfidenceStage(verifiedLeads, intentDetails);
+            // 4. CONFIDENCE STAGE            onProgress?.('📊 Starting Confidence Scoring...');
+            const scoredLeads = runConfidenceStage(verifiedLeads, intentDetails);
 
             // 5. CLASSIFY STAGE
             onProgress?.('🏷️ Starting Lead Classification...');
