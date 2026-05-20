@@ -47,8 +47,7 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
             max_results:         options.maxResults || 10,
             include_answer:      false,
             include_raw_content: false,
-        }, { headers: { 'Content-Type': 'application/json' }, timeout: 12000 });
-        recordTavilyUsage();
+        }, { headers: { 'Content-Type': 'application/json' }, timeout: 12000 });        recordTavilyUsage();
         return (response.data?.results || []).map(r => ({
             title:   r.title   || '',
             url:     r.url     || '',
@@ -96,8 +95,8 @@ Rules:
         return parsed;
 
     } catch (e) {
-        console.warn('[Intent Parse Failed]:', e.message);        return { industry: 'General', business_type: 'Company', target_role: 'Decision Maker', location: null, purpose: 'outreach' };
-    }
+        console.warn('[Intent Parse Failed]:', e.message);
+        return { industry: 'General', business_type: 'Company', target_role: 'Decision Maker', location: null, purpose: 'outreach' };    }
 }
 
 // ─── COLLECT STAGE: QUERY CONSTRUCTION ─────────────────────────────────────────
@@ -145,8 +144,8 @@ function filterRawSources(results) {
         /reddit\.com/i, /medium\.com/i, /quora\.com/i, /wikipedia\.org/i,
         /stackoverflow\.com/i, /linkedin\.com\/posts/i, /facebook\.com/i,
         /twitter\.com/i, /x\.com/i, /instagram\.com/i,
-        /hubspot\.com\/blog/i, /moz\.com\/blog/i, /semrush\.com\/blog/i,        /clutch\.co/i, /yelp\.com/i, /g2\.com/i, /capterra\.com/i,
-        /crunchbase\.com/i, /apollo\.io/i, /hunter\.io/i,
+        /hubspot\.com\/blog/i, /moz\.com\/blog/i, /semrush\.com\/blog/i,
+        /clutch\.co/i, /yelp\.com/i, /g2\.com/i, /capterra\.com/i,        /crunchbase\.com/i, /apollo\.io/i, /hunter\.io/i,
         /top\s+\d+/i, /best\s+\d+/i, /listicle/i
     ];
 
@@ -195,8 +194,7 @@ function filterRawSources(results) {
         }
     }
     console.log(`🧹 [FILTERING] Reduced ${results.length} results to ${filtered.length} high-quality candidates`);
-    return filtered;
-}
+    return filtered;}
 
 // ─── COLLECT STAGE: DOMAIN NORMALIZATION ───────────────────────────────────────
 /**
@@ -243,8 +241,8 @@ function normalizeDomains(filteredResults) {
             }
         } catch (e) {
             // Invalid URL, skip
-        }    }
-
+        }
+    }
     return Array.from(domainMap.values());
 }
 
@@ -292,9 +290,9 @@ async function runCollectStage(message, apiKey, tavilyKey, onProgress) {
         for (const query of queries) {
             if (getTavilyRemaining() <= 0) break;
             onProgress?.(`🔎 Searching: ${query.slice(0, 50)}...`);
-            const results = await searchWithTavily(query, tavilyKey, { maxResults: 5 });            allRawResults = [...allRawResults, ...results];
+            const results = await searchWithTavily(query, tavilyKey, { maxResults: 5 });
+            allRawResults = [...allRawResults, ...results];
         }
-
         if (allRawResults.length === 0) {
             return [];
         }
@@ -321,6 +319,8 @@ async function runCollectStage(message, apiKey, tavilyKey, onProgress) {
             return {
                 domain: entity.domain,
                 source_url: entity.source_url,
+                title: entity.title,
+                snippet: entity.snippet,
                 reason: reason,
                 initial_confidence: parseFloat(confidence.toFixed(2))
             };
@@ -338,10 +338,110 @@ async function runCollectStage(message, apiKey, tavilyKey, onProgress) {
     }
 }
 
+// ─── INFER STAGE: INTELLIGENCE EXTRACTION ──────────────────────────────────────
+/**
+ * The "Thinking Layer".
+ * Transforms stored business entities into structured intelligence. * Does NOT search the internet.
+ */
+async function runInferStage(collectedCandidates, apiKey, onProgress) {
+    if (!collectedCandidates || collectedCandidates.length === 0) {
+        return [];
+    }
+
+    console.log(`🧠 [INFER STAGE] Starting intelligence extraction for ${collectedCandidates.length} companies...`);
+    onProgress?.('🧠 Analyzing company intelligence...');
+
+    const inferredResults = [];
+
+    // Process in batches to avoid rate limits if necessary, but for now sequential for simplicity/clarity
+    for (const candidate of collectedCandidates) {
+        try {
+            const inferPrompt = `You are a B2B Intelligence Analyst. 
+Analyze the following company data to extract meaningful intelligence for outreach.
+DO NOT search the internet. Use ONLY the provided data.
+
+INPUT DATA:
+- Domain: ${candidate.domain}
+- Source URL: ${candidate.source_url}
+- Page Title: ${candidate.title}
+- Snippet/Content: ${candidate.snippet}
+
+TASK:
+1. Company Understanding: What do they actually do? What industry? What stage (startup/growth/enterprise)?
+2. Decision-Maker Identification: Who is the best person to contact? (e.g., SaaS->Founder, Logistics->Ops Manager).
+3. Pain Point Inference: What are 2-5 likely business problems they face based on their industry/type?
+4. Outreach Strategy: What is the best angle and tone?
+5. Confidence: How confident are you in this analysis (0.0-1.0)?
+
+Return ONLY valid JSON:
+{
+  "domain": "${candidate.domain}",
+  "industry": "string (Specific industry category)",
+  "company_stage": "string (startup | growth | enterprise | local_small_business)",
+  "decision_maker": {
+    "primary": "string (e.g., Founder, CEO, Ops Manager)",
+    "secondary": "string (e.g., Head of Growth, Director)"
+  },
+  "pain_points": [
+    "string (Pain point 1)",
+    "string (Pain point 2)"
+  ],
+  "outreach_strategy": {
+    "angle": "string (e.g., ROI-focused, Efficiency-focused, Partnership)",
+    "tone": "string (e.g., Direct, Professional, Casual)"
+  },
+  "confidence": 0.0-1.0}
+
+RULES:
+- NEVER guess specific facts like revenue or employee count.
+- ALWAYS base inference on stored data signals.
+- If data is weak, lower confidence and keep pain points generic to the industry.`;
+
+            const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+                model:       'gpt-4o-mini',
+                messages:    [{ role: 'user', content: inferPrompt }],
+                max_tokens:  400,
+                temperature: 0.2,
+            }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), `OpenAI:Infer:${candidate.domain}`);
+
+            if (res) {
+                const raw = res.data.choices[0].message.content.replace(/```json|```/g, '');
+                const parsed = JSON.parse(raw);
+                
+                // Merge with original candidate data if needed, or just return inferred
+                inferredResults.push({
+                    ...candidate, // Keep domain, url, etc.
+                    intelligence: parsed
+                });
+                console.log(`✅ [INFER] Completed for ${candidate.domain}`);
+            }
+
+        } catch (err) {
+            console.warn(`⚠️ [INFER] Failed for ${candidate.domain}: ${err.message}`);
+            // Push a fallback minimal structure so pipeline doesn't break
+            inferredResults.push({
+                ...candidate,
+                intelligence: {
+                    domain: candidate.domain,
+                    industry: "Unknown",
+                    company_stage: "unknown",
+                    decision_maker: { primary: "Owner", secondary: "Manager" },
+                    pain_points: ["General operational efficiency"],
+                    outreach_strategy: { angle: "General value prop", tone: "Professional" },
+                    confidence: 0.3
+                }
+            });
+        }
+    }
+
+    console.log(`✅ [INFER STAGE] Completed. Analyzed ${inferredResults.length} companies.`);
+    return inferredResults;
+}
+
 // ─── INTENT CLASSIFIER (For Routing) ────────────────────────────────────────────
-const INTENT = {
-    LEAD_GEN:    'lead_gen',
-    CHAT:        'chat',};
+const INTENT = {    LEAD_GEN:    'lead_gen',
+    CHAT:        'chat',
+};
 
 async function _classifyIntent(message, history, apiKey) {
     const recentHistory = (history || []).slice(-6)
@@ -388,9 +488,9 @@ async function _handleChat(message, history, userProfile, apiKey) {
     const systemPrompt = `You are an intelligent AI assistant.
 You help with conversations, answer questions, and assist with business tasks.
 Keep responses concise but complete.`;
-
     const memoryMessages = (history || [])
-        .slice(-20)        .map(h => ({ role: h.role, content: h.content }));
+        .slice(-20)
+        .map(h => ({ role: h.role, content: h.content }));
 
     const messages = [
         { role: 'system',  content: systemPrompt },
@@ -438,18 +538,34 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         const intent = await _classifyIntent(safeMessage, history, apiKey);
         console.log(`🎯 [INTENT] ${intent}`);
-
-        if (intent === INTENT.LEAD_GEN) {            onProgress?.('🚀 Starting Collect Stage...');
+        if (intent === INTENT.LEAD_GEN) {
+            // 1. COLLECT STAGE
+            onProgress?.('🚀 Starting Collect Stage...');
             const candidates = await runCollectStage(safeMessage, apiKey, tavilyKey, onProgress);
             
-            const reply = JSON.stringify(candidates);
+            if (candidates.length === 0) {
+                return {
+                    reply: JSON.stringify([]),
+                    updatedHistory: [
+                        ...history,
+                        { role: 'user', content: safeMessage },
+                        { role: 'assistant', content: 'No candidates found.' },
+                    ],
+                };
+            }
+
+            // 2. INFER STAGE
+            onProgress?.('🧠 Starting Infer Stage...');
+            const enrichedLeads = await runInferStage(candidates, apiKey, onProgress);
+            
+            const reply = JSON.stringify(enrichedLeads);
             
             return {
                 reply,
                 updatedHistory: [
                     ...history,
                     { role: 'user',      content: safeMessage },
-                    { role: 'assistant', content: `[Found ${candidates.length} business candidates]` },
+                    { role: 'assistant', content: `[Found and Analyzed ${enrichedLeads.length} business candidates]` },
                 ],
             };
         }
@@ -470,5 +586,4 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         return { reply: 'An error occurred. Please try again.', updatedHistory: history };
     }
 }
-
 module.exports = { generateFreeResponse };
