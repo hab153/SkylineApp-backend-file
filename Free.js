@@ -685,8 +685,7 @@ function calculateRoleConfidence(lead, userIntent) {
         score += 0.10;
         reasons.push("High-priority decision maker role");
     }
-    return { 
-    : Math.min(Math.max(score, 0), 1), reasons };
+    return { score: Math.min(Math.max(score, 0), 1), reasons };
 }
 
 function calculateSourceConfidence(lead) {
