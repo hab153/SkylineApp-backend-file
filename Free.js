@@ -194,8 +194,7 @@ function normalizeDomains(filteredResults) {
                 const existing = domainMap.get(domain);
                 const currentUrlLower = result.url.toLowerCase();
                 const existingUrlLower = existing.source_url.toLowerCase();
-                const priorityPaths = ['/contact', '/about', '/team', '/leadership'];
-                
+                const priorityPaths = ['/contact', '/about', '/team', '/leadership'];                
                 let shouldReplace = false;
                 for (const path of priorityPaths) {
                     if (currentUrlLower.includes(path) && !existingUrlLower.includes(path)) {
@@ -219,7 +218,7 @@ function normalizeDomains(filteredResults) {
 }
 
 // ─── COLLECT STAGE: CONFIDENCE SCORING ─────────────────────────────────────────
-function calculateConfidence(entity, intent) {
+function calculateCollectConfidence(entity, intent) {
     let score = 0.5;
 
     const url = entity.source_url.toLowerCase();
@@ -243,8 +242,8 @@ function calculateConfidence(entity, intent) {
 
 // ─── COLLECT STAGE: MAIN EXECUTION ─────────────────────────────────────────────
 async function runCollectStage(message, apiKey, tavilyKey, onProgress) {
-    try {        onProgress?.('🧠 Parsing intent...');
-        const intent = await parseIntent(message, apiKey);
+    try {
+        onProgress?.('🧠 Parsing intent...');        const intent = await parseIntent(message, apiKey);
 
         onProgress?.('🔍 Constructing search queries...');
         const queries = constructQueries(intent);
@@ -268,7 +267,7 @@ async function runCollectStage(message, apiKey, tavilyKey, onProgress) {
         const normalizedEntities = normalizeDomains(filteredResults);
 
         const output = normalizedEntities.map(entity => {
-            const confidence = calculateConfidence(entity, intent);
+            const confidence = calculateCollectConfidence(entity, intent);
             
             const reasons = [];
             if (entity.source_url.toLowerCase().includes('/contact')) reasons.push('Contact page found');
@@ -292,8 +291,8 @@ async function runCollectStage(message, apiKey, tavilyKey, onProgress) {
 
         console.log(`✅ [COLLECT STAGE] Completed. Found ${output.length} candidates.`);
         return output;
-    } catch (error) {
-        console.error('❌ [COLLECT STAGE] Error:', error.message);
+
+    } catch (error) {        console.error('❌ [COLLECT STAGE] Error:', error.message);
         return [];
     }
 }
@@ -341,8 +340,8 @@ Return ONLY valid JSON:
     "string (Pain point 1)",
     "string (Pain point 2)"
   ],
-  "outreach_strategy": {    "angle": "string (e.g., ROI-focused, Efficiency-focused, Partnership)",
-    "tone": "string (e.g., Direct, Professional, Casual)"
+  "outreach_strategy": {
+    "angle": "string (e.g., ROI-focused, Efficiency-focused, Partnership)",    "tone": "string (e.g., Direct, Professional, Casual)"
   },
   "confidence": 0.0-1.0
 }
@@ -390,8 +389,8 @@ RULES:
     console.log(`✅ [INFER STAGE] Completed. Analyzed ${inferredResults.length} companies.`);
     return inferredResults;
 }
-// ─── VERIFY STAGE: TRUST ENGINE ────────────────────────────────────────────────
 
+// ─── VERIFY STAGE: TRUST ENGINE ────────────────────────────────────────────────
 const DISPOSABLE_DOMAINS = new Set([
     'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
     'yopmail.com','trashmail.com','fakeinbox.com','sharklasers.com',
@@ -433,14 +432,14 @@ async function smtpProbeEmail(email, domain) {
             const timeout = setTimeout(() => {
                 try { socket.destroy(); } catch {}
                 resolve('timeout');
-            }, 5000); // Short timeout for verification stage
+            }, 5000);
 
             const socket = net.createConnection(25, mxHost);
             let   buffer = '';
             let   stage  = 0;
 
-            socket.on('error', (err) => {                clearTimeout(timeout);
-                resolve('error');
+            socket.on('error', (err) => {
+                clearTimeout(timeout);                resolve('error');
             });
 
             socket.on('data', (chunk) => {
@@ -487,37 +486,8 @@ async function smtpProbeEmail(email, domain) {
     }
 }
 
-function calculateTrustScore(verification, roleMatch, sourceConfidence) {
-    let score = 0;
-    // Technical Validity (40%)
-    if (verification.email_syntax) score += 10;
-    if (verification.mx_valid) score += 20;
-    if (verification.smtp_status === 'valid') score += 10;
-    else if (verification.smtp_status === 'unknown') score += 5;
-
-    // Contextual Validity (40%)
-    if (roleMatch) score += 20;
-    if (verification.business_legitimacy) score += 20;
-
-    // Source Confidence (20%)
-    score += (sourceConfidence * 20);
-
-    return parseFloat(Math.min(score, 100).toFixed(2));
-}
-
-function determineStatus(trustScore, verification) {
-    if (!verification.email_syntax || !verification.mx_valid || verification.is_disposable || verification.is_free_provider) {
-        return 'REJECTED';
-    }
-    if (trustScore >= 90) return 'VERIFIED';
-    if (trustScore >= 75) return 'STRONG_MATCH';
-    if (trustScore >= 50) return 'PROBABLE';
-    return 'LOW_CONFIDENCE';
-}
-
 async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
     if (!enrichedLeads || enrichedLeads.length === 0) return [];
-
     console.log(`🛡️ [VERIFY STAGE] Starting verification for ${enrichedLeads.length} leads...`);
     onProgress?.('🛡️ Verifying trust and reachability...');
 
@@ -529,40 +499,37 @@ async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
             const intelligence = lead.intelligence || {};
             const inferredRole = intelligence.decision_maker?.primary || 'Owner';
             
-            // 1. Email Syntax & Generation (Simulated for this stage as we don't have extracted emails yet)
-            // In a full system, this would take extracted emails. Here we infer the *likely* email structure
-            // or check if the snippet contained one. For now, we verify the DOMAIN primarily.
-            
             // Check if snippet had an email
             const snippetEmailMatch = lead.snippet.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
             const foundEmail = snippetEmailMatch ? snippetEmailMatch[0] : null;
 
-            const emailToVerify = foundEmail || `contact@${domain}`; // Fallback for domain verification            
+            const emailToVerify = foundEmail || `contact@${domain}`;
             const syntaxValid = isValidEmailFormat(emailToVerify);
             const isDisposable = DISPOSABLE_DOMAINS.has(domain);
             const isFreeProvider = FREE_EMAIL_PROVIDERS.has(domain);
 
-            // 2. Domain & MX Validation
+            // Domain & MX Validation
             const mxValid = await validateMX(domain);
 
-            // 3. SMTP Probe (Optional - only if MX valid and not free/disposable)
+            // SMTP Probe
             let smtpStatus = 'skipped';
-            if (mxValid && !isFreeProvider && !isDisposable) {
-                smtpStatus = await smtpProbeEmail(emailToVerify, domain);
+            if (mxValid && !isFreeProvider && !isDisposable && foundEmail) {
+                smtpStatus = await smtpProbeEmail(foundEmail, domain);
+            } else if (mxValid && !isFreeProvider && !isDisposable) {
+                 // Probe the generic contact if no specific email found
+                 smtpStatus = await smtpProbeEmail(`contact@${domain}`, domain);
             }
 
-            // 4. Role Validation
+            // Role Validation
             const requestedRole = (userIntent.target_role || 'Decision Maker').toLowerCase();
             const inferredRoleLower = inferredRole.toLowerCase();
-            
-            // Simple keyword match for role validation
             const roleKeywords = requestedRole.split(/\s+/).filter(w => w.length > 2);
             const roleMatch = roleKeywords.some(kw => inferredRoleLower.includes(kw)) || 
                               inferredRoleLower.includes('founder') || 
                               inferredRoleLower.includes('ceo') || 
                               inferredRoleLower.includes('owner');
 
-            // 5. Business Legitimacy (Based on Infer Stage Confidence & Source)
+            // Business Legitimacy
             const businessLegitimacy = (intelligence.confidence > 0.5) && (lead.initial_confidence > 0.5);
 
             const verification = {
@@ -570,42 +537,240 @@ async function runVerifyStage(enrichedLeads, userIntent, apiKey, onProgress) {
                 mx_valid: mxValid,
                 smtp_status: smtpStatus,
                 is_disposable: isDisposable,
-                is_free_provider: isFreeProvider,
-                role_match: roleMatch,
+                is_free_provider: isFreeProvider,                role_match: roleMatch,
                 source_confidence: lead.initial_confidence,
-                business_legitimacy: businessLegitimacy
+                business_legitimacy: businessLegitimacy,
+                has_specific_email: !!foundEmail
             };
 
-            const trustScore = calculateTrustScore(verification, roleMatch, lead.initial_confidence);
-            const status = determineStatus(trustScore, verification);
-
-            if (status !== 'REJECTED') {
-                verifiedLeads.push({
-                    company: domain,
-                    contact: {
-                        name: intelligence.decision_maker?.primary || 'Decision Maker',
-                        role: inferredRole,
-                        email: foundEmail || null // Null if not found, but domain is verified
-                    },                    verification: verification,
-                    trust_score: trustScore / 100, // Normalize to 0-1
-                    status: status,
-                    intelligence: intelligence, // Keep inferred data
-                    source_url: lead.source_url
-                });
-            } else {
-                console.log(`🗑️ [VERIFY] Rejected ${domain}: ${status}`);
-            }
+            verifiedLeads.push({
+                company: domain,
+                contact: {
+                    name: intelligence.decision_maker?.primary || 'Decision Maker',
+                    role: inferredRole,
+                    email: foundEmail || null
+                },
+                verification: verification,
+                intelligence: intelligence,
+                source_url: lead.source_url
+            });
 
         } catch (err) {
             console.warn(`⚠️ [VERIFY] Error for ${lead.domain}: ${err.message}`);
         }
     }
 
-    // Sort by trust score descending
-    verifiedLeads.sort((a, b) => b.trust_score - a.trust_score);
-
-    console.log(`✅ [VERIFY STAGE] Completed. ${verifiedLeads.length} trusted leads.`);
+    console.log(`✅ [VERIFY STAGE] Completed. ${verifiedLeads.length} leads passed technical checks.`);
     return verifiedLeads;
+}
+
+// ─── CONFIDENCE / SCORING STAGE ────────────────────────────────────────────────
+
+function calculateCompanyConfidence(lead) {
+    let score = 0.5; // Base
+    const reasons = [];
+
+    // Domain Quality & Legitimacy
+    if (lead.verification.business_legitimacy) {
+        score += 0.25;
+        reasons.push("Business legitimacy confirmed via inference");
+    } else {
+        reasons.push("Low business legitimacy signals");
+    }
+
+    // Source Authority (from Collect Stage)
+    if (lead.verification.source_confidence > 0.8) {
+        score += 0.15;
+        reasons.push("High authority source URL");
+    } else if (lead.verification.source_confidence > 0.5) {
+        score += 0.10;
+        reasons.push("Moderate authority source URL");
+    }
+    // Penalties
+    if (lead.verification.is_free_provider) score -= 0.20;
+
+    return { score: Math.min(Math.max(score, 0), 1), reasons };
+}
+
+function calculateHumanConfidence(lead) {
+    let score = 0.3; // Base low because we rarely have perfect human ID without enrichment
+    const reasons = [];
+
+    const name = lead.contact.name;
+    const role = lead.contact.role;
+
+    // Specific Name Identified?
+    if (name && name !== 'Decision Maker' && name !== 'Owner' && name !== 'CEO') {
+        score += 0.40;
+        reasons.push("Specific human name identified");
+    } else {
+        reasons.push("Generic role identifier only");
+    }
+
+    // Role Specificity
+    if (role && role !== 'Decision Maker') {
+        score += 0.20;
+        reasons.push("Specific job role identified");
+    }
+
+    return { score: Math.min(Math.max(score, 0), 1), reasons };
+}
+
+function calculateEmailConfidence(lead) {
+    let score = 0.2; // Base low
+    const reasons = [];
+
+    // Syntax
+    if (lead.verification.email_syntax) {
+        score += 0.10;
+        reasons.push("Valid email syntax");
+    } else {
+        return { score: 0, reasons: ["Invalid email syntax"] };
+    }
+
+    // MX Records
+    if (lead.verification.mx_valid) {
+        score += 0.20;
+        reasons.push("MX records valid");
+    } else {
+        return { score: 0, reasons: ["Invalid MX records"] };
+    }
+    // SMTP Status
+    if (lead.verification.smtp_status === 'valid') {
+        score += 0.30;
+        reasons.push("SMTP server accepted recipient");
+    } else if (lead.verification.smtp_status === 'invalid') {
+        return { score: 0, reasons: ["SMTP server rejected recipient"] };
+    } else if (lead.verification.smtp_status === 'unknown' || lead.verification.smtp_status === 'skipped') {
+        score += 0.10; // Neutral
+        reasons.push("SMTP status inconclusive");
+    }
+
+    // Disposable/Free Checks
+    if (lead.verification.is_disposable) {
+        return { score: 0, reasons: ["Disposable email domain"] };
+    }
+    if (lead.verification.is_free_provider) {
+        score -= 0.10;
+        reasons.push("Free email provider (lower B2B trust)");
+    }
+
+    // Has Specific Email?
+    if (lead.verification.has_specific_email) {
+        score += 0.10;
+        reasons.push("Specific email found in source");
+    } else {
+        score -= 0.10;
+        reasons.push("Using generic/constructed email");
+    }
+
+    return { score: Math.min(Math.max(score, 0), 1), reasons };
+}
+
+function calculateRoleConfidence(lead, userIntent) {
+    let score = 0.5;
+    const reasons = [];
+
+    if (lead.verification.role_match) {
+        score += 0.30;
+        reasons.push("Role matches user intent");
+    } else {
+        score -= 0.20;
+        reasons.push("Role mismatch with user intent");
+    }
+
+    // Priority Bonus
+    const roleLower = (lead.contact.role || '').toLowerCase();
+    if (roleLower.includes('founder') || roleLower.includes('ceo') || roleLower.includes('owner')) {
+        score += 0.10;
+        reasons.push("High-priority decision maker role");
+    }
+    return { score: Math.min(Math.max(score, 0), 1), reasons };
+}
+
+function calculateSourceConfidence(lead) {
+    // Directly map from initial collect confidence but normalized
+    let score = lead.verification.source_confidence || 0.5;
+    const reasons = [];
+
+    if (score > 0.8) reasons.push("High-quality source URL structure");
+    else if (score > 0.5) reasons.push("Standard source URL");
+    else reasons.push("Weak source signals");
+
+    return { score: score, reasons };
+}
+
+function determineStatus(overallScore) {
+    if (overallScore >= 0.86) return 'VERIFIED';
+    if (overallScore >= 0.66) return 'STRONG_MATCH';
+    if (overallScore >= 0.46) return 'PROBABLE';
+    if (overallScore >= 0.21) return 'LOW_CONFIDENCE';
+    return 'REJECTED';
+}
+
+function runConfidenceStage(verifiedLeads, userIntent) {
+    console.log(`📊 [CONFIDENCE STAGE] Scoring ${verifiedLeads.length} leads...`);
+
+    const scoredLeads = [];
+
+    for (const lead of verifiedLeads) {
+        // 1. Calculate Dimensional Scores
+        const companyScore = calculateCompanyConfidence(lead);
+        const humanScore = calculateHumanConfidence(lead);
+        const emailScore = calculateEmailConfidence(lead);
+        const roleScore = calculateRoleConfidence(lead, userIntent);
+        const sourceScore = calculateSourceConfidence(lead);
+
+        // 2. Weighted Scoring Engine
+        // Weights: Company 25%, Human 20%, Email 25%, Role 15%, Source 15%
+        const overallScore = (
+            (companyScore.score * 0.25) +
+            (humanScore.score * 0.20) +
+            (emailScore.score * 0.25) +
+            (roleScore.score * 0.15) +
+            (sourceScore.score * 0.15)
+        );
+
+        // 3. Determine Status
+        const status = determineStatus(overallScore);
+        // 4. Evidence Traceability
+        const allReasons = [
+            ...companyScore.reasons,
+            ...humanScore.reasons,
+            ...emailScore.reasons,
+            ...roleScore.reasons,
+            ...sourceScore.reasons
+        ];
+
+        // Aggressive Rejection: If status is REJECTED, skip it
+        if (status === 'REJECTED') {
+            console.log(`🗑️ [CONFIDENCE] Rejected ${lead.company}: Score ${overallScore.toFixed(2)}`);
+            continue;
+        }
+
+        scoredLeads.push({
+            company: lead.company,
+            contact: lead.contact,
+            source_url: lead.source_url,
+            intelligence: lead.intelligence,
+            confidence: {
+                company_confidence: parseFloat(companyScore.score.toFixed(2)),
+                human_confidence: parseFloat(humanScore.score.toFixed(2)),
+                email_confidence: parseFloat(emailScore.score.toFixed(2)),
+                role_confidence: parseFloat(roleScore.score.toFixed(2)),
+                source_confidence: parseFloat(sourceScore.score.toFixed(2)),
+                overall_confidence: parseFloat(overallScore.toFixed(2)),
+                status: status,
+                reasoning: allReasons
+            }
+        });
+    }
+
+    // Sort by overall confidence descending
+    scoredLeads.sort((a, b) => b.confidence.overall_confidence - a.confidence.overall_confidence);
+
+    console.log(`✅ [CONFIDENCE STAGE] Completed. ${scoredLeads.length} high-trust leads remaining.`);
+    return scoredLeads;
 }
 
 // ─── INTENT CLASSIFIER (For Routing) ────────────────────────────────────────────
@@ -618,7 +783,6 @@ async function _classifyIntent(message, history, apiKey) {
     const recentHistory = (history || []).slice(-6)
         .map(h => `${h.role}: ${h.content}`)
         .join('\n');
-
     const classifyPrompt = `You are an intent classifier.
 Classify the user message into EXACTLY ONE of these intents:
 
@@ -635,7 +799,8 @@ Return ONLY the intent string. No explanation. Just one of: lead_gen | chat`;
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: classifyPrompt }],            max_tokens:  10,
+            messages:    [{ role: 'user', content: classifyPrompt }],
+            max_tokens:  10,
             temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
 
@@ -667,7 +832,6 @@ Keep responses concise but complete.`;
         ...memoryMessages,
         { role: 'user',    content: message },
     ];
-
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
@@ -685,6 +849,7 @@ Keep responses concise but complete.`;
         return 'Something went wrong. Please try again.';
     }
 }
+
 // ─── MAIN EXPORT: generateFreeResponse ─────────────────────────────────────────
 async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
@@ -708,15 +873,14 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const intent = await _classifyIntent(safeMessage, history, apiKey);
         console.log(`🎯 [INTENT] ${intent}`);
         
-        // Parse intent details for Verify Stage
+        // Parse intent details for Verify/Confidence Stages
         const intentDetails = await parseIntent(safeMessage, apiKey);
 
         if (intent === INTENT.LEAD_GEN) {
             // 1. COLLECT STAGE
             onProgress?.('🚀 Starting Collect Stage...');
             const candidates = await runCollectStage(safeMessage, apiKey, tavilyKey, onProgress);
-            
-            if (candidates.length === 0) {
+                        if (candidates.length === 0) {
                 return {
                     reply: JSON.stringify([]),
                     updatedHistory: [
@@ -733,15 +897,20 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             
             // 3. VERIFY STAGE
             onProgress?.('🛡️ Starting Verify Stage...');
-            const verifiedLeads = await runVerifyStage(enrichedLeads, intentDetails, apiKey, onProgress);            
-            const reply = JSON.stringify(verifiedLeads);
+            const verifiedLeads = await runVerifyStage(enrichedLeads, intentDetails, apiKey, onProgress);
+
+            // 4. CONFIDENCE STAGE
+            onProgress?.('📊 Starting Confidence Scoring...');
+            const finalLeads = runConfidenceStage(verifiedLeads, intentDetails);
+            
+            const reply = JSON.stringify(finalLeads);
             
             return {
                 reply,
                 updatedHistory: [
                     ...history,
                     { role: 'user',      content: safeMessage },
-                    { role: 'assistant', content: `[Found, Analyzed, and Verified ${verifiedLeads.length} business leads]` },
+                    { role: 'assistant', content: `[Found, Verified, and Scored ${finalLeads.length} high-trust leads]` },
                 ],
             };
         }
@@ -760,7 +929,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
     } catch (error) {
         console.error('❌ [AI ENGINE] Fatal error:', error.message);
         return { reply: 'An error occurred. Please try again.', updatedHistory: history };
-    }
-}
+    }}
 
 module.exports = { generateFreeResponse };
