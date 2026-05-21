@@ -37,46 +37,24 @@ const ROLE_PRIORITY = {
 };
 
 // ─── DOMAIN REPUTATION BLOCKLIST ─────────────────────────────────────────────
-const REPUTATION_BLOCKED_DOMAINS = new Set([
-    // Extend with known bad actors as needed
-]);
+const REPUTATION_BLOCKED_DOMAINS = new Set([]);
 
 // ─── SEARCH DIVERSIFICATION ───────────────────────────────────────────────────
 const MIN_POOL_SIZE = 3;
 
 // ─── CONTENT QUALITY FILTER — LOW-VALUE PAGE SIGNALS ─────────────────────────
-// NEW: Used in _scorePageBusinessRelevance() to reject editorial/SEO noise early.
 const LOW_VALUE_URL_PATTERNS = [
-    /\/blog\//i,    /\/article\//i,
-    /\/news\//i,
-    /\/tutorial\//i,
-    /\/how-to\//i,
-    /\/guide\//i,
-    /\/tips\//i,
-    /\/resources\//i,
-    /\/learn\//i,
-    /\/wiki\//i,
-    /\/forum\//i,
-    /\.pdf$/i,
-    /reddit\.com/i,
-    /medium\.com/i,
-    /quora\.com/i,
-    /wikipedia\.org/i,
-    /stackoverflow\.com/i,
-    /hubspot\.com\/blog/i,
-    /moz\.com\/blog/i,
+    /\/blog\//i, /\/article\//i, /\/news\//i, /\/tutorial\//i,
+    /\/how-to\//i, /\/guide\//i, /\/tips\//i, /\/resources\//i,
+    /\/learn\//i, /\/wiki\//i, /\/forum\//i, /\.pdf$/i,
+    /reddit\.com/i, /medium\.com/i, /quora\.com/i, /wikipedia\.org/i,
+    /stackoverflow\.com/i, /hubspot\.com\/blog/i, /moz\.com\/blog/i,
     /semrush\.com\/blog/i,
 ];
 
 const HIGH_VALUE_URL_PATTERNS = [
-    /\/about/i,
-    /\/team/i,
-    /\/contact/i,
-    /\/company/i,
-    /\/people/i,
-    /\/leadership/i,
-    /\/founders/i,
-    /\/our-story/i,
+    /\/about/i, /\/team/i, /\/contact/i, /\/company/i,
+    /\/people/i, /\/leadership/i, /\/founders/i, /\/our-story/i,
 ];
 
 const HIGH_VALUE_TITLE_SIGNALS = [
@@ -96,7 +74,8 @@ const LOW_VALUE_TITLE_SIGNALS = [
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
     LEAD_GEN:    'lead_gen',
-    CHAT:        'chat',    EMAIL_DRAFT: 'email_draft',
+    CHAT:        'chat',
+    EMAIL_DRAFT: 'email_draft',
     BUSINESS_QA: 'business_qa',
 };
 
@@ -111,21 +90,21 @@ const REASONING_FILTER = `
 
 // ─── BANNED WORDS ─────────────────────────────────────────────────────────────
 const BANNED_ADJECTIVES = [
-    'transformative','seamless','mission-critical','synergy','game-changer',
-    'revolutionary','cutting-edge','innovative','disruptive','next-level',
-    'holistic','robust','scalable','leverage','streamline','optimize',
-    'empower','unlock','elevate','enhance','boost','accelerate','amplify',
-    'delve','awe-inspiring','exciting','landscape','unleash','dynamic',
-    'groundbreaking','paradigm','ecosystem','value-add','best-in-class',
+    'transformative', 'seamless', 'mission-critical', 'synergy', 'game-changer',
+    'revolutionary', 'cutting-edge', 'innovative', 'disruptive', 'next-level',
+    'holistic', 'robust', 'scalable', 'leverage', 'streamline', 'optimize',
+    'empower', 'unlock', 'elevate', 'enhance', 'boost', 'accelerate', 'amplify',
+    'delve', 'awe-inspiring', 'exciting', 'landscape', 'unleash', 'dynamic',
+    'groundbreaking', 'paradigm', 'ecosystem', 'value-add', 'best-in-class',
 ];
 
 const BANNED_PHRASES = [
-    'I hope this finds you well','I wanted to reach out','touch base',
-    'circle back','quick question','just following up','as per my last email',
-    'I am reaching out because','My name is','I hope you are doing well',
-    'let me know your thoughts','feel free to','do not hesitate',
-    'please find attached','as mentioned','at your earliest convenience',
-    'in today\'s world','in the current landscape','going forward',
+    'I hope this finds you well', 'I wanted to reach out', 'touch base',
+    'circle back', 'quick question', 'just following up', 'as per my last email',
+    'I am reaching out because', 'My name is', 'I hope you are doing well',
+    'let me know your thoughts', 'feel free to', 'do not hesitate',
+    'please find attached', 'as mentioned', 'at your earliest convenience',
+    'in today\'s world', 'in the current landscape', 'going forward',
 ];
 
 const BANNED_STATS_INSTRUCTION = `
@@ -162,40 +141,55 @@ function checkTavilyReset() {
         tavilyQuota.lastReset = Date.now();
     }
 }
-function getTavilyRemaining() { checkTavilyReset(); return tavilyQuota.limit - tavilyQuota.used; }
-function recordTavilyUsage()  { tavilyQuota.used += 1; }
+
+function getTavilyRemaining() {
+    checkTavilyReset();
+    return tavilyQuota.limit - tavilyQuota.used;
+}
+
+function recordTavilyUsage() {
+    tavilyQuota.used += 1;
+}
 
 function recordOpenAiUsage(inputTokens = 0, outputTokens = 0, model = 'gpt-4o-mini') {
-    openAiTracker.totalCallsThisSession         += 1;
-    openAiTracker.totalInputTokensThisSession   += inputTokens;
-    openAiTracker.totalOutputTokensThisSession  += outputTokens;
+    // FIXED: Ensure we're working with numbers, not null
+    const safeInputTokens = typeof inputTokens === 'number' && !isNaN(inputTokens) ? inputTokens : 0;
+    const safeOutputTokens = typeof outputTokens === 'number' && !isNaN(outputTokens) ? outputTokens : 0;
+    
+    openAiTracker.totalCallsThisSession += 1;
+    openAiTracker.totalInputTokensThisSession += safeInputTokens;
+    openAiTracker.totalOutputTokensThisSession += safeOutputTokens;
 
     const PRICING = {
-        'gpt-4o-mini': { input: 0.15,  output: 0.60  },
-        'gpt-4o':      { input: 2.50,  output: 10.00 },
+        'gpt-4o-mini': { input: 0.15, output: 0.60 },
+        'gpt-4o': { input: 2.50, output: 10.00 },
     };
     const rates = PRICING[model] ?? PRICING['gpt-4o-mini'];
     costTracker.estimatedUSDThisSession +=
-        (inputTokens  / 1_000_000) * rates.input +
-        (outputTokens / 1_000_000) * rates.output;
+        (safeInputTokens / 1_000_000) * rates.input +
+        (safeOutputTokens / 1_000_000) * rates.output;
 }
 
 // ─── PERSISTENT DOMAIN DEDUP ──────────────────────────────────────────────────
 const globalSeenDomains = new Set();
-
-// ─── PERSISTENT COMPANY NAME DEDUP ───────────────────────────────────────────
 const globalSeenCompanyNames = new Set();
 
 // ─── IN-MEMORY RESEARCH CACHE ─────────────────────────────────────────────────
 const researchCache = new Map();
+
 function getCachedResearch(domain) {
     const hit = researchCache.get(domain);
     if (!hit) return null;
-    if (Date.now() - hit.timestamp > CACHE_TTL_MS) { researchCache.delete(domain); return null; }
+    if (Date.now() - hit.timestamp > CACHE_TTL_MS) {
+        researchCache.delete(domain);
+        return null;
+    }
     console.log(`💾 [CACHE HIT] ${domain}`);
     return hit.data;
 }
-function setCachedResearch(domain, data) {    researchCache.set(domain, { data, timestamp: Date.now() });
+
+function setCachedResearch(domain, data) {
+    researchCache.set(domain, { data, timestamp: Date.now() });
 }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
@@ -212,104 +206,90 @@ async function withRetry(fn, label, retries = 2, delayMs = 800) {
     return null;
 }
 
-// ─── NEW: PAGE BUSINESS RELEVANCE SCORER ─────────────────────────────────────
-// Scores a search result 0–100 for B2B business entity relevance BEFORE
-// committing Tavily quota to research it. High-value pages get processed;
-// low-value content pages are rejected early to reduce noise and hallucination.
-//
-// Score bands:
-//   70–100 : Process — strong business entity signal
-//   40–69  : Process — moderate signal, worth checking
-//   0–39   : Reject — likely blog/SEO/editorial content
-//
+// ─── PAGE BUSINESS RELEVANCE SCORER ─────────────────────────────────────
 function _scorePageBusinessRelevance(result) {
-    const url     = (result.url     || '').toLowerCase();
-    const title   = (result.title   || '').toLowerCase();
+    if (!result) return 0;
+    
+    const url = (result.url || '').toLowerCase();
+    const title = (result.title || '').toLowerCase();
     const snippet = (result.snippet || '').toLowerCase();
 
-    let score = 50; // neutral baseline
+    let score = 50;
 
-    // ── Hard reject: known low-value URL patterns ─────────────────────────
     for (const pattern of LOW_VALUE_URL_PATTERNS) {
         if (pattern.test(url)) {
             score -= 35;
-            console.log(`🔴 [PAGE SCORE] Low-value URL pattern matched: ${url} → score penalised`);
             break;
         }
     }
 
-    // ── Bonus: high-value URL structure signals ───────────────────────────
     for (const pattern of HIGH_VALUE_URL_PATTERNS) {
-        if (pattern.test(url)) { score += 15; break; }
+        if (pattern.test(url)) {
+            score += 15;
+            break;
+        }
     }
 
-    // ── Title signals ─────────────────────────────────────────────────────
-    for (const signal of HIGH_VALUE_TITLE_SIGNALS) {        if (title.includes(signal)) { score += 12; break; }
+    for (const signal of HIGH_VALUE_TITLE_SIGNALS) {
+        if (title.includes(signal)) {
+            score += 12;
+            break;
+        }
     }
+    
     for (const signal of LOW_VALUE_TITLE_SIGNALS) {
-        if (title.includes(signal)) { score -= 20; break; }
+        if (title.includes(signal)) {
+            score -= 20;
+            break;
+        }
     }
 
-    // ── Snippet contact/email signals ─────────────────────────────────────
-    if (snippet.includes('@'))                     score += 10;
-    if (snippet.includes('contact'))               score += 5;
+    if (snippet.includes('@')) score += 10;
+    if (snippet.includes('contact')) score += 5;
     if (/ceo|founder|owner|director/.test(snippet)) score += 10;
     if (/agency|studio|solutions|services/.test(snippet)) score += 8;
-
-    // ── Penalise generic informational content ────────────────────────────
     if (/how to|what is|tutorial|step.by.step|learn how/.test(snippet)) score -= 15;
-    if (/read more|subscribe|newsletter|download free/.test(snippet))   score -= 10;
+    if (/read more|subscribe|newsletter|download free/.test(snippet)) score -= 10;
 
-    const finalScore = Math.max(0, Math.min(100, score));
-    return finalScore;
+    return Math.max(0, Math.min(100, score));
 }
 
-// ─── NEW: INTENT NORMALIZATION ENGINE ────────────────────────────────────────
-// Validates that a discovered lead actually matches the structured intent.
-// Returns true if the lead should be included, false if it should be rejected.
-// This acts as a post-discovery FILTER gate — precision over volume.
-//
+// ─── INTENT NORMALIZATION ENGINE ────────────────────────────────────────
 function _leadMatchesIntent(lead, intentParams) {
-    if (!intentParams || !lead) return true; // no constraints = pass all
+    if (!intentParams || !lead) return true;
 
     const industryLower = (intentParams.industry || '').toLowerCase();
-    const targetLower   = (intentParams.target_role || '').toLowerCase();
+    const targetLower = (intentParams.target_role || '').toLowerCase();
 
-    // Skip validation if intent is vague/generic
     const GENERIC_TERMS = ['general', 'any', 'all', 'business', 'company', 'businesses'];
     const isVagueIntent = GENERIC_TERMS.some(t =>
         industryLower.includes(t) || targetLower.includes(t)
     );
     if (isVagueIntent) return true;
 
-    // Check if the lead's industry context aligns
     const leadIndustry = (lead.industry || '').toLowerCase();
-    const leadCompany  = (lead.company  || '').toLowerCase();
-    const leadDomain   = (lead.domain   || '').toLowerCase();
+    const leadCompany = (lead.company || '').toLowerCase();
+    const leadDomain = (lead.domain || '').toLowerCase();
 
-    // If lead has an explicit industry tag and it's set, do a loose keyword match
     if (leadIndustry && leadIndustry !== 'unknown') {
         const intentKeywords = industryLower.split(/\s+/).filter(w => w.length > 3);
         const anyMatch = intentKeywords.some(kw =>
             leadIndustry.includes(kw) || leadCompany.includes(kw) || leadDomain.includes(kw)
         );
-        // If we have strong keywords and zero match, flag but don't hard-reject        // (domain/company names don't always contain the industry word)
         if (!anyMatch && intentKeywords.length > 1) {
-            console.log(`⚠️ [INTENT FILTER] Weak industry match for "${lead.company}" — industry: "${leadIndustry}" vs intent: "${industryLower}"`);
+            console.log(`⚠️ [INTENT FILTER] Weak industry match for "${lead.company}"`);
         }
     }
 
-    // Role filter: if user requested a specific contact type, enforce it
     const preferredContact = (intentParams.target_role || 'any').toLowerCase();
     if (preferredContact && preferredContact !== 'any') {
         const leadRole = (lead.role || '').toLowerCase();
         if (leadRole && !leadRole.includes(preferredContact.split(' ')[0])) {
-            console.log(`⚠️ [INTENT FILTER] Role mismatch: "${leadRole}" vs requested "${preferredContact}" for ${lead.company}`);
-            // Don't hard-reject on role alone — best contact was already selected by priority
+            console.log(`⚠️ [INTENT FILTER] Role mismatch for ${lead.company}`);
         }
     }
 
-    return true; // Pass — filtering is advisory/logging for now to avoid false rejections
+    return true;
 }
 
 // ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
@@ -318,52 +298,39 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
 
     return withRetry(async () => {
         const response = await axios.post('https://api.tavily.com/search', {
-            api_key:             tavilyKey,
+            api_key: tavilyKey,
             query,
-            search_depth:        'advanced',
-            max_results:         options.maxResults || 5,
-            include_answer:      false,
+            search_depth: 'advanced',
+            max_results: options.maxResults || 5,
+            include_answer: false,
             include_raw_content: false,
         }, { headers: { 'Content-Type': 'application/json' }, timeout: 12000 });
 
         recordTavilyUsage();
-        return (response.data?.results || []).map(r => ({
-            title:   r.title   || '',
-            url:     r.url     || '',
+        
+        // FIXED: Ensure results is always an array
+        const results = response.data?.results || [];
+        return results.map(r => ({
+            title: r.title || '',
+            url: r.url || '',
             snippet: r.content || '',
-            date:    r.published_date || null,
+            date: r.published_date || null,
         }));
-    }, `Tavily:${query.slice(0, 40)}`) ?? [];
+    }, `Tavily:${query.slice(0, 40)}`) || [];
 }
 
-// ─── SEARCH QUERY DIVERSIFICATION ────────────────────────────────────────────
-function _buildFallbackQuery(intentParams) {
-    const locationClause = intentParams.location ? `"${intentParams.location}"` : '';
-    return [
-        intentParams.industry,
-        intentParams.target_role,
-        locationClause,        'company website official',
-        'inurl:about OR inurl:team',
-    ].filter(Boolean).join(' ');
-}
-
-// ─── NEW: ENTITY-FIRST SEARCH QUERY BUILDER ──────────────────────────────────
-// Builds domain-specific, entity-first queries that prioritise business
-// entity pages over informational content. Three query variants per intent.
-//
+// ─── ENTITY-FIRST SEARCH QUERY BUILDER ──────────────────────────────────
 function _buildEntityFirstQueries(intentParams, poolSize) {
-    const loc   = intentParams.location ? `"${intentParams.location}"` : '';
-    const ind   = intentParams.industry || '';
-    const tgt   = intentParams.target_role || '';
+    const loc = intentParams.location ? `"${intentParams.location}"` : '';
+    const ind = intentParams.industry || '';
+    const tgt = intentParams.target_role || '';
 
-    // Query 1 — Primary: company pages with contact/about signals
     const primary = [
         `"${tgt}"`, ind, loc,
         'contact email CEO founder',
         'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
     ].filter(Boolean).join(' ');
 
-    // Query 2 — Entity signals: company name patterns + domain indicators
     const entityFocus = [
         ind, loc,
         'official website company',
@@ -371,7 +338,6 @@ function _buildEntityFirstQueries(intentParams, poolSize) {
         '"contact us" OR "get in touch"',
     ].filter(Boolean).join(' ');
 
-    // Query 3 — Decision-maker focus: find founders/CEOs directly
     const dmFocus = [
         `"${ind}"`, loc,
         'CEO OR founder OR owner OR director',
@@ -385,13 +351,14 @@ function _buildEntityFirstQueries(intentParams, poolSize) {
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
 function extractEmailsFromText(text, companyDomain) {
     if (!text || !companyDomain) return { companyEmails: [], allEmails: [] };
-    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-    const allFound      = [...new Set(text.match(emailRegex) || [])];
-    const domainRoot    = companyDomain.split('.')[0].toLowerCase();
+    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const allFound = [...new Set(text.match(emailRegex) || [])];
+    const domainRoot = companyDomain.split('.')[0].toLowerCase();
     const companyEmails = allFound.filter(e => {
         const ed = e.split('@')[1]?.toLowerCase() || '';
         return ed === companyDomain || ed.includes(domainRoot);
-    });    if (companyEmails.length > 0) {
+    });
+    if (companyEmails.length > 0) {
         console.log(`📧 [REGEX] Found ${companyEmails.length} real email(s) for ${companyDomain}:`, companyEmails);
     }
     return { companyEmails, allEmails: allFound };
@@ -405,14 +372,14 @@ async function huntRealEmails(companyName, domain, tavilyKey) {
         `"${companyName}" "@${domain}" OR "contact" OR "email us" site:${domain}`,
         tavilyKey, { maxResults: 3 }
     );
+    
     const directoryResults = getTavilyRemaining() > 0
         ? await searchWithTavily(
             `"${companyName}" email "@${domain}" contact site:hunter.io OR site:rocketreach.co OR site:signalhire.com OR site:contactout.com`,
             tavilyKey, { maxResults: 3 }
-          )
-        : [];
+        ) : [];
 
-    const allText   = [...contactResults, ...directoryResults]
+    const allText = [...contactResults, ...directoryResults]
         .map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
     const extracted = extractEmailsFromText(allText, domain);
 
@@ -426,55 +393,31 @@ async function huntRealEmails(companyName, domain, tavilyKey) {
 
 function classifyEmail(email, domain) {
     if (!email) return { type: 'none', label: 'Not found', trustLevel: 0 };
-    const localPart   = email.split('@')[0].toLowerCase();
+    const localPart = email.split('@')[0].toLowerCase();
     const emailDomain = email.split('@')[1]?.toLowerCase();
     const domainMatches = emailDomain === domain || emailDomain?.includes(domain.split('.')[0]);
 
     const GENERIC_PREFIXES = [
-        'contact','info','hello','sales','team','support',
-        'enquiries','enquiry','admin','office','mail','general',
-        'press','media',
+        'contact', 'info', 'hello', 'sales', 'team', 'support',
+        'enquiries', 'enquiry', 'admin', 'office', 'mail', 'general',
+        'press', 'media',
     ];
     const isGeneric = GENERIC_PREFIXES.some(p =>
         localPart === p || localPart.startsWith(p + '.')
     );
 
-    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain',           trustLevel: 0  };
-    if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };    if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
-        return          { type: 'confirmed-personal', label: '✓ Personal email (real)',      trustLevel: 90 };
+    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain', trustLevel: 0 };
+    if (isGeneric) return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
+    if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
+        return { type: 'confirmed-personal', label: '✓ Personal email (real)', trustLevel: 90 };
     }
-    return              { type: 'confirmed-other',   label: '✓ Email (real)',                trustLevel: 75 };
-}
-
-// ─── DEAD STUB — DO NOT CALL ──────────────────────────────────────────────────
-// Preserved for audit trail. Intentionally disabled.
-function _DEAD_guessEmailPatterns_DO_NOT_USE(fullName, domain) {
-    if (!fullName || !domain) return [];
-    const parts = fullName.toLowerCase().trim().split(/\s+/);
-    if (parts.length < 2) return [`${parts[0]}@${domain}`];
-    const [first, last] = [parts[0], parts[parts.length - 1]];
-    return [
-        `${first}.${last}@${domain}`,
-        `${first}@${domain}`,
-        `${first[0]}${last}@${domain}`,
-        `${first}${last[0]}@${domain}`,
-        `${first}_${last}@${domain}`,
-        `${last}.${first}@${domain}`,
-        `${first[0]}.${last}@${domain}`,
-    ];
+    return { type: 'confirmed-other', label: '✓ Email (real)', trustLevel: 75 };
 }
 
 // ─── DISPOSABLE / SPAM DOMAIN BLOCKLIST ──────────────────────────────────────
 const DISPOSABLE_DOMAINS = new Set([
-    'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
-    'yopmail.com','trashmail.com','fakeinbox.com','sharklasers.com',
-    'guerrillamailblock.com','grr.la','guerrillamail.info','spam4.me',
-    'dispostable.com','maildrop.cc','discard.email','spamgourmet.com',
-    'spamgourmet.net','spamgourmet.org','wegwerfmail.de','wegwerfmail.net',
-    'wegwerfmail.org','10minutemail.com','10minutemail.net','10minutemail.org',
-    'tempr.email','mailnull.com','spamfree24.org','spamfree24.de',
-    'spamfree24.eu','spamfree24.info','spamfree24.net','spamfree.eu',
-    'spamoff.de',
+    'mailinator.com', 'guerrillamail.com', 'tempmail.com', 'throwam.com',
+    'yopmail.com', 'trashmail.com', 'fakeinbox.com', 'sharklasers.com',
 ]);
 
 function isDisposableDomain(domain) {
@@ -489,16 +432,17 @@ async function smtpProbeEmail(email, domain) {
 
         const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
         const mxHost = sorted[0].exchange;
+        
         return await new Promise((resolve) => {
             const timeout = setTimeout(() => {
-                try { socket.destroy(); } catch {}
+                try { socket.destroy(); } catch (e) {}
                 console.warn(`⏱️ [SMTP PROBE] Timeout for ${email}`);
                 resolve('unknown');
             }, 8000);
 
             const socket = net.createConnection(25, mxHost);
-            let   buffer = '';
-            let   stage  = 0;
+            let buffer = '';
+            let stage = 0;
 
             socket.on('error', (err) => {
                 clearTimeout(timeout);
@@ -535,10 +479,10 @@ async function smtpProbeEmail(email, domain) {
                             console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);
                             resolve('invalid');
                         } else {
-                            console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
                             resolve('unknown');
                         }
-                    } else if (code >= 500) {                        clearTimeout(timeout);
+                    } else if (code >= 500) {
+                        clearTimeout(timeout);
                         socket.destroy();
                         resolve('unknown');
                     }
@@ -550,7 +494,6 @@ async function smtpProbeEmail(email, domain) {
                 if (stage < 3) resolve('unknown');
             });
         });
-
     } catch (err) {
         console.warn(`⚠️ [SMTP PROBE] Failed for ${email}: ${err.message}`);
         return 'unknown';
@@ -562,15 +505,15 @@ async function validateEmailFull(email, domain) {
     const normalisedEmail = (typeof email === 'string') ? email.toLowerCase().trim() : email;
 
     const result = {
-        email:           normalisedEmail,
-        verdict:         'rejected',
+        email: normalisedEmail,
+        verdict: 'rejected',
         confidenceScore: 0,
-        smtpResult:      null,
-        mxValid:         false,
-        disposable:      false,
-        syntaxValid:     false,
-        domainMatch:     false,
-        reason:          '',
+        smtpResult: null,
+        mxValid: false,
+        disposable: false,
+        syntaxValid: false,
+        domainMatch: false,
+        reason: '',
     };
 
     if (!isValidEmailFormat(normalisedEmail)) {
@@ -580,13 +523,17 @@ async function validateEmailFull(email, domain) {
     result.syntaxValid = true;
 
     const emailDomain = normalisedEmail.split('@')[1]?.toLowerCase();
-    if (!emailDomain) { result.reason = 'No domain in email'; return result; }
+    if (!emailDomain) {
+        result.reason = 'No domain in email';
+        return result;
+    }
 
     if (isDisposableDomain(emailDomain)) {
         result.disposable = true;
-        result.reason     = 'Disposable domain';
+        result.reason = 'Disposable domain';
         return result;
     }
+    
     if (isFreeEmailDomain(emailDomain)) {
         result.reason = 'Free email provider';
         return result;
@@ -597,7 +544,7 @@ async function validateEmailFull(email, domain) {
         return result;
     }
 
-    const domainRoot   = domain.split('.')[0].toLowerCase();
+    const domainRoot = domain.split('.')[0].toLowerCase();
     result.domainMatch = emailDomain === domain || emailDomain.includes(domainRoot);
     if (!result.domainMatch) {
         result.reason = `Domain mismatch: ${emailDomain} vs ${domain}`;
@@ -621,7 +568,7 @@ async function validateEmailFull(email, domain) {
     result.smtpResult = smtpResult;
 
     if (smtpResult === 'invalid') {
-        result.reason          = 'SMTP probe: mailbox does not exist';
+        result.reason = 'SMTP probe: mailbox does not exist';
         result.confidenceScore = 0;
         return result;
     }
@@ -629,25 +576,26 @@ async function validateEmailFull(email, domain) {
     if (smtpResult === 'valid') {
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 95;
-            result.verdict         = 'verified';
-            result.reason          = 'SMTP-confirmed personal email';
+            result.verdict = 'verified';
+            result.reason = 'SMTP-confirmed personal email';
         } else {
             result.confidenceScore = 78;
-            result.verdict         = 'verified';
-            result.reason          = 'SMTP-confirmed role/generic email';
+            result.verdict = 'verified';
+            result.reason = 'SMTP-confirmed role/generic email';
         }
-    } else {        if (classification.type === 'confirmed-personal') {
+    } else {
+        if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 65;
-            result.verdict         = 'probable';
-            result.reason          = 'Found in public source, personal format, MX valid, SMTP inconclusive';
+            result.verdict = 'probable';
+            result.reason = 'Found in public source, personal format, MX valid, SMTP inconclusive';
         } else if (classification.type === 'confirmed-generic' || classification.type === 'confirmed-other') {
             result.confidenceScore = 52;
-            result.verdict         = 'probable';
-            result.reason          = 'Found in public source, role email, MX valid, SMTP inconclusive';
+            result.verdict = 'probable';
+            result.reason = 'Found in public source, role email, MX valid, SMTP inconclusive';
         } else {
             result.confidenceScore = 30;
-            result.verdict         = 'probable';
-            result.reason          = 'Source-found, MX valid, format unclear';
+            result.verdict = 'probable';
+            result.reason = 'Source-found, MX valid, format unclear';
         }
     }
 
@@ -681,23 +629,30 @@ async function validateMX(domain) {
     try {
         const records = await dns.resolveMx(domain);
         return records && records.length > 0;
-    } catch { return false; }
+    } catch {
+        return false;
+    }
 }
 
 function isValidEmailFormat(email) {
-    if (!email || typeof email !== 'string') return false;    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
+    if (!email || typeof email !== 'string') return false;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 }
 
 const FREE_EMAIL_PROVIDERS = new Set([
-    'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
-    'protonmail.com','aol.com','mail.com','yandex.com','zoho.com',
-    'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
+    'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com',
+    'protonmail.com', 'aol.com', 'mail.com', 'yandex.com', 'zoho.com',
 ]);
-function isFreeEmailDomain(domain) { return FREE_EMAIL_PROVIDERS.has(domain.toLowerCase()); }
+
+function isFreeEmailDomain(domain) {
+    return FREE_EMAIL_PROVIDERS.has(domain.toLowerCase());
+}
 
 // ─── HALLUCINATION DETECTION ──────────────────────────────────────────────────
 function detectHallucinations(companyName, extracted) {
     const flags = [];
+    if (!extracted) return flags;
+    
     if (Array.isArray(extracted.employees)) {
         extracted.employees.forEach((emp, i) => {
             if (emp.name && companyName &&
@@ -714,15 +669,17 @@ function detectHallucinations(companyName, extracted) {
             }
         });
     }
+    
     if (extracted.mission) {
         const genericPhrases = [
-            'helping businesses','empowering companies','world-class',
-            'innovative solutions','cutting-edge',
+            'helping businesses', 'empowering companies', 'world-class',
+            'innovative solutions', 'cutting-edge',
         ];
         if (genericPhrases.some(p => extracted.mission.toLowerCase().includes(p))) {
             flags.push(`Mission may be generic/hallucinated: "${extracted.mission}"`);
         }
     }
+    
     if (extracted.recentNews) {
         const yearMatch = extracted.recentNews.match(/\b(20\d{2})\b/);
         if (yearMatch && parseInt(yearMatch[1]) < CURRENT_YEAR - 2) {
@@ -734,35 +691,35 @@ function detectHallucinations(companyName, extracted) {
 
 // ─── SCORING ───────────────────────────────────────────────────────────────────
 function scoreDataCompleteness(extracted) {
-    if (!extracted) return 0;    let score = 0;
-    if (extracted.mission    && extracted.mission    !== 'unknown') score += 15;
-    if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;
-    if (extracted.size       && extracted.size        !== 'unknown') score += 10;
-    if (extracted.model      && extracted.model       !== 'unknown') score += 10;
-    if (extracted.recentNews)                                        score += 15;
-    if (extracted.contactEmails?.length > 0)                         score += 15;
-    if (extracted.employees?.length > 0)                             score += 15;
-    if (extracted.employees?.some(e => e.email))                     score += 10;
+    if (!extracted) return 0;
+    let score = 0;
+    if (extracted.mission && extracted.mission !== 'unknown') score += 15;
+    if (extracted.hq && extracted.hq !== 'unknown') score += 10;
+    if (extracted.size && extracted.size !== 'unknown') score += 10;
+    if (extracted.model && extracted.model !== 'unknown') score += 10;
+    if (extracted.recentNews) score += 15;
+    if (extracted.contactEmails?.length > 0) score += 15;
+    if (extracted.employees?.length > 0) score += 15;
+    if (extracted.employees?.some(e => e.email)) score += 10;
     return Math.min(score, 100);
 }
 
 function scoreLeadQuality({ emailConfidence, mxValid, hasRealName, hasLinkedIn, hasNews, hasMission, dataScore, hallucinationCount, pageScore }) {
     let score = 0;
 
-    if      (emailConfidence === 'confirmed-personal') score += 40;
-    else if (emailConfidence === 'confirmed-generic')  score += 30;
-    else if (emailConfidence === 'confirmed-other')    score += 28;
-    else if (emailConfidence === 'guessed-pattern')    score += 12;
-    else                                               score +=  3;
+    if (emailConfidence === 'confirmed-personal') score += 40;
+    else if (emailConfidence === 'confirmed-generic') score += 30;
+    else if (emailConfidence === 'confirmed-other') score += 28;
+    else if (emailConfidence === 'guessed-pattern') score += 12;
+    else score += 3;
 
-    if (mxValid)        score += 20;
-    if (hasRealName)    score += 15;
-    if (hasLinkedIn)    score += 10;
-    if (hasNews)        score += 10;
-    if (hasMission)     score +=  5;
-    if (dataScore > 60) score +=  5;
+    if (mxValid) score += 20;
+    if (hasRealName) score += 15;
+    if (hasLinkedIn) score += 10;
+    if (hasNews) score += 10;
+    if (hasMission) score += 5;
+    if (dataScore > 60) score += 5;
 
-    // NEW: page relevance score bonus (0–10 points for high-quality entity pages)
     if (pageScore && pageScore >= 70) score += 10;
     else if (pageScore && pageScore >= 50) score += 5;
 
@@ -783,6 +740,7 @@ function _pickBestContact(employees, preferredContact) {
         );
         if (match) return match;
     }
+    
     const ranked = [...employees].sort((a, b) => {
         const aRole = (a.role || '').toLowerCase();
         const bRole = (b.role || '').toLowerCase();
@@ -798,12 +756,16 @@ function _pickBestContact(employees, preferredContact) {
 
 // ─── CONCURRENCY ──────────────────────────────────────────────────────────────
 async function runWithConcurrency(tasks, limit) {
-    const results   = [];
+    const results = [];
     const executing = new Set();
+    
     for (const task of tasks) {
         const promise = task()
-            .then(result => { executing.delete(promise); return result; })
-            .catch(err   => {
+            .then(result => {
+                executing.delete(promise);
+                return result;
+            })
+            .catch(err => {
                 executing.delete(promise);
                 console.warn(`⚠️ [CONCURRENCY] Task failed: ${err?.message || err}`);
                 return null;
@@ -817,12 +779,13 @@ async function runWithConcurrency(tasks, limit) {
 
 // ─── COMPANY NAME CLEANER ─────────────────────────────────────────────────────
 function cleanCompanyName(rawTitle) {
+    if (!rawTitle) return null;
+    
     let name = rawTitle.split(/[|\-–]/)[0].trim();
-    name = name.replace(
-        /\b(Ltd|LLC|Inc|Limited|PLC)\s*$/gi, ''
-    ).trim();
+    name = name.replace(/\b(Ltd|LLC|Inc|Limited|PLC)\s*$/gi, '').trim();
     if (name.length > 50) name = name.substring(0, 50).trim();
-    const REJECT = ['home','about','contact','services','welcome','index'];
+    
+    const REJECT = ['home', 'about', 'contact', 'services', 'welcome', 'index'];
     if (!name || REJECT.includes(name.toLowerCase())) return null;
     return name;
 }
@@ -832,41 +795,43 @@ function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
 
     const unicodeText = message.replace(/[\x00-\x7F]+/g, ' ').trim();
+    
     if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(unicodeText)) {
-        if (/[\u0698\u06AF\u06CC\u06BE]/.test(unicodeText)) return { code: 'fa', name: 'Farsi',  rtl: true };
-        if (/[\u06C1\u06BE\u06D2]/.test(unicodeText))        return { code: 'ur', name: 'Urdu',   rtl: true };
+        if (/[\u0698\u06AF\u06CC\u06BE]/.test(unicodeText)) return { code: 'fa', name: 'Farsi', rtl: true };
+        if (/[\u06C1\u06BE\u06D2]/.test(unicodeText)) return { code: 'ur', name: 'Urdu', rtl: true };
         return { code: 'ar', name: 'Arabic', rtl: true };
     }
-    if (/[\u0590-\u05FF\uFB1D-\uFB4F]/.test(unicodeText)) return { code: 'he', name: 'Hebrew',   rtl: true  };
-    if (/[\u0400-\u04FF]/.test(unicodeText))               return { code: 'ru', name: 'Russian',  rtl: false };
+    if (/[\u0590-\u05FF\uFB1D-\uFB4F]/.test(unicodeText)) return { code: 'he', name: 'Hebrew', rtl: true };
+    if (/[\u0400-\u04FF]/.test(unicodeText)) return { code: 'ru', name: 'Russian', rtl: false };
     if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(unicodeText)) {
         if (/[\u3040-\u309F\u30A0-\u30FF]/.test(unicodeText)) return { code: 'ja', name: 'Japanese', rtl: false };
         return { code: 'zh', name: 'Chinese', rtl: false };
     }
     if (/[\u3040-\u309F\u30A0-\u30FF]/.test(unicodeText)) return { code: 'ja', name: 'Japanese', rtl: false };
-    if (/[\uAC00-\uD7AF\u1100-\u11FF]/.test(unicodeText)) return { code: 'ko', name: 'Korean',   rtl: false };
-    if (/[\u0900-\u097F]/.test(unicodeText))               return { code: 'hi', name: 'Hindi',    rtl: false };
-    if (/[\u0E00-\u0E7F]/.test(unicodeText))               return { code: 'th', name: 'Thai',     rtl: false };
-    if (/[\u0370-\u03FF]/.test(unicodeText))               return { code: 'el', name: 'Greek',    rtl: false };
+    if (/[\uAC00-\uD7AF\u1100-\u11FF]/.test(unicodeText)) return { code: 'ko', name: 'Korean', rtl: false };
+    if (/[\u0900-\u097F]/.test(unicodeText)) return { code: 'hi', name: 'Hindi', rtl: false };
+    if (/[\u0E00-\u0E7F]/.test(unicodeText)) return { code: 'th', name: 'Thai', rtl: false };
+    if (/[\u0370-\u03FF]/.test(unicodeText)) return { code: 'el', name: 'Greek', rtl: false };
 
     const lower = message.toLowerCase();
     const langPatterns = [
-        { code: 'es', name: 'Spanish',    rtl: false, pattern: /\b(gracias|hola|por favor|cómo|también|sí|buenas|estimado|empresa|necesito|quiero|podría|tenemos|nuestro|sistema|equipo|proceso)\b/ },
-        { code: 'fr', name: 'French',     rtl: false, pattern: /\b(merci|bonjour|comment|nous|vous|les|des|une|pour|avec|très|aussi|notre|votre|pouvez|entreprise|besoin|système|équipe)\b/ },
-        { code: 'de', name: 'German',     rtl: false, pattern: /\b(danke|hallo|bitte|wie|haben|sind|kann|wir|das|die|der|und|nicht|ich|sie|mit|für|eine|unser|team|system|prozess|brauchen)\b/ },
+        { code: 'es', name: 'Spanish', rtl: false, pattern: /\b(gracias|hola|por favor|cómo|también|sí|buenas|estimado|empresa|necesito|quiero|podría|tenemos|nuestro|sistema|equipo|proceso)\b/ },
+        { code: 'fr', name: 'French', rtl: false, pattern: /\b(merci|bonjour|comment|nous|vous|les|des|une|pour|avec|très|aussi|notre|votre|pouvez|entreprise|besoin|système|équipe)\b/ },
+        { code: 'de', name: 'German', rtl: false, pattern: /\b(danke|hallo|bitte|wie|haben|sind|kann|wir|das|die|der|und|nicht|ich|sie|mit|für|eine|unser|team|system|prozess|brauchen)\b/ },
         { code: 'pt', name: 'Portuguese', rtl: false, pattern: /\b(obrigado|olá|temos|nosso|empresa|preciso|quero|poderia|sistema|equipe|processo|também|muito|para|com|por)\b/ },
-        { code: 'it', name: 'Italian',    rtl: false, pattern: /\b(grazie|ciao|come|abbiamo|nostro|azienda|bisogno|voglio|potrebbe|sistema|squadra|processo|anche|molto|per|con)\b/ },
-        { code: 'nl', name: 'Dutch',      rtl: false, pattern: /\b(bedankt|hallo|hoe|wij|onze|bedrijf|nodig|wil|zou|systeem|team|proces|ook|heel|voor|met)\b/ },
-        { code: 'pl', name: 'Polish',     rtl: false, pattern: /\b(dziękuję|cześć|jak|mamy|nasz|firma|potrzebuję|chcę|mógłby|system|zespół|proces|też|bardzo|dla|z)\b/ },
-        { code: 'tr', name: 'Turkish',    rtl: false, pattern: /\b(teşekkür|merhaba|nasıl|bizim|şirket|ihtiyaç|istiyorum|olur|sistem|ekip|süreç|ayrıca|çok|için|ile)\b/ },
-        { code: 'sv', name: 'Swedish',    rtl: false, pattern: /\b(tack|hej|hur|vi|vårt|företag|behöver|vill|skulle|system|team|process|också|mycket|för|med)\b/ },
-        { code: 'no', name: 'Norwegian',  rtl: false, pattern: /\b(takk|hei|hvordan|vi|vår|selskap|trenger|vil|ville|system|team|prosess|også|veldig|for|med)\b/ },
-        { code: 'da', name: 'Danish',     rtl: false, pattern: /\b(tak|hej|hvordan|vi|vores|virksomhed|behøver|vil|ville|system|team|proces|også|meget|for|med)\b/ },
-        { code: 'fi', name: 'Finnish',    rtl: false, pattern: /\b(kiitos|hei|miten|meillä|meidän|yritys|tarvitsen|haluan|voisi|järjestelmä|tiimi|prosessi|myös|paljon|varten)\b/ },
+        { code: 'it', name: 'Italian', rtl: false, pattern: /\b(grazie|ciao|come|abbiamo|nostro|azienda|bisogno|voglio|potrebbe|sistema|squadra|processo|anche|molto|per|con)\b/ },
+        { code: 'nl', name: 'Dutch', rtl: false, pattern: /\b(bedankt|hallo|hoe|wij|onze|bedrijf|nodig|wil|zou|systeem|team|proces|ook|heel|voor|met)\b/ },
+        { code: 'pl', name: 'Polish', rtl: false, pattern: /\b(dziękuję|cześć|jak|mamy|nasz|firma|potrzebuję|chcę|mógłby|system|zespół|proces|też|bardzo|dla|z)\b/ },
+        { code: 'tr', name: 'Turkish', rtl: false, pattern: /\b(teşekkür|merhaba|nasıl|bizim|şirket|ihtiyaç|istiyorum|olur|sistem|ekip|süreç|ayrıca|çok|için|ile)\b/ },
+        { code: 'sv', name: 'Swedish', rtl: false, pattern: /\b(tack|hej|hur|vi|vårt|företag|behöver|vill|skulle|system|team|process|också|mycket|för|med)\b/ },
+        { code: 'no', name: 'Norwegian', rtl: false, pattern: /\b(takk|hei|hvordan|vi|vår|selskap|trenger|vil|ville|system|team|prosess|også|veldig|for|med)\b/ },
+        { code: 'da', name: 'Danish', rtl: false, pattern: /\b(tak|hej|hvordan|vi|vores|virksomhed|behøver|vil|ville|system|team|proces|også|meget|for|med)\b/ },
+        { code: 'fi', name: 'Finnish', rtl: false, pattern: /\b(kiitos|hei|miten|meillä|meidän|yritys|tarvitsen|haluan|voisi|järjestelmä|tiimi|prosessi|myös|paljon|varten)\b/ },
         { code: 'id', name: 'Indonesian', rtl: false, pattern: /\b(terima kasih|halo|bagaimana|kami|perusahaan|butuh|ingin|bisa|sistem|tim|proses|juga|sangat|untuk|dengan)\b/ },
-        { code: 'ms', name: 'Malay',      rtl: false, pattern: /\b(terima kasih|hai|bagaimana|kami|syarikat|perlu|mahu|boleh|sistem|pasukan|proses|juga|sangat|untuk|dengan)\b/ },
+        { code: 'ms', name: 'Malay', rtl: false, pattern: /\b(terima kasih|hai|bagaimana|kami|syarikat|perlu|mahu|boleh|sistem|pasukan|proses|juga|sangat|untuk|dengan)\b/ },
         { code: 'vi', name: 'Vietnamese', rtl: false, pattern: /\b(cảm ơn|xin chào|chúng tôi|công ty|cần|muốn|có thể|hệ thống|đội|quy trình|cũng|rất|cho|với)\b/ },
     ];
+    
     for (const lang of langPatterns) {
         if (lang.pattern.test(lower)) return { code: lang.code, name: lang.name, rtl: lang.rtl };
     }
@@ -907,7 +872,7 @@ function _parseRequestedCount(message) {
     };
 
     const digitPattern = /\b(\d{1,3})\s*(?:leads?|emails?|contacts?|companies|companies'|results?|prospects?)\b/i;
-    const digitMatch   = message.match(digitPattern);
+    const digitMatch = message.match(digitPattern);
     if (digitMatch) {
         const n = parseInt(digitMatch[1], 10);
         if (n >= 1 && n <= 100) {
@@ -917,7 +882,7 @@ function _parseRequestedCount(message) {
     }
 
     const givePattern = /\b(?:give|find|get|show|fetch|pull|return|bring)\s+(?:me\s+)?(\d{1,3})\b/i;
-    const giveMatch   = message.match(givePattern);
+    const giveMatch = message.match(givePattern);
     if (giveMatch) {
         const n = parseInt(giveMatch[1], 10);
         if (n >= 1 && n <= 100) {
@@ -927,16 +892,15 @@ function _parseRequestedCount(message) {
     }
 
     for (const [word, num] of Object.entries(wordToNum)) {
-        const wordPattern = new RegExp(
-            `\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i'
-        );
-        if (wordPattern.test(lower)) {            console.log(`🔢 [QUANTITY PARSER] Word match: "${word}" → ${num}`);
+        const wordPattern = new RegExp(`\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i');
+        if (wordPattern.test(lower)) {
+            console.log(`🔢 [QUANTITY PARSER] Word match: "${word}" → ${num}`);
             return num;
         }
     }
 
     const topPattern = /\btop\s+(\d{1,3})\b/i;
-    const topMatch   = message.match(topPattern);
+    const topMatch = message.match(topPattern);
     if (topMatch) {
         const n = parseInt(topMatch[1], 10);
         if (n >= 1 && n <= 100) {
@@ -954,7 +918,7 @@ function _applyOutputQuantityRules(leads, requestedMax) {
     if (!Array.isArray(leads)) return [];
 
     const totalVerified = leads.length;
-    const cap           = Math.min(requestedMax, QUANTITY_RULE_DEFAULT_MAX);
+    const cap = Math.min(requestedMax, QUANTITY_RULE_DEFAULT_MAX);
 
     console.log(`📐 [QUANTITY RULES] Verified: ${totalVerified} | Requested max: ${requestedMax} | System cap: ${QUANTITY_RULE_DEFAULT_MAX} | Effective cap: ${cap}`);
 
@@ -969,7 +933,7 @@ function _applyOutputQuantityRules(leads, requestedMax) {
     }
 
     const effectiveMin = QUANTITY_RULE_HARD_MIN;
-    const sliceTo      = Math.max(effectiveMin, Math.min(cap, totalVerified));
+    const sliceTo = Math.max(effectiveMin, Math.min(cap, totalVerified));
 
     const final = leads.slice(0, sliceTo);
     console.log(`📐 [QUANTITY RULES] Returning ${final.length} lead(s) [min:${effectiveMin}, cap:${cap}, available:${totalVerified}]`);
@@ -977,9 +941,7 @@ function _applyOutputQuantityRules(leads, requestedMax) {
     return final;
 }
 
-// ─── INTENT PARSING ENGINE (NEW FIRST LAYER) ──────────────────────────────────
-// Replaces the old _classifyIntent.
-// Converts raw user request into a strict, machine-readable intent schema.//
+// ─── INTENT PARSING ENGINE ──────────────────────────────────────────────────
 async function _parseUserIntent(message, history, apiKey) {
     const recentHistory = (history || []).slice(-6)
         .map(h => `${h.role}: ${h.content}`)
@@ -1015,29 +977,32 @@ async function _parseUserIntent(message, history, apiKey) {
 
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: parsingPrompt }],
-            max_tokens:  250,
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: parsingPrompt }],
+            max_tokens: 250,
             temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
         if (!res) {
-            // Fallback to chat if parsing fails
             return {
                 intent_type: INTENT.CHAT,
                 parameters: {}
             };
         }
+        
+        // FIXED: Safely extract token usage
+        const promptTokens = res.data?.usage?.prompt_tokens;
+        const completionTokens = res.data?.usage?.completion_tokens;
+        
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
+            typeof promptTokens === 'number' ? promptTokens : 0,
+            typeof completionTokens === 'number' ? completionTokens : 0,
             'gpt-4o-mini'
         );
 
         const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
         const parsed = JSON.parse(raw);
 
-        // Ensure basic structure integrity
         if (!parsed.intent_type) parsed.intent_type = INTENT.CHAT;
         if (!parsed.parameters) parsed.parameters = {};
 
@@ -1046,7 +1011,6 @@ async function _parseUserIntent(message, history, apiKey) {
 
     } catch (err) {
         console.warn('[Intent Parsing Failed]:', err.message);
-        // Fallback to chat on error
         return {
             intent_type: INTENT.CHAT,
             parameters: {}
@@ -1057,7 +1021,7 @@ async function _parseUserIntent(message, history, apiKey) {
 // ─── CHAT HANDLER ─────────────────────────────────────────────────────────────
 async function _handleChat(message, history, userProfile, apiKey) {
     const senderName = userProfile?.senderName || 'there';
-    const usp        = userProfile?.usp || null;
+    const usp = userProfile?.usp || null;
 
     const systemPrompt = `You are an intelligent AI assistant and business operator.
 You help with conversations, answer questions, give advice, and assist with business tasks.
@@ -1072,23 +1036,27 @@ Keep responses concise but complete. Never pad with filler.`;
         .map(h => ({ role: h.role, content: h.content }));
 
     const messages = [
-        { role: 'system',  content: systemPrompt },
+        { role: 'system', content: systemPrompt },
         ...memoryMessages,
-        { role: 'user',    content: message },
+        { role: 'user', content: message },
     ];
 
-    try {        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
+    try {
+        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+            model: 'gpt-4o-mini',
             messages,
-            max_tokens:  600,
+            max_tokens: 600,
             temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:chat');
 
         if (!res) return 'I had trouble responding — please try again.';
 
+        const promptTokens = res.data?.usage?.prompt_tokens;
+        const completionTokens = res.data?.usage?.completion_tokens;
+        
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
+            typeof promptTokens === 'number' ? promptTokens : 0,
+            typeof completionTokens === 'number' ? completionTokens : 0,
             'gpt-4o-mini'
         );
 
@@ -1103,7 +1071,7 @@ Keep responses concise but complete. Never pad with filler.`;
 // ─── EMAIL DRAFT HANDLER ──────────────────────────────────────────────────────
 async function _handleEmailDraft(message, history, userProfile, apiKey) {
     const senderName = userProfile?.senderName || 'Alex';
-    const usp        = userProfile?.usp || null;
+    const usp = userProfile?.usp || null;
 
     const recentContext = (history || [])
         .slice(-6)
@@ -1126,7 +1094,8 @@ USER INSTRUCTION: "${message}"
 Rules:
 - Write a complete, ready-to-send email
 - Subject line must be specific and compelling (4-7 words)
-- Never use banned adjectives or phrases listed above- Never invent stats or percentages
+- Never use banned adjectives or phrases listed above
+- Never invent stats or percentages
 - Opening line must hook immediately — no "I hope this finds you well"
 - CTA must be one soft, specific ask
 - Sign off with: Best, ${senderName}
@@ -1140,21 +1109,24 @@ Return ONLY valid JSON:
 
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o',
-            messages:    [{ role: 'user', content: draftPrompt }],
-            max_tokens:  600,
+            model: 'gpt-4o',
+            messages: [{ role: 'user', content: draftPrompt }],
+            max_tokens: 600,
             temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:emaildraft');
 
         if (!res) throw new Error('Draft returned null');
 
+        const promptTokens = res.data?.usage?.prompt_tokens;
+        const completionTokens = res.data?.usage?.completion_tokens;
+        
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
+            typeof promptTokens === 'number' ? promptTokens : 0,
+            typeof completionTokens === 'number' ? completionTokens : 0,
             'gpt-4o'
         );
 
-        const raw    = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
+        const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
         const parsed = JSON.parse(raw);
 
         return `Here's your email:\n\n**Subject:** ${parsed.subject}\n\n${parsed.body}`;
@@ -1175,7 +1147,8 @@ You think like a founder, operator, and growth expert simultaneously.
 ${usp ? `The user runs a business with this value proposition: "${usp}". Use this as context when relevant.` : ''}
 When answering:
 - Be specific and concrete — no vague generalities
-- Use frameworks only when they genuinely help- Give a direct recommendation, not just options
+- Use frameworks only when they genuinely help
+- Give a direct recommendation, not just options
 - If you need more information to give a good answer, ask one focused question
 - Never pad responses with filler sentences`;
 
@@ -1184,24 +1157,27 @@ When answering:
         .map(h => ({ role: h.role, content: h.content }));
 
     const messages = [
-        { role: 'system',  content: systemPrompt },
+        { role: 'system', content: systemPrompt },
         ...memoryMessages,
-        { role: 'user',    content: message },
+        { role: 'user', content: message },
     ];
 
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o',
+            model: 'gpt-4o',
             messages,
-            max_tokens:  800,
+            max_tokens: 800,
             temperature: 0.5,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:businessqa');
 
         if (!res) return 'I had trouble with that — please try again.';
 
+        const promptTokens = res.data?.usage?.prompt_tokens;
+        const completionTokens = res.data?.usage?.completion_tokens;
+        
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
+            typeof promptTokens === 'number' ? promptTokens : 0,
+            typeof completionTokens === 'number' ? completionTokens : 0,
             'gpt-4o'
         );
 
@@ -1224,12 +1200,14 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
 
         const generalResults = await searchWithTavily(
             `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} OR site:linkedin.com OR site:crunchbase.com mission about ${CURRENT_YEAR}`,
-            tavilyKey, { maxResults: 5 }        );
-        const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+            tavilyKey, { maxResults: 5 }
+        );
+        
+        const generalText = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
         const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
         const regexFromGeneral = extractEmailsFromText(generalText, domain);
 
-        const hasEmailSignal      = regexFromGeneral.companyEmails.length > 0 || generalSnippets.toLowerCase().includes('contact');
+        const hasEmailSignal = regexFromGeneral.companyEmails.length > 0 || generalSnippets.toLowerCase().includes('contact');
         const needsEmployeeSearch = generalResults.length < 3 || !hasEmailSignal;
 
         let employeeResults = [];
@@ -1241,7 +1219,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
             );
         }
 
-        const allText     = [...generalResults, ...employeeResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const allText = [...generalResults, ...employeeResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
         const allSnippets = [...generalResults, ...employeeResults]
             .map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
         const regexFromAll = extractEmailsFromText(allText, domain);
@@ -1272,20 +1250,24 @@ SNIPPETS:
 ${allSnippets}`;
 
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: extractPrompt }],            max_tokens:  500,
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: extractPrompt }],
+            max_tokens: 500,
             temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
 
         if (!res) return null;
 
+        const promptTokens = res.data?.usage?.prompt_tokens;
+        const completionTokens = res.data?.usage?.completion_tokens;
+        
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
+            typeof promptTokens === 'number' ? promptTokens : 0,
+            typeof completionTokens === 'number' ? completionTokens : 0,
             'gpt-4o-mini'
         );
 
-        const raw    = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
+        const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
         const parsed = JSON.parse(raw);
         parsed._domain = domain;
 
@@ -1293,6 +1275,7 @@ ${allSnippets}`;
             ...regexFromAll.companyEmails,
             ...(parsed.contactEmails || []),
         ])].filter(isValidEmailFormat);
+        
         parsed.contactEmails = allRealEmails.filter(email => {
             const ed = email.split('@')[1]?.toLowerCase();
             return ed === domain || ed?.includes(domain.split('.')[0]);
@@ -1322,7 +1305,8 @@ ${allSnippets}`;
                     if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
                     return !isSuspect;
                 });
-            }        }
+            }
+        }
 
         parsed._regexEmails = regexFromAll.companyEmails;
         setCachedResearch(domain, parsed);
@@ -1337,15 +1321,15 @@ ${allSnippets}`;
 // ─── EMAIL SEQUENCE WRITER ────────────────────────────────────────────────────
 async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
     try {
-        const companyName   = companyData.name;
-        const mission       = companyData.mission   || null;
-        const news          = companyData.recentNews || null;
-        const industry      = companyData.industry  || 'their industry';
-        const businessModel = companyData.model     || 'unknown';
-        const senderName    = userProfile?.senderName || 'Alex';
-        const usp           = userProfile?.usp || null;
-        const contactName   = contactPerson?.name || null;
-        const contactRole   = contactPerson?.role || null;
+        const companyName = companyData.name;
+        const mission = companyData.mission || null;
+        const news = companyData.recentNews || null;
+        const industry = companyData.industry || 'their industry';
+        const businessModel = companyData.model || 'unknown';
+        const senderName = userProfile?.senderName || 'Alex';
+        const usp = userProfile?.usp || null;
+        const contactName = contactPerson?.name || null;
+        const contactRole = contactPerson?.role || null;
         const firstNameOnly = contactName ? contactName.split(' ')[0] : null;
 
         const uspToUse = (usp && usp.trim().length > 10) ? usp
@@ -1374,7 +1358,7 @@ You NEVER write generic emails. Every word is tailored to the recipient's exact 
 TARGET COMPANY: ${companyName}
 ${contactName ? `CONTACT: ${contactName} (${contactRole || 'Decision Maker'})` : `CONTACT: Decision maker at ${companyName}`}
 ${mission ? `COMPANY MISSION: ${mission}` : ''}
-${news    ? `RECENT NEWS: ${news}` : ''}
+${news ? `RECENT NEWS: ${news}` : ''}
 SENDER: ${senderName}
 VALUE PROP: ${uspToUse}
 ${industryContext}
@@ -1384,12 +1368,12 @@ Subject: 4-6 words. Specific to ${companyName} or ${industry}. NOT generic.
 Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line. NEVER skip. NEVER "Dear".
 
 Para 1 — Hook:
-${news    ? `Reference this news specifically: "${news}". Show you read it. 1-2 sentences.` :
+${news ? `Reference this news specifically: "${news}". Show you read it. 1-2 sentences.` :
   mission ? `Reference this mission: "${mission}". Connect it to something real. 1-2 sentences.` :
-            `Reference a real, specific challenge that ${industry} ${businessModel} businesses face daily.
-             Do NOT say "I noticed you are growing" or anything vague.
-             Write something a ${contactRole || 'business owner'} in ${industry} would read and think "how did they know?"
-             1-2 sentences only.`}
+    `Reference a real, specific challenge that ${industry} ${businessModel} businesses face daily.
+     Do NOT say "I noticed you are growing" or anything vague.
+     Write something a ${contactRole || 'business owner'} in ${industry} would read and think "how did they know?"
+     1-2 sentences only.`}
 
 Para 2 — Value:
 Connect "${uspToUse}" to how it solves the specific problem you referenced.
@@ -1423,23 +1407,26 @@ HARD RULES:
 - If you write something a plumber and a SaaS founder could both receive unchanged, rewrite it.
 Return ONLY valid JSON:
 {
-  "initial":  { "subject": "string", "body": "string" },
+  "initial": { "subject": "string", "body": "string" },
   "followup": { "subject": "string", "body": "string" },
-  "breakup":  { "subject": "string", "body": "string" }
+  "breakup": { "subject": "string", "body": "string" }
 }`;
 
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o',
-            messages:    [{ role: 'user', content: writePrompt }],
-            max_tokens:  1000,
+            model: 'gpt-4o',
+            messages: [{ role: 'user', content: writePrompt }],
+            max_tokens: 1000,
             temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:emailgen');
 
         if (!res) throw new Error('Email generation returned null after retries');
 
+        const promptTokens = res.data?.usage?.prompt_tokens;
+        const completionTokens = res.data?.usage?.completion_tokens;
+        
         recordOpenAiUsage(
-            res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
+            typeof promptTokens === 'number' ? promptTokens : 0,
+            typeof completionTokens === 'number' ? completionTokens : 0,
             'gpt-4o'
         );
 
@@ -1449,45 +1436,42 @@ Return ONLY valid JSON:
     } catch (err) {
         console.warn(`[Email Gen Error] ${err.message}`);
 
-        const name     = contactPerson?.name?.split(' ')[0] || 'Hi';
+        const name = contactPerson?.name?.split(' ')[0] || 'Hi';
         const industry = companyData.industry || 'your sector';
-        const company  = companyData.name     || 'your business';
-        const sender   = userProfile?.senderName || 'Alex';
-        const usp      = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
+        const company = companyData.name || 'your business';
+        const sender = userProfile?.senderName || 'Alex';
+        const usp = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
 
         return {
             initial: {
                 subject: `One thought on ${company}`,
-                body:    `${name},\n\nRunning a ${industry} business means most of your day goes to work that doesn't directly close deals.\n\n${usp}\n\nWorth 15 minutes this week?\n\nBest,\n${sender}`,
+                body: `${name},\n\nRunning a ${industry} business means most of your day goes to work that doesn't directly close deals.\n\n${usp}\n\nWorth 15 minutes this week?\n\nBest,\n${sender}`,
             },
             followup: {
                 subject: `Re: One thought on ${company}`,
-                body:    `${name},\n\nFloating this back up — most ${industry} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${sender}`,
+                body: `${name},\n\nFloating this back up — most ${industry} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${sender}`,
             },
             breakup: {
                 subject: `Closing my file on ${company}`,
-                body:    `${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${sender}`,
+                body: `${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${sender}`,
             },
         };
-    }}
+    }
+}
 
 // ─── SINGLE COMPANY PIPELINE ──────────────────────────────────────────────────
-// EMAIL RESOLUTION CHAIN:
-//   TIER 1 — Regex-extracted emails from search snippets → validated by full pipeline
-//   TIER 2 — Reality-checked employee email from GPT extract → validated by full pipeline
-//   TIER 3 — huntRealEmails (contact/directory search) → validated by full pipeline
-//   TIER 4 — REMOVED (guessEmailPatterns — fabricated, never call)
-//
-// NEW: page business relevance score gating before committing research quota.
-//
 async function processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
     try {
         let domain = '';
-        try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
+        try {
+            domain = new URL(result.url).hostname.replace('www.', '');
+        } catch {
+            return null;
+        }
+        
         if (!domain) return null;
         if (isFreeEmailDomain(domain)) return null;
 
-        // NEW: Page business relevance gate — reject low-value content pages early
         const pageScore = _scorePageBusinessRelevance(result);
         if (pageScore < 30) {
             console.log(`🔴 [PAGE GATE] Rejected low-value page (score:${pageScore}): ${result.url}`);
@@ -1498,7 +1482,6 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
         const companyName = cleanCompanyName(result.title);
         if (!companyName) return null;
 
-        // Company name dedup
         const companyKey = companyName.toLowerCase().replace(/\s+/g, '');
         if (globalSeenCompanyNames.has(companyKey)) {
             console.log(`⏭️ [COMPANY DEDUP] Skipping duplicate company: ${companyName}`);
@@ -1518,27 +1501,26 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             console.warn(`🗑️ [REJECTED] ${companyName} — domain ${domain} has no MX records`);
             return null;
         }
+        
         const dataScore = scoreDataCompleteness(companyData);
         if (dataScore < 10) {
             console.warn(`🗑️ Skipping ${companyName} — data score ${dataScore}/100`);
             return null;
         }
 
-        const employees   = companyData?.employees || [];
-        // Use target_role from structured intent
+        const employees = companyData?.employees || [];
         const bestContact = _pickBestContact(employees, intentParams.target_role);
 
-        // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
-        const candidateEmails = [
-            ...(companyData?._regexEmails || []),
-            ...(companyData?.contactEmails || []),
-            ...(employees
-                .filter(e => e.email && isValidEmailFormat(e.email))
-                .map(e => e.email)
-            ),
-        ].filter(isValidEmailFormat);
+        // FIXED: Safely collect candidate emails
+        const regexEmails = companyData?._regexEmails || [];
+        const contactEmailsList = companyData?.contactEmails || [];
+        const employeeEmails = employees
+            .filter(e => e.email && isValidEmailFormat(e.email))
+            .map(e => e.email);
 
-        // ── TIER 3: EMAIL HUNT if no candidates yet ──────────────────────────
+        const candidateEmails = [...regexEmails, ...contactEmailsList, ...employeeEmails]
+            .filter(isValidEmailFormat);
+
         if (candidateEmails.length === 0 && getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting real email for ${companyName}...`);
             const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
@@ -1553,7 +1535,6 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             return null;
         }
 
-        // ── FULL VALIDATION PIPELINE ─────────────────────────────────────────
         onProgress?.(`🔬 Validating emails for ${companyName}...`);
         const validatedEmails = await rankAndFilterEmails(candidateEmails, domain);
 
@@ -1562,23 +1543,24 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             return null;
         }
 
-        const topEmail        = validatedEmails[0];
-        const resolvedEmail   = topEmail.email;
-        const classification  = classifyEmail(resolvedEmail, domain);
+        const topEmail = validatedEmails[0];
+        const resolvedEmail = topEmail.email;
+        const classification = classifyEmail(resolvedEmail, domain);
         const emailConfidence = classification.type;
-        const emailLabel      = classification.label;
+        const emailLabel = classification.label;
         const allEmailOptions = validatedEmails.map(v => v.email);
+        
         console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] confidence:${topEmail.confidenceScore} smtp:${topEmail.smtpResult} MX:${mxValid}`);
 
         onProgress?.(`✍️ Writing emails for ${companyName}...`);
 
         const emailSequence = await generateEmailsForLead(
             {
-                name:        companyName,
-                mission:     companyData?.mission,
-                recentNews:  companyData?.recentNews,
-                industry:    intentParams.industry,
-                model:       companyData?.model,
+                name: companyName,
+                mission: companyData?.mission,
+                recentNews: companyData?.recentNews,
+                industry: intentParams.industry,
+                model: companyData?.model,
             },
             bestContact,
             domain,
@@ -1590,52 +1572,52 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
         const hallucinationCount = (companyData?._hallucinationFlags || []).length;
 
         const leadScore = scoreLeadQuality({
-            emailConfidence, mxValid,
-            hasRealName:       !!bestContact?.name,
-            hasLinkedIn:       !!bestContact?.linkedIn,
-            hasNews:           !!companyData?.recentNews,
-            hasMission:        !!companyData?.mission,
+            emailConfidence,
+            mxValid,
+            hasRealName: !!bestContact?.name,
+            hasLinkedIn: !!bestContact?.linkedIn,
+            hasNews: !!companyData?.recentNews,
+            hasMission: !!companyData?.mission,
             dataScore,
             hallucinationCount,
             pageScore,
         });
 
         const lead = {
-            name:               bestContact?.name || companyName,
-            company:            companyName,
+            name: bestContact?.name || companyName,
+            company: companyName,
             domain,
-            email:              resolvedEmail,
+            email: resolvedEmail,
             emailConfidence,
             emailLabel,
             emailValidation: {
                 confidenceScore: topEmail.confidenceScore,
-                verdict:         topEmail.verdict,
-                smtpResult:      topEmail.smtpResult,
-                reason:          topEmail.reason,
+                verdict: topEmail.verdict,
+                smtpResult: topEmail.smtpResult,
+                reason: topEmail.reason,
             },
             allEmailOptions,
-            role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
-            linkedIn:           bestContact?.linkedIn  || null,
-            companySize:        companyData?.size      || 'unknown',            companyModel:       companyData?.model     || 'unknown',
-            industry:           intentParams.industry  || 'unknown',
-            hq:                 companyData?.hq        || null,
-            recentNews:         companyData?.recentNews || null,
+            role: bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
+            linkedIn: bestContact?.linkedIn || null,
+            companySize: companyData?.size || 'unknown',
+            companyModel: companyData?.model || 'unknown',
+            industry: intentParams.industry || 'unknown',
+            hq: companyData?.hq || null,
+            recentNews: companyData?.recentNews || null,
             leadScore,
             pageScore,
             mxValid,
             dataScore,
             hallucinationFlags: companyData?._hallucinationFlags || [],
-            emailLanguage:      detectedLanguage.code,
+            emailLanguage: detectedLanguage.code,
             messages: [
-                { type: 'initial',  subject: emailSequence.initial.subject,  body: emailSequence.initial.body  },
+                { type: 'initial', subject: emailSequence.initial.subject, body: emailSequence.initial.body },
                 { type: 'followup', subject: emailSequence.followup.subject, body: emailSequence.followup.body },
-                { type: 'breakup',  subject: emailSequence.breakup.subject,  body: emailSequence.breakup.body  },
+                { type: 'breakup', subject: emailSequence.breakup.subject, body: emailSequence.breakup.body },
             ],
         };
 
-        // NEW: Intent match validation (advisory — logs mismatches, doesn't hard-reject)
         _leadMatchesIntent(lead, intentParams);
-
         return lead;
 
     } catch (err) {
@@ -1645,38 +1627,22 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
 }
 
 // ─── LEAD GEN PIPELINE ────────────────────────────────────────────────────────
-// Upgrades in this version (all additive, zero breaking changes):
-//   1. Entity-first search using _buildEntityFirstQueries()
-//   2. Page relevance scoring gate in processOneCompany()
-//   3. Fallback query on thin primary pool
-//   4. Company name dedup reset per pipeline run
-//   5. Session _meta passthrough in return object
-//   6. Expanded SKIP_DOMAINS list with more SEO/directory sites
-//
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, intentParams) {
-
-    // Reset company name dedup for each fresh pipeline run
     globalSeenCompanyNames.clear();
 
-    // Parse user-requested quantity
     const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
     console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
 
     onProgress?.(`🔍 Searching for ${intentParams.industry} companies${intentParams.location ? ' in ' + intentParams.location : ''}...`);
 
-    const searchPoolSize = Math.min(
-        Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3),        15
-    );
+    const searchPoolSize = Math.min(Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3), 15);
 
-    // ── BUILD ENTITY-FIRST QUERIES ────────────────────────────────────────────
     const queries = _buildEntityFirstQueries(intentParams, searchPoolSize);
     console.log(`🔍 Primary Query: ${queries.primary}`);
 
-    // Run primary query
     const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
     console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
 
-    // ── FALLBACK QUERY on thin primary pool ───────────────────────────────────
     let fallbackResults = [];
     if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
         console.log(`⚡ [FALLBACK QUERY] Primary pool thin (${rawResults.length}/${MIN_POOL_SIZE}) — trying entity-focus fallback`);
@@ -1690,8 +1656,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         }
     }
 
-    // ── MERGE PRIMARY + FALLBACK (deduplicated by URL) ────────────────────────
-    const seenUrls  = new Set(rawResults.map(r => r.url));
+    const seenUrls = new Set(rawResults.map(r => r.url));
     const mergedRaw = [
         ...rawResults,
         ...fallbackResults.filter(r => !seenUrls.has(r.url)),
@@ -1699,39 +1664,42 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     if (mergedRaw.length === 0) {
         return {
-            reply:          'No companies found. Try narrowing the industry or adding a location.',
+            reply: 'No companies found. Try narrowing the industry or adding a location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
         };
     }
 
-    // ── EXPANDED SKIP DOMAINS (more SEO/directory sites blocked) ─────────────
     const SKIP_DOMAINS = [
-        'linkedin.com','crunchbase.com','apollo.io','hunter.io',
-        'yelp.com','clutch.co','g2.com','trustpilot.com',
-        'bark.com','bark.london','upwork.com','fiverr.com','peopleperhour.com',
-        'yell.com','thomsonlocal.com','checkatrade.com',
-        'directory.com','yellowpages.com','manta.com',
-        // NEW additions: common SEO/editorial noise sources
-        'hubspot.com','moz.com','semrush.com','ahrefs.com',
-        'searchenginejournal.com','searchengineland.com',
-        'entrepreneur.com','forbes.com','inc.com','businessinsider.com',        'techcrunch.com','venturebeat.com','wired.com',
-        'reddit.com','quora.com','medium.com','substack.com',
-        'wikipedia.org','wikihow.com',
-        'indeed.com','glassdoor.com','ziprecruiter.com',
-        'capterra.com','getapp.com','softwareadvice.com',
-        'producthunt.com','angellist.com','f6s.com',
-        'goodfirms.co','designrush.com','expertise.com',
-        'houzz.com','thumbtack.com','homeadvisor.com',
-        'yelp.ca','yelp.co.uk','yelp.com.au',
+        'linkedin.com', 'crunchbase.com', 'apollo.io', 'hunter.io',
+        'yelp.com', 'clutch.co', 'g2.com', 'trustpilot.com',
+        'bark.com', 'bark.london', 'upwork.com', 'fiverr.com', 'peopleperhour.com',
+        'yell.com', 'thomsonlocal.com', 'checkatrade.com',
+        'directory.com', 'yellowpages.com', 'manta.com',
+        'hubspot.com', 'moz.com', 'semrush.com', 'ahrefs.com',
+        'searchenginejournal.com', 'searchengineland.com',
+        'entrepreneur.com', 'forbes.com', 'inc.com', 'businessinsider.com',
+        'techcrunch.com', 'venturebeat.com', 'wired.com',
+        'reddit.com', 'quora.com', 'medium.com', 'substack.com',
+        'wikipedia.org', 'wikihow.com',
+        'indeed.com', 'glassdoor.com', 'ziprecruiter.com',
+        'capterra.com', 'getapp.com', 'softwareadvice.com',
+        'producthunt.com', 'angellist.com', 'f6s.com',
+        'goodfirms.co', 'designrush.com', 'expertise.com',
+        'houzz.com', 'thumbtack.com', 'homeadvisor.com',
+        'yelp.ca', 'yelp.co.uk', 'yelp.com.au',
     ];
 
     const cleanResults = [];
     for (const result of mergedRaw) {
         let domain = '';
-        try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
-        if (!domain)                                                  continue;
-        if (globalSeenDomains.has(domain))                           continue;
-        if (SKIP_DOMAINS.some(d => domain.includes(d)))              continue;
+        try {
+            domain = new URL(result.url).hostname.replace('www.', '');
+        } catch {
+            continue;
+        }
+        if (!domain) continue;
+        if (globalSeenDomains.has(domain)) continue;
+        if (SKIP_DOMAINS.some(d => domain.includes(d))) continue;
         globalSeenDomains.add(domain);
         cleanResults.push({ ...result, _domain: domain });
         if (cleanResults.length >= requestedCount + 5) break;
@@ -1741,7 +1709,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     if (cleanResults.length === 0) {
         return {
-            reply:          'Found results but all were directory or editorial sites. Try a more specific industry or location.',
+            reply: 'Found results but all were directory or editorial sites. Try a more specific industry or location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after filtering.' }],
         };
     }
@@ -1757,21 +1725,20 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         .map(r => r.value)
         .sort((a, b) => b.leadScore - a.leadScore);
 
-    // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // Build session meta
     const _meta = {
-        tavilyUsed:         tavilyQuota.used,
-        tavilyRemaining:    getTavilyRemaining(),        openAiCalls:        openAiTracker.totalCallsThisSession,
-        openAiInputTokens:  openAiTracker.totalInputTokensThisSession,
+        tavilyUsed: tavilyQuota.used,
+        tavilyRemaining: getTavilyRemaining(),
+        openAiCalls: openAiTracker.totalCallsThisSession,
+        openAiInputTokens: openAiTracker.totalInputTokensThisSession,
         openAiOutputTokens: openAiTracker.totalOutputTokensThisSession,
-        estimatedCostUSD:   parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
-        totalVerified:      allVerifiedLeads.length,
-        totalReturned:      leadsToReturn.length,
+        estimatedCostUSD: parseFloat(costTracker.estimatedUSDThisSession.toFixed(4)),
+        totalVerified: allVerifiedLeads.length,
+        totalReturned: leadsToReturn.length,
         requestedCount,
-        fallbackUsed:       fallbackResults.length > 0,
-        entityFirstSearch:  true,
+        fallbackUsed: fallbackResults.length > 0,
+        entityFirstSearch: true,
     };
 
     console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
@@ -1780,7 +1747,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     if (leadsToReturn.length === 0) {
         return {
-            reply:          'Found companies but no emails passed verification. Try a different industry or location.',
+            reply: 'Found companies but no emails passed verification. Try a different industry or location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No verified leads.' }],
             _meta,
         };
@@ -1790,7 +1757,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         reply: JSON.stringify(leadsToReturn),
         updatedHistory: [
             ...history,
-            { role: 'user',      content: safeMessage },
+            { role: 'user', content: safeMessage },
             { role: 'assistant', content: `[Generated ${leadsToReturn.length} verified leads]` },
         ],
         _meta,
@@ -1798,23 +1765,21 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 }
 
 // ─── MAIN: generateFreeResponse ────────────────────────────────────────────────
-// Function signature, return shape, all intent branches, and all existing
-// environment variables are preserved 100%.
-//
 async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
         console.log('🟢 [AI ENGINE] Pipeline started...');
         onProgress?.('🧠 Understanding your request...');
 
-        const apiKey    = process.env.OPENAI_API_KEY;
+        const apiKey = process.env.OPENAI_API_KEY;
         const tavilyKey = process.env.TAVILY_API_KEY;
 
         const safeMessage = typeof message === 'string'
             ? message.slice(0, MAX_MESSAGE_LENGTH)
             : '';
+            
         if (!safeMessage.trim()) {
             return {
-                reply:          'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
+                reply: 'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
                 updatedHistory: history,
             };
         }
@@ -1822,7 +1787,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const detectedLanguage = _detectLanguage(safeMessage);
         console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
 
-        // ─── NEW FIRST LAYER: INTENT PARSING ─────────────────────────────────────
         const parsedIntent = await _parseUserIntent(safeMessage, history, apiKey);
         const intentType = parsedIntent.intent_type;
         const intentParams = parsedIntent.parameters;
@@ -1842,7 +1806,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 reply,
                 updatedHistory: [
                     ...history,
-                    { role: 'user',      content: safeMessage },
+                    { role: 'user', content: safeMessage },
                     { role: 'assistant', content: reply },
                 ],
             };
@@ -1854,24 +1818,25 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 reply,
                 updatedHistory: [
                     ...history,
-                    { role: 'user',      content: safeMessage },
+                    { role: 'user', content: safeMessage },
                     { role: 'assistant', content: reply },
                 ],
             };
         }
 
-        // INTENT.CHAT (default)
-        const reply = await _handleChat(safeMessage, history, userProfile, apiKey);        return {
+        const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
+        return {
             reply,
             updatedHistory: [
                 ...history,
-                { role: 'user',      content: safeMessage },
+                { role: 'user', content: safeMessage },
                 { role: 'assistant', content: reply },
             ],
         };
 
     } catch (error) {
         console.error('❌ [AI ENGINE] Fatal error:', error.message);
+        console.error('Stack trace:', error.stack);
         return { reply: 'An error occurred. Please try again.', updatedHistory: history };
     }
 }
