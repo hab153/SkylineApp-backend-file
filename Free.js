@@ -476,68 +476,11 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
     return candidates;
 }
 
-// ─── FILTERING LAYER (NEW THIRD LAYER) ────────────────────────────────────────
-// Responsible for cleaning raw discovery results.
-// Removes noise, duplicates, and irrelevant sites before deep research.
-// Output: Array of { company, domain, source_url, relevance_score }
-//
-async function _runFiltering(rawCandidates, intentParams) {
-    console.log(`🧹 [FILTERING] Starting filtering for ${rawCandidates.length} candidates...`);
-    
-    const filtered = [];
-    const seenDomains = new Set();
-    
-    for (const candidate of rawCandidates) {
-        const domain = candidate.domain.toLowerCase();        
-        // 1. Duplicate Handling
-        if (seenDomains.has(domain)) {
-            console.log(`⏭️ [FILTERING] Duplicate domain skipped: ${domain}`);
-            continue;
-        }
-        
-        // 2. Hard Filters (Domain Quality & Business Relevance)
-        // Check against known non-business or low-quality patterns
-        const isLowValueUrl = LOW_VALUE_URL_PATTERNS.some(p => p.test(candidate.source_url));
-        const isLowValueTitle = LOW_VALUE_TITLE_SIGNALS.some(s => (candidate.company || '').toLowerCase().includes(s));
-        
-        if (isLowValueUrl || isLowValueTitle) {
-            console.log(`🔴 [FILTERING] Hard reject (low value): ${candidate.company} (${domain})`);
-            continue;
-        }
-        
-        // 3. Content Signals (Relevance Scoring)
-        // We use the existing scorer to determine if it's worth researching
-        const mockResult = {
-            url: candidate.source_url,
-            title: candidate.company,
-            snippet: candidate.snippet
-        };
-        const relevanceScore = _scorePageBusinessRelevance(mockResult);
-        
-        // Threshold: Only keep candidates with moderate-to-high relevance
-        // This prevents wasting API credits on blogs or news articles that slipped through
-        if (relevanceScore < 40) {
-            console.log(`🔴 [FILTERING] Soft reject (low score ${relevanceScore}): ${candidate.company} (${domain})`);
-            continue;
-        }
-        
-        seenDomains.add(domain);
-        filtered.push({
-            company: candidate.company,
-            domain: domain,
-            source_url: candidate.source_url,
-            relevance_score: relevanceScore
-        });
-    }
-    
-    console.log(`✅ [FILTERING] ${filtered.length} candidates passed filtering.`);
-    return filtered;
-}
-
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
 function extractEmailsFromText(text, companyDomain) {
     if (!text || !companyDomain) return { companyEmails: [], allEmails: [] };
-    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;    const allFound      = [...new Set(text.match(emailRegex) || [])];
+    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const allFound      = [...new Set(text.match(emailRegex) || [])];
     const domainRoot    = companyDomain.split('.')[0].toLowerCase();
     const companyEmails = allFound.filter(e => {
         const ed = e.split('@')[1]?.toLowerCase() || '';
@@ -545,8 +488,7 @@ function extractEmailsFromText(text, companyDomain) {
     });
     if (companyEmails.length > 0) {
         console.log(`📧 [REGEX] Found ${companyEmails.length} real email(s) for ${companyDomain}:`, companyEmails);
-    }
-    return { companyEmails, allEmails: allFound };
+    }    return { companyEmails, allEmails: allFound };
 }
 
 async function huntRealEmails(companyName, domain, tavilyKey) {
@@ -586,7 +528,8 @@ function classifyEmail(email, domain) {
         'contact','info','hello','sales','team','support',
         'enquiries','enquiry','admin','office','mail','general',
         'press','media',
-    ];    const isGeneric = GENERIC_PREFIXES.some(p =>
+    ];
+    const isGeneric = GENERIC_PREFIXES.some(p =>
         localPart === p || localPart.startsWith(p + '.')
     );
 
@@ -594,8 +537,7 @@ function classifyEmail(email, domain) {
     if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
     if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
         return          { type: 'confirmed-personal', label: '✓ Personal email (real)',      trustLevel: 90 };
-    }
-    return              { type: 'confirmed-other',   label: '✓ Email (real)',                trustLevel: 75 };
+    }    return              { type: 'confirmed-other',   label: '✓ Email (real)',                trustLevel: 75 };
 }
 
 // ─── DEAD STUB — DO NOT CALL ──────────────────────────────────────────────────
@@ -635,7 +577,8 @@ function isDisposableDomain(domain) {
 
 // ─── SMTP PROBE ───────────────────────────────────────────────────────────────
 async function smtpProbeEmail(email, domain) {
-    try {        const mxRecords = await dns.resolveMx(domain);
+    try {
+        const mxRecords = await dns.resolveMx(domain);
         if (!mxRecords || mxRecords.length === 0) return 'unknown';
 
         const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
@@ -643,8 +586,7 @@ async function smtpProbeEmail(email, domain) {
 
         return await new Promise((resolve) => {
             const timeout = setTimeout(() => {
-                try { socket.destroy(); } catch {}
-                console.warn(`⏱️ [SMTP PROBE] Timeout for ${email}`);
+                try { socket.destroy(); } catch {}                console.warn(`⏱️ [SMTP PROBE] Timeout for ${email}`);
                 resolve('unknown');
             }, 8000);
 
@@ -684,7 +626,8 @@ async function smtpProbeEmail(email, domain) {
                             console.log(`✅ [SMTP PROBE] ${email} → VALID (${code})`);
                             resolve('valid');
                         } else if (code === 550 || code === 551 || code === 553 || code === 554) {
-                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);                            resolve('invalid');
+                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);
+                            resolve('invalid');
                         } else {
                             console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
                             resolve('unknown');
@@ -692,8 +635,7 @@ async function smtpProbeEmail(email, domain) {
                     } else if (code >= 500) {
                         clearTimeout(timeout);
                         socket.destroy();
-                        resolve('unknown');
-                    }
+                        resolve('unknown');                    }
                 }
             });
 
@@ -733,6 +675,7 @@ async function validateEmailFull(email, domain) {
 
     const emailDomain = normalisedEmail.split('@')[1]?.toLowerCase();
     if (!emailDomain) { result.reason = 'No domain in email'; return result; }
+
     if (isDisposableDomain(emailDomain)) {
         result.disposable = true;
         result.reason     = 'Disposable domain';
@@ -741,8 +684,7 @@ async function validateEmailFull(email, domain) {
 
     if (isFreeEmailDomain(emailDomain)) {
         result.reason = 'Free email provider';
-        return result;
-    }
+        return result;    }
 
     if (REPUTATION_BLOCKED_DOMAINS.has(emailDomain)) {
         result.reason = 'Domain on reputation blocklist';
@@ -782,7 +724,8 @@ async function validateEmailFull(email, domain) {
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 95;
             result.verdict         = 'verified';
-            result.reason          = 'SMTP-confirmed personal email';        } else {
+            result.reason          = 'SMTP-confirmed personal email';
+        } else {
             result.confidenceScore = 78;
             result.verdict         = 'verified';
             result.reason          = 'SMTP-confirmed role/generic email';
@@ -790,8 +733,7 @@ async function validateEmailFull(email, domain) {
     } else {
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 65;
-            result.verdict         = 'probable';
-            result.reason          = 'Found in public source, personal format, MX valid, SMTP inconclusive';
+            result.verdict         = 'probable';            result.reason          = 'Found in public source, personal format, MX valid, SMTP inconclusive';
         } else if (classification.type === 'confirmed-generic' || classification.type === 'confirmed-other') {
             result.confidenceScore = 52;
             result.verdict         = 'probable';
@@ -831,7 +773,8 @@ async function rankAndFilterEmails(emails, domain) {
 // ─── VALIDATION ────────────────────────────────────────────────────────────────
 async function validateMX(domain) {
     try {
-        const records = await dns.resolveMx(domain);        return records && records.length > 0;
+        const records = await dns.resolveMx(domain);
+        return records && records.length > 0;
     } catch { return false; }
 }
 
@@ -839,7 +782,6 @@ function isValidEmailFormat(email) {
     if (!email || typeof email !== 'string') return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
 }
-
 const FREE_EMAIL_PROVIDERS = new Set([
     'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
     'protonmail.com','aol.com','mail.com','yandex.com','zoho.com',
@@ -880,7 +822,8 @@ function detectHallucinations(companyName, extracted) {
         if (yearMatch && parseInt(yearMatch[1]) < CURRENT_YEAR - 2) {
             flags.push(`recentNews stale (${yearMatch[1]}): "${extracted.recentNews}"`);
         }
-    }    return flags;
+    }
+    return flags;
 }
 
 // ─── SCORING ───────────────────────────────────────────────────────────────────
@@ -888,8 +831,7 @@ function scoreDataCompleteness(extracted) {
     if (!extracted) return 0;
     let score = 0;
     if (extracted.mission    && extracted.mission    !== 'unknown') score += 15;
-    if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;
-    if (extracted.size       && extracted.size        !== 'unknown') score += 10;
+    if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;    if (extracted.size       && extracted.size        !== 'unknown') score += 10;
     if (extracted.model      && extracted.model       !== 'unknown') score += 10;
     if (extracted.recentNews)                                        score += 15;
     if (extracted.contactEmails?.length > 0)                         score += 15;
@@ -929,7 +871,8 @@ function _pickBestContact(employees, preferredContact) {
 
     const preferred = (preferredContact || '').toLowerCase().trim();
 
-    if (preferred && preferred !== 'any') {        const match = employees.find(e =>
+    if (preferred && preferred !== 'any') {
+        const match = employees.find(e =>
             e.role && e.role.toLowerCase().includes(preferred)
         );
         if (match) return match;
@@ -938,7 +881,6 @@ function _pickBestContact(employees, preferredContact) {
     const ranked = [...employees].sort((a, b) => {
         const aRole = (a.role || '').toLowerCase();
         const bRole = (b.role || '').toLowerCase();
-
         const aScore = Object.entries(ROLE_PRIORITY).find(([key]) => aRole.includes(key))?.[1] ?? 99;
         const bScore = Object.entries(ROLE_PRIORITY).find(([key]) => bRole.includes(key))?.[1] ?? 99;
 
@@ -978,6 +920,7 @@ function cleanCompanyName(rawTitle) {
     if (!name || REJECT.includes(name.toLowerCase())) return null;
     return name;
 }
+
 // ─── MULTILINGUAL ENGINE ──────────────────────────────────────────────────────
 function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
@@ -986,8 +929,7 @@ function _detectLanguage(message) {
 
     if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(unicodeText)) {
         if (/[\u0698\u06AF\u06CC\u06BE]/.test(unicodeText)) return { code: 'fa', name: 'Farsi',  rtl: true };
-        if (/[\u06C1\u06BE\u06D2]/.test(unicodeText))        return { code: 'ur', name: 'Urdu',   rtl: true };
-        return { code: 'ar', name: 'Arabic', rtl: true };
+        if (/[\u06C1\u06BE\u06D2]/.test(unicodeText))        return { code: 'ur', name: 'Urdu',   rtl: true };        return { code: 'ar', name: 'Arabic', rtl: true };
     }
     if (/[\u0590-\u05FF\uFB1D-\uFB4F]/.test(unicodeText)) return { code: 'he', name: 'Hebrew',   rtl: true  };
     if (/[\u0400-\u04FF]/.test(unicodeText))               return { code: 'ru', name: 'Russian',  rtl: false };
@@ -1027,7 +969,8 @@ function _detectLanguage(message) {
 }
 
 function _buildMultilingualEmailBlock(detectedLanguage) {
-    const rtlNote = detectedLanguage.rtl        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
+    const rtlNote = detectedLanguage.rtl
+        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
         : '';
     return `
 MULTILINGUAL ENGINE — CRITICAL:
@@ -1035,8 +978,7 @@ The user's request was written in: ${detectedLanguage.name} (${detectedLanguage.
 ${rtlNote}
 
 ALL THREE EMAILS (initial, followup, breakup) MUST be written entirely in ${detectedLanguage.name}.
-RULES — NEVER VIOLATE:
-1. Write every word of every email in ${detectedLanguage.name}. No exceptions.
+RULES — NEVER VIOLATE:1. Write every word of every email in ${detectedLanguage.name}. No exceptions.
 2. Translate the subject line, salutation, body, CTA, and sign-off into ${detectedLanguage.name}.
 3. Do NOT mix languages. The emails must be 100% in ${detectedLanguage.name}.
 4. Maintain all tone, rhythm, banned-word, and sales-logic rules in ${detectedLanguage.name}.
@@ -1077,6 +1019,7 @@ function _parseRequestedCount(message) {
             return n;
         }
     }
+
     for (const [word, num] of Object.entries(wordToNum)) {
         const wordPattern = new RegExp(
             `\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i'
@@ -1084,8 +1027,7 @@ function _parseRequestedCount(message) {
         if (wordPattern.test(lower)) {
             console.log(`🔢 [QUANTITY PARSER] Word match: "${word}" → ${num}`);
             return num;
-        }
-    }
+        }    }
 
     const topPattern = /\btop\s+(\d{1,3})\b/i;
     const topMatch   = message.match(topPattern);
@@ -1125,6 +1067,7 @@ function _applyOutputQuantityRules(leads, requestedMax) {
 
     const final = leads.slice(0, sliceTo);
     console.log(`📐 [QUANTITY RULES] Returning ${final.length} lead(s) [min:${effectiveMin}, cap:${cap}, available:${totalVerified}]`);
+
     return final;
 }
 
@@ -1133,8 +1076,7 @@ function _applyOutputQuantityRules(leads, requestedMax) {
 // Converts raw user request into a strict, machine-readable intent schema.
 //
 async function _parseUserIntent(message, history, apiKey) {
-    const recentHistory = (history || []).slice(-6)
-        .map(h => `${h.role}: ${h.content}`)
+    const recentHistory = (history || []).slice(-6)        .map(h => `${h.role}: ${h.content}`)
         .join('\n');
 
     const parsingPrompt = `You are the Intent Parsing Engine. Your job is to convert raw user requests into a strict, structured intent object.
@@ -1174,7 +1116,7 @@ async function _parseUserIntent(message, history, apiKey) {
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
         if (!res) {
-            // Fallback to chat if parsing fails            
+            // Fallback to chat if parsing fails
             return {
                 intent_type: INTENT.CHAT,
                 parameters: {}
@@ -1183,8 +1125,7 @@ async function _parseUserIntent(message, history, apiKey) {
 
         recordOpenAiUsage(
             res.data?.usage?.prompt_tokens     || 0,
-            res.data?.usage?.completion_tokens || 0,
-            'gpt-4o-mini'
+            res.data?.usage?.completion_tokens || 0,            'gpt-4o-mini'
         );
 
         const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
@@ -1224,7 +1165,8 @@ Keep responses concise but complete. Never pad with filler.`;
         .slice(-20)
         .map(h => ({ role: h.role, content: h.content }));
 
-    const messages = [        { role: 'system',  content: systemPrompt },
+    const messages = [
+        { role: 'system',  content: systemPrompt },
         ...memoryMessages,
         { role: 'user',    content: message },
     ];
@@ -1232,8 +1174,7 @@ Keep responses concise but complete. Never pad with filler.`;
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
-            messages,
-            max_tokens:  600,
+            messages,            max_tokens:  600,
             temperature: 0.7,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:chat');
 
@@ -1273,6 +1214,7 @@ ${usp ? `SENDER VALUE PROP: ${usp}` : ''}
 
 RECENT CONTEXT:
 ${recentContext || 'None'}
+
 USER INSTRUCTION: "${message}"
 
 Rules:
@@ -1281,8 +1223,7 @@ Rules:
 - Never use banned adjectives or phrases listed above
 - Never invent stats or percentages
 - Opening line must hook immediately — no "I hope this finds you well"
-- CTA must be one soft, specific ask
-- Sign off with: Best, ${senderName}
+- CTA must be one soft, specific ask- Sign off with: Best, ${senderName}
 - Keep total length under 150 words unless the user asks for longer
 
 Return ONLY valid JSON:
@@ -1322,7 +1263,8 @@ Return ONLY valid JSON:
 async function _handleBusinessQA(message, history, userProfile, apiKey) {
     const usp = userProfile?.usp || null;
 
-    const systemPrompt = `You are a sharp senior business strategist and operator.You give direct, actionable business advice with zero corporate fluff.
+    const systemPrompt = `You are a sharp senior business strategist and operator.
+You give direct, actionable business advice with zero corporate fluff.
 You think like a founder, operator, and growth expert simultaneously.
 ${usp ? `The user runs a business with this value proposition: "${usp}". Use this as context when relevant.` : ''}
 When answering:
@@ -1331,7 +1273,6 @@ When answering:
 - Give a direct recommendation, not just options
 - If you need more information to give a good answer, ask one focused question
 - Never pad responses with filler sentences`;
-
     const memoryMessages = (history || [])
         .slice(-12)
         .map(h => ({ role: h.role, content: h.content }));
@@ -1371,6 +1312,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     const cached = getCachedResearch(domain);
     if (cached) return cached;
     if (getTavilyRemaining() <= 1) return null;
+
     try {
         onProgress?.(`🔍 Researching ${companyName}...`);
 
@@ -1379,8 +1321,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
             tavilyKey, { maxResults: 5 }
         );
         const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
-        const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
-        const regexFromGeneral = extractEmailsFromText(generalText, domain);
+        const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');        const regexFromGeneral = extractEmailsFromText(generalText, domain);
 
         const hasEmailSignal      = regexFromGeneral.companyEmails.length > 0 || generalSnippets.toLowerCase().includes('contact');
         const needsEmployeeSearch = generalResults.length < 3 || !hasEmailSignal;
@@ -1420,7 +1361,8 @@ Return ONLY valid JSON:
     }
   ]
 }
-CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.SNIPPETS:
+CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.
+SNIPPETS:
 ${allSnippets}`;
 
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
@@ -1429,7 +1371,6 @@ ${allSnippets}`;
             max_tokens:  500,
             temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
-
         if (!res) return null;
 
         recordOpenAiUsage(
@@ -1469,7 +1410,8 @@ ${allSnippets}`;
         if (hallucinations.length > 0) {
             console.warn(`⚠️ [HALLUCINATION] ${companyName}:`, hallucinations);
             parsed._hallucinationFlags = hallucinations;
-            if (Array.isArray(parsed.employees)) {                parsed.employees = parsed.employees.filter(emp => {
+            if (Array.isArray(parsed.employees)) {
+                parsed.employees = parsed.employees.filter(emp => {
                     const isSuspect = hallucinations.some(f => emp.name && f.includes(emp.name));
                     if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
                     return !isSuspect;
@@ -1477,8 +1419,7 @@ ${allSnippets}`;
             }
         }
 
-        parsed._regexEmails = regexFromAll.companyEmails;
-        setCachedResearch(domain, parsed);
+        parsed._regexEmails = regexFromAll.companyEmails;        setCachedResearch(domain, parsed);
         return parsed;
 
     } catch (err) {
@@ -1518,6 +1459,7 @@ The goal: the reader thinks "this person actually understands my world", not "th
 `;
 
         const multilingualBlock = _buildMultilingualEmailBlock(detectedLanguage);
+
         const writePrompt = `${buildBannedWordsInstruction()}
 ${multilingualBlock}
 
@@ -1526,8 +1468,7 @@ You NEVER write generic emails. Every word is tailored to the recipient's exact 
 
 TARGET COMPANY: ${companyName}
 ${contactName ? `CONTACT: ${contactName} (${contactRole || 'Decision Maker'})` : `CONTACT: Decision maker at ${companyName}`}
-${mission ? `COMPANY MISSION: ${mission}` : ''}
-${news    ? `RECENT NEWS: ${news}` : ''}
+${mission ? `COMPANY MISSION: ${mission}` : ''}${news    ? `RECENT NEWS: ${news}` : ''}
 SENDER: ${senderName}
 VALUE PROP: ${uspToUse}
 ${industryContext}
@@ -1567,6 +1508,7 @@ Subject: "Closing my file on ${companyName}"
 Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
 3 sentences total. Acknowledge timing. No sell. Leave door open gracefully.
 Sign-off: Best, ${senderName}
+
 HARD RULES:
 - Every email MUST open with the salutation line before any other text.
 - NEVER invent stats, percentages, or results.
@@ -1575,8 +1517,7 @@ HARD RULES:
 - If you write something a plumber and a SaaS founder could both receive unchanged, rewrite it.
 
 Return ONLY valid JSON:
-{
-  "initial":  { "subject": "string", "body": "string" },
+{  "initial":  { "subject": "string", "body": "string" },
   "followup": { "subject": "string", "body": "string" },
   "breakup":  { "subject": "string", "body": "string" }
 }`;
@@ -1616,7 +1557,8 @@ Return ONLY valid JSON:
             followup: {
                 subject: `Re: One thought on ${company}`,
                 body:    `${name},\n\nFloating this back up — most ${industry} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${sender}`,
-            },            breakup: {
+            },
+            breakup: {
                 subject: `Closing my file on ${company}`,
                 body:    `${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${sender}`,
             },
@@ -1624,8 +1566,7 @@ Return ONLY valid JSON:
     }
 }
 
-// ─── SINGLE COMPANY PIPELINE ──────────────────────────────────────────────────
-// EMAIL RESOLUTION CHAIN:
+// ─── SINGLE COMPANY PIPELINE ──────────────────────────────────────────────────// EMAIL RESOLUTION CHAIN:
 //   TIER 1 — Regex-extracted emails from search snippets → validated by full pipeline
 //   TIER 2 — Reality-checked employee email from GPT extract → validated by full pipeline
 //   TIER 3 — huntRealEmails (contact/directory search) → validated by full pipeline
@@ -1666,6 +1607,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
             validateMX(domain),
         ]);
+
         if (!mxValid) {
             console.warn(`🗑️ [REJECTED] ${companyName} — domain ${domain} has no MX records`);
             return null;
@@ -1673,8 +1615,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
 
         const dataScore = scoreDataCompleteness(companyData);
         if (dataScore < 10) {
-            console.warn(`🗑️ Skipping ${companyName} — data score ${dataScore}/100`);
-            return null;
+            console.warn(`🗑️ Skipping ${companyName} — data score ${dataScore}/100`);            return null;
         }
 
         const employees   = companyData?.employees || [];
@@ -1714,6 +1655,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             console.warn(`🗑️ [REJECTED] ${companyName} — no emails passed validation threshold (${EMAIL_CONFIDENCE_THRESHOLD})`);
             return null;
         }
+
         const topEmail        = validatedEmails[0];
         const resolvedEmail   = topEmail.email;
         const classification  = classifyEmail(resolvedEmail, domain);
@@ -1722,7 +1664,6 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
         const allEmailOptions = validatedEmails.map(v => v.email);
 
         console.log(`✅ ${companyName} → ${resolvedEmail} [${emailConfidence}] confidence:${topEmail.confidenceScore} smtp:${topEmail.smtpResult} MX:${mxValid}`);
-
         onProgress?.(`✍️ Writing emails for ${companyName}...`);
 
         const emailSequence = await generateEmailsForLead(
@@ -1763,7 +1704,8 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             emailValidation: {
                 confidenceScore: topEmail.confidenceScore,
                 verdict:         topEmail.verdict,
-                smtpResult:      topEmail.smtpResult,                reason:          topEmail.reason,
+                smtpResult:      topEmail.smtpResult,
+                reason:          topEmail.reason,
             },
             allEmailOptions,
             role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
@@ -1771,8 +1713,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             companySize:        companyData?.size      || 'unknown',
             companyModel:       companyData?.model     || 'unknown',
             industry:           intentParams.industry  || 'unknown',
-            hq:                 companyData?.hq        || null,
-            recentNews:         companyData?.recentNews || null,
+            hq:                 companyData?.hq        || null,            recentNews:         companyData?.recentNews || null,
             leadScore,
             pageScore,
             mxValid,
@@ -1812,7 +1753,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     globalSeenCompanyNames.clear();
 
     // Parse user-requested quantity
-    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
+    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
+    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
 
     // ─── NEW SECOND LAYER: DISCOVERY ─────────────────────────────────────────────
     // Find raw candidates first
@@ -1820,29 +1762,18 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     
     if (rawCandidates.length === 0) {
         return {
-            reply:          'No companies found during discovery. Try narrowing the industry or adding a location.',
-            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
+            reply:          'No companies found during discovery. Try narrowing the industry or adding a location.',            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
         };
     }
 
-    // ─── NEW THIRD LAYER: FILTERING ──────────────────────────────────────────────
-    // Clean the raw candidates before expensive research
-    const filteredCandidates = await _runFiltering(rawCandidates, intentParams);
+    onProgress?.(`⚙️ Processing ${rawCandidates.length} discovered companies...`);
 
-    if (filteredCandidates.length === 0) {
-        return {
-            reply:          'Found potential companies but none passed quality filtering. Try a different industry.',
-            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after filtering.' }],
-        };
-    }
-
-    onProgress?.(`⚙️ Processing ${filteredCandidates.length} filtered companies...`);
-
-    // Convert filtered candidates into the format expected by processOneCompany
-    const discoveryResults = filteredCandidates.map(c => ({
+    // Convert raw candidates into the format expected by processOneCompany
+    // We use the source_url from discovery as the result.url
+    const discoveryResults = rawCandidates.map(c => ({
         title: c.company,
         url: c.source_url,
-        snippet: '' // Snippet not needed here as we have relevance score
+        snippet: c.snippet
     }));
 
     // Process each discovered company through the existing verification/research pipeline
@@ -1861,7 +1792,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // Build session meta    
+    // Build session meta
     const _meta = {
         tavilyUsed:         tavilyQuota.used,
         tavilyRemaining:    getTavilyRemaining(),
@@ -1873,7 +1804,6 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         totalReturned:      leadsToReturn.length,
         requestedCount,
         discoveryCandidates: rawCandidates.length,
-        filteredCandidates: filteredCandidates.length,
     };
 
     console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
@@ -1881,8 +1811,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
     if (leadsToReturn.length === 0) {
-        return {
-            reply:          'Found companies but no emails passed verification. Try a different industry or location.',
+        return {            reply:          'Found companies but no emails passed verification. Try a different industry or location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No verified leads.' }],
             _meta,
         };
@@ -1911,7 +1840,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const apiKey    = process.env.OPENAI_API_KEY;
         const tavilyKey = process.env.TAVILY_API_KEY;
 
-        const safeMessage = typeof message === 'string'            ? message.slice(0, MAX_MESSAGE_LENGTH)
+        const safeMessage = typeof message === 'string'
+            ? message.slice(0, MAX_MESSAGE_LENGTH)
             : '';
 
         if (!safeMessage.trim()) {
@@ -1931,7 +1861,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         console.log(`🎯 [INTENT ROUTER] ${intentType}`);
         onProgress?.(`🧠 Mode: ${intentType.replace('_', ' ')}...`);
-
         if (intentType === INTENT.LEAD_GEN) {
             return await _runLeadGenPipeline(
                 safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, intentParams
@@ -1961,6 +1890,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 ],
             };
         }
+
         // INTENT.CHAT (default)
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
