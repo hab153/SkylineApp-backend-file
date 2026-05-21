@@ -1174,7 +1174,8 @@ async function _parseUserIntent(message, history, apiKey) {
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
         if (!res) {
-            // Fallback to chat if parsing fails            return {
+            // Fallback to chat if parsing fails            
+            return {
                 intent_type: INTENT.CHAT,
                 parameters: {}
             };
