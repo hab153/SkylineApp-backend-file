@@ -1174,7 +1174,8 @@ async function _parseUserIntent(message, history, apiKey) {
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
         if (!res) {
-            // Fallback to chat if parsing fails            return {
+            // Fallback to chat if parsing fails            
+            return {
                 intent_type: INTENT.CHAT,
                 parameters: {}
             };
@@ -1860,7 +1861,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // Build session meta    const _meta = {
+    // Build session meta    
+    const _meta = {
         tavilyUsed:         tavilyQuota.used,
         tavilyRemaining:    getTavilyRemaining(),
         openAiCalls:        openAiTracker.totalCallsThisSession,
