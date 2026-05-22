@@ -145,7 +145,8 @@ function buildBannedWordsInstruction() {
     ].join('\n');
 }
 
-// ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
+// ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────
+const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
 const openAiTracker = {
     totalCallsThisSession:        0,
@@ -1174,7 +1175,8 @@ async function _parseUserIntent(message, history, apiKey) {
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
         if (!res) {
-            // Fallback to chat if parsing fails            return {
+            // Fallback to chat if parsing fails            
+            return {
                 intent_type: INTENT.CHAT,
                 parameters: {}
             };
