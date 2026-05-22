@@ -1862,7 +1862,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // Build session meta    const _meta = {
+    // Build session meta    
+    const _meta = {
         tavilyUsed:         tavilyQuota.used,
         tavilyRemaining:    getTavilyRemaining(),
         openAiCalls:        openAiTracker.totalCallsThisSession,
