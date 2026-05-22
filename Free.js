@@ -47,8 +47,7 @@ const MIN_POOL_SIZE = 3;
 // ─── CONTENT QUALITY FILTER — LOW-VALUE PAGE SIGNALS ─────────────────────────
 // NEW: Used in _scorePageBusinessRelevance() to reject editorial/SEO noise early.
 const LOW_VALUE_URL_PATTERNS = [
-    /\/blog\//i,
-    /\/article\//i,
+    /\/blog\//i,    /\/article\//i,
     /\/news\//i,
     /\/tutorial\//i,
     /\/how-to\//i,
@@ -97,8 +96,7 @@ const LOW_VALUE_TITLE_SIGNALS = [
 // ─── INTENT TYPES ─────────────────────────────────────────────────────────────
 const INTENT = {
     LEAD_GEN:    'lead_gen',
-    CHAT:        'chat',
-    EMAIL_DRAFT: 'email_draft',
+    CHAT:        'chat',    EMAIL_DRAFT: 'email_draft',
     BUSINESS_QA: 'business_qa',
 };
 
@@ -147,8 +145,7 @@ function buildBannedWordsInstruction() {
     ].join('\n');
 }
 
-// ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────
-const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
+// ─── QUOTA TRACKERS ────────────────────────────────────────────────────────────const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
 
 const openAiTracker = {
     totalCallsThisSession:        0,
@@ -197,8 +194,7 @@ function getCachedResearch(domain) {
     console.log(`💾 [CACHE HIT] ${domain}`);
     return hit.data;
 }
-function setCachedResearch(domain, data) {
-    researchCache.set(domain, { data, timestamp: Date.now() });
+function setCachedResearch(domain, data) {    researchCache.set(domain, { data, timestamp: Date.now() });
 }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
@@ -247,8 +243,7 @@ function _scorePageBusinessRelevance(result) {
     }
 
     // ── Title signals ─────────────────────────────────────────────────────
-    for (const signal of HIGH_VALUE_TITLE_SIGNALS) {
-        if (title.includes(signal)) { score += 12; break; }
+    for (const signal of HIGH_VALUE_TITLE_SIGNALS) {        if (title.includes(signal)) { score += 12; break; }
     }
     for (const signal of LOW_VALUE_TITLE_SIGNALS) {
         if (title.includes(signal)) { score -= 20; break; }
@@ -273,11 +268,11 @@ function _scorePageBusinessRelevance(result) {
 // Returns true if the lead should be included, false if it should be rejected.
 // This acts as a post-discovery FILTER gate — precision over volume.
 //
-function _leadMatchesIntent(lead, intent) {
-    if (!intent || !lead) return true; // no constraints = pass all
+function _leadMatchesIntent(lead, intentParams) {
+    if (!intentParams || !lead) return true; // no constraints = pass all
 
-    const industryLower = (intent.industry || '').toLowerCase();
-    const targetLower   = (intent.target   || '').toLowerCase();
+    const industryLower = (intentParams.industry || '').toLowerCase();
+    const targetLower   = (intentParams.target_role || '').toLowerCase();
 
     // Skip validation if intent is vague/generic
     const GENERIC_TERMS = ['general', 'any', 'all', 'business', 'company', 'businesses'];
@@ -297,15 +292,14 @@ function _leadMatchesIntent(lead, intent) {
         const anyMatch = intentKeywords.some(kw =>
             leadIndustry.includes(kw) || leadCompany.includes(kw) || leadDomain.includes(kw)
         );
-        // If we have strong keywords and zero match, flag but don't hard-reject
-        // (domain/company names don't always contain the industry word)
+        // If we have strong keywords and zero match, flag but don't hard-reject        // (domain/company names don't always contain the industry word)
         if (!anyMatch && intentKeywords.length > 1) {
             console.log(`⚠️ [INTENT FILTER] Weak industry match for "${lead.company}" — industry: "${leadIndustry}" vs intent: "${industryLower}"`);
         }
     }
 
     // Role filter: if user requested a specific contact type, enforce it
-    const preferredContact = (intent.preferredContact || 'any').toLowerCase();
+    const preferredContact = (intentParams.target_role || 'any').toLowerCase();
     if (preferredContact && preferredContact !== 'any') {
         const leadRole = (lead.role || '').toLowerCase();
         if (leadRole && !leadRole.includes(preferredContact.split(' ')[0])) {
@@ -341,58 +335,209 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
     }, `Tavily:${query.slice(0, 40)}`) ?? [];
 }
 
-// ─── SEARCH QUERY DIVERSIFICATION ────────────────────────────────────────────
-function _buildFallbackQuery(intent) {
-    const locationClause = intent.location ? `"${intent.location}"` : '';
-    return [
-        intent.industry,
-        intent.target,
-        locationClause,
-        'company website official',
-        'inurl:about OR inurl:team',
-    ].filter(Boolean).join(' ');
+// ─── DISCOVERY LAYER (NEW SECOND LAYER) ───────────────────────────────────────
+// Responsible for finding raw company candidates based on intent.
+// Focuses on HIGH RECALL (breadth) rather than precision.
+// Output: Array of { company, domain, source_url }
+//
+async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
+    console.log(`🔎 [DISCOVERY] Starting discovery for: ${intentParams.industry} in ${intentParams.location || 'Global'}`);    
+    // 1. Generate Synonym/Expansion Queries for Broad Coverage
+    const industry = intentParams.industry || '';
+    const location = intentParams.location ? `"${intentParams.location}"` : '';
+    const type     = intentParams.business_type || '';
+    
+    // Basic queries
+    const queries = [
+        `${industry} companies ${location}`,
+        `${industry} businesses ${location}`,
+        `${type} ${industry} ${location}`,
+        `top ${industry} firms ${location}`,
+        `${industry} agencies ${location}`,
+        `${industry} startups ${location}`,
+        `${industry} manufacturers ${location}`,
+        `${industry} services ${location}`,
+    ].filter(q => q.trim().length > 5); // Remove empty/short queries
+
+    // Deduplication sets
+    const seenDomains = new Set();
+    const candidates  = [];
+    
+    // 2. Execute Search Queries (Parallel with concurrency limit)
+    // We want to cast a wide net, so we run multiple queries
+    const maxQueries = 6; // Limit to avoid excessive API usage in one go
+    const queriesToRun = queries.slice(0, maxQueries);
+    
+    console.log(`🔎 [DISCOVERY] Running ${queriesToRun.length} discovery queries...`);
+
+    for (const query of queriesToRun) {
+        if (candidates.length >= requestedCount * 3) break; // Stop if we have enough raw candidates
+        
+        try {
+            const results = await searchWithTavily(query, tavilyKey, { maxResults: 5 });
+            
+            for (const res of results) {
+                let domain = '';
+                try {
+                    const urlObj = new URL(res.url);
+                    domain = urlObj.hostname.replace('www.', '');
+                } catch (e) { continue; }
+
+                // Skip if we've already seen this domain
+                if (seenDomains.has(domain)) continue;
+                
+                // Skip known non-company domains (social, directories, etc.)
+                const SKIP_DISCOVERY_DOMAINS = [
+                    'linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com',
+                    'crunchbase.com', 'apollo.io', 'hunter.io', 'zoominfo.com',
+                    'yelp.com', 'yellowpages.com', 'trustpilot.com', 'glassdoor.com',                    'medium.com', 'reddit.com', 'quora.com', 'wikipedia.org',
+                    'youtube.com', 'vimeo.com', 'tiktok.com', 'pinterest.com',
+                    'github.com', 'gitlab.com', 'stackoverflow.com',
+                    'indeed.com', 'monster.com', 'careerbuilder.com',
+                    'amazon.com', 'ebay.com', 'etsy.com', 'shopify.com',
+                    'wordpress.com', 'wix.com', 'squarespace.com',
+                    'google.com', 'bing.com', 'yahoo.com',
+                    'bbc.com', 'cnn.com', 'reuters.com', 'bloomberg.com',
+                    'forbes.com', 'entrepreneur.com', 'inc.com', 'techcrunch.com',
+                    'hubspot.com', 'salesforce.com', 'microsoft.com', 'apple.com',
+                    'netflix.com', 'spotify.com', 'uber.com', 'lyft.com',
+                    'airbnb.com', 'booking.com', 'expedia.com', 'tripadvisor.com',
+                    'ycombinator.com', 'angellist.com', 'producthunt.com',
+                    'slideshow.net', 'slideshare.net', 'scribd.com',
+                    'issuu.com', 'calameo.com', 'flipbook.com',
+                    'pdfdrive.com', 'docdroid.net', 'docplayer.net',
+                    'academia.edu', 'researchgate.net', 'springer.com',
+                    'elsevier.com', 'sciencedirect.com', 'jstor.org',
+                    'nature.com', 'science.org', 'cell.com', 'lanet.com',
+                    'nih.gov', 'ncbi.nlm.nih.gov', 'pubmed.ncbi.nlm.nih.gov',
+                    'who.int', 'cdc.gov', 'fda.gov', 'epa.gov', 'usda.gov',
+                    'un.org', 'worldbank.org', 'imf.org', 'oecd.org',
+                    'europa.eu', 'ec.europa.eu', 'gov.uk', 'gov.ca',
+                    'gov.ny.us', 'gov.tx.us', 'gov.fl.us', 'gov.il.us',
+                    'gov.pa.us', 'gov.oh.us', 'gov.mi.us', 'gov.ga.us',
+                    'gov.nc.us', 'gov.nj.us', 'gov.va.us', 'gov.ma.us',
+                    'gov.in.us', 'gov.az.us', 'gov.tn.us', 'gov.mo.us',
+                    'gov.md.us', 'gov.wi.us', 'gov.mn.us', 'gov.co.us',
+                    'gov.al.us', 'gov.sc.us', 'gov.ok.us', 'gov.ky.us',
+                    'gov.or.us', 'gov.ct.us', 'gov.ia.us', 'gov.ms.us',
+                    'gov.ar.us', 'gov.ks.us', 'gov.ut.us', 'gov.nv.us',
+                    'gov.nm.us', 'gov.wv.us', 'gov.ne.us', 'gov.id.us',
+                    'gov.hi.us', 'gov.me.us', 'gov.nh.us', 'gov.ri.us',
+                    'gov.mt.us', 'gov.de.us', 'gov.sd.us', 'gov.nd.us',
+                    'gov.ak.us', 'gov.vt.us', 'gov.wy.us', 'gov.dc.us',
+                    'gov.pr.us', 'gov.vi.us', 'gov.gu.us', 'gov.as.us',
+                    'gov.mp.us', 'gov.um.us', 'gov.aq.us', 'gov.bq.us',
+                    'gov.cw.us', 'gov.sx.us', 'gov.aw.us', 'gov.bb.us',
+                    'gov.dm.us', 'gov.gd.us', 'gov.ht.us', 'gov.jm.us',
+                    'gov.kn.us', 'gov.lc.us', 'gov.vc.us', 'gov.tt.us',
+                    'gov.ag.us', 'gov.bs.us', 'gov.bz.us', 'gov.cr.us',
+                    'gov.sv.us', 'gov.gt.us', 'gov.hn.us', 'gov.ni.us',
+                    'gov.pa.us', 'gov.py.us', 'gov.pe.us', 'gov.sr.us',
+                    'gov.uy.us', 'gov.ve.us', 'gov.bo.us', 'gov.cl.us',
+                    'gov.co.us', 'gov.ec.us', 'gov.gf.us', 'gov.gy.us',
+                    'gov.fk.us', 'gov.gs.us', 'gov.tk.us', 'gov.to.us',
+                    'gov.tv.us', 'gov.nr.us', 'gov.pw.us', 'gov.fm.us',
+                    'gov.mh.us', 'gov.ki.us', 'gov.sb.us', 'gov.vu.us',
+                    'gov.fj.us', 'gov.ws.us', 'gov.as.us', 'gov.gu.us',
+                    'gov.mp.us', 'gov.pr.us', 'gov.vi.us', 'gov.um.us',                    'gov.aq.us', 'gov.bq.us', 'gov.cw.us', 'gov.sx.us',
+                    'gov.aw.us', 'gov.bb.us', 'gov.dm.us', 'gov.gd.us',
+                    'gov.ht.us', 'gov.jm.us', 'gov.kn.us', 'gov.lc.us',
+                    'gov.vc.us', 'gov.tt.us', 'gov.ag.us', 'gov.bs.us',
+                    'gov.bz.us', 'gov.cr.us', 'gov.sv.us', 'gov.gt.us',
+                    'gov.hn.us', 'gov.ni.us', 'gov.pa.us', 'gov.py.us',
+                    'gov.pe.us', 'gov.sr.us', 'gov.uy.us', 'gov.ve.us',
+                    'gov.bo.us', 'gov.cl.us', 'gov.co.us', 'gov.ec.us',
+                    'gov.gf.us', 'gov.gy.us', 'gov.fk.us', 'gov.gs.us',
+                    'gov.tk.us', 'gov.to.us', 'gov.tv.us', 'gov.nr.us',
+                    'gov.pw.us', 'gov.fm.us', 'gov.mh.us', 'gov.ki.us',
+                    'gov.sb.us', 'gov.vu.us', 'gov.fj.us', 'gov.ws.us'
+                ];
+                
+                if (SKIP_DISCOVERY_DOMAINS.some(d => domain.includes(d))) continue;
+                
+                // Basic validation: must look like a company page (not a blog post or news article)
+                // We use a very loose filter here to ensure HIGH RECALL
+                if (LOW_VALUE_URL_PATTERNS.some(p => p.test(res.url))) continue;
+
+                seenDomains.add(domain);
+                candidates.push({
+                    company: res.title || domain,
+                    domain: domain,
+                    source_url: res.url,
+                    snippet: res.snippet || ''
+                });
+            }
+        } catch (err) {
+            console.warn(`⚠️ [DISCOVERY] Query failed: ${query} - ${err.message}`);
+        }
+    }
+
+    console.log(`✅ [DISCOVERY] Found ${candidates.length} raw candidates.`);
+    return candidates;
 }
 
-// ─── NEW: ENTITY-FIRST SEARCH QUERY BUILDER ──────────────────────────────────
-// Builds domain-specific, entity-first queries that prioritise business
-// entity pages over informational content. Three query variants per intent.
+// ─── FILTERING LAYER (NEW THIRD LAYER) ────────────────────────────────────────
+// Responsible for cleaning raw discovery results.
+// Removes noise, duplicates, and irrelevant sites before deep research.
+// Output: Array of { company, domain, source_url, relevance_score }
 //
-function _buildEntityFirstQueries(intent, poolSize) {
-    const loc   = intent.location ? `"${intent.location}"` : '';
-    const ind   = intent.industry || '';
-    const tgt   = intent.target   || '';
-
-    // Query 1 — Primary: company pages with contact/about signals
-    const primary = [
-        `"${tgt}"`, ind, loc,
-        'contact email CEO founder',
-        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
-    ].filter(Boolean).join(' ');
-
-    // Query 2 — Entity signals: company name patterns + domain indicators
-    const entityFocus = [
-        ind, loc,
-        'official website company',
-        '"about us" OR "our team" OR "meet the team"',
-        '"contact us" OR "get in touch"',
-    ].filter(Boolean).join(' ');
-
-    // Query 3 — Decision-maker focus: find founders/CEOs directly
-    const dmFocus = [
-        `"${ind}"`, loc,
-        'CEO OR founder OR owner OR director',
-        '"email" OR "contact"',
-        '-site:linkedin.com -site:crunchbase.com',
-    ].filter(Boolean).join(' ');
-
-    return { primary, entityFocus, dmFocus };
+async function _runFiltering(rawCandidates, intentParams) {
+    console.log(`🧹 [FILTERING] Starting filtering for ${rawCandidates.length} candidates...`);
+    
+    const filtered = [];
+    const seenDomains = new Set();
+    
+    for (const candidate of rawCandidates) {
+        const domain = candidate.domain.toLowerCase();        
+        // 1. Duplicate Handling
+        if (seenDomains.has(domain)) {
+            console.log(`⏭️ [FILTERING] Duplicate domain skipped: ${domain}`);
+            continue;
+        }
+        
+        // 2. Hard Filters (Domain Quality & Business Relevance)
+        // Check against known non-business or low-quality patterns
+        const isLowValueUrl = LOW_VALUE_URL_PATTERNS.some(p => p.test(candidate.source_url));
+        const isLowValueTitle = LOW_VALUE_TITLE_SIGNALS.some(s => (candidate.company || '').toLowerCase().includes(s));
+        
+        if (isLowValueUrl || isLowValueTitle) {
+            console.log(`🔴 [FILTERING] Hard reject (low value): ${candidate.company} (${domain})`);
+            continue;
+        }
+        
+        // 3. Content Signals (Relevance Scoring)
+        // We use the existing scorer to determine if it's worth researching
+        const mockResult = {
+            url: candidate.source_url,
+            title: candidate.company,
+            snippet: candidate.snippet
+        };
+        const relevanceScore = _scorePageBusinessRelevance(mockResult);
+        
+        // Threshold: Only keep candidates with moderate-to-high relevance
+        // This prevents wasting API credits on blogs or news articles that slipped through
+        if (relevanceScore < 40) {
+            console.log(`🔴 [FILTERING] Soft reject (low score ${relevanceScore}): ${candidate.company} (${domain})`);
+            continue;
+        }
+        
+        seenDomains.add(domain);
+        filtered.push({
+            company: candidate.company,
+            domain: domain,
+            source_url: candidate.source_url,
+            relevance_score: relevanceScore
+        });
+    }
+    
+    console.log(`✅ [FILTERING] ${filtered.length} candidates passed filtering.`);
+    return filtered;
 }
 
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
 function extractEmailsFromText(text, companyDomain) {
     if (!text || !companyDomain) return { companyEmails: [], allEmails: [] };
-    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-    const allFound      = [...new Set(text.match(emailRegex) || [])];
+    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;    const allFound      = [...new Set(text.match(emailRegex) || [])];
     const domainRoot    = companyDomain.split('.')[0].toLowerCase();
     const companyEmails = allFound.filter(e => {
         const ed = e.split('@')[1]?.toLowerCase() || '';
@@ -441,8 +586,7 @@ function classifyEmail(email, domain) {
         'contact','info','hello','sales','team','support',
         'enquiries','enquiry','admin','office','mail','general',
         'press','media',
-    ];
-    const isGeneric = GENERIC_PREFIXES.some(p =>
+    ];    const isGeneric = GENERIC_PREFIXES.some(p =>
         localPart === p || localPart.startsWith(p + '.')
     );
 
@@ -491,8 +635,7 @@ function isDisposableDomain(domain) {
 
 // ─── SMTP PROBE ───────────────────────────────────────────────────────────────
 async function smtpProbeEmail(email, domain) {
-    try {
-        const mxRecords = await dns.resolveMx(domain);
+    try {        const mxRecords = await dns.resolveMx(domain);
         if (!mxRecords || mxRecords.length === 0) return 'unknown';
 
         const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
@@ -541,8 +684,7 @@ async function smtpProbeEmail(email, domain) {
                             console.log(`✅ [SMTP PROBE] ${email} → VALID (${code})`);
                             resolve('valid');
                         } else if (code === 550 || code === 551 || code === 553 || code === 554) {
-                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);
-                            resolve('invalid');
+                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);                            resolve('invalid');
                         } else {
                             console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
                             resolve('unknown');
@@ -591,7 +733,6 @@ async function validateEmailFull(email, domain) {
 
     const emailDomain = normalisedEmail.split('@')[1]?.toLowerCase();
     if (!emailDomain) { result.reason = 'No domain in email'; return result; }
-
     if (isDisposableDomain(emailDomain)) {
         result.disposable = true;
         result.reason     = 'Disposable domain';
@@ -641,8 +782,7 @@ async function validateEmailFull(email, domain) {
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 95;
             result.verdict         = 'verified';
-            result.reason          = 'SMTP-confirmed personal email';
-        } else {
+            result.reason          = 'SMTP-confirmed personal email';        } else {
             result.confidenceScore = 78;
             result.verdict         = 'verified';
             result.reason          = 'SMTP-confirmed role/generic email';
@@ -691,8 +831,7 @@ async function rankAndFilterEmails(emails, domain) {
 // ─── VALIDATION ────────────────────────────────────────────────────────────────
 async function validateMX(domain) {
     try {
-        const records = await dns.resolveMx(domain);
-        return records && records.length > 0;
+        const records = await dns.resolveMx(domain);        return records && records.length > 0;
     } catch { return false; }
 }
 
@@ -741,8 +880,7 @@ function detectHallucinations(companyName, extracted) {
         if (yearMatch && parseInt(yearMatch[1]) < CURRENT_YEAR - 2) {
             flags.push(`recentNews stale (${yearMatch[1]}): "${extracted.recentNews}"`);
         }
-    }
-    return flags;
+    }    return flags;
 }
 
 // ─── SCORING ───────────────────────────────────────────────────────────────────
@@ -791,8 +929,7 @@ function _pickBestContact(employees, preferredContact) {
 
     const preferred = (preferredContact || '').toLowerCase().trim();
 
-    if (preferred && preferred !== 'any') {
-        const match = employees.find(e =>
+    if (preferred && preferred !== 'any') {        const match = employees.find(e =>
             e.role && e.role.toLowerCase().includes(preferred)
         );
         if (match) return match;
@@ -841,7 +978,6 @@ function cleanCompanyName(rawTitle) {
     if (!name || REJECT.includes(name.toLowerCase())) return null;
     return name;
 }
-
 // ─── MULTILINGUAL ENGINE ──────────────────────────────────────────────────────
 function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
@@ -891,8 +1027,7 @@ function _detectLanguage(message) {
 }
 
 function _buildMultilingualEmailBlock(detectedLanguage) {
-    const rtlNote = detectedLanguage.rtl
-        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
+    const rtlNote = detectedLanguage.rtl        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
         : '';
     return `
 MULTILINGUAL ENGINE — CRITICAL:
@@ -942,7 +1077,6 @@ function _parseRequestedCount(message) {
             return n;
         }
     }
-
     for (const [word, num] of Object.entries(wordToNum)) {
         const wordPattern = new RegExp(
             `\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i'
@@ -991,47 +1125,60 @@ function _applyOutputQuantityRules(leads, requestedMax) {
 
     const final = leads.slice(0, sliceTo);
     console.log(`📐 [QUANTITY RULES] Returning ${final.length} lead(s) [min:${effectiveMin}, cap:${cap}, available:${totalVerified}]`);
-
     return final;
 }
 
-// ─── INTENT CLASSIFIER ────────────────────────────────────────────────────────
-async function _classifyIntent(message, history, apiKey) {
+// ─── INTENT PARSING ENGINE (NEW FIRST LAYER) ──────────────────────────────────
+// Replaces the old _classifyIntent.
+// Converts raw user request into a strict, machine-readable intent schema.
+//
+async function _parseUserIntent(message, history, apiKey) {
     const recentHistory = (history || []).slice(-6)
         .map(h => `${h.role}: ${h.content}`)
         .join('\n');
 
-    const classifyPrompt = `You are an intent classifier for an AI assistant.
-Classify the user message into EXACTLY ONE of these intents:
+    const parsingPrompt = `You are the Intent Parsing Engine. Your job is to convert raw user requests into a strict, structured intent object.
+    
+    RULES:
+    1. Identify the primary intent_type: "lead_gen", "email_draft", "business_qa", or "chat".
+    2. If intent_type is "lead_gen", extract parameters: industry, business_type, target_role, location, purpose, constraints.
+    3. Normalize synonyms (e.g., "boss" -> "CEO", "founder" -> "Founder").
+    4. If a field is missing, use safe defaults (e.g., location: "Global", purpose: "outreach").
+    5. NEVER hallucinate specific companies or contacts.
+    6. Return ONLY valid JSON.
 
-1. "lead_gen"    — user wants to find leads, prospect companies, get contacts, find businesses to outreach
-2. "email_draft" — user wants to write, draft, compose, or improve an email (NOT find leads)
-3. "business_qa" — user wants business advice, strategy, analysis, calculations, or professional Q&A
-4. "chat"        — anything else: greetings, small talk, general questions, follow-up clarifications
+    RECENT CONVERSATION:
+    ${recentHistory || 'None'}
 
-RECENT CONVERSATION:
-${recentHistory || 'None'}
+    USER MESSAGE: "${message}"
 
-USER MESSAGE: "${message}"
-
-Rules:
-- If the message mentions finding companies, leads, prospects, outreach targets → "lead_gen"
-- If the message says write/draft/compose/fix/improve an email → "email_draft"
-- If the message asks for business advice, strategy, metrics, pricing, sales tips → "business_qa"
-- Greetings like "hi", "hello", "thanks", "what can you do" → "chat"
-- Short follow-up messages after a lead_gen result (like "give me more" or "try another industry") → "lead_gen"
-
-Return ONLY the intent string. No explanation. No JSON. Just one of: lead_gen | email_draft | business_qa | chat`;
+    OUTPUT FORMAT:
+    {
+      "intent_type": "lead_gen" | "email_draft" | "business_qa" | "chat",
+      "parameters": {
+        "industry": "string (e.g., 'SaaS', 'Fashion', 'Logistics')",
+        "business_type": "string (e.g., 'Startup', 'Enterprise', 'Agency')",
+        "target_role": "string (e.g., 'CEO', 'Founder', 'Head of Growth')",
+        "location": "string (e.g., 'China', 'London', 'Global')",
+        "purpose": "string (e.g., 'outreach', 'partnerships', 'sales')",
+        "constraints": ["string"] (e.g., ['only verified', 'exclude startups'])
+      }
+    }`;
 
     try {
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: classifyPrompt }],
-            max_tokens:  10,
+            messages:    [{ role: 'user', content: parsingPrompt }],
+            max_tokens:  250,
             temperature: 0.0,
-        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:classify');
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
-        if (!res) return INTENT.CHAT;
+        if (!res) {
+            // Fallback to chat if parsing fails            return {
+                intent_type: INTENT.CHAT,
+                parameters: {}
+            };
+        }
 
         recordOpenAiUsage(
             res.data?.usage?.prompt_tokens     || 0,
@@ -1039,15 +1186,23 @@ Return ONLY the intent string. No explanation. No JSON. Just one of: lead_gen | 
             'gpt-4o-mini'
         );
 
-        const raw = res.data.choices[0].message.content.trim().toLowerCase();
-        if (raw.includes('lead_gen'))    return INTENT.LEAD_GEN;
-        if (raw.includes('email_draft')) return INTENT.EMAIL_DRAFT;
-        if (raw.includes('business_qa')) return INTENT.BUSINESS_QA;
-        return INTENT.CHAT;
+        const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
+        const parsed = JSON.parse(raw);
+
+        // Ensure basic structure integrity
+        if (!parsed.intent_type) parsed.intent_type = INTENT.CHAT;
+        if (!parsed.parameters) parsed.parameters = {};
+
+        console.log(`🎯 [INTENT PARSED] Type: ${parsed.intent_type} | Params: ${JSON.stringify(parsed.parameters)}`);
+        return parsed;
 
     } catch (err) {
-        console.warn('[Intent Classify Failed]:', err.message);
-        return INTENT.CHAT;
+        console.warn('[Intent Parsing Failed]:', err.message);
+        // Fallback to chat on error
+        return {
+            intent_type: INTENT.CHAT,
+            parameters: {}
+        };
     }
 }
 
@@ -1068,8 +1223,7 @@ Keep responses concise but complete. Never pad with filler.`;
         .slice(-20)
         .map(h => ({ role: h.role, content: h.content }));
 
-    const messages = [
-        { role: 'system',  content: systemPrompt },
+    const messages = [        { role: 'system',  content: systemPrompt },
         ...memoryMessages,
         { role: 'user',    content: message },
     ];
@@ -1118,7 +1272,6 @@ ${usp ? `SENDER VALUE PROP: ${usp}` : ''}
 
 RECENT CONTEXT:
 ${recentContext || 'None'}
-
 USER INSTRUCTION: "${message}"
 
 Rules:
@@ -1168,8 +1321,7 @@ Return ONLY valid JSON:
 async function _handleBusinessQA(message, history, userProfile, apiKey) {
     const usp = userProfile?.usp || null;
 
-    const systemPrompt = `You are a sharp senior business strategist and operator.
-You give direct, actionable business advice with zero corporate fluff.
+    const systemPrompt = `You are a sharp senior business strategist and operator.You give direct, actionable business advice with zero corporate fluff.
 You think like a founder, operator, and growth expert simultaneously.
 ${usp ? `The user runs a business with this value proposition: "${usp}". Use this as context when relevant.` : ''}
 When answering:
@@ -1218,7 +1370,6 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     const cached = getCachedResearch(domain);
     if (cached) return cached;
     if (getTavilyRemaining() <= 1) return null;
-
     try {
         onProgress?.(`🔍 Researching ${companyName}...`);
 
@@ -1268,8 +1419,7 @@ Return ONLY valid JSON:
     }
   ]
 }
-CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.
-SNIPPETS:
+CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.SNIPPETS:
 ${allSnippets}`;
 
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
@@ -1318,8 +1468,7 @@ ${allSnippets}`;
         if (hallucinations.length > 0) {
             console.warn(`⚠️ [HALLUCINATION] ${companyName}:`, hallucinations);
             parsed._hallucinationFlags = hallucinations;
-            if (Array.isArray(parsed.employees)) {
-                parsed.employees = parsed.employees.filter(emp => {
+            if (Array.isArray(parsed.employees)) {                parsed.employees = parsed.employees.filter(emp => {
                     const isSuspect = hallucinations.some(f => emp.name && f.includes(emp.name));
                     if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
                     return !isSuspect;
@@ -1368,7 +1517,6 @@ The goal: the reader thinks "this person actually understands my world", not "th
 `;
 
         const multilingualBlock = _buildMultilingualEmailBlock(detectedLanguage);
-
         const writePrompt = `${buildBannedWordsInstruction()}
 ${multilingualBlock}
 
@@ -1418,7 +1566,6 @@ Subject: "Closing my file on ${companyName}"
 Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
 3 sentences total. Acknowledge timing. No sell. Leave door open gracefully.
 Sign-off: Best, ${senderName}
-
 HARD RULES:
 - Every email MUST open with the salutation line before any other text.
 - NEVER invent stats, percentages, or results.
@@ -1468,8 +1615,7 @@ Return ONLY valid JSON:
             followup: {
                 subject: `Re: One thought on ${company}`,
                 body:    `${name},\n\nFloating this back up — most ${industry} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${sender}`,
-            },
-            breakup: {
+            },            breakup: {
                 subject: `Closing my file on ${company}`,
                 body:    `${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${sender}`,
             },
@@ -1486,7 +1632,7 @@ Return ONLY valid JSON:
 //
 // NEW: page business relevance score gating before committing research quota.
 //
-async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
+async function processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
     try {
         let domain = '';
         try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
@@ -1519,7 +1665,6 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
             validateMX(domain),
         ]);
-
         if (!mxValid) {
             console.warn(`🗑️ [REJECTED] ${companyName} — domain ${domain} has no MX records`);
             return null;
@@ -1532,7 +1677,8 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         }
 
         const employees   = companyData?.employees || [];
-        const bestContact = _pickBestContact(employees, intent.preferredContact);
+        // Use target_role from structured intent
+        const bestContact = _pickBestContact(employees, intentParams.target_role);
 
         // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
         const candidateEmails = [
@@ -1567,7 +1713,6 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             console.warn(`🗑️ [REJECTED] ${companyName} — no emails passed validation threshold (${EMAIL_CONFIDENCE_THRESHOLD})`);
             return null;
         }
-
         const topEmail        = validatedEmails[0];
         const resolvedEmail   = topEmail.email;
         const classification  = classifyEmail(resolvedEmail, domain);
@@ -1584,7 +1729,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
                 name:        companyName,
                 mission:     companyData?.mission,
                 recentNews:  companyData?.recentNews,
-                industry:    intent.industry,
+                industry:    intentParams.industry,
                 model:       companyData?.model,
             },
             bestContact,
@@ -1617,15 +1762,14 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             emailValidation: {
                 confidenceScore: topEmail.confidenceScore,
                 verdict:         topEmail.verdict,
-                smtpResult:      topEmail.smtpResult,
-                reason:          topEmail.reason,
+                smtpResult:      topEmail.smtpResult,                reason:          topEmail.reason,
             },
             allEmailOptions,
             role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
             linkedIn:           bestContact?.linkedIn  || null,
             companySize:        companyData?.size      || 'unknown',
             companyModel:       companyData?.model     || 'unknown',
-            industry:           intent.industry        || 'unknown',
+            industry:           intentParams.industry  || 'unknown',
             hq:                 companyData?.hq        || null,
             recentNews:         companyData?.recentNews || null,
             leadScore,
@@ -1642,7 +1786,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         };
 
         // NEW: Intent match validation (advisory — logs mismatches, doesn't hard-reject)
-        _leadMatchesIntent(lead, intent);
+        _leadMatchesIntent(lead, intentParams);
 
         return lead;
 
@@ -1661,137 +1805,51 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 //   5. Session _meta passthrough in return object
 //   6. Expanded SKIP_DOMAINS list with more SEO/directory sites
 //
-async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
+async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, intentParams) {
 
     // Reset company name dedup for each fresh pipeline run
     globalSeenCompanyNames.clear();
 
     // Parse user-requested quantity
-    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
-    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
+    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
 
-    const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
-Return ONLY valid JSON:
-{
-  "target": "description of ideal customer or company type",
-  "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",
-  "location": "city, country, region — null if not mentioned",
-  "preferredContact": "CEO | Founder | Marketing | Sales | Owner | Any"
-}
-Never return null for target or industry. Infer from context.`;
-
-    let intent = { target: 'small businesses', industry: 'general', location: null, preferredContact: 'Any' };
-    try {
-        const intentRes = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: intentPrompt }],
-            max_tokens:  150,
-            temperature: 0.1,
-        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
-
-        if (intentRes) {
-            recordOpenAiUsage(
-                intentRes.data?.usage?.prompt_tokens     || 0,
-                intentRes.data?.usage?.completion_tokens || 0,
-                'gpt-4o-mini'
-            );
-            const raw    = intentRes.data.choices[0].message.content.replace(/```json|```/g, '');
-            const parsed = JSON.parse(raw);
-            intent = { ...intent, ...parsed };
-            console.log(`🎯 Intent: ${JSON.stringify(intent)}`);
-        }
-    } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
-
-    onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
-
-    const searchPoolSize = Math.min(
-        Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3),
-        15
-    );
-
-    // ── BUILD ENTITY-FIRST QUERIES ────────────────────────────────────────────
-    const queries = _buildEntityFirstQueries(intent, searchPoolSize);
-    console.log(`🔍 Primary Query: ${queries.primary}`);
-
-    // Run primary query
-    const rawResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: searchPoolSize });
-    console.log(`🔎 RAW RESULTS (${rawResults.length}):`, rawResults.map(r => r.url));
-
-    // ── FALLBACK QUERY on thin primary pool ───────────────────────────────────
-    let fallbackResults = [];
-    if (rawResults.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
-        console.log(`⚡ [FALLBACK QUERY] Primary pool thin (${rawResults.length}/${MIN_POOL_SIZE}) — trying entity-focus fallback`);
-        const fallbackQuery = queries.entityFocus;
-        console.log(`🔍 Fallback Query: ${fallbackQuery}`);
-        try {
-            fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, { maxResults: searchPoolSize });
-            console.log(`🔎 FALLBACK RESULTS (${fallbackResults.length}):`, fallbackResults.map(r => r.url));
-        } catch (fbErr) {
-            console.warn(`⚠️ [FALLBACK QUERY] Failed: ${fbErr.message}`);
-        }
-    }
-
-    // ── MERGE PRIMARY + FALLBACK (deduplicated by URL) ────────────────────────
-    const seenUrls  = new Set(rawResults.map(r => r.url));
-    const mergedRaw = [
-        ...rawResults,
-        ...fallbackResults.filter(r => !seenUrls.has(r.url)),
-    ];
-
-    if (mergedRaw.length === 0) {
+    // ─── NEW SECOND LAYER: DISCOVERY ─────────────────────────────────────────────
+    // Find raw candidates first
+    const rawCandidates = await _runDiscovery(intentParams, tavilyKey, requestedCount);
+    
+    if (rawCandidates.length === 0) {
         return {
-            reply:          'No companies found. Try narrowing the industry or adding a location.',
+            reply:          'No companies found during discovery. Try narrowing the industry or adding a location.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads found.' }],
         };
     }
 
-    // ── EXPANDED SKIP DOMAINS (more SEO/directory sites blocked) ─────────────
-    const SKIP_DOMAINS = [
-        'linkedin.com','crunchbase.com','apollo.io','hunter.io',
-        'yelp.com','clutch.co','g2.com','trustpilot.com',
-        'bark.com','bark.london','upwork.com','fiverr.com','peopleperhour.com',
-        'yell.com','thomsonlocal.com','checkatrade.com',
-        'directory.com','yellowpages.com','manta.com',
-        // NEW additions: common SEO/editorial noise sources
-        'hubspot.com','moz.com','semrush.com','ahrefs.com',
-        'searchenginejournal.com','searchengineland.com',
-        'entrepreneur.com','forbes.com','inc.com','businessinsider.com',
-        'techcrunch.com','venturebeat.com','wired.com',
-        'reddit.com','quora.com','medium.com','substack.com',
-        'wikipedia.org','wikihow.com',
-        'indeed.com','glassdoor.com','ziprecruiter.com',
-        'capterra.com','getapp.com','softwareadvice.com',
-        'producthunt.com','angellist.com','f6s.com',
-        'goodfirms.co','designrush.com','expertise.com',
-        'houzz.com','thumbtack.com','homeadvisor.com',
-        'yelp.ca','yelp.co.uk','yelp.com.au',
-    ];
+    // ─── NEW THIRD LAYER: FILTERING ──────────────────────────────────────────────
+    // Clean the raw candidates before expensive research
+    const filteredCandidates = await _runFiltering(rawCandidates, intentParams);
 
-    const cleanResults = [];
-    for (const result of mergedRaw) {
-        let domain = '';
-        try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
-        if (!domain)                                                  continue;
-        if (globalSeenDomains.has(domain))                           continue;
-        if (SKIP_DOMAINS.some(d => domain.includes(d)))              continue;
-        globalSeenDomains.add(domain);
-        cleanResults.push({ ...result, _domain: domain });
-        if (cleanResults.length >= requestedCount + 5) break;
-    }
-
-    console.log(`✅ Clean results after domain filter: ${cleanResults.length}`);
-
-    if (cleanResults.length === 0) {
+    if (filteredCandidates.length === 0) {
         return {
-            reply:          'Found results but all were directory or editorial sites. Try a more specific industry or location.',
+            reply:          'Found potential companies but none passed quality filtering. Try a different industry.',
             updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after filtering.' }],
         };
     }
 
-    onProgress?.(`⚙️ Researching ${cleanResults.length} companies...`);
-    const tasks = cleanResults.map(result => () =>
-        processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
+    onProgress?.(`⚙️ Processing ${filteredCandidates.length} filtered companies...`);
+
+    // Convert filtered candidates into the format expected by processOneCompany
+    const discoveryResults = filteredCandidates.map(c => ({
+        title: c.company,
+        url: c.source_url,
+        snippet: '' // Snippet not needed here as we have relevance score
+    }));
+
+    // Process each discovered company through the existing verification/research pipeline
+    const tasks = discoveryResults.map(result => () =>
+        processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
     );
+    
+    // Run with concurrency limit
     const settled = await runWithConcurrency(tasks, CONCURRENCY_LIMIT);
 
     const allVerifiedLeads = settled
@@ -1802,8 +1860,7 @@ Never return null for target or industry. Infer from context.`;
     // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // Build session meta
-    const _meta = {
+    // Build session meta    const _meta = {
         tavilyUsed:         tavilyQuota.used,
         tavilyRemaining:    getTavilyRemaining(),
         openAiCalls:        openAiTracker.totalCallsThisSession,
@@ -1813,8 +1870,8 @@ Never return null for target or industry. Infer from context.`;
         totalVerified:      allVerifiedLeads.length,
         totalReturned:      leadsToReturn.length,
         requestedCount,
-        fallbackUsed:       fallbackResults.length > 0,
-        entityFirstSearch:  true,
+        discoveryCandidates: rawCandidates.length,
+        filteredCandidates: filteredCandidates.length,
     };
 
     console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
@@ -1852,8 +1909,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const apiKey    = process.env.OPENAI_API_KEY;
         const tavilyKey = process.env.TAVILY_API_KEY;
 
-        const safeMessage = typeof message === 'string'
-            ? message.slice(0, MAX_MESSAGE_LENGTH)
+        const safeMessage = typeof message === 'string'            ? message.slice(0, MAX_MESSAGE_LENGTH)
             : '';
 
         if (!safeMessage.trim()) {
@@ -1866,17 +1922,21 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const detectedLanguage = _detectLanguage(safeMessage);
         console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
 
-        const intent = await _classifyIntent(safeMessage, history, apiKey);
-        console.log(`🎯 [INTENT] ${intent}`);
-        onProgress?.(`🧠 Mode: ${intent.replace('_', ' ')}...`);
+        // ─── NEW FIRST LAYER: INTENT PARSING ─────────────────────────────────────
+        const parsedIntent = await _parseUserIntent(safeMessage, history, apiKey);
+        const intentType = parsedIntent.intent_type;
+        const intentParams = parsedIntent.parameters;
 
-        if (intent === INTENT.LEAD_GEN) {
+        console.log(`🎯 [INTENT ROUTER] ${intentType}`);
+        onProgress?.(`🧠 Mode: ${intentType.replace('_', ' ')}...`);
+
+        if (intentType === INTENT.LEAD_GEN) {
             return await _runLeadGenPipeline(
-                safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey
+                safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, intentParams
             );
         }
 
-        if (intent === INTENT.EMAIL_DRAFT) {
+        if (intentType === INTENT.EMAIL_DRAFT) {
             const reply = await _handleEmailDraft(safeMessage, history, userProfile, apiKey);
             return {
                 reply,
@@ -1888,7 +1948,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        if (intent === INTENT.BUSINESS_QA) {
+        if (intentType === INTENT.BUSINESS_QA) {
             const reply = await _handleBusinessQA(safeMessage, history, userProfile, apiKey);
             return {
                 reply,
@@ -1899,7 +1959,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 ],
             };
         }
-
         // INTENT.CHAT (default)
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
