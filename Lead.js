@@ -54,6 +54,23 @@ const LeadSchema = new mongoose.Schema({
         default: ''
     },
 
+    // ─── NEW CONFIDENCE SCORING FIELDS (P0 FEATURE) ──────────────────────────────
+    confidenceScore: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100
+    },
+    confidenceTier: {
+        type: String,
+        enum: ['High', 'Medium', 'Low'],
+        default: 'Low'
+    },
+    confidenceColor: {
+        type: String,
+        default: '#ef4444' // Red
+    },
+
     createdAt: { type: Date, default: Date.now }
 });
 
