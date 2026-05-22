@@ -535,12 +535,108 @@ async function _runFiltering(rawCandidates, intentParams) {
     return filtered;
 }
 
+// ─── INFERENCE LAYER (NEW FOURTH LAYER) ───────────────────────────────────────
+// Responsible for understanding and interpreting a company after filtering.
+// Generates structured business intelligence: industry, model, stage, pain points, etc.
+// Output: Array of { ...candidate, inference: { ... } }//
+async function _runInference(filteredCandidates, intentParams, apiKey) {
+    console.log(`🧠 [INFERENCE] Starting inference for ${filteredCandidates.length} candidates...`);
+    
+    const inferredCandidates = [];
+    
+    // Process in batches to avoid rate limits, but for simplicity here we do one by one or small batch
+    // Using concurrency limit for efficiency
+    const tasks = filteredCandidates.map(async (candidate) => {
+        const prompt = `You are a Business Intelligence Analyst. Analyze the following company based on the provided snippet and domain.
+        
+        COMPANY: ${candidate.company}
+        DOMAIN: ${candidate.domain}
+        SNIPPET: ${candidate.snippet || 'No snippet available'}
+        USER INTENT INDUSTRY: ${intentParams.industry}
+        
+        TASK:
+        Infer the following structured intelligence. Be probabilistic but evidence-based. Do NOT hallucinate fake people.
+        
+        1. industry: Standardized industry (e.g., "SaaS", "Fashion Manufacturing", "Logistics").
+        2. business_model: How they make money (e.g., "B2B SaaS", "DTC E-commerce", "Consulting").
+        3. company_stage: Maturity (e.g., "Startup", "Growth", "Enterprise", "Local Small Business").
+        4. decision_maker_role: Who likely makes decisions? (e.g., "CEO", "Founder", "Head of Growth", "Operations Director").
+        5. pain_points: List 2-3 likely operational challenges based on industry/stage (e.g., "customer acquisition", "supply chain efficiency").
+        6. outreach_strategy: Recommended angle (e.g., "efficiency-focused", "growth-focused", "partnership-focused").
+        7. legitimacy_score: 0-100 estimate of how real/operational they appear.
+        
+        Return ONLY valid JSON:
+        {
+          "industry": "string",
+          "business_model": "string",
+          "company_stage": "string",
+          "decision_maker_role": "string",
+          "pain_points": ["string"],
+          "outreach_strategy": "string",
+          "legitimacy_score": number
+        }`;
+
+        try {
+            const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+                model:       'gpt-4o-mini',
+                messages:    [{ role: 'user', content: prompt }],
+                max_tokens:  300,
+                temperature: 0.1,
+            }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), `Inference:${candidate.domain}`);
+
+            if (!res) return null;
+
+            recordOpenAiUsage(
+                res.data?.usage?.prompt_tokens     || 0,                res.data?.usage?.completion_tokens || 0,
+                'gpt-4o-mini'
+            );
+
+            const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '');
+            const inference = JSON.parse(raw);
+
+            // Filter out low legitimacy scores
+            if (inference.legitimacy_score < 50) {
+                console.log(`🔴 [INFERENCE] Low legitimacy (${inference.legitimacy_score}) for ${candidate.company}`);
+                return null;
+            }
+
+            return {
+                ...candidate,
+                inference: inference
+            };
+
+        } catch (err) {
+            console.warn(`⚠️ [INFERENCE] Failed for ${candidate.domain}: ${err.message}`);
+            // Return with default inference if AI fails, so we don't lose the lead entirely
+            return {
+                ...candidate,
+                inference: {
+                    industry: intentParams.industry,
+                    business_model: 'Unknown',
+                    company_stage: 'Unknown',
+                    decision_maker_role: intentParams.target_role || 'CEO',
+                    pain_points: ['General operational efficiency'],
+                    outreach_strategy: 'value-focused',
+                    legitimacy_score: 60 // Default moderate score
+                }
+            };
+        }
+    });
+
+    const results = await runWithConcurrency(tasks, 3); // Concurrency of 3 for inference
+    
+    const validInferences = results.filter(r => r.status === 'fulfilled' && r.value !== null).map(r => r.value);
+    
+    console.log(`✅ [INFERENCE] ${validInferences.length} candidates successfully inferred.`);
+    return validInferences;
+}
+
 // ─── REAL EMAIL HUNTING ────────────────────────────────────────────────────────
 function extractEmailsFromText(text, companyDomain) {
     if (!text || !companyDomain) return { companyEmails: [], allEmails: [] };
-    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;    const allFound      = [...new Set(text.match(emailRegex) || [])];
-    const domainRoot    = companyDomain.split('.')[0].toLowerCase();
-    const companyEmails = allFound.filter(e => {
+    const emailRegex    = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const allFound      = [...new Set(text.match(emailRegex) || [])];
+    const domainRoot    = companyDomain.split('.')[0].toLowerCase();    const companyEmails = allFound.filter(e => {
         const ed = e.split('@')[1]?.toLowerCase() || '';
         return ed === companyDomain || ed.includes(domainRoot);
     });
@@ -587,9 +683,9 @@ function classifyEmail(email, domain) {
         'contact','info','hello','sales','team','support',
         'enquiries','enquiry','admin','office','mail','general',
         'press','media',
-    ];    const isGeneric = GENERIC_PREFIXES.some(p =>
-        localPart === p || localPart.startsWith(p + '.')
-    );
+    ];
+    const isGeneric = GENERIC_PREFIXES.some(p =>
+        localPart === p || localPart.startsWith(p + '.')    );
 
     if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain',           trustLevel: 0  };
     if (isGeneric)      return { type: 'confirmed-generic', label: '✓ Contact email (real)', trustLevel: 70 };
@@ -636,9 +732,9 @@ function isDisposableDomain(domain) {
 
 // ─── SMTP PROBE ───────────────────────────────────────────────────────────────
 async function smtpProbeEmail(email, domain) {
-    try {        const mxRecords = await dns.resolveMx(domain);
+    try {
+        const mxRecords = await dns.resolveMx(domain);
         if (!mxRecords || mxRecords.length === 0) return 'unknown';
-
         const sorted = mxRecords.sort((a, b) => a.priority - b.priority);
         const mxHost = sorted[0].exchange;
 
@@ -685,9 +781,9 @@ async function smtpProbeEmail(email, domain) {
                             console.log(`✅ [SMTP PROBE] ${email} → VALID (${code})`);
                             resolve('valid');
                         } else if (code === 550 || code === 551 || code === 553 || code === 554) {
-                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);                            resolve('invalid');
-                        } else {
-                            console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
+                            console.warn(`❌ [SMTP PROBE] ${email} → INVALID (${code})`);
+                            resolve('invalid');
+                        } else {                            console.warn(`❓ [SMTP PROBE] ${email} → UNKNOWN (${code})`);
                             resolve('unknown');
                         }
                     } else if (code >= 500) {
@@ -734,9 +830,9 @@ async function validateEmailFull(email, domain) {
 
     const emailDomain = normalisedEmail.split('@')[1]?.toLowerCase();
     if (!emailDomain) { result.reason = 'No domain in email'; return result; }
+
     if (isDisposableDomain(emailDomain)) {
-        result.disposable = true;
-        result.reason     = 'Disposable domain';
+        result.disposable = true;        result.reason     = 'Disposable domain';
         return result;
     }
 
@@ -783,9 +879,9 @@ async function validateEmailFull(email, domain) {
         if (classification.type === 'confirmed-personal') {
             result.confidenceScore = 95;
             result.verdict         = 'verified';
-            result.reason          = 'SMTP-confirmed personal email';        } else {
-            result.confidenceScore = 78;
-            result.verdict         = 'verified';
+            result.reason          = 'SMTP-confirmed personal email';
+        } else {
+            result.confidenceScore = 78;            result.verdict         = 'verified';
             result.reason          = 'SMTP-confirmed role/generic email';
         }
     } else {
@@ -832,9 +928,9 @@ async function rankAndFilterEmails(emails, domain) {
 // ─── VALIDATION ────────────────────────────────────────────────────────────────
 async function validateMX(domain) {
     try {
-        const records = await dns.resolveMx(domain);        return records && records.length > 0;
-    } catch { return false; }
-}
+        const records = await dns.resolveMx(domain);
+        return records && records.length > 0;
+    } catch { return false; }}
 
 function isValidEmailFormat(email) {
     if (!email || typeof email !== 'string') return false;
@@ -881,9 +977,9 @@ function detectHallucinations(companyName, extracted) {
         if (yearMatch && parseInt(yearMatch[1]) < CURRENT_YEAR - 2) {
             flags.push(`recentNews stale (${yearMatch[1]}): "${extracted.recentNews}"`);
         }
-    }    return flags;
+    }
+    return flags;
 }
-
 // ─── SCORING ───────────────────────────────────────────────────────────────────
 function scoreDataCompleteness(extracted) {
     if (!extracted) return 0;
@@ -930,9 +1026,9 @@ function _pickBestContact(employees, preferredContact) {
 
     const preferred = (preferredContact || '').toLowerCase().trim();
 
-    if (preferred && preferred !== 'any') {        const match = employees.find(e =>
-            e.role && e.role.toLowerCase().includes(preferred)
-        );
+    if (preferred && preferred !== 'any') {
+        const match = employees.find(e =>
+            e.role && e.role.toLowerCase().includes(preferred)        );
         if (match) return match;
     }
 
@@ -979,9 +1075,9 @@ function cleanCompanyName(rawTitle) {
     if (!name || REJECT.includes(name.toLowerCase())) return null;
     return name;
 }
+
 // ─── MULTILINGUAL ENGINE ──────────────────────────────────────────────────────
-function _detectLanguage(message) {
-    if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
+function _detectLanguage(message) {    if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
 
     const unicodeText = message.replace(/[\x00-\x7F]+/g, ' ').trim();
 
@@ -1028,9 +1124,9 @@ function _detectLanguage(message) {
 }
 
 function _buildMultilingualEmailBlock(detectedLanguage) {
-    const rtlNote = detectedLanguage.rtl        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
-        : '';
-    return `
+    const rtlNote = detectedLanguage.rtl
+        ? `NOTE: ${detectedLanguage.name} is a right-to-left language. Format text accordingly.`
+        : '';    return `
 MULTILINGUAL ENGINE — CRITICAL:
 The user's request was written in: ${detectedLanguage.name} (${detectedLanguage.code}).
 ${rtlNote}
@@ -1078,8 +1174,8 @@ function _parseRequestedCount(message) {
             return n;
         }
     }
-    for (const [word, num] of Object.entries(wordToNum)) {
-        const wordPattern = new RegExp(
+
+    for (const [word, num] of Object.entries(wordToNum)) {        const wordPattern = new RegExp(
             `\\b${word}\\s*(?:leads?|emails?|contacts?|companies|results?|prospects?)?\\b`, 'i'
         );
         if (wordPattern.test(lower)) {
@@ -1126,9 +1222,9 @@ function _applyOutputQuantityRules(leads, requestedMax) {
 
     const final = leads.slice(0, sliceTo);
     console.log(`📐 [QUANTITY RULES] Returning ${final.length} lead(s) [min:${effectiveMin}, cap:${cap}, available:${totalVerified}]`);
+
     return final;
 }
-
 // ─── INTENT PARSING ENGINE (NEW FIRST LAYER) ──────────────────────────────────
 // Replaces the old _classifyIntent.
 // Converts raw user request into a strict, machine-readable intent schema.
@@ -1175,10 +1271,9 @@ async function _parseUserIntent(message, history, apiKey) {
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intentParse');
 
         if (!res) {
-            // Fallback to chat if parsing fails            
+            // Fallback to chat if parsing fails
             return {
-                intent_type: INTENT.CHAT,
-                parameters: {}
+                intent_type: INTENT.CHAT,                parameters: {}
             };
         }
 
@@ -1225,9 +1320,9 @@ Keep responses concise but complete. Never pad with filler.`;
         .slice(-20)
         .map(h => ({ role: h.role, content: h.content }));
 
-    const messages = [        { role: 'system',  content: systemPrompt },
-        ...memoryMessages,
-        { role: 'user',    content: message },
+    const messages = [
+        { role: 'system',  content: systemPrompt },
+        ...memoryMessages,        { role: 'user',    content: message },
     ];
 
     try {
@@ -1274,8 +1369,8 @@ ${usp ? `SENDER VALUE PROP: ${usp}` : ''}
 
 RECENT CONTEXT:
 ${recentContext || 'None'}
-USER INSTRUCTION: "${message}"
 
+USER INSTRUCTION: "${message}"
 Rules:
 - Write a complete, ready-to-send email
 - Subject line must be specific and compelling (4-7 words)
@@ -1323,9 +1418,9 @@ Return ONLY valid JSON:
 async function _handleBusinessQA(message, history, userProfile, apiKey) {
     const usp = userProfile?.usp || null;
 
-    const systemPrompt = `You are a sharp senior business strategist and operator.You give direct, actionable business advice with zero corporate fluff.
-You think like a founder, operator, and growth expert simultaneously.
-${usp ? `The user runs a business with this value proposition: "${usp}". Use this as context when relevant.` : ''}
+    const systemPrompt = `You are a sharp senior business strategist and operator.
+You give direct, actionable business advice with zero corporate fluff.
+You think like a founder, operator, and growth expert simultaneously.${usp ? `The user runs a business with this value proposition: "${usp}". Use this as context when relevant.` : ''}
 When answering:
 - Be specific and concrete — no vague generalities
 - Use frameworks only when they genuinely help
@@ -1368,13 +1463,15 @@ When answering:
 }
 
 // ─── COMPANY RESEARCH ─────────────────────────────────────────────────────────
-async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey, onProgress) {
+async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey, onProgress, inferenceData) {
     const cached = getCachedResearch(domain);
     if (cached) return cached;
     if (getTavilyRemaining() <= 1) return null;
+
     try {
         onProgress?.(`🔍 Researching ${companyName}...`);
-
+        // Use inference data to tailor search if available
+        const targetRole = inferenceData?.decision_maker_role || 'CEO';
         const generalResults = await searchWithTavily(
             `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} OR site:linkedin.com OR site:crunchbase.com mission about ${CURRENT_YEAR}`,
             tavilyKey, { maxResults: 5 }
@@ -1389,8 +1486,9 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
         let employeeResults = [];
         if (needsEmployeeSearch && getTavilyRemaining() > 0) {
             onProgress?.(`👤 Finding decision-makers at ${companyName}...`);
+            // Use inferred role for better search precision
             employeeResults = await searchWithTavily(
-                `"${companyName}" CEO OR founder OR "head of" OR "director of" OR "VP of" email LinkedIn`,
+                `"${companyName}" "${targetRole}" OR founder OR "head of" OR "director of" OR "VP of" email LinkedIn`,
                 tavilyKey, { maxResults: 4 }
             );
         }
@@ -1420,8 +1518,8 @@ Return ONLY valid JSON:
       "linkedIn": "LinkedIn URL if found. null otherwise."
     }
   ]
-}
-CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.SNIPPETS:
+}CRITICAL: Do NOT construct any email. Do NOT guess. If not in snippets: null or empty array.
+SNIPPETS:
 ${allSnippets}`;
 
         const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
@@ -1469,8 +1567,8 @@ ${allSnippets}`;
         const hallucinations = detectHallucinations(companyName, parsed);
         if (hallucinations.length > 0) {
             console.warn(`⚠️ [HALLUCINATION] ${companyName}:`, hallucinations);
-            parsed._hallucinationFlags = hallucinations;
-            if (Array.isArray(parsed.employees)) {                parsed.employees = parsed.employees.filter(emp => {
+            parsed._hallucinationFlags = hallucinations;            if (Array.isArray(parsed.employees)) {
+                parsed.employees = parsed.employees.filter(emp => {
                     const isSuspect = hallucinations.some(f => emp.name && f.includes(emp.name));
                     if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
                     return !isSuspect;
@@ -1489,26 +1587,36 @@ ${allSnippets}`;
 }
 
 // ─── EMAIL SEQUENCE WRITER ────────────────────────────────────────────────────
-async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage) {
+async function generateEmailsForLead(companyData, contactPerson, domain, userProfile, openAiKey, detectedLanguage, inferenceData) {
     try {
         const companyName   = companyData.name;
         const mission       = companyData.mission   || null;
         const news          = companyData.recentNews || null;
-        const industry      = companyData.industry  || 'their industry';
-        const businessModel = companyData.model     || 'unknown';
+        const industry      = inferenceData?.industry || companyData.industry || 'their industry';
+        const businessModel = inferenceData?.business_model || companyData.model || 'unknown';
         const senderName    = userProfile?.senderName || 'Alex';
         const usp           = userProfile?.usp || null;
         const contactName   = contactPerson?.name || null;
-        const contactRole   = contactPerson?.role || null;
+        const contactRole   = contactPerson?.role || inferenceData?.decision_maker_role || null;
         const firstNameOnly = contactName ? contactName.split(' ')[0] : null;
+        const painPoints    = inferenceData?.pain_points || [];
+        const outreachStrat = inferenceData?.outreach_strategy || 'value-focused';
 
         const uspToUse = (usp && usp.trim().length > 10) ? usp
             : 'We build done-for-you outreach pipelines that replace manual prospecting — so business owners spend time closing, not searching.';
 
+        // Create a dynamic hook based on inferred pain points
+        let painPointHook = '';
+        if (painPoints.length > 0) {
+            painPointHook = `Reference this specific challenge: "${painPoints[0]}". Show you understand this is a common issue for ${industry} ${businessModel} companies. 1-2 sentences.`;
+        } else {
+            painPointHook = `Reference a real, specific challenge that ${industry} ${businessModel} businesses face daily. Do NOT say "I noticed you are growing" or anything vague. 1-2 sentences only.`;
+        }
+
         const industryContext = `
 INDUSTRY: ${industry}
 BUSINESS TYPE: ${businessModel}
-CONTACT ROLE: ${contactRole || 'Business Owner/Decision Maker'}
+CONTACT ROLE: ${contactRole || 'Business Owner/Decision Maker'}OUTREACH STRATEGY: ${outreachStrat}
 
 INDUSTRY CONTEXT (use this when mission/news are not available):
 Write as if you genuinely understand the day-to-day reality of running a ${industry} ${businessModel} business.
@@ -1519,6 +1627,7 @@ The goal: the reader thinks "this person actually understands my world", not "th
 `;
 
         const multilingualBlock = _buildMultilingualEmailBlock(detectedLanguage);
+
         const writePrompt = `${buildBannedWordsInstruction()}
 ${multilingualBlock}
 
@@ -1540,10 +1649,7 @@ Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line. NEVER skip. NE
 Para 1 — Hook:
 ${news    ? `Reference this news specifically: "${news}". Show you read it. 1-2 sentences.` :
   mission ? `Reference this mission: "${mission}". Connect it to something real. 1-2 sentences.` :
-            `Reference a real, specific challenge that ${industry} ${businessModel} businesses face daily.
-             Do NOT say "I noticed you are growing" or anything vague.
-             Write something a ${contactRole || 'business owner'} in ${industry} would read and think "how did they know?"
-             1-2 sentences only.`}
+            painPointHook}
 
 Para 2 — Value:
 Connect "${uspToUse}" to how it solves the specific problem you referenced.
@@ -1559,8 +1665,7 @@ Sign-off: Best, ${senderName}
 Subject: "Re: " + Email 1 subject exactly.
 Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
 
-Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.
-Para 2: Re-state the ask in a fresh way. Max 2 sentences.
+Para 1: Add ONE new observation about ${companyName} OR a specific trend in ${industry} that is relevant right now. NOT a repeat of Email 1. 1-2 sentences.Para 2: Re-state the ask in a fresh way. Max 2 sentences.
 Sign-off: Best, ${senderName}
 
 ─── EMAIL 3 — BREAK-UP (7 days later) ───
@@ -1568,6 +1673,7 @@ Subject: "Closing my file on ${companyName}"
 Salutation: "${firstNameOnly || 'Hi'}" — alone on its own line.
 3 sentences total. Acknowledge timing. No sell. Leave door open gracefully.
 Sign-off: Best, ${senderName}
+
 HARD RULES:
 - Every email MUST open with the salutation line before any other text.
 - NEVER invent stats, percentages, or results.
@@ -1604,11 +1710,10 @@ Return ONLY valid JSON:
         console.warn(`[Email Gen Error] ${err.message}`);
 
         const name     = contactPerson?.name?.split(' ')[0] || 'Hi';
-        const industry = companyData.industry || 'your sector';
+        const industry = inferenceData?.industry || 'your sector';
         const company  = companyData.name     || 'your business';
         const sender   = userProfile?.senderName || 'Alex';
         const usp      = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
-
         return {
             initial: {
                 subject: `One thought on ${company}`,
@@ -1617,7 +1722,8 @@ Return ONLY valid JSON:
             followup: {
                 subject: `Re: One thought on ${company}`,
                 body:    `${name},\n\nFloating this back up — most ${industry} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${sender}`,
-            },            breakup: {
+            },
+            breakup: {
                 subject: `Closing my file on ${company}`,
                 body:    `${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${sender}`,
             },
@@ -1634,7 +1740,7 @@ Return ONLY valid JSON:
 //
 // NEW: page business relevance score gating before committing research quota.
 //
-async function processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
+async function processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage, inferenceData) {
     try {
         let domain = '';
         try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
@@ -1657,16 +1763,17 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
         if (globalSeenCompanyNames.has(companyKey)) {
             console.log(`⏭️ [COMPANY DEDUP] Skipping duplicate company: ${companyName}`);
             return null;
-        }
-        globalSeenCompanyNames.add(companyKey);
+        }        globalSeenCompanyNames.add(companyKey);
 
         onProgress?.(`📋 Researching ${companyName}...`);
         console.log(`📋 Processing: ${companyName} (${domain})`);
 
+        // Pass inference data to research function for smarter searching
         const [companyData, mxValid] = await Promise.all([
-            researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
+            researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress, inferenceData),
             validateMX(domain),
         ]);
+
         if (!mxValid) {
             console.warn(`🗑️ [REJECTED] ${companyName} — domain ${domain} has no MX records`);
             return null;
@@ -1679,8 +1786,9 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
         }
 
         const employees   = companyData?.employees || [];
-        // Use target_role from structured intent
-        const bestContact = _pickBestContact(employees, intentParams.target_role);
+        // Use inferred role first, then fallback to intent params
+        const targetRole = inferenceData?.decision_maker_role || intentParams.target_role;
+        const bestContact = _pickBestContact(employees, targetRole);
 
         // ── COLLECT ALL CANDIDATE EMAILS ────────────────────────────────────
         const candidateEmails = [
@@ -1704,8 +1812,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
 
         if (candidateEmails.length === 0) {
             console.warn(`🗑️ [REJECTED] ${companyName} — no source-discoverable emails found`);
-            return null;
-        }
+            return null;        }
 
         // ── FULL VALIDATION PIPELINE ─────────────────────────────────────────
         onProgress?.(`🔬 Validating emails for ${companyName}...`);
@@ -1715,6 +1822,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             console.warn(`🗑️ [REJECTED] ${companyName} — no emails passed validation threshold (${EMAIL_CONFIDENCE_THRESHOLD})`);
             return null;
         }
+
         const topEmail        = validatedEmails[0];
         const resolvedEmail   = topEmail.email;
         const classification  = classifyEmail(resolvedEmail, domain);
@@ -1726,33 +1834,40 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
 
         onProgress?.(`✍️ Writing emails for ${companyName}...`);
 
+        // Pass inference data to email generator for personalized hooks
         const emailSequence = await generateEmailsForLead(
             {
                 name:        companyName,
                 mission:     companyData?.mission,
                 recentNews:  companyData?.recentNews,
-                industry:    intentParams.industry,
-                model:       companyData?.model,
+                industry:    inferenceData?.industry || intentParams.industry,
+                model:       inferenceData?.business_model || companyData?.model,
             },
             bestContact,
             domain,
             userProfile,
             apiKey,
-            detectedLanguage
+            detectedLanguage,
+            inferenceData
         );
 
         const hallucinationCount = (companyData?._hallucinationFlags || []).length;
 
+        // Boost lead score with inference legitimacy
+        const inferenceLegitimacy = inferenceData?.legitimacy_score || 50;
+        
         const leadScore = scoreLeadQuality({
             emailConfidence, mxValid,
             hasRealName:       !!bestContact?.name,
             hasLinkedIn:       !!bestContact?.linkedIn,
             hasNews:           !!companyData?.recentNews,
-            hasMission:        !!companyData?.mission,
-            dataScore,
+            hasMission:        !!companyData?.mission,            dataScore,
             hallucinationCount,
             pageScore,
         });
+        
+        // Combine traditional score with inference legitimacy
+        const finalLeadScore = Math.round((leadScore * 0.7) + (inferenceLegitimacy * 0.3));
 
         const lead = {
             name:               bestContact?.name || companyName,
@@ -1764,22 +1879,25 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
             emailValidation: {
                 confidenceScore: topEmail.confidenceScore,
                 verdict:         topEmail.verdict,
-                smtpResult:      topEmail.smtpResult,                reason:          topEmail.reason,
+                smtpResult:      topEmail.smtpResult,
+                reason:          topEmail.reason,
             },
             allEmailOptions,
-            role:               bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
+            role:               bestContact?.role || (inferenceData?.decision_maker_role) || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
             linkedIn:           bestContact?.linkedIn  || null,
             companySize:        companyData?.size      || 'unknown',
-            companyModel:       companyData?.model     || 'unknown',
-            industry:           intentParams.industry  || 'unknown',
+            companyModel:       inferenceData?.business_model || companyData?.model     || 'unknown',
+            industry:           inferenceData?.industry  || intentParams.industry  || 'unknown',
             hq:                 companyData?.hq        || null,
             recentNews:         companyData?.recentNews || null,
-            leadScore,
+            leadScore:          finalLeadScore,
             pageScore,
             mxValid,
             dataScore,
             hallucinationFlags: companyData?._hallucinationFlags || [],
             emailLanguage:      detectedLanguage.code,
+            // Include inference data in the lead object for frontend display/debugging
+            inference:          inferenceData,
             messages: [
                 { type: 'initial',  subject: emailSequence.initial.subject,  body: emailSequence.initial.body  },
                 { type: 'followup', subject: emailSequence.followup.subject, body: emailSequence.followup.body },
@@ -1792,8 +1910,7 @@ async function processOneCompany(result, intentParams, tavilyKey, apiKey, userPr
 
         return lead;
 
-    } catch (err) {
-        console.warn(`[processOneCompany Error] ${err.message}`);
+    } catch (err) {        console.warn(`[processOneCompany Error] ${err.message}`);
         return null;
     }
 }
@@ -1813,7 +1930,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     globalSeenCompanyNames.clear();
 
     // Parse user-requested quantity
-    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
+    const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
+    console.log(`🔢 [QUANTITY CONTROL] User requested: ${requestedCount} leads`);
 
     // ─── NEW SECOND LAYER: DISCOVERY ─────────────────────────────────────────────
     // Find raw candidates first
@@ -1837,18 +1955,29 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         };
     }
 
-    onProgress?.(`⚙️ Processing ${filteredCandidates.length} filtered companies...`);
+    // ─── NEW FOURTH LAYER: INFERENCE ─────────────────────────────────────────────
+    // Generate business intelligence for filtered candidates
+    const inferredCandidates = await _runInference(filteredCandidates, intentParams, apiKey);
 
-    // Convert filtered candidates into the format expected by processOneCompany
-    const discoveryResults = filteredCandidates.map(c => ({
+    if (inferredCandidates.length === 0) {        return {
+            reply:          'Found companies but none passed intelligence inference. Try a different industry.',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No leads after inference.' }],
+        };
+    }
+
+    onProgress?.(`⚙️ Processing ${inferredCandidates.length} intelligent leads...`);
+
+    // Convert inferred candidates into the format expected by processOneCompany
+    const discoveryResults = inferredCandidates.map(c => ({
         title: c.company,
         url: c.source_url,
-        snippet: '' // Snippet not needed here as we have relevance score
+        snippet: c.snippet,
+        inference: c.inference // Pass inference data along
     }));
 
     // Process each discovered company through the existing verification/research pipeline
     const tasks = discoveryResults.map(result => () =>
-        processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
+        processOneCompany(result, intentParams, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage, result.inference)
     );
     
     // Run with concurrency limit
@@ -1862,7 +1991,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
     // Apply CRITICAL OUTPUT QUANTITY RULE
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
-    // Build session meta    
+    // Build session meta
     const _meta = {
         tavilyUsed:         tavilyQuota.used,
         tavilyRemaining:    getTavilyRemaining(),
@@ -1875,11 +2004,11 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
         requestedCount,
         discoveryCandidates: rawCandidates.length,
         filteredCandidates: filteredCandidates.length,
+        inferredCandidates: inferredCandidates.length,
     };
 
     console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned (from ${allVerifiedLeads.length} total verified).`);
-    console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
-    console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
+    console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | in:${openAiTracker.totalInputTokensThisSession} out:${openAiTracker.totalOutputTokensThisSession} tokens | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);    console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
     if (leadsToReturn.length === 0) {
         return {
@@ -1912,7 +2041,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const apiKey    = process.env.OPENAI_API_KEY;
         const tavilyKey = process.env.TAVILY_API_KEY;
 
-        const safeMessage = typeof message === 'string'            ? message.slice(0, MAX_MESSAGE_LENGTH)
+        const safeMessage = typeof message === 'string'
+            ? message.slice(0, MAX_MESSAGE_LENGTH)
             : '';
 
         if (!safeMessage.trim()) {
@@ -1927,8 +2057,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         // ─── NEW FIRST LAYER: INTENT PARSING ─────────────────────────────────────
         const parsedIntent = await _parseUserIntent(safeMessage, history, apiKey);
-        const intentType = parsedIntent.intent_type;
-        const intentParams = parsedIntent.parameters;
+        const intentType = parsedIntent.intent_type;        const intentParams = parsedIntent.parameters;
 
         console.log(`🎯 [INTENT ROUTER] ${intentType}`);
         onProgress?.(`🧠 Mode: ${intentType.replace('_', ' ')}...`);
@@ -1962,6 +2091,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 ],
             };
         }
+
         // INTENT.CHAT (default)
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
@@ -1976,7 +2106,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
     } catch (error) {
         console.error('❌ [AI ENGINE] Fatal error:', error.message);
         return { reply: 'An error occurred. Please try again.', updatedHistory: history };
-    }
-}
+    }}
 
 module.exports = { generateFreeResponse };
