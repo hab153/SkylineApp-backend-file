@@ -1,11 +1,14 @@
 'use strict';
 
 const axios = require('axios');
+const dns   = require('dns').promises;
+const net   = require('net');
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────────
-const MAX_COMPANIES_RETURNED = 10; // Limit to top 10 companies for Step 2
+const MAX_COMPANIES_RETURNED = 10; 
 const TAVILY_LIMIT           = 1000;
 const CURRENT_YEAR           = new Date().getFullYear();
+const EMAIL_CONFIDENCE_THRESHOLD = 28; // Minimum score to consider an email valid
 
 // ─── CONTENT QUALITY FILTER — LOW-VALUE PAGE SIGNALS ─────────────────────────
 const LOW_VALUE_URL_PATTERNS = [
@@ -44,10 +47,12 @@ function getTavilyRemaining() { checkTavilyReset(); return tavilyQuota.limit - t
 function recordTavilyUsage()  { tavilyQuota.used += 1; }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
-async function withRetry(fn, label, retries = 2, delayMs = 800) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
+async function withRetry(fn, label, retries = 2, delayMs = 800) {    for (let attempt = 0; attempt <= retries; attempt++) {
         try {
-            return await fn();        } catch (err) {            const isLast = attempt === retries;            console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
+            return await fn();        
+        } catch (err) {            
+            const isLast = attempt === retries;            
+            console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
             if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
         }
     }
@@ -55,15 +60,13 @@ async function withRetry(fn, label, retries = 2, delayMs = 800) {
 }
 
 // ─── PAGE BUSINESS RELEVANCE SCORER ──────────────────────────────────────────
-// Scores a search result 0–100 for B2B business entity relevance.
 function _scorePageBusinessRelevance(result) {
     const url     = (result.url     || '').toLowerCase();
     const title   = (result.title   || '').toLowerCase();
     const snippet = (result.snippet || '').toLowerCase();
 
-    let score = 50; // neutral baseline
+    let score = 50; 
 
-    // Hard reject: known low-value URL patterns
     for (const pattern of LOW_VALUE_URL_PATTERNS) {
         if (pattern.test(url)) {
             score -= 35;
@@ -71,12 +74,10 @@ function _scorePageBusinessRelevance(result) {
         }
     }
 
-    // Bonus: high-value URL structure signals
     if (/\/about/i.test(url) || /\/team/i.test(url) || /\/contact/i.test(url) || /\/company/i.test(url)) {
         score += 15;
     }
 
-    // Title signals
     for (const signal of HIGH_VALUE_TITLE_SIGNALS) {
         if (title.includes(signal)) { score += 12; break; }
     }
@@ -84,18 +85,17 @@ function _scorePageBusinessRelevance(result) {
         if (title.includes(signal)) { score -= 20; break; }
     }
 
-    // Snippet contact/email signals
     if (snippet.includes('@'))                     score += 10;
     if (snippet.includes('contact'))               score += 5;
     if (/ceo|founder|owner|director/.test(snippet)) score += 10;
     if (/agency|studio|solutions|services/.test(snippet)) score += 8;
 
-    // Penalise generic informational content
     if (/how to|what is|tutorial|step.by.step|learn how/.test(snippet)) score -= 15;
     if (/read more|subscribe|newsletter|download free/.test(snippet))   score -= 10;
 
     return Math.max(0, Math.min(100, score));
 }
+
 // ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
 async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
@@ -121,14 +121,12 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
 }
 
 // ─── DISCOVERY LAYER (STEP 1) ──────────────────────────────────────────────────
-// Scrapes multiple sources to find matching companies based on user criteria.
 async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
     console.log(`🔎 [DISCOVERY] Starting discovery for: ${intentParams.industry} in ${intentParams.location || 'Global'}`);    
     
     const industry = intentParams.industry || '';
     const location = intentParams.location ? `"${intentParams.location}"` : '';
     
-    // Build precise search queries
     const queries = [
         `${industry} companies ${location}`,
         `${industry} businesses ${location}`,
@@ -140,26 +138,23 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
     const seenDomains = new Set();
     const candidates  = [];
     
-    // Execute Search Queries
     const maxQueries = 6;
     const queriesToRun = queries.slice(0, maxQueries);
-        console.log(`🔎 [DISCOVERY] Running ${queriesToRun.length} discovery queries...`);
+        
     for (const query of queriesToRun) {
         if (candidates.length >= requestedCount * 3) break; 
-                try {
+        
+        try {
             const results = await searchWithTavily(query, tavilyKey, { maxResults: 5 });
-            
-            for (const res of results) {
+                        for (const res of results) {
                 let domain = '';
                 try {
                     const urlObj = new URL(res.url);
                     domain = urlObj.hostname.replace('www.', '');
                 } catch (e) { continue; }
 
-                // Skip if we've already seen this domain (Duplicate Removal)
                 if (seenDomains.has(domain)) continue;
                 
-                // Skip known non-company domains (Irrelevant Result Removal)
                 const SKIP_DISCOVERY_DOMAINS = [
                     'linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com',
                     'crunchbase.com', 'apollo.io', 'hunter.io', 'zoominfo.com',
@@ -176,8 +171,6 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
                 ];
                 
                 if (SKIP_DISCOVERY_DOMAINS.some(d => domain.includes(d))) continue;
-                
-                // Basic validation: must look like a company page
                 if (LOW_VALUE_URL_PATTERNS.some(p => p.test(res.url))) continue;
 
                 seenDomains.add(domain);
@@ -190,34 +183,31 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
             }
         } catch (err) {
             console.warn(`⚠️ [DISCOVERY] Query failed: ${query} - ${err.message}`);
-        }    }
+        }    
+    }
 
-    console.log(`✅ [DISCOVERY] Found ${candidates.length} raw candidates.`);    return candidates;
+    console.log(`✅ [DISCOVERY] Found ${candidates.length} raw candidates.`);    
+    return candidates;
 }
 
-// ─── FILTERING LAYER (STEP 2) ──────────────────────────────────────────────────// Identifies real businesses and removes irrelevant results.
+// ─── FILTERING LAYER (STEP 2) ──────────────────────────────────────────────────
 async function _runFiltering(rawCandidates) {
     console.log(`🧹 [FILTERING] Starting filtering for ${rawCandidates.length} candidates...`);
     
     const filtered = [];
-    const seenDomains = new Set();
-    
+    const seenDomains = new Set();    
     for (const candidate of rawCandidates) {
         const domain = candidate.domain.toLowerCase();        
         
-        // 1. Duplicate Handling
         if (seenDomains.has(domain)) continue;
         
-        // 2. Hard Filters (Domain Quality & Business Relevance)
         const isLowValueUrl = LOW_VALUE_URL_PATTERNS.some(p => p.test(candidate.source_url));
         const isLowValueTitle = LOW_VALUE_TITLE_SIGNALS.some(s => (candidate.company || '').toLowerCase().includes(s));
         
         if (isLowValueUrl || isLowValueTitle) {
-            console.log(`🔴 [FILTERING] Hard reject (low value): ${candidate.company} (${domain})`);
             continue;
         }
         
-        // 3. Content Signals (Relevance Scoring)
         const mockResult = {
             url: candidate.source_url,
             title: candidate.company,
@@ -225,9 +215,7 @@ async function _runFiltering(rawCandidates) {
         };
         const relevanceScore = _scorePageBusinessRelevance(mockResult);
         
-        // Threshold: Only keep candidates with moderate-to-high relevance
         if (relevanceScore < 40) {
-            console.log(`🔴 [FILTERING] Soft reject (low score ${relevanceScore}): ${candidate.company} (${domain})`);
             continue;
         }
         
@@ -237,37 +225,32 @@ async function _runFiltering(rawCandidates) {
             domain: domain,
             source_url: candidate.source_url,
             relevance_score: relevanceScore
-        });    }
+        });    
+    }
     
     console.log(`✅ [FILTERING] ${filtered.length} candidates passed filtering.`);
-    return filtered;}
+    return filtered;
+}
 
 // ─── DECISION MAKER FINDER (STEP 3) ──────────────────────────────────────────
-// For each company, find the specific person (CEO, Founder, etc.)
-async function _findDecisionMakers(companies, jobTitle, tavilyKey) {    console.log(`🕵️ [STEP 3] Finding ${jobTitle}s for ${companies.length} companies...`);
+async function _findDecisionMakers(companies, jobTitle, tavilyKey) {    
+    console.log(`🕵️ [STEP 3] Finding ${jobTitle}s for ${companies.length} companies...`);
     
     const enrichedCompanies = [];
     
-    // Process in batches to avoid rate limits
     for (const company of companies) {
         try {
-            // Search specifically for the person
             const query = `"${company.company}" "${jobTitle}" email OR LinkedIn site:linkedin.com`;
             const results = await searchWithTavily(query, tavilyKey, { maxResults: 3 });
             
             let bestPerson = null;
-            
-            for (const res of results) {
-                // Simple extraction logic (can be improved with AI parsing later)
+                        for (const res of results) {
                 const snippet = res.snippet.toLowerCase();
                 const title = res.title.toLowerCase();
                 
-                // Check if the result actually mentions the job title and company
                 if ((snippet.includes(jobTitle.toLowerCase()) || title.includes(jobTitle.toLowerCase())) && 
                     snippet.includes(company.company.toLowerCase())) {
                     
-                    // Try to extract a name (very basic heuristic)
-                    // In a production app, you would use an LLM here to parse the name from the snippet
                     const nameMatch = res.title.match(/^([A-Z][a-z]+ [A-Z][a-z]+)/); 
                     const extractedName = nameMatch ? nameMatch[1] : `${jobTitle} at ${company.company}`;
                     
@@ -275,9 +258,9 @@ async function _findDecisionMakers(companies, jobTitle, tavilyKey) {    console.
                         name: extractedName,
                         role: jobTitle,
                         source: res.url,
-                        confidence: 0.8 // Default confidence for found matches
+                        confidence: 0.8
                     };
-                    break; // Take the first good match
+                    break; 
                 }
             }
             
@@ -288,87 +271,232 @@ async function _findDecisionMakers(companies, jobTitle, tavilyKey) {    console.
             
         } catch (err) {
             console.warn(`⚠️ [STEP 3] Failed to find contact for ${company.company}: ${err.message}`);
-            enrichedCompanies.push({                ...company,
+            enrichedCompanies.push({                
+                ...company,
                 contact: { name: 'Unknown', role: jobTitle, confidence: 0.5 }
             });
         }
     }
-        console.log(`✅ [STEP 3] Enriched ${enrichedCompanies.length} companies with contacts.`);
+        
+    console.log(`✅ [STEP 3] Enriched ${enrichedCompanies.length} companies with contacts.`);
     return enrichedCompanies;
 }
 
-// ─── MAIN: generateFreeResponse (STEP 2 + STEP 3) ─────────────────────────────
-// This function performs Step 2 (Search/Filter) AND Step 3 (Find People).
-// It sends real-time progress updates to the frontend via onProgress.
-async function generateFreeResponse(message, history, userProfile, onProgress) {
+// ─── EMAIL VERIFIER (STEP 4) ─────────────────────────────────────────────────
+// Finds and verifies emails for each decision maker
+async function _verifyEmails(enrichedLeads, tavilyKey) {
+    console.log(`📧 [STEP 4] Finding & Verifying emails for ${enrichedLeads.length} contacts...`);
+    
+    const verifiedLeads = [];
+    
+    for (const lead of enrichedLeads) {
+        try {
+            // Skip if contact is unknown
+            if (!lead.contact || lead.contact.name === 'Unknown') {
+                verifiedLeads.push({ ...lead, email: null, emailStatus: 'No Contact Found' });                continue;
+            }
+
+            // Search specifically for the person's email
+            const query = `"${lead.contact.name}" "${lead.company}" email address`;
+            const results = await searchWithTavily(query, tavilyKey, { maxResults: 3 });
+            
+            let foundEmail = null;
+            
+            // Extract email from snippets
+            for (const res of results) {
+                const emailMatch = res.snippet.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                if (emailMatch) {
+                    foundEmail = emailMatch[0];
+                    break; // Take the first valid email found
+                }
+            }
+
+            if (foundEmail) {
+                // Verify the email using the existing validation pipeline
+                const validation = await validateEmailFull(foundEmail, lead.domain);
+                
+                if (validation.verdict === 'verified' || validation.verdict === 'probable') {
+                    verifiedLeads.push({
+                        ...lead,
+                        email: foundEmail,
+                        emailStatus: validation.verdict,
+                        emailScore: validation.confidenceScore
+                    });
+                } else {
+                    // Flag as bad/unverified
+                    verifiedLeads.push({
+                        ...lead,
+                        email: foundEmail,
+                        emailStatus: 'Invalid/Unverified',
+                        emailScore: validation.confidenceScore
+                    });
+                }
+            } else {
+                verifiedLeads.push({ ...lead, email: null, emailStatus: 'Not Found' });
+            }
+            
+        } catch (err) {
+            console.warn(`⚠️ [STEP 4] Failed to verify email for ${lead.contact.name}: ${err.message}`);
+            verifiedLeads.push({ ...lead, email: null, emailStatus: 'Error' });
+        }
+    }
+    
+    console.log(`✅ [STEP 4] Verified ${verifiedLeads.filter(l => l.email).length} emails.`);
+    return verifiedLeads;}
+
+// ─── EMAIL VALIDATION HELPERS (Required for Step 4) ──────────────────────────
+const DISPOSABLE_DOMAINS = new Set([
+    'mailinator.com','guerrillamail.com','tempmail.com','throwam.com',
+    'yopmail.com','trashmail.com','fakeinbox.com','sharklasers.com',
+]);
+const FREE_EMAIL_PROVIDERS = new Set([
+    'gmail.com','yahoo.com','hotmail.com','outlook.com','icloud.com',
+    'protonmail.com','aol.com','mail.com','yandex.com','zoho.com',
+]);
+
+function isValidEmailFormat(email) {
+    if (!email || typeof email !== 'string') return false;
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
+}
+
+function classifyEmail(email, domain) {
+    if (!email) return { type: 'none', label: 'Not found', trustLevel: 0 };
+    const localPart   = email.split('@')[0].toLowerCase();
+    const emailDomain = email.split('@')[1]?.toLowerCase();
+    const domainMatches = emailDomain === domain || emailDomain?.includes(domain.split('.')[0]);
+
+    const GENERIC_PREFIXES = ['contact','info','hello','sales','team','support','admin'];
+    const isGeneric = GENERIC_PREFIXES.some(p => localPart === p || localPart.startsWith(p + '.'));
+    
+    if (!domainMatches) return { type: 'unrelated-domain', label: 'Wrong domain', trustLevel: 0 };
+    if (isGeneric)      return { type: 'confirmed-generic', label: 'Contact email', trustLevel: 70 };
+    if (localPart.includes('.') || /[a-z]{2,}[a-z]{2,}/.test(localPart)) {
+        return { type: 'confirmed-personal', label: 'Personal email', trustLevel: 90 };
+    }
+    return { type: 'confirmed-other', label: 'Email found', trustLevel: 75 };
+}
+
+async function validateMX(domain) {
     try {
-        console.log('🟢 [AI ENGINE] Step 2 & 3 Pipeline started...');
+        const records = await dns.resolveMx(domain);
+        return records && records.length > 0;
+    } catch { return false; }
+}
+
+async function smtpProbeEmail(email, domain) {
+    // Simplified SMTP probe for verification
+    try {
+        const mxRecords = await dns.resolveMx(domain);
+        if (!mxRecords || mxRecords.length === 0) return 'unknown';
+        const mxHost = mxRecords.sort((a, b) => a.priority - b.priority)[0].exchange;
         
-        // STEP 1: Signal Frontend -> AI Searching
+        return new Promise((resolve) => {
+            const socket = net.createConnection(25, mxHost);            let stage = 0;
+            const timeout = setTimeout(() => { socket.destroy(); resolve('unknown'); }, 5000);
+
+            socket.on('connect', () => socket.write(`EHLO verify.local\r\n`));
+            socket.on('data', (chunk) => {
+                const lines = chunk.toString().split('\r\n');
+                for (const line of lines) {
+                    const code = parseInt(line.slice(0, 3), 10);
+                    if (stage === 0 && code === 250) { socket.write(`MAIL FROM:<test@verify.local>\r\n`); stage = 1; }
+                    else if (stage === 1 && code === 250) { socket.write(`RCPT TO:<${email}>\r\n`); stage = 2; }
+                    else if (stage === 2) {
+                        clearTimeout(timeout);
+                        socket.write('QUIT\r\n');
+                        socket.destroy();
+                        resolve(code === 250 || code === 251 ? 'valid' : 'invalid');
+                    }
+                }
+            });
+            socket.on('error', () => { clearTimeout(timeout); resolve('unknown'); });
+        });
+    } catch { return 'unknown'; }
+}
+
+async function validateEmailFull(email, domain) {
+    const result = { email, verdict: 'rejected', confidenceScore: 0, smtpResult: null, mxValid: false };
+    if (!isValidEmailFormat(email)) return result;
+    
+    const emailDomain = email.split('@')[1]?.toLowerCase();
+    if (DISPOSABLE_DOMAINS.has(emailDomain) || FREE_EMAIL_PROVIDERS.has(emailDomain)) return result;
+    
+    result.mxValid = await validateMX(emailDomain);
+    if (!result.mxValid) return result;
+
+    const classification = classifyEmail(email, domain);
+    result.smtpResult = await smtpProbeEmail(email, emailDomain);
+
+    if (result.smtpResult === 'valid') {
+        result.verdict = 'verified';
+        result.confidenceScore = classification.trustLevel;
+    } else if (result.smtpResult === 'unknown' && classification.trustLevel > 50) {
+        result.verdict = 'probable';
+        result.confidenceScore = classification.trustLevel - 10;
+    }
+    
+    return result;
+}
+
+// ─── MAIN: generateFreeResponse (FULL PIPELINE) ──────────────────────────────
+async function generateFreeResponse(message, history, userProfile, onProgress) {
+    try {        console.log('🟢 [AI ENGINE] Full Pipeline started...');
         onProgress?.('AI Searching...'); 
 
         const tavilyKey = process.env.TAVILY_API_KEY;
         if (!tavilyKey) throw new Error('Missing TAVILY_API_KEY');
 
-        // Simple intent parsing for Step 2 (Industry/Location/Role)
         const intentParams = {
-            industry: message, // Using the whole message as industry context for now
+            industry: message, 
             location: 'Global',
-            target_role: 'CEO' // Default, but should come from user input in future
+            target_role: 'CEO' 
         };
 
-        // 1. Discovery (Scrapes multiple sources)
+        // 1. Discovery
         const rawCandidates = await _runDiscovery(intentParams, tavilyKey, MAX_COMPANIES_RETURNED);
-        
         if (rawCandidates.length === 0) {
-            return {
-                reply: 'No companies found matching your criteria.',
-                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No companies found.' }],
-            };
+            return { reply: 'No companies found.', updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No companies found.' }] };
         }
 
-        // STEP 2: Signal Frontend -> Filtering
         onProgress?.('Filtering Results...');
-
-        // 2. Filtering (Identifies real businesses, removes duplicates/irrelevant)
+        // 2. Filtering
         const filteredCompanies = await _runFiltering(rawCandidates);
-
         if (filteredCompanies.length === 0) {
-            return {
-                reply: 'Found potential matches, but none passed our quality filters for real businesses.',
-                updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No valid businesses found.' }],
-            };
+            return { reply: 'No valid businesses found.', updatedHistory: [...history, { role: 'user', content: message }, { role: 'assistant', content: 'No valid businesses found.' }] };
         }
 
-        // STEP 3: Signal Frontend -> Finding Decision Makers
         onProgress?.('Finding Decision Makers...');
-        // 3. Find Decision Makers (Step 3)
-        // Use the jobTitle from intentParams (e.g., "CEO", "Founder")
+        // 3. Find People
         const targetRole = intentParams.target_role || 'CEO';
         const enrichedLeads = await _findDecisionMakers(filteredCompanies, targetRole, tavilyKey);
 
-        // STEP 4: Signal Frontend -> Finalizing
+        onProgress?.('Verifying Emails...');
+        // 4. Verify Emails
+        const verifiedLeads = await _verifyEmails(enrichedLeads, tavilyKey);
+
         onProgress?.('Finalizing...');
 
-        // Format the output for the frontend
-        const leadList = enrichedLeads.map(c => ({
+        // Format output
+        const leadList = verifiedLeads.map(c => ({
             company: c.company,
             domain: c.domain,
             contactName: c.contact.name,
             contactRole: c.contact.role,
+            email: c.email,
+            emailStatus: c.emailStatus,
             confidence: c.contact.confidence
         }));
 
-        const replyText = `I found ${leadList.length} companies and their ${targetRole}s:\n\n` + 
-                          leadList.map(l => `• **${l.company}**: ${l.contactName} (${l.contactRole})`).join('\n');
-
+        const validCount = leadList.filter(l => l.email && l.emailStatus !== 'Invalid/Unverified').length;
+        const replyText = `I found ${leadList.length} decision makers. ${validCount} have verified emails:\n\n` + 
+                          leadList.map(l => `• **${l.company}**: ${l.contactName} (${l.email || 'No Email'})`).join('\n');
         return {
             reply: replyText,
-            leads: leadList, // Structured data for frontend display
+            leads: leadList, 
             updatedHistory: [
                 ...history,
                 { role: 'user', content: message },
-                { role: 'assistant', content: `[Found ${leadList.length} decision makers]` }
+                { role: 'assistant', content: `[Found ${validCount} verified leads]` }
             ],
         };
 
