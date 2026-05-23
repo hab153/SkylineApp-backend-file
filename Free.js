@@ -47,8 +47,7 @@ function getTavilyRemaining() { checkTavilyReset(); return tavilyQuota.limit - t
 function recordTavilyUsage()  { tavilyQuota.used += 1; }
 
 // ─── RETRY HELPER ─────────────────────────────────────────────────────────────
-async function withRetry(fn, label, retries = 2, delayMs = 800) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
+async function withRetry(fn, label, retries = 2, delayMs = 800) {    for (let attempt = 0; attempt <= retries; attempt++) {
         try {
             return await fn();
         } catch (err) {
@@ -97,8 +96,7 @@ function _scorePageBusinessRelevance(result) {
 async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
 
-    return withRetry(async () => {
-        const response = await axios.post('https://api.tavily.com/search', {
+    return withRetry(async () => {        const response = await axios.post('https://api.tavily.com/search', {
             api_key:             tavilyKey,
             query,
             search_depth:        'advanced',
@@ -148,7 +146,6 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
                     const urlObj = new URL(res.url);
                     domain = urlObj.hostname.replace('www.', '');
                 } catch (e) { continue; }
-
                 if (seenDomains.has(domain)) continue;
 
                 const SKIP_DISCOVERY_DOMAINS = [
@@ -197,8 +194,7 @@ async function _runFiltering(rawCandidates) {
         const domain = candidate.domain.toLowerCase();
         if (seenDomains.has(domain)) continue;
 
-        const isLowValueUrl   = LOW_VALUE_URL_PATTERNS.some(p => p.test(candidate.source_url));
-        const isLowValueTitle = LOW_VALUE_TITLE_SIGNALS.some(s => (candidate.company || '').toLowerCase().includes(s));
+        const isLowValueUrl   = LOW_VALUE_URL_PATTERNS.some(p => p.test(candidate.source_url));        const isLowValueTitle = LOW_VALUE_TITLE_SIGNALS.some(s => (candidate.company || '').toLowerCase().includes(s));
         if (isLowValueUrl || isLowValueTitle) continue;
 
         const relevanceScore = _scorePageBusinessRelevance({
@@ -247,8 +243,7 @@ async function _findDecisionMakers(companies, jobTitle, tavilyKey) {
 
             enrichedCompanies.push({
                 ...company,
-                contact: bestPerson || { name: 'Unknown', role: jobTitle, confidence: 0.5 }
-            });
+                contact: bestPerson || { name: 'Unknown', role: jobTitle, confidence: 0.5 }            });
 
         } catch (err) {
             console.warn(`⚠️ [STEP 3] Failed for ${company.company}: ${err.message}`);
@@ -298,7 +293,6 @@ async function validateMX(domain) {
         return records && records.length > 0;
     } catch { return false; }
 }
-
 async function smtpProbeEmail(email, domain) {
     try {
         const mxRecords = await dns.resolveMx(domain);
@@ -347,15 +341,13 @@ async function validateEmailFull(email, domain) {
         result.verdict         = 'verified';
         result.confidenceScore = classification.trustLevel;
     } else if (result.smtpResult === 'unknown' && classification.trustLevel > 50) {
-        result.verdict         = 'probable';
-        result.confidenceScore = classification.trustLevel - 10;
+        result.verdict         = 'probable';        result.confidenceScore = classification.trustLevel - 10;
     }
 
     return result;
 }
 
 // ─── 🟡 NEW: EMAIL PATTERN GENERATOR ─────────────────────────────────────────
-// Generates all common email patterns from a person's name + domain
 function _generateEmailPatterns(fullName, domain) {
     const parts     = fullName.trim().toLowerCase().split(/\s+/);
     const first     = parts[0]     || '';
@@ -379,12 +371,10 @@ function _generateEmailPatterns(fullName, domain) {
         `${firstInit}${lastInit}@${domain}`,
     ].filter(e => isValidEmailFormat(e) && !e.startsWith('@') && !e.includes('@@'));
 
-    // Remove duplicates
     return [...new Set(patterns)];
 }
 
 // ─── 🟡 NEW: PATTERN EMAIL VERIFIER ──────────────────────────────────────────
-// Tests each generated pattern via MX + SMTP and returns the best verified one
 async function _verifyPatternEmails(patterns, domain) {
     console.log(`🔬 [PATTERN] Testing ${patterns.length} email patterns for ${domain}...`);
 
@@ -400,11 +390,9 @@ async function _verifyPatternEmails(patterns, domain) {
         }
     }
 
-    return null;
-}
+    return null;}
 
 // ─── 🟡 NEW: HUNTER.IO EMAIL FINDER ──────────────────────────────────────────
-// Uses Hunter.io API to find emails. Pass HUNTER_API_KEY in environment.
 async function _searchHunterIO(firstName, lastName, domain) {
     const hunterKey = process.env.HUNTER_API_KEY;
     if (!hunterKey) {
@@ -443,7 +431,6 @@ async function _searchHunterIO(firstName, lastName, domain) {
 }
 
 // ─── 🟡 NEW: CONTACT PAGE SCRAPER ────────────────────────────────────────────
-// Fetches the company's contact/about page and extracts any email addresses found
 async function _scrapeContactPage(domain, tavilyKey) {
     const contactUrls = [
         `https://${domain}/contact`,
@@ -452,7 +439,6 @@ async function _scrapeContactPage(domain, tavilyKey) {
         `https://${domain}/team`,
         `https://www.${domain}/contact`,
     ];
-
     console.log(`🌐 [CONTACT PAGE] Scraping contact pages for ${domain}...`);
 
     for (const url of contactUrls) {
@@ -465,7 +451,6 @@ async function _scrapeContactPage(domain, tavilyKey) {
                 if (emailMatch) {
                     for (const email of emailMatch) {
                         const emailDomain = email.split('@')[1]?.toLowerCase();
-                        // Only accept emails matching the company domain
                         if (emailDomain && domain.includes(emailDomain.split('.')[0])) {
                             const validation = await validateEmailFull(email, domain);
                             if (validation.verdict !== 'rejected') {
@@ -485,8 +470,6 @@ async function _scrapeContactPage(domain, tavilyKey) {
 }
 
 // ─── 🟡 NEW: ZEROBOUNCE VERIFIER ─────────────────────────────────────────────
-// Validates a found email via ZeroBounce API for extra accuracy.
-// Pass ZEROBOUNCE_API_KEY in environment. Falls back gracefully if not set.
 async function _verifyWithZeroBounce(email) {
     const zbKey = process.env.ZEROBOUNCE_API_KEY;
     if (!zbKey) {
@@ -502,12 +485,10 @@ async function _verifyWithZeroBounce(email) {
         });
 
         const status = response.data?.status;
-        const subStatus = response.data?.sub_status;
 
-        console.log(`✅ [ZEROBOUNCE] Result for ${email}: ${status} (${subStatus})`);
+        console.log(`✅ [ZEROBOUNCE] Result for ${email}: ${status}`);
 
-        if (status === 'valid') {
-            return { valid: true, verdict: 'verified', confidenceScore: 95, source: 'zerobounce' };
+        if (status === 'valid') {            return { valid: true, verdict: 'verified', confidenceScore: 95, source: 'zerobounce' };
         } else if (status === 'catch-all') {
             return { valid: true, verdict: 'probable', confidenceScore: 65, source: 'zerobounce' };
         } else {
@@ -520,12 +501,6 @@ async function _verifyWithZeroBounce(email) {
 }
 
 // ─── 🟠 UPGRADED: EMAIL VERIFIER (STEP 4) ────────────────────────────────────
-// Now uses a 4-layer fallback chain:
-// Layer 1 → Tavily direct search
-// Layer 2 → Hunter.io API
-// Layer 3 → Company contact page scrape
-// Layer 4 → Name pattern generation + SMTP verification
-// Final    → ZeroBounce confirmation on any found email
 async function _verifyEmails(enrichedLeads, tavilyKey) {
     console.log(`📧 [STEP 4] Finding & Verifying emails for ${enrichedLeads.length} contacts...`);
 
@@ -562,8 +537,7 @@ async function _verifyEmails(enrichedLeads, tavilyKey) {
 
             // ── LAYER 2: Hunter.io API ────────────────────────────────────────
             if (!foundResult && firstName && lastName) {
-                console.log(`🔎 [LAYER 2] Hunter.io for ${firstName} ${lastName} @ ${lead.domain}`);
-                foundResult = await _searchHunterIO(firstName, lastName, lead.domain);
+                console.log(`🔎 [LAYER 2] Hunter.io for ${firstName} ${lastName} @ ${lead.domain}`);                foundResult = await _searchHunterIO(firstName, lastName, lead.domain);
             }
 
             // ── LAYER 3: Contact Page Scrape ──────────────────────────────────
@@ -584,10 +558,9 @@ async function _verifyEmails(enrichedLeads, tavilyKey) {
             if (foundResult?.email) {
                 const zbResult = await _verifyWithZeroBounce(foundResult.email);
                 if (zbResult) {
-                    // ZeroBounce overrides verdict if it has an answer
                     foundResult.verdict        = zbResult.verdict;
                     foundResult.confidenceScore = zbResult.confidenceScore;
-                    if (!zbResult.valid) foundResult = null; // Rejected by ZeroBounce
+                    if (!zbResult.valid) foundResult = null; 
                 }
             }
 
@@ -613,50 +586,66 @@ async function _verifyEmails(enrichedLeads, tavilyKey) {
     console.log(`✅ [STEP 4] Result: ${found}/${verifiedLeads.length} emails found.`);
     return verifiedLeads;
 }
-
 // ─── 🟡 NEW: CONFIDENCE SCORER (STEP 5) ──────────────────────────────────────
-// Scores each lead 0-100 based on data completeness, email validity, and contact quality
 function _scoreLeadConfidence(lead) {
     let score = 0;
 
-    // Email found and verified
     if (lead.email) {
         if (lead.emailStatus === 'verified') score += 40;
         else if (lead.emailStatus === 'probable') score += 25;
         else score += 5;
     }
 
-    // Email source quality
     if (lead.emailSource === 'hunter.io')        score += 15;
     else if (lead.emailSource === 'zerobounce')  score += 15;
     else if (lead.emailSource === 'tavily')      score += 10;
     else if (lead.emailSource === 'contact_page') score += 8;
     else if (lead.emailSource === 'pattern_generated') score += 5;
 
-    // Contact name found
     if (lead.contact?.name && lead.contact.name !== 'Unknown') score += 15;
 
-    // Contact confidence
     if (lead.contact?.confidence >= 0.8) score += 10;
     else if (lead.contact?.confidence >= 0.5) score += 5;
 
-    // Relevance score from filtering
     if (lead.relevance_score >= 80) score += 15;
     else if (lead.relevance_score >= 60) score += 10;
     else if (lead.relevance_score >= 40) score += 5;
 
-    // Email score bonus
     if (lead.emailScore >= 80) score += 5;
 
     score = Math.min(100, Math.max(0, score));
 
-    // Classify into tiers
     let tier, tierLabel;
     if (score >= 75) { tier = 'high';   tierLabel = '🟢 Outreach Ready'; }
     else if (score >= 45) { tier = 'medium'; tierLabel = '🟡 Needs Review'; }
     else { tier = 'low'; tierLabel = '🔴 Low Confidence'; }
 
     return { confidenceScore: score, tier, tierLabel };
+}
+
+// ─── ✉️ NEW: PERSONALIZED EMAIL GENERATOR (STEP 6) ───────────────────────────
+function _generatePersonalizedEmail(lead) {
+    const firstName = lead.contact.name.split(' ')[0];
+    const company = lead.company;
+    const industry = lead.industry || 'your industry';
+    const role = lead.contact.role;
+
+    const subject = `Quick question for ${firstName} at ${company}`;
+    
+    const body = `Hi ${firstName},
+
+I came across ${company} while researching top ${industry} firms and was impressed by your work.
+As a ${role}, you likely face challenges with scaling outreach efficiently. We help companies like yours streamline this process and achieve better results.
+
+Would you be open to a brief 15-minute chat next week to see if we can help?
+
+Best regards,
+[Your Name]`;
+
+    return {
+        subject: subject,
+        body: body
+    };
 }
 
 // ─── MAIN: generateFreeResponse (FULL PIPELINE) ──────────────────────────────
@@ -695,8 +684,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 updatedHistory: [...history,
                     { role: 'user', content: message },
                     { role: 'assistant', content: 'No valid businesses found.' }
-                ]
-            };
+                ]            };
         }
 
         onProgress?.('Finding Decision Makers...');
@@ -720,8 +708,17 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         onProgress?.('Finalizing...');
 
+        // ── STEP 6: Generate Personalized Emails ──────────────────────────────
+        const finalLeads = scoredLeads.map(lead => {
+            const emailContent = _generatePersonalizedEmail(lead);
+            return {
+                ...lead,
+                messages: [emailContent] // Format matches frontend expectation
+            };
+        });
+
         // ── FORMAT OUTPUT ─────────────────────────────────────────────────────
-        const leadList = scoredLeads.map(c => ({
+        const leadList = finalLeads.map(c => ({
             company:        c.company,
             domain:         c.domain,
             contactName:    c.contact.name,
@@ -733,10 +730,10 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             confidenceScore: c.confidenceScore,
             tier:           c.tier,
             tierLabel:      c.tierLabel,
+            messages:       c.messages // Include the generated email
         }));
 
-        const verifiedCount = leadList.filter(l => l.email && l.emailStatus !== 'Invalid/Unverified').length;
-        const highTier      = leadList.filter(l => l.tier === 'high').length;
+        const verifiedCount = leadList.filter(l => l.email && l.emailStatus !== 'Invalid/Unverified').length;        const highTier      = leadList.filter(l => l.tier === 'high').length;
         const medTier       = leadList.filter(l => l.tier === 'medium').length;
 
         const replyText =
