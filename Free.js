@@ -47,8 +47,7 @@ function recordTavilyUsage()  { tavilyQuota.used += 1; }
 async function withRetry(fn, label, retries = 2, delayMs = 800) {
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
-            return await fn();        } catch (err) {            const isLast = attempt === retries;
-            console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
+            return await fn();        } catch (err) {            const isLast = attempt === retries;            console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
             if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
         }
     }
@@ -97,8 +96,7 @@ function _scorePageBusinessRelevance(result) {
 
     return Math.max(0, Math.min(100, score));
 }
-// ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
-async function searchWithTavily(query, tavilyKey, options = {}) {
+// ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
 
     return withRetry(async () => {
@@ -147,8 +145,7 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
         console.log(`🔎 [DISCOVERY] Running ${queriesToRun.length} discovery queries...`);
     for (const query of queriesToRun) {
         if (candidates.length >= requestedCount * 3) break; 
-        
-        try {
+                try {
             const results = await searchWithTavily(query, tavilyKey, { maxResults: 5 });
             
             for (const res of results) {
@@ -197,8 +194,7 @@ async function _runDiscovery(intentParams, tavilyKey, requestedCount) {
     console.log(`✅ [DISCOVERY] Found ${candidates.length} raw candidates.`);    return candidates;
 }
 
-// ─── FILTERING LAYER (STEP 2) ──────────────────────────────────────────────────
-// Identifies real businesses and removes irrelevant results.
+// ─── FILTERING LAYER (STEP 2) ──────────────────────────────────────────────────// Identifies real businesses and removes irrelevant results.
 async function _runFiltering(rawCandidates) {
     console.log(`🧹 [FILTERING] Starting filtering for ${rawCandidates.length} candidates...`);
     
@@ -247,8 +243,7 @@ async function _runFiltering(rawCandidates) {
 
 // ─── DECISION MAKER FINDER (STEP 3) ──────────────────────────────────────────
 // For each company, find the specific person (CEO, Founder, etc.)
-async function _findDecisionMakers(companies, jobTitle, tavilyKey) {
-    console.log(`🕵️ [STEP 3] Finding ${jobTitle}s for ${companies.length} companies...`);
+async function _findDecisionMakers(companies, jobTitle, tavilyKey) {    console.log(`🕵️ [STEP 3] Finding ${jobTitle}s for ${companies.length} companies...`);
     
     const enrichedCompanies = [];
     
@@ -297,17 +292,19 @@ async function _findDecisionMakers(companies, jobTitle, tavilyKey) {
             });
         }
     }
-    
-    console.log(`✅ [STEP 3] Enriched ${enrichedCompanies.length} companies with contacts.`);
+        console.log(`✅ [STEP 3] Enriched ${enrichedCompanies.length} companies with contacts.`);
     return enrichedCompanies;
 }
 
 // ─── MAIN: generateFreeResponse (STEP 2 + STEP 3) ─────────────────────────────
 // This function performs Step 2 (Search/Filter) AND Step 3 (Find People).
+// It sends real-time progress updates to the frontend via onProgress.
 async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
         console.log('🟢 [AI ENGINE] Step 2 & 3 Pipeline started...');
-        onProgress?.('🔍 Searching for companies...');
+        
+        // STEP 1: Signal Frontend -> AI Searching
+        onProgress?.('AI Searching...'); 
 
         const tavilyKey = process.env.TAVILY_API_KEY;
         if (!tavilyKey) throw new Error('Missing TAVILY_API_KEY');
@@ -329,7 +326,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        onProgress?.('🧹 Filtering irrelevant results...');
+        // STEP 2: Signal Frontend -> Filtering
+        onProgress?.('Filtering Results...');
 
         // 2. Filtering (Identifies real businesses, removes duplicates/irrelevant)
         const filteredCompanies = await _runFiltering(rawCandidates);
@@ -341,11 +339,15 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        onProgress?.('🕵️ Finding Decision Makers...');
+        // STEP 3: Signal Frontend -> Finding Decision Makers
+        onProgress?.('Finding Decision Makers...');
         // 3. Find Decision Makers (Step 3)
         // Use the jobTitle from intentParams (e.g., "CEO", "Founder")
         const targetRole = intentParams.target_role || 'CEO';
         const enrichedLeads = await _findDecisionMakers(filteredCompanies, targetRole, tavilyKey);
+
+        // STEP 4: Signal Frontend -> Finalizing
+        onProgress?.('Finalizing...');
 
         // Format the output for the frontend
         const leadList = enrichedLeads.map(c => ({
