@@ -96,7 +96,8 @@ function _scorePageBusinessRelevance(result) {
 
     return Math.max(0, Math.min(100, score));
 }
-// ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────async function searchWithTavily(query, tavilyKey, options = {}) {
+// ─── TAVILY SEARCH ─────────────────────────────────────────────────────────────
+async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
 
     return withRetry(async () => {
