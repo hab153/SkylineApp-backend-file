@@ -7,20 +7,11 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
-const multer = require('multer'); // ADDED: For file uploads
-const fs = require('fs'); // ADDED: For file handling
-const os = require('os'); // ADDED: For temp paths
 
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
 const goAI = require('./Go');
-// FIXED: Changed 'chat' to 'generateBusinessResponse'
-const { generateDreamPlan, generateBusinessResponse, refinePlan } = require('./businessAI'); 
-
-// ADDED: Import image and file processing files
-const { resizeImage } = require('./resize');
-const { analyzeImage } = require('./image');
-const { convertFileToText } = require('./converter'); // ADDED
+const { generateDreamPlan, chat, refinePlan } = require('./businessAI'); // Pro/Business AI
 
 const authRoutes = require('./authRoutes');
 const Message = require('./Message');
@@ -47,9 +38,12 @@ const checkSubscriptionExpiry = async (req, res, next) => {
         
         // Check if paid subscription has expired
         if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();            const endDate = new Date(user.subscriptionEndDate);            
+            const now = new Date();
+            const endDate = new Date(user.subscriptionEndDate);
+            
             if (now > endDate) {
-                // Auto-downgrade to free                user.subscriptionTier = 'free';
+                // Auto-downgrade to free
+                user.subscriptionTier = 'free';
                 user.subscriptionEndDate = null;
                 await user.save();
                 console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
@@ -96,7 +90,10 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 
         if (status === 'successful') {
             console.log(`✅ Payment successful for txRef: ${txRef}`);
-                        if (!txRef) return res.status(400).send('Missing txRef');                        // Infer plan from txRef if meta is missing (Safety Net)
+            
+            if (!txRef) return res.status(400).send('Missing txRef');
+            
+            // Infer plan from txRef if meta is missing (Safety Net)
             if (!planType) {
                 if (txRef.includes('_go_')) planType = 'go';                else if (txRef.includes('_pro_')) planType = 'pro';
                 else planType = 'free';            }
@@ -144,8 +141,11 @@ const verifyToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
-    if (!token) return res.status(403).json({ message: 'No token provided' });    try {        const secret = process.env.JWT_SECRET || 'secretkey';
-        const decoded = jwt.verify(token, secret);        req.userId = decoded.user.id;        next();
+    if (!token) return res.status(403).json({ message: 'No token provided' });
+
+    try {        const secret = process.env.JWT_SECRET || 'secretkey';
+        const decoded = jwt.verify(token, secret);
+        req.userId = decoded.user.id;        next();
     } catch (err) {
         console.error('Token Verification Failed:', err.message);
         return res.status(401).json({ message: 'Invalid token' });        
@@ -193,228 +193,6 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 // ════════════════════════════════════════════
-//  IMAGE UPLOAD & ANALYSIS ROUTE
-// ════════════════════════════════════════════
-// Configure Multer to store files in memory (buffer)
-const storage = multer.memoryStorage();
-const upload = multer({ 
-    storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit for images
-});
-
-app.post('/api/upload-image', verifyToken, upload.single('image'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ message: 'No image file provided' });
-        }
-
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        // --- CHECK IMAGE LIMITS ---
-        const now = new Date();
-        const todayStr = now.toDateString();
-        
-        // Reset count if new day
-        if (!user.usage.lastImageUploadDate || user.usage.lastImageUploadDate.toDateString() !== todayStr) {
-            user.usage.dailyImageCount = 0;
-            user.usage.lastImageUploadDate = now;
-        }
-
-        // Define Limits
-        let imageLimit = 1; // Free
-        if (user.subscriptionTier === 'go') imageLimit = 4;
-        if (user.subscriptionTier === 'pro') imageLimit = 8;
-
-        if (user.usage.dailyImageCount >= imageLimit) {
-            return res.status(429).json({ 
-                message: `Daily image limit reached (${imageLimit}/${imageLimit}). Upgrade your plan for more.` 
-            });
-        }
-
-        // Increment Image Count
-        user.usage.dailyImageCount += 1;
-        await user.save();
-
-        // --- PROCESS IMAGE ---
-        console.log("🖼️ Resizing image...");
-        const resizedBuffer = await resizeImage(req.file.buffer);
-
-        console.log("🧠 Analyzing image with GPT-4o-mini...");        const imageDescription = await analyzeImage(resizedBuffer);
-        console.log("✅ Image Analysis Complete. Routing to AI Model...");
-        
-        // --- ROUTE TO CORRECT AI FILE BASED ON PLAN ---        const plan = user.subscriptionTier || 'free';
-        let aiReply;
-        let updatedHistory = [];
-
-        // We simulate a chat message with the image description
-        const imagePrompt = `[Image Analysis]: ${imageDescription}\n\nThe user has uploaded an image. Please respond to the content of this image directly.`;
-
-        if (plan === 'free') {
-            const result = await freeAI.generateFreeResponse(imagePrompt, [], user);
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
-        } else if (plan === 'go') {
-            const result = await goAI.generateGoResponse(imagePrompt, [], user);
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
-        } else {
-            // Pro uses BusinessAI
-            const userProfile = {
-                fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
-                userId: user._id.toString()
-            };
-            const result = await requestQueue.enqueue(async () => {
-                // FIXED: Use generateBusinessResponse
-                return await generateBusinessResponse(imagePrompt, [], userProfile);
-            });
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
-        }
-
-        // Save the interaction to history
-        const sessionId = uuidv4();
-        await new Message({ userId: user._id, sessionId, role: 'user', content: 'Uploaded an image' }).save();
-        await new Message({ userId: user._id, sessionId, role: 'ai', content: aiReply }).save();
-
-        res.json({ 
-            success: true, 
-            reply: aiReply, 
-            sessionId, 
-            remainingImages: imageLimit - user.usage.dailyImageCount 
-        });
-
-    } catch (error) {
-        console.error('❌ Image Upload Error:', error);
-        res.status(500).json({ message: 'Server Error processing image' });
-    }
-});
-// ════════════════════════════════════════════
-//  FILE UPLOAD & CONVERSION ROUTE (NEW)
-// ════════════════════════════════════════════
-app.post('/api/upload-file', verifyToken, upload.single('file'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ message: 'No file provided' });
-        }
-
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-
-        // --- CHECK FILE SIZE LIMITS ---
-        const fileSizeKB = req.file.size / 1024;
-        let maxFileSizeKB = 200; // Free
-        if (user.subscriptionTier === 'go') maxFileSizeKB = 300;
-        if (user.subscriptionTier === 'pro') maxFileSizeKB = 500;
-
-        if (fileSizeKB > maxFileSizeKB) {
-            return res.status(400).json({ 
-                message: `File too large. Max size for your plan is ${maxFileSizeKB}KB.` 
-            });
-        }
-
-        // --- CHECK DAILY FILE LIMITS ---
-        const now = new Date();
-        const todayStr = now.toDateString();
-        
-        if (!user.usage.lastFileUploadDate || user.usage.lastFileUploadDate.toDateString() !== todayStr) {
-            user.usage.dailyFileCount = 0;
-            user.usage.lastFileUploadDate = now;
-        }
-
-        let fileLimit = 1; // Free
-        if (user.subscriptionTier === 'go') fileLimit = 4;
-        if (user.subscriptionTier === 'pro') fileLimit = 8;
-
-        if (user.usage.dailyFileCount >= fileLimit) {
-            return res.status(429).json({ 
-                message: `Daily file limit reached (${fileLimit}/${fileLimit}). Upgrade your plan for more.` 
-            });
-        }
-
-        user.usage.dailyFileCount += 1;
-        await user.save();
-
-        // --- CONVERT FILE TO TEXT ---
-        console.log("📄 Converting file to text...");
-        // Note: Since we use memoryStorage, req.file.buffer is available.         // However, converter.js expects a path. Let's write temp file for compatibility or update converter.
-        // For simplicity with existing converter.js, we write a temp file.
-        const tempFilePath = path.join(os.tmpdir(), `${uuidv4()}_${req.file.originalname}`);
-        fs.writeFileSync(tempFilePath, req.file.buffer);
-        let fileText = "";
-        try {
-            fileText = await convertFileToText(tempFilePath, req.file.mimetype);
-        } catch (err) {
-            fs.unlinkSync(tempFilePath); // Clean up
-            return res.status(400).json({ message: "Could not read this file type." });
-        }
-        
-        // Delete temp file
-        fs.unlinkSync(tempFilePath);
-
-        // --- COMBINE FILE TEXT WITH USER MESSAGE ---
-        const userMessage = req.body.message || ""; 
-        
-        const combinedPrompt = `
-[FILE CONTENT START]
-${fileText}
-[FILE CONTENT END]
-
-[USER MESSAGE]
-${userMessage}
-
-INSTRUCTION: The user has uploaded a file and sent a message. 
-If the user asked a question, answer it based on the file content. 
-If the user just said "Hi" or didn't ask a specific question, summarize the file briefly and ask how you can help.
-`;
-
-        // --- ROUTE TO CORRECT AI MODEL ---
-        const plan = user.subscriptionTier || 'free';
-        let aiReply;
-        
-        if (plan === 'free') {
-            const result = await freeAI.generateFreeResponse(combinedPrompt, [], user);
-            aiReply = result.reply;
-        } else if (plan === 'go') {
-            const result = await goAI.generateGoResponse(combinedPrompt, [], user);
-            aiReply = result.reply;
-        } else {
-            const userProfile = { 
-                fullName: user.fullName, 
-                country: user.country, 
-                skillLevel: user.skillLevel, 
-                primaryGoal: user.primaryGoal, 
-                interests: user.interests, 
-                bio: user.bio,
-                userId: user._id.toString()
-            };
-            const result = await requestQueue.enqueue(async () => {
-                // FIXED: Use generateBusinessResponse                return await generateBusinessResponse(combinedPrompt, [], userProfile);
-            });
-            aiReply = result.reply;
-        }
-        // Save interaction
-        const sessionId = uuidv4();
-        const displayMessage = userMessage ? userMessage : `Uploaded file: ${req.file.originalname}`;
-        
-        await new Message({ userId: user._id, sessionId, role: 'user', content: displayMessage }).save();
-        await new Message({ userId: user._id, sessionId, role: 'ai', content: aiReply }).save();
-
-        res.json({ 
-            success: true, 
-            reply: aiReply, 
-            sessionId, 
-            remainingFiles: fileLimit - user.usage.dailyFileCount 
-        });
-
-    } catch (error) {
-        console.error('❌ File Upload Error:', error);
-        res.status(500).json({ message: 'Server Error processing file' });
-    }
-});
-
-// ════════════════════════════════════════════
 //  FLUTTERWAVE PAYMENT ROUTES (UPDATED PRICES: GO $9, PRO $20)
 // ════════════════════════════════════════════
 // Manual verification route (fallback)
@@ -439,10 +217,12 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
         if (data.status === "successful") {
             let userId = data.meta?.userId;
             
-            if (!userId) {                const user = await User.findOne({ lastTxRef: tx_ref });
+            if (!userId) {
+                const user = await User.findOne({ lastTxRef: tx_ref });
                 if (user) {
                     userId = user._id;
-                }            }
+                }
+            }
             
             if (!userId) {
                 console.error("❌ No userId found in verification response and no user found by txRef");
@@ -460,7 +240,8 @@ app.get('/api/verify-payment/:tx_ref', async (req, res) => {
                 userId, 
                 {
                     subscriptionTier: planType,                    subscriptionEndDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-                    lastTxRef: null                },
+                    lastTxRef: null
+                },
                 { new: true }
             );            
             if (updatedUser) {
@@ -489,8 +270,10 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         const { planType } = req.body; // 'go' or 'pro' from frontend
         let amount = 0;
         let planName = '';
+
         if (planType === 'go') {
-            amount = 9; // NEW PRICE FOR GO            planName = 'Skyline AA-1 GO Plan';
+            amount = 9; // NEW PRICE FOR GO
+            planName = 'Skyline AA-1 GO Plan';
         } else if (planType === 'pro') {
             amount = 20; // NEW PRICE FOR PRO
             planName = 'Skyline AA-1 PRO Plan';
@@ -498,7 +281,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
 
-        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-3ejd.vercel.app'; 
+        const vercelUrl = process.env.VERCEL_URL || 'https://new-version-ojbo.vercel.app'; 
         const txRef = `skyline_${planType}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
         // Save txRef to user BEFORE creating payment
@@ -507,7 +290,8 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         console.log(`💾 Saved txRef ${txRef} to user ${user._id} for plan ${planType}`);
         const payload = {
             tx_ref: txRef,
-            amount: amount,            currency: "USD", 
+            amount: amount,
+            currency: "USD", 
             redirect_url: `${vercelUrl}/payment-success.html?tx_ref=${txRef}`,            customer: {
                 email: user.email,
                 phonenumber: user.phone || "08012345678",
@@ -537,8 +321,10 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             console.log(`✅ Payment link created for user ${user._id}`);
             res.json({ link: response.data.data.link, tx_ref: txRef });
         } else {
-            console.error('❌ Failed to initialize payment:', response.data);            res.status(400).json({ message: 'Failed to initialize payment', error: response.data });
-        }    } catch (error) {
+            console.error('❌ Failed to initialize payment:', response.data);
+            res.status(400).json({ message: 'Failed to initialize payment', error: response.data });
+        }
+    } catch (error) {
         console.error('❌ Flutterwave Error:', error.response ? error.response.data : error.message);
         res.status(500).json({ message: 'Server Error initializing payment' });
     }
@@ -554,7 +340,8 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
 
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
-    const plan = user.subscriptionTier || 'free';    try {
+    const plan = user.subscriptionTier || 'free';
+    try {
         await new Message({
             userId,
             sessionId: currentSessionId,
@@ -583,12 +370,12 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
             console.log("🔴 Routing to Pro/Business AI");
             const userProfile = {
                 fullName: user.fullName, country: user.country, skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio,
-                userId: user._id.toString()
+                primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio
             };
-            const result = await requestQueue.enqueue(async () => {                // FIXED: Use generateBusinessResponse
-                return await generateBusinessResponse(message, history || [], userProfile);
-            });            aiReply = result.reply;
+            const result = await requestQueue.enqueue(async () => {
+                return await chat(message, history || [], userProfile);
+            });
+            aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
 
@@ -604,6 +391,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }});
+
 // ════════════════════════════════════════════
 //  OTHER PROTECTED API ROUTES (WITH EXPIRY CHECK)
 // ════════════════════════════════════════════
@@ -635,8 +423,10 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (
         const messages = await Message.find({
             userId: req.userId,
             sessionId: req.params.sessionId
-        }).sort({ createdAt: 1 });        res.json(messages);
-    } catch (error) {        res.status(500).json({ message: 'Server Error fetching history' });
+        }).sort({ createdAt: 1 });
+        res.json(messages);
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error fetching history' });
     }
 });
 
@@ -650,7 +440,8 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
         await new Message({
             userId,
             sessionId: currentSessionId,            role: 'user',
-            content: dream,            title: dream.substring(0, 30) + '...'
+            content: dream,
+            title: dream.substring(0, 30) + '...'
         }).save();
 
         const user = await User.findById(userId);
@@ -684,7 +475,9 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 // 4b. Refine an existing plan
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
     const { originalPlan, followUpAnswer, dreamDescription, sessionId } = req.body;
-    const userId = req.userId;    if (!originalPlan || !followUpAnswer || !dreamDescription) {
+    const userId = req.userId;
+
+    if (!originalPlan || !followUpAnswer || !dreamDescription) {
         return res.status(400).json({
             message: 'originalPlan, followUpAnswer, and dreamDescription are required'        });
     }
@@ -733,7 +526,9 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
     } catch (err) {
         console.error(err.message);
         res.status(500).json({ message: 'Server Error' });
-    }});// 6. Update User Profile
+    }
+});
+// 6. Update User Profile
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {        
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
@@ -782,7 +577,9 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
 
 // 8. Change Email
 app.put('/api/auth/change-email', verifyToken, changeEmail);
-// 9. Verify Ageapp.put('/api/users/verify-age', verifyToken, verifyAge);
+
+// 9. Verify Age
+app.put('/api/users/verify-age', verifyToken, verifyAge);
 
 // 10. Delete Account
 app.delete('/api/users/me', verifyToken, async (req, res) => {
@@ -829,9 +626,11 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
 
 app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {    try {
         const admin = await User.findById(req.userId);        
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });        await User.findByIdAndDelete(req.params.id);
+        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
+        await User.findByIdAndDelete(req.params.id);
         res.json({ message: 'User deleted' });
-    } catch (err) {        res.status(500).json({ message: 'Server Error' });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -877,10 +676,12 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
             userId: req.params.id,
             sessionId: 'admin-direct-message',             
             role: 'ai', 
-            content: `[ADMIN MESSAGE]: ${messageContent}`,            title: 'Direct Message from Admin'
+            content: `[ADMIN MESSAGE]: ${messageContent}`,
+            title: 'Direct Message from Admin'
         });
 
         await newMessage.save();
+
         res.json({ message: 'Message sent successfully' });
     } catch (err) {
         console.error(err);        res.status(500).json({ message: 'Server Error' });
@@ -925,11 +726,13 @@ app.get('/api/admin/reports', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 //  NOTIFICATION ROUTES (USER)
 // ════════════════════════════════════════════
+
 app.get('/api/notifications', verifyToken, async (req, res) => {
     try {
         const notifications = await Message.find({ 
             userId: req.userId,             
-            sessionId: 'admin-direct-message'         }).sort({ createdAt: -1 });
+            sessionId: 'admin-direct-message' 
+        }).sort({ createdAt: -1 });
                 res.json(notifications);
     } catch (err) {
         console.error(err);
@@ -937,7 +740,8 @@ app.get('/api/notifications', verifyToken, async (req, res) => {
     }
 });
 
-app.get('/api/notifications/count', verifyToken, async (req, res) => {    try {
+app.get('/api/notifications/count', verifyToken, async (req, res) => {
+    try {
         const count = await Message.countDocuments({ 
             userId: req.userId, 
             sessionId: 'admin-direct-message' 
@@ -973,11 +777,12 @@ const scheduleExpiryCheck = async () => {
 };
 
 // Run expiry check on startup and every 24 hours
-setTimeout(() => {    scheduleExpiryCheck();
+setTimeout(() => {
+    scheduleExpiryCheck();
     setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000);
 }, 5000);
 
-// ════════════════════════════════════════════
-const PORT = process.env.PORT || 5001;app.listen(PORT, () => {
+// ════════════════════════════════════════════const PORT = process.env.PORT || 5001;
+app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
 });
