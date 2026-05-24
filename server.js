@@ -475,10 +475,10 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         let planName = '';
 
         if (planType === 'go') {
-            amount = 49;
+            amount = 10;  // MODIFIED: Reduced from 49 to 10 dollars
             planName = 'GO Plan';
         } else if (planType === 'pro') {
-            amount = 129;
+            amount = 10;  // MODIFIED: Reduced from 129 to 10 dollars
             planName = 'PRO Plan';
         } else {
             return res.status(400).json({ message: 'Invalid plan type' });
@@ -537,8 +537,7 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 
 // ════════════════════════════════════════════
 //  WHATSAPP-STYLE INBOX ROUTES
-// ════════════════════════════════════════════
-app.get('/api/conversations', verifyToken, async (req, res) => {
+// ════════════════════════════════════════════app.get('/api/conversations', verifyToken, async (req, res) => {
     try {
         const leads         = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
         const conversations = leads.map(lead => {
