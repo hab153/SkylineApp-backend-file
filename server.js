@@ -47,8 +47,7 @@ async function refreshNylasToken(emailAccount, attempt = 1) {
                 client_id:     process.env.NYLAS_CLIENT_ID,
                 client_secret: process.env.NYLAS_CLIENT_SECRET,
                 grant_type:    'refresh_token',
-                refresh_token: emailAccount.refreshToken
-            }
+                refresh_token: emailAccount.refreshToken            }
         );
 
         const newAccessToken = response.data.access_token;
@@ -97,8 +96,7 @@ async function proactiveTokenRefresh() {
         const accounts = await EmailAccount.find({
             isConnected:  true,
             refreshToken: { $exists: true, $ne: null },
-            tokenExpiry:  { $lte: soon }
-        });
+            tokenExpiry:  { $lte: soon }        });
 
         if (accounts.length === 0) return;
         console.log(`🔁 [PROACTIVE] Refreshing ${accounts.length} token(s) before expiry...`);
@@ -147,8 +145,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
     const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
     if (secretHash && sig !== secretHash) {
         console.log("⚠️ Hash mismatch");
-        return res.status(401).send('Unauthorized');
-    }
+        return res.status(401).send('Unauthorized');    }
     let payload;
     try {
         payload = JSON.parse(req.body.toString('utf-8'));
@@ -197,8 +194,7 @@ app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), 
 //  INBOUND EMAIL WEBHOOK
 //  FIX 1: followUpCount now uses lead.followUpCount
 //         (stored field) instead of recalculating
-//         from the replies array — avoids off-by-one
-//         bug where freshly-pushed lead reply was
+//         from the replies array — avoids off-by-one//         bug where freshly-pushed lead reply was
 //         included in the count.
 //  FIX 2: followUpCount resets to 0 when lead replies
 //         so active conversations never hit the cap.
@@ -247,7 +243,6 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                     lead.status          = 'Replied';
                     lead.lastContactDate = new Date();
                     lead.followUpCount   = 0; // FIX: reset — lead is actively replying
-
                     const bodyText = messageData.body || messageData.snippet || '';
                     lead.replies   = lead.replies || [];
                     lead.replies.push({
@@ -275,88 +270,114 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                     console.log(`🤖 [AUTO-REPLY] Enabled: ${lead.autoReplyEnabled}`);
                     if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
                         try {
-                            // Build conversation history from last 4 messages
-                            const history = lead.replies.slice(-4).map(msg => ({
-                                role:    msg.from === 'lead' ? 'user' : 'assistant',
-                                content: msg.content
-                            }));
+                            // CHECK AUTO-REPLY LIMITS HERE
+                            const ownerUser = await User.findById(ownerUserId);
+                            let autoReplyLimit = 10; // Free
+                            if (ownerUser.subscriptionTier === 'go') autoReplyLimit = 40;
+                            if (ownerUser.subscriptionTier === 'pro') autoReplyLimit = 70;
 
-                            // ── FIX 2: Use stored followUpCount field — NOT recalculated
-                            //    from the replies array. Recalculating was broken because
-                            //    the new lead reply was already in the array, causing the
-                            //    slice to include AI replies from before reset, hitting cap.
-                            const followUpCount = lead.followUpCount || 0;
-                            console.log(`📊 [AUTO-REPLY] followUpCount: ${followUpCount}`);
+                            // You need to track auto-reply count in User.usage or Lead
+                            // For simplicity, let's assume we store it in User.usage.autoReplyCount
+                            if (!ownerUser.usage) ownerUser.usage = { autoReplyCount: 0, lastAutoReplyDate: new Date() };
+                            
+                            const todayStr = new Date().toDateString();
+                            const lastAutoStr = ownerUser.usage.lastAutoReplyDate ? new Date(ownerUser.usage.lastAutoReplyDate).toDateString() : '';
+                            
+                            if (lastAutoStr !== todayStr) {
+                                ownerUser.usage.autoReplyCount = 0;
+                                ownerUser.usage.lastAutoReplyDate = new Date();
+                                await ownerUser.save();
+                            }
 
-                            // Call AI generator
-                            const aiResult = await generateAIReply(
-                                bodyText,
-                                lead.autoReplyInstructions,
-                                lead.name,
-                                history,
-                                {
-                                    mode:         'full', // lead is actively replying — use full
-                                    followUpCount: followUpCount
-                                }
-                            );
+                            if (ownerUser.usage.autoReplyCount >= autoReplyLimit) {
+                                console.log(`🚫 [AUTO-REPLY] Limit reached for user ${ownerUserId} (${autoReplyLimit}/${autoReplyLimit})`);
+                                // Optional: Send a notification to the user that their auto-reply limit is reached
+                            } else {                                // Increment count
+                                ownerUser.usage.autoReplyCount += 1;
+                                await ownerUser.save();
 
-                            console.log(`🧠 [AUTO-REPLY] AI result: action=${aiResult?.action} | risk=${aiResult?.riskLevel} | tokens=${aiResult?.tokensUsed}`);
+                                // Build conversation history from last 4 messages
+                                const history = lead.replies.slice(-4).map(msg => ({
+                                    role:    msg.from === 'lead' ? 'user' : 'assistant',
+                                    content: msg.content
+                                }));
 
-                            // Check if AI generated a sendable reply
-                            if (aiResult && aiResult.action === 'REPLY' && aiResult.reply) {
-                                const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
+                                // ── FIX 2: Use stored followUpCount field — NOT recalculated
+                                //    from the replies array. Recalculating was broken because
+                                //    the new lead reply was already in the array, causing the
+                                //    slice to include AI replies from before reset, hitting cap.
+                                const followUpCount = lead.followUpCount || 0;
+                                console.log(`📊 [AUTO-REPLY] followUpCount: ${followUpCount}`);
 
-                                if (!emailAccount) {
-                                    console.error('❌ [AUTO-REPLY] No email account found for user.');
+                                // Call AI generator
+                                const aiResult = await generateAIReply(
+                                    bodyText,
+                                    lead.autoReplyInstructions,
+                                    lead.name,
+                                    history,
+                                    {
+                                        mode:         'full', // lead is actively replying — use full
+                                        followUpCount: followUpCount
+                                    }
+                                );
 
-                                // ── FIX 3: Guard against missing refresh token
-                                } else if (!emailAccount.refreshToken) {
-                                    console.error('❌ [AUTO-REPLY] No refresh token — user must reconnect Nylas. Go to Nylas dashboard and ensure offline_access scope is enabled.');
+                                console.log(`🧠 [AUTO-REPLY] AI result: action=${aiResult?.action} | risk=${aiResult?.riskLevel} | tokens=${aiResult?.tokensUsed}`);
 
+                                // Check if AI generated a sendable reply
+                                if (aiResult && aiResult.action === 'REPLY' && aiResult.reply) {
+                                    const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
+
+                                    if (!emailAccount) {
+                                        console.error('❌ [AUTO-REPLY] No email account found for user.');
+
+                                    // ── FIX 3: Guard against missing refresh token
+                                    } else if (!emailAccount.refreshToken) {
+                                        console.error('❌ [AUTO-REPLY] No refresh token — user must reconnect Nylas. Go to Nylas dashboard and ensure offline_access scope is enabled.');
+
+                                    } else {
+                                        let accessToken = emailAccount.accessToken;
+
+                                        // Refresh token if expiring within 5 minutes
+                                        const isExpired = !emailAccount.tokenExpiry ||
+                                            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
+
+                                        if (isExpired) {                                            try {
+                                                console.log('🔄 [AUTO-REPLY] Token expiring — refreshing...');
+                                                accessToken = await refreshNylasToken(emailAccount);
+                                            } catch (refreshErr) {
+                                                console.error(`❌ [AUTO-REPLY] Token refresh failed — skipping send: ${refreshErr.message}`);
+                                                accessToken = null;
+                                            }
+                                        }
+
+                                        if (accessToken) {
+                                            const result = await sendEmail(
+                                                accessToken,
+                                                lead.email,
+                                                `Re: ${messageData.subject}`,
+                                                aiResult.reply
+                                            );
+
+                                            if (result.success) {
+                                                // Save AI reply and increment followUpCount
+                                                lead.replies.push({
+                                                    date:    new Date(),
+                                                    content: aiResult.reply,
+                                                    subject: `Re: ${messageData.subject}`,
+                                                    from:    'ai',
+                                                    status:  'sent'
+                                                });
+                                                lead.followUpCount = (lead.followUpCount || 0) + 1;
+                                                await lead.save();
+                                                console.log(`✅ [AUTO-REPLY] Sent to ${lead.email} | followUpCount now: ${lead.followUpCount}`);
+                                            } else {
+                                                console.error(`❌ [AUTO-REPLY] Send failed: ${result.error}`);
+                                            }
+                                        }
+                                    }
                                 } else {
-                                    let accessToken = emailAccount.accessToken;
-
-                                    // Refresh token if expiring within 5 minutes
-                                    const isExpired = !emailAccount.tokenExpiry ||
-                                        new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
-
-                                    if (isExpired) {
-                                        try {
-                                            console.log('🔄 [AUTO-REPLY] Token expiring — refreshing...');
-                                            accessToken = await refreshNylasToken(emailAccount);
-                                        } catch (refreshErr) {
-                                            console.error(`❌ [AUTO-REPLY] Token refresh failed — skipping send: ${refreshErr.message}`);
-                                            accessToken = null;
-                                        }
-                                    }
-
-                                    if (accessToken) {
-                                        const result = await sendEmail(
-                                            accessToken,
-                                            lead.email,
-                                            `Re: ${messageData.subject}`,
-                                            aiResult.reply
-                                        );
-
-                                        if (result.success) {
-                                            // Save AI reply and increment followUpCount
-                                            lead.replies.push({
-                                                date:    new Date(),
-                                                content: aiResult.reply,
-                                                subject: `Re: ${messageData.subject}`,
-                                                from:    'ai',
-                                                status:  'sent'
-                                            });
-                                            lead.followUpCount = (lead.followUpCount || 0) + 1;
-                                            await lead.save();
-                                            console.log(`✅ [AUTO-REPLY] Sent to ${lead.email} | followUpCount now: ${lead.followUpCount}`);
-                                        } else {
-                                            console.error(`❌ [AUTO-REPLY] Send failed: ${result.error}`);
-                                        }
-                                    }
+                                    console.log(`🔇 [AUTO-REPLY] Skipped. Action: ${aiResult?.action || 'NULL'} | Reason: ${aiResult?.reasoning || 'No reply generated'}`);
                                 }
-                            } else {
-                                console.log(`🔇 [AUTO-REPLY] Skipped. Action: ${aiResult?.action || 'NULL'} | Reason: ${aiResult?.reasoning || 'No reply generated'}`);
                             }
                         } catch (aiErr) {
                             console.error('❌ [AUTO-REPLY] Generation error:', aiErr.message);
@@ -369,8 +390,7 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
                 }
             }
             return res.status(200).send('OK');
-        } catch (err) {
-            console.error('❌ Webhook Error:', err);
+        } catch (err) {            console.error('❌ Webhook Error:', err);
             return res.status(500).send('Error');
         }
     }
@@ -414,19 +434,24 @@ const checkDailyLimit = async (req, res, next) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
-        let limit = 30;
-        if (user.subscriptionTier === 'go')  limit = 18;
-        if (user.subscriptionTier === 'pro') limit = 40;
+        
+        // UPDATED LIMITS
+        let limit = 7; // Free plan
+        if (user.subscriptionTier === 'go')  limit = 30;
+        if (user.subscriptionTier === 'pro') limit = 50;
         const todayStr = new Date().toDateString();
         const lastStr  = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
+        
         if (lastStr !== todayStr) {
             user.usage.dailyCallCount = 0;
             user.usage.lastCallDate   = new Date();
             await user.save();
         }
+        
         if (user.usage.dailyCallCount >= limit) {
             return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade for more.` });
         }
+        
         user.usage.dailyCallCount += 1;
         await user.save();
         next();
@@ -437,9 +462,82 @@ const checkDailyLimit = async (req, res, next) => {
 };
 
 // ════════════════════════════════════════════
-//  WHATSAPP-STYLE INBOX ROUTES
+//  CREATE FLUTTERWAVE PAYMENT LINK
 // ════════════════════════════════════════════
-app.get('/api/conversations', verifyToken, async (req, res) => {
+app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
+    try {
+        const { planType } = req.body; // 'go' or 'pro'
+        const user = await User.findById(req.userId);
+        
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        let amount = 0;
+        let planName = '';
+
+        if (planType === 'go') {
+            amount = 49;
+            planName = 'GO Plan';
+        } else if (planType === 'pro') {
+            amount = 129;
+            planName = 'PRO Plan';
+        } else {
+            return res.status(400).json({ message: 'Invalid plan type' });
+        }
+
+        // Create a unique transaction reference
+        const txRef = `skyline_${planType}_${user._id}_${Date.now()}`;
+
+        // Save txRef to user so webhook can find them later
+        user.lastTxRef = txRef;        await user.save();
+
+        // Flutterwave API Payload
+        const payload = {
+            tx_ref: txRef,
+            amount: amount,
+            currency: "USD",
+            redirect_url: "https://skylineai-app.vercel.app/dashboard.html?payment=success",
+            meta: {
+                plan: planType,
+                userId: user._id.toString()
+            },
+            customer: {
+                email: user.email || "customer@example.com", // Ensure user has an email in DB
+                name: user.fullName || "Skyline User"
+            },
+            customizations: {
+                title: "Skyline AA-1 Subscription",
+                description: `Payment for ${planName}`,
+                logo: "https://skylineai-app.vercel.app/logo.png" // Optional: Your logo URL
+            }
+        };
+
+        // Call Flutterwave API
+        const response = await axios.post(
+            'https://api.flutterwave.com/v3/payments',
+            payload,
+            {
+                headers: {
+                    'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+
+        if (response.data.status === 'success') {
+            res.json({ link: response.data.data.link });
+        } else {
+            throw new Error('Failed to create payment link');
+        }
+
+    } catch (err) {
+        console.error('❌ Payment Link Error:', err.response?.data || err.message);
+        res.status(500).json({ message: 'Could not initiate payment', error: err.message });
+    }
+});
+
+// ════════════════════════════════════════════
+//  WHATSAPP-STYLE INBOX ROUTES
+// ════════════════════════════════════════════app.get('/api/conversations', verifyToken, async (req, res) => {
     try {
         const leads         = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
         const conversations = leads.map(lead => {
@@ -489,7 +587,6 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
 app.put('/api/leads/:leadId/rename', verifyToken, async (req, res) => {
     try {
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
@@ -538,7 +635,6 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                 return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'Session expired. Please reconnect.' });
             }
         }
-
         let sentCount = 0;
         let errors    = [];
         const now     = new Date();
@@ -588,8 +684,7 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
                         lead.status = 'Failed';
                         await lead.save();
                         errors.push({ email: leadData.email, error: result.error });
-                    }
-                }
+                    }                }
             } catch (err) {
                 errors.push({ email: leadData.email, error: err.message });
             }
@@ -638,8 +733,7 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  NOTIFICATIONS
-// ════════════════════════════════════════════
+//  NOTIFICATIONS// ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
     try {
         const replyNotifications = await Message.find({ userId: req.userId, sessionId: 'reply-notification' }).sort({ createdAt: -1 });
@@ -688,8 +782,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 
         await User.findByIdAndUpdate(userId, {
             'nylasIntegration.accessToken':  accessToken,
-            'nylasIntegration.emailAddress': emailAddress,
-            'nylasIntegration.isConnected':  true,
+            'nylasIntegration.emailAddress': emailAddress,            'nylasIntegration.isConnected':  true,
             'nylasIntegration.connectedAt':  new Date()
         });
 
@@ -738,8 +831,7 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
-    try {
-        await new Message({
+    try {        await new Message({
             userId,
             sessionId: currentSessionId,
             role:      'user',
@@ -788,8 +880,7 @@ app.get('/api/leads', verifyToken, async (req, res) => {
         const leads = await Lead.find({ userId: req.userId }).sort({ createdAt: -1 });
         res.json(leads);
     } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
+        res.status(500).json({ message: 'Server Error' });    }
 });
 
 app.post('/api/feedback', verifyToken, async (req, res) => {
@@ -838,8 +929,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' }).save();
         const user        = await User.findById(userId);
-        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result      = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
+        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };        const result      = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
@@ -888,8 +978,7 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
         res.json(user);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
+    } catch (err) {        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -938,8 +1027,7 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         targetUser.suspensionEnds = targetUser.isSuspended ? new Date('2099-12-31') : null;
         await targetUser.save();
         res.json({ message: 'Status updated' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
+    } catch (err) {        res.status(500).json({ message: 'Server Error' });
     }
 });
 
@@ -988,8 +1076,7 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        await new Message({
-            userId:    req.params.id,
+        await new Message({            userId:    req.params.id,
             sessionId: 'admin-direct-message',
             role:      'ai',
             content:   `[ADMIN MESSAGE]: ${messageContent}`,
@@ -1038,8 +1125,7 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
 //  EXPIRY CHECK JOB
 // ════════════════════════════════════════════
 const scheduleExpiryCheck = async () => {
-    try {
-        const result = await User.updateMany(
+    try {        const result = await User.updateMany(
             { subscriptionTier: { $ne: 'free' }, subscriptionEndDate: { $lt: new Date() } },
             { subscriptionTier: 'free', subscriptionEndDate: null }
         );
