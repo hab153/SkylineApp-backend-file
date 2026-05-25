@@ -534,8 +534,10 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
         );
 
         if (response.data.status === 'success') {
-            console.log('✅ [PAYMENT] Link Generated:', response.data.data.link);
-            res.json({ link: response.data.data.link });
+    console.log('✅ [PAYMENT] Link Generated:', response.data.data.link);
+    res.json({ 
+        link: response.data.data.link,
+        txRef: txRef  // ← ADD THIS LINE
         } else {
             console.error('❌ [PAYMENT] Flutterwave API Error:', response.data);            throw new Error(response.data.message || 'Failed to create payment link');
         }
