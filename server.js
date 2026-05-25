@@ -537,19 +537,12 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     console.log('✅ [PAYMENT] Link Generated:', response.data.data.link);
     res.json({ 
         link: response.data.data.link,
-        txRef: txRef  // ← ADD THIS LINE
-        } else {
-            console.error('❌ [PAYMENT] Flutterwave API Error:', response.data);            throw new Error(response.data.message || 'Failed to create payment link');
+        txRef: txRef
+    });
+} else {  // ← Moved the else outside the res.json()
+    console.error('❌ [PAYMENT] Flutterwave API Error:', response.data);
+    throw new Error(response.data.message || 'Failed to create payment link');
         }
-
-    } catch (err) {
-        console.error('❌ [PAYMENT] Critical Error:', err.response?.data || err.message);
-        res.status(500).json({ 
-            message: 'Could not initiate payment', 
-            error: err.response?.data?.message || err.message 
-        });
-    }
-});
 
 // ════════════════════════════════════════════
 //  WHATSAPP-STYLE INBOX ROUTES
