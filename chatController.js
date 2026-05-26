@@ -4,7 +4,19 @@ const User = require('./User');
 const freeAI = require('./Free');
 const goAI = require('./Go');
 const { generateBusinessResponse } = require('./businessAI');
-const requestQueue = require('./requestQueue');
+const { freeQueue, goQueue, proQueue } = require('./requestQueue');
+
+// Helper to handle queue errors and send friendly messages
+const handleQueueError = (error, res) => {
+    console.error('Queue error:', error.message);
+    if (error.message.includes('busy') || error.message.includes('try again')) {
+        return res.status(503).json({ message: error.message });
+    }
+    if (error.message.includes('taking longer than expected')) {
+        return res.status(504).json({ message: error.message });
+    }
+    return res.status(500).json({ message: 'AI service error. Please try again later.' });
+};
 
 // POST /api/chat
 const sendMessage = async (req, res) => {
@@ -25,18 +37,14 @@ const sendMessage = async (req, res) => {
 
         let aiReply, updatedHistory;
         if (plan === 'free') {
-            const result = await freeAI.generateFreeResponse(message, history || [], user);
+            const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(message, history || [], user));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
-            try {
-                const result = await goAI.generateGoResponse(message, history || [], user);
-                aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
-                updatedHistory = result ? (result.updatedHistory || []) : [];
-            } catch (goError) {
-                aiReply = "⚠️ Go AI Service currently unavailable.";
-            }
-        } else {
+            const result = await goQueue.enqueue(() => goAI.generateGoResponse(message, history || [], user));
+            aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
+            updatedHistory = result ? (result.updatedHistory || []) : [];
+        } else { // pro
             const userProfile = {
                 fullName: user.fullName,
                 country: user.country,
@@ -46,7 +54,7 @@ const sendMessage = async (req, res) => {
                 bio: user.bio,
                 userId: user._id.toString()
             };
-            const result = await requestQueue.enqueue(async () => generateBusinessResponse(message, history || [], userProfile));
+            const result = await proQueue.enqueue(() => generateBusinessResponse(message, history || [], userProfile));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
@@ -54,6 +62,10 @@ const sendMessage = async (req, res) => {
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply }).save();
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
     } catch (error) {
+        // Check if error is from queue (has friendly message)
+        if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
+            return handleQueueError(error, res);
+        }
         console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }
@@ -101,7 +113,7 @@ const getHistory = async (req, res) => {
     }
 };
 
-// POST /api/dreams/analyze
+// POST /api/dreams/analyze (pro feature)
 const analyzeDream = async (req, res) => {
     const { dream, sessionId } = req.body;
     const userId = req.userId;
@@ -119,15 +131,19 @@ const analyzeDream = async (req, res) => {
             bio: user.bio,
             userId: user._id.toString()
         };
-        const result = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
+        const result = await proQueue.enqueue(() => generateBusinessResponse(dream, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
+        if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
+            return handleQueueError(error, res);
+        }
+        console.error('Dream analyze error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 };
 
-// POST /api/dreams/refine
+// POST /api/dreams/refine (pro feature)
 const refineDream = async (req, res) => {
     const { followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
@@ -145,10 +161,14 @@ const refineDream = async (req, res) => {
             bio: user.bio,
             userId: user._id.toString()
         };
-        const result = await requestQueue.enqueue(async () => generateBusinessResponse(followUpAnswer, [], userProfile));
+        const result = await proQueue.enqueue(() => generateBusinessResponse(followUpAnswer, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
+        if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
+            return handleQueueError(error, res);
+        }
+        console.error('Dream refine error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 };
