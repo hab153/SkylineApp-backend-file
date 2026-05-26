@@ -19,8 +19,8 @@ const UserSchema = new mongoose.Schema({
     password: {
         type: String,
         required: true,
-        minlength: 8,
-        select: false          // 🔒 Never returned in queries by default
+        minlength: 8
+        // 🔒 select: false  REMOVED – login needs password
     },
     // Profile Fields
     fullName: { type: String, default: '' },
