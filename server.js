@@ -13,6 +13,8 @@ const crypto = require('crypto');
 const { verifyToken } = require('./authMiddleware');
 // NEW IMPORT FOR DAILY LIMIT MIDDLEWARE
 const { checkDailyLimit } = require('./dailyLimitMiddleware');
+// NEW IMPORT FOR SUBSCRIPTION EXPIRY MIDDLEWARE
+const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
@@ -117,29 +119,6 @@ async function proactiveTokenRefresh() {
         console.error('❌ [PROACTIVE] Token refresh job error:', err.message);
     }
 }
-
-// ════════════════════════════════════════════
-//  CHECK SUBSCRIPTION EXPIRY MIDDLEWARE
-// ════════════════════════════════════════════
-const checkSubscriptionExpiry = async (req, res, next) => {
-    try {
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        if (user.subscriptionTier && user.subscriptionTier !== 'free' && user.subscriptionEndDate) {
-            const now = new Date();
-            if (now > new Date(user.subscriptionEndDate)) {
-                user.subscriptionTier    = 'free';
-                user.subscriptionEndDate = null;
-                await user.save();
-                console.log(`⚠️ User ${user._id} downgraded to free - subscription expired`);
-            }
-        }
-        next();
-    } catch (err) {
-        console.error('Error checking subscription expiry:', err);
-        next();
-    }
-};
 
 // ════════════════════════════════════════════
 //  WEBHOOK — MUST BE BEFORE express.json()
@@ -419,8 +398,7 @@ mongoose.connect(process.env.MONGODB_URI)
 
 app.use('/api/auth', authRoutes);
 
-// ── NOTE: verifyToken is now imported from authMiddleware.js
-// ── NOTE: checkDailyLimit is now imported from dailyLimitMiddleware.js
+// ── NOTE: verifyToken, checkDailyLimit, and checkSubscriptionExpiry are now imported
 
 // ════════════════════════════════════════════
 //  CREATE FLUTTERWAVE PAYMENT LINK (WITH FULL TRACKING)
