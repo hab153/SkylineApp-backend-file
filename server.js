@@ -11,6 +11,8 @@ const crypto = require('crypto');
 
 // NEW IMPORT FOR AUTH MIDDLEWARE
 const { verifyToken } = require('./authMiddleware');
+// NEW IMPORT FOR DAILY LIMIT MIDDLEWARE
+const { checkDailyLimit } = require('./dailyLimitMiddleware');
 
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
@@ -418,39 +420,7 @@ mongoose.connect(process.env.MONGODB_URI)
 app.use('/api/auth', authRoutes);
 
 // ── NOTE: verifyToken is now imported from authMiddleware.js
-
-// ── Daily Usage Limit Middleware ──
-const checkDailyLimit = async (req, res, next) => {
-    try {
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
-        
-        // UPDATED LIMITS
-        let limit = 7; // Free plan
-        if (user.subscriptionTier === 'go')  limit = 30;
-        if (user.subscriptionTier === 'pro') limit = 50;
-        const todayStr = new Date().toDateString();
-        const lastStr  = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
-        
-        if (lastStr !== todayStr) {
-            user.usage.dailyCallCount = 0;
-            user.usage.lastCallDate   = new Date();
-            await user.save();
-        }
-        
-        if (user.usage.dailyCallCount >= limit) {
-            return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade for more.` });
-        }
-        
-        user.usage.dailyCallCount += 1;
-        await user.save();
-        next();
-    } catch (err) {
-        console.error('Error checking daily limit:', err);
-        res.status(500).json({ message: 'Server Error checking usage limits' });
-    }
-};
+// ── NOTE: checkDailyLimit is now imported from dailyLimitMiddleware.js
 
 // ════════════════════════════════════════════
 //  CREATE FLUTTERWAVE PAYMENT LINK (WITH FULL TRACKING)
