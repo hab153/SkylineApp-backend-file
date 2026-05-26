@@ -19,6 +19,7 @@ const nylasInboundWebhook = require('./nylasInboundWebhook');
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
 const leadController = require('./leadController');
 const chatController = require('./chatController');
+const userController = require('./userController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -35,7 +36,7 @@ const Message = require('./Message');
 const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
-const { verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount } = require('./authController');
+const { verifyLayer2, verifyLayer3 } = require('./authController'); // only needed for admin
 
 dotenv.config();
 const app = express();
@@ -171,7 +172,17 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  USER & ADMIN ROUTES (remain)
+//  USER PROFILE ROUTES (extracted)
+// ════════════════════════════════════════════
+app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
+app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.updateUserProfile);
+app.put('/api/auth/change-password', verifyToken, userController.changePassword);
+app.put('/api/auth/change-email', verifyToken, userController.changeEmail);
+app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
+app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
+
+// ════════════════════════════════════════════
+//  OTHER ROUTES (admin, reports, notifications, etc.)
 // ════════════════════════════════════════════
 app.get('/api/notifications/replies', verifyToken, async (req, res) => {
     try {
@@ -181,56 +192,6 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
         res.status(500).json({ message: 'Server Error' });
     }
 });
-
-app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
-        const user = await User.findById(req.userId).select('-password');
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        res.json(user);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
-        const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
-        let user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        if (fullName) user.fullName = fullName;
-        if (primaryGoal) user.primaryGoal = primaryGoal;
-        if (skillLevel) user.skillLevel = skillLevel;
-        if (interests) user.interests = interests;
-        if (country) user.country = country;
-        if (bio) user.bio = bio;
-        if (profilePicture) user.profilePicture = profilePicture;
-        await user.save();
-        res.json(user);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.put('/api/auth/change-password', verifyToken, async (req, res) => {
-    const { currentPassword, newPassword } = req.body;
-    try {
-        let user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        const isMatch = await bcrypt.compare(currentPassword, user.password);
-        if (!isMatch) return res.status(400).json({ message: 'Current password is incorrect' });
-        if (newPassword.length < 8) return res.status(400).json({ message: 'New password must be at least 8 characters' });
-        const salt = await bcrypt.genSalt(10);
-        user.password = await bcrypt.hash(newPassword, salt);
-        await user.save();
-        res.json({ message: 'Password updated successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.put('/api/auth/change-email', verifyToken, changeEmail);
-app.put('/api/users/verify-age', verifyToken, verifyAge);
-app.delete('/api/users/me', verifyToken, async (req, res) => { await deleteAccount(req, res); });
 
 app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
