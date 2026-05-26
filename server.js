@@ -3,6 +3,8 @@ const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const path = require('path');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
@@ -44,6 +46,25 @@ const requestQueue = require('./requestQueue');
 
 dotenv.config();
 const app = express();
+
+// ════════════════════════════════════════════
+//  SECURITY MIDDLEWARE
+// ════════════════════════════════════════════
+app.use(helmet());                     // Sets secure HTTP headers
+app.disable('x-powered-by');           // Hide Express signature
+app.set('trust proxy', 1);             // Trust first proxy (e.g., Nginx, Cloudflare)
+
+// Global rate limiter (prevents DDoS / brute force)
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,          // 15 minutes
+    max: 200,                          // limit each IP to 200 requests per windowMs
+    keyGenerator: (req) => req.userId || req.ip,
+    skipSuccessfulRequests: false,     // count successful requests as well
+    standardHeaders: true,             // Return rate limit info in `RateLimit-*` headers
+    legacyHeaders: false,
+});
+app.use(globalLimiter);
+
 app.use(cors());
 
 // ════════════════════════════════════════════
