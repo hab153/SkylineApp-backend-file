@@ -14,6 +14,7 @@ const { verifyToken } = require('./authMiddleware');
 const { checkDailyLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
+const { startExpiryJob } = require('./expiryJob');
 const flutterwaveWebhook = require('./flutterwaveWebhook');
 const nylasInboundWebhook = require('./nylasInboundWebhook');
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
@@ -61,6 +62,7 @@ mongoose.connect(process.env.MONGODB_URI)
     .then(() => {
         console.log('✅ MongoDB Connected');
         startTokenRefreshJob();
+        startExpiryJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
@@ -90,7 +92,7 @@ app.get('/api/notifications/replies', verifyToken, notificationController.getRep
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
 
 // ════════════════════════════════════════════
-//  NYLAS AUTH (extracted)
+//  NYLAS AUTH
 // ════════════════════════════════════════════
 app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
@@ -129,28 +131,9 @@ app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMe
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
 // ════════════════════════════════════════════
-//  REPORTS (user submission) — extracted
+//  REPORTS (user submission)
 // ════════════════════════════════════════════
 app.post('/api/reports', verifyToken, reportController.submitReport);
-
-// ════════════════════════════════════════════
-//  EXPIRY CHECK JOB
-// ════════════════════════════════════════════
-const scheduleExpiryCheck = async () => {
-    try {
-        const result = await User.updateMany(
-            { subscriptionTier: { $ne: 'free' }, subscriptionEndDate: { $lt: new Date() } },
-            { subscriptionTier: 'free', subscriptionEndDate: null }
-        );
-        if (result.modifiedCount > 0) console.log(`🔄 Downgraded ${result.modifiedCount} expired users`);
-    } catch (err) {
-        console.error('Error in expiry check:', err);
-    }
-};
-setTimeout(() => {
-    scheduleExpiryCheck();
-    setInterval(scheduleExpiryCheck, 24 * 60 * 60 * 1000);
-}, 5000);
 
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
