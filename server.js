@@ -18,6 +18,7 @@ const flutterwaveWebhook = require('./flutterwaveWebhook');
 const nylasInboundWebhook = require('./nylasInboundWebhook');
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
 const leadController = require('./leadController');
+const chatController = require('./chatController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -160,7 +161,17 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  OTHER ROUTES (chat, dreams, user, admin, reports, etc.)
+//  CHAT & DREAMS ROUTES (extracted)
+// ════════════════════════════════════════════
+app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.sendMessage);
+app.post('/api/feedback', verifyToken, chatController.submitFeedback);
+app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, chatController.getSessions);
+app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.analyzeDream);
+app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
+
+// ════════════════════════════════════════════
+//  USER & ADMIN ROUTES (remain)
 // ════════════════════════════════════════════
 app.get('/api/notifications/replies', verifyToken, async (req, res) => {
     try {
@@ -168,130 +179,6 @@ app.get('/api/notifications/replies', verifyToken, async (req, res) => {
         res.json({ count: repliedLeads.length, leads: repliedLeads });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { message, history, sessionId } = req.body;
-    const userId = req.userId;
-    if (!message) return res.status(400).json({ message: 'Message is required' });
-    const currentSessionId = sessionId || uuidv4();
-    const user = await User.findById(userId);
-    const plan = user.subscriptionTier || 'free';
-    try {
-        await new Message({
-            userId,
-            sessionId: currentSessionId,
-            role: 'user',
-            content: message,
-            title: message.substring(0, 30) + '...'
-        }).save();
-
-        let aiReply, updatedHistory;
-        if (plan === 'free') {
-            const result = await freeAI.generateFreeResponse(message, history || [], user);
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
-        } else if (plan === 'go') {
-            try {
-                const result = await goAI.generateGoResponse(message, history || [], user);
-                aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
-                updatedHistory = result ? (result.updatedHistory || []) : [];
-            } catch (goError) {
-                aiReply = "⚠️ Go AI Service currently unavailable.";
-            }
-        } else {
-            const userProfile = {
-                fullName: user.fullName,
-                country: user.country,
-                skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal,
-                interests: user.interests,
-                bio: user.bio,
-                userId: user._id.toString()
-            };
-            const result = await requestQueue.enqueue(async () => generateBusinessResponse(message, history || [], userProfile));
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
-        }
-
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply }).save();
-        res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
-    } catch (error) {
-        console.error('Chat route error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
-});
-
-app.post('/api/feedback', verifyToken, async (req, res) => {
-    try {
-        const { messageId, type } = req.body;
-        if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });
-        const message = await Message.findById(messageId);
-        if (!message) return res.status(404).json({ message: 'Message not found' });
-        if (message.userId.toString() !== req.userId) return res.status(403).json({ message: 'Unauthorized' });
-        message.feedback = message.feedback === type ? null : type;
-        await message.save();
-        res.json({ success: true, feedback: message.feedback });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error saving feedback' });
-    }
-});
-
-app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
-        const sessions = await Message.aggregate([
-            { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
-            { $sort: { createdAt: -1 } },
-            { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
-            { $sort: { lastUpdated: -1 } }
-        ]);
-        res.json(sessions);
-    } catch (error) {
-        res.status(500).json({ message: 'Server Error fetching sessions' });
-    }
-});
-
-app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, async (req, res) => {
-    try {
-        const messages = await Message.find({ userId: req.userId, sessionId: req.params.sessionId }).sort({ createdAt: 1 });
-        res.json(messages);
-    } catch (error) {
-        res.status(500).json({ message: 'Server Error fetching history' });
-    }
-});
-
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { dream, sessionId } = req.body;
-    const userId = req.userId;
-    if (!dream) return res.status(400).json({ message: 'Dream description is required' });
-    const currentSessionId = sessionId || uuidv4();
-    try {
-        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' }).save();
-        const user = await User.findById(userId);
-        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
-        res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
-    } catch (error) {
-        res.status(500).json({ message: error.message || 'Server Error' });
-    }
-});
-
-app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, async (req, res) => {
-    const { followUpAnswer, dreamDescription, sessionId } = req.body;
-    const userId = req.userId;
-    if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
-    const currentSessionId = sessionId || uuidv4();
-    try {
-        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
-        const user = await User.findById(userId);
-        const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result = await requestQueue.enqueue(async () => generateBusinessResponse(followUpAnswer, [], userProfile));
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
-        res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
-    } catch (error) {
-        res.status(500).json({ message: error.message || 'Server Error' });
     }
 });
 
