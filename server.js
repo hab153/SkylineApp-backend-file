@@ -58,7 +58,13 @@ app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' })
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-mongoose.connect(process.env.MONGODB_URI)
+// ════════════════════════════════════════════
+//  MONGODB CONNECTION WITH LARGER POOL SIZE
+// ════════════════════════════════════════════
+mongoose.connect(process.env.MONGODB_URI, {
+    maxPoolSize: 50,
+    serverSelectionTimeoutMS: 5000
+})
     .then(() => {
         console.log('✅ MongoDB Connected');
         startTokenRefreshJob();
@@ -135,5 +141,9 @@ app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 // ════════════════════════════════════════════
 app.post('/api/reports', verifyToken, reportController.submitReport);
 
+// ════════════════════════════════════════════
+//  START SERVER WITH 5-MINUTE TIMEOUT
+// ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
+const server = app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
+server.timeout = 300000; // 5 minutes (300,000 ms)
