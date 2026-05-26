@@ -23,6 +23,7 @@ const userController = require('./userController');
 const adminController = require('./adminController');
 const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
+const reportController = require('./reportController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -128,19 +129,9 @@ app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMe
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
 // ════════════════════════════════════════════
-//  REPORTS (user submission)
+//  REPORTS (user submission) — extracted
 // ════════════════════════════════════════════
-app.post('/api/reports', verifyToken, async (req, res) => {
-    try {
-        const { subject, message } = req.body;
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        await new Report({ userId: req.userId, username: user.username, subject, message }).save();
-        res.json({ message: 'Report submitted successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
+app.post('/api/reports', verifyToken, reportController.submitReport);
 
 // ════════════════════════════════════════════
 //  EXPIRY CHECK JOB
