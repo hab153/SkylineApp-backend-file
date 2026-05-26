@@ -19,6 +19,8 @@ const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 // NEW IMPORT FOR FLUTTERWAVE WEBHOOK
 const flutterwaveWebhook = require('./flutterwaveWebhook');
+// NEW IMPORT FOR INBOUND NYLAS WEBHOOK
+const nylasInboundWebhook = require('./nylasInboundWebhook');
 
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
@@ -46,219 +48,13 @@ app.use(cors());
 const stateStore = {};
 
 // ════════════════════════════════════════════
-//  WEBHOOK — MUST BE BEFORE express.json()
+//  WEBHOOKS — MUST BE BEFORE express.json()
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
+app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
 
 // ════════════════════════════════════════════
-//  INBOUND EMAIL WEBHOOK
-//  FIX 1: followUpCount now uses lead.followUpCount
-//         (stored field) instead of recalculating
-//         from the replies array — avoids off-by-one//         bug where freshly-pushed lead reply was
-//         included in the count.
-//  FIX 2: followUpCount resets to 0 when lead replies
-//         so active conversations never hit the cap.//  FIX 3: Guards against missing refresh token before
-//         attempting to send — logs clearly instead of
-//         crashing.
-// ════════════════════════════════════════════
-app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), async (req, res) => {
-    if (req.method === 'GET') {
-        const challenge = req.query.challenge;
-        if (challenge) return res.status(200).send(challenge);
-        return res.status(400).send('No challenge provided');
-    }
-
-    if (req.method === 'POST') {
-        try {
-            const payload     = JSON.parse(req.body.toString('utf-8'));
-            const messageData = payload.data?.object;
-
-            if (messageData && (payload.type === 'message.created' || payload.event === 'message.created')) {
-                const fromEmail = messageData.from?.[0]?.email;
-                const toEmail   = messageData.to?.[0]?.email;
-                console.log(`📩 [WEBHOOK] Email from ${fromEmail} to ${toEmail}`);
-
-                // 1. Find inbox owner
-                const grantId = payload.grant_id || messageData.grant_id;
-                let ownerUserId = null;
-                if (grantId) {
-                    const account = await EmailAccount.findOne({ nylasGrantId: grantId });
-                    if (account) ownerUserId = account.userId;
-                }
-                if (!ownerUserId && toEmail) {
-                    const account = await EmailAccount.findOne({ emailAddress: toEmail.toLowerCase() });
-                    if (account) ownerUserId = account.userId;
-                }
-                if (!ownerUserId) {
-                    console.warn(`⚠️ [WEBHOOK] Could not identify owner for To: ${toEmail}`);
-                    return res.status(200).send('OK');
-                }
-
-                // 2. Find the Lead
-                const lead = await Lead.findOne({ email: fromEmail, userId: ownerUserId });
-                if (lead) {
-                    // ── FIX 1: Reset follow-up count BEFORE saving the new reply
-                    //    so the stored field is always correct for next AI call
-                    lead.status          = 'Replied';
-                    lead.lastContactDate = new Date();
-                    lead.followUpCount   = 0; // FIX: reset — lead is actively replying
-                    const bodyText = messageData.body || messageData.snippet || '';
-                    lead.replies   = lead.replies || [];
-                    lead.replies.push({
-                        date:    new Date(),
-                        content: bodyText,
-                        from:    'lead',
-                        subject: messageData.subject
-                    });
-                    await lead.save();
-
-                    // 3. Notification
-                    await new Message({
-                        userId:           ownerUserId,
-                        sessionId:        'reply-notification',
-                        role:             'ai',
-                        title:            '📬 New Lead Reply',
-                        content:          `${lead.name} replied:\n\n"${bodyText.substring(0, 200)}..."`,
-                        notificationType: 'reply',
-                        leadId:           lead._id,
-                        isRead:           false
-                    }).save();
-                    console.log(`🔔 Notification saved for User: ${ownerUserId}`);
-
-                    // 4. Auto-Reply
-                    console.log(`🤖 [AUTO-REPLY] Enabled: ${lead.autoReplyEnabled}`);
-                    if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
-                        try {
-                            // CHECK AUTO-REPLY LIMITS HERE
-                            const ownerUser = await User.findById(ownerUserId);
-                            let autoReplyLimit = 10; // Free
-                            if (ownerUser.subscriptionTier === 'go') autoReplyLimit = 40;
-                            if (ownerUser.subscriptionTier === 'pro') autoReplyLimit = 70;
-
-                            // You need to track auto-reply count in User.usage or Lead
-                            // For simplicity, let's assume we store it in User.usage.autoReplyCount
-                            if (!ownerUser.usage) ownerUser.usage = { autoReplyCount: 0, lastAutoReplyDate: new Date() };
-                            
-                            const todayStr = new Date().toDateString();
-                            const lastAutoStr = ownerUser.usage.lastAutoReplyDate ? new Date(ownerUser.usage.lastAutoReplyDate).toDateString() : '';
-                            
-                            if (lastAutoStr !== todayStr) {
-                                ownerUser.usage.autoReplyCount = 0;
-                                ownerUser.usage.lastAutoReplyDate = new Date();
-                                await ownerUser.save();
-                            }
-
-                            if (ownerUser.usage.autoReplyCount >= autoReplyLimit) {
-                                console.log(`🚫 [AUTO-REPLY] Limit reached for user ${ownerUserId} (${autoReplyLimit}/${autoReplyLimit})`);
-                                // Optional: Send a notification to the user that their auto-reply limit is reached
-                            } else {                                // Increment count
-                                ownerUser.usage.autoReplyCount += 1;
-                                await ownerUser.save();
-
-                                // Build conversation history from last 4 messages
-                                const history = lead.replies.slice(-4).map(msg => ({
-                                    role:    msg.from === 'lead' ? 'user' : 'assistant',
-                                    content: msg.content
-                                }));
-
-                                // ── FIX 2: Use stored followUpCount field — NOT recalculated
-                                //    from the replies array. Recalculating was broken because
-                                //    the new lead reply was already in the array, causing the
-                                //    slice to include AI replies from before reset, hitting cap.
-                                const followUpCount = lead.followUpCount || 0;
-                                console.log(`📊 [AUTO-REPLY] followUpCount: ${followUpCount}`);
-
-                                // Call AI generator
-                                const aiResult = await generateAIReply(
-                                    bodyText,
-                                    lead.autoReplyInstructions,
-                                    lead.name,
-                                    history,
-                                    {
-                                        mode:         'full', // lead is actively replying — use full
-                                        followUpCount: followUpCount
-                                    }
-                                );
-
-                                console.log(`🧠 [AUTO-REPLY] AI result: action=${aiResult?.action} | risk=${aiResult?.riskLevel} | tokens=${aiResult?.tokensUsed}`);
-
-                                // Check if AI generated a sendable reply
-                                if (aiResult && aiResult.action === 'REPLY' && aiResult.reply) {
-                                    const emailAccount = await EmailAccount.findOne({ userId: ownerUserId });
-
-                                    if (!emailAccount) {
-                                        console.error('❌ [AUTO-REPLY] No email account found for user.');
-
-                                    // ── FIX 3: Guard against missing refresh token
-                                    } else if (!emailAccount.refreshToken) {
-                                        console.error('❌ [AUTO-REPLY] No refresh token — user must reconnect Nylas. Go to Nylas dashboard and ensure offline_access scope is enabled.');
-
-                                    } else {
-                                        let accessToken = emailAccount.accessToken;
-
-                                        // Refresh token if expiring within 5 minutes
-                                        const isExpired = !emailAccount.tokenExpiry ||
-                                            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 5 * 60 * 1000);
-
-                                        if (isExpired) {
-                                            try {
-                                                console.log('🔄 [AUTO-REPLY] Token expiring — refreshing...');
-                                                accessToken = await refreshNylasToken(emailAccount);
-                                            } catch (refreshErr) {
-                                                console.error(`❌ [AUTO-REPLY] Token refresh failed — skipping send: ${refreshErr.message}`);
-                                                accessToken = null;
-                                            }
-                                        }
-
-                                        if (accessToken) {
-                                            const result = await sendEmail(
-                                                accessToken,
-                                                lead.email,
-                                                `Re: ${messageData.subject}`,
-                                                aiResult.reply
-                                            );
-
-                                            if (result.success) {
-                                                // Save AI reply and increment followUpCount
-                                                lead.replies.push({
-                                                    date:    new Date(),
-                                                    content: aiResult.reply,
-                                                    subject: `Re: ${messageData.subject}`,
-                                                    from:    'ai',
-                                                    status:  'sent'
-                                                });
-                                                lead.followUpCount = (lead.followUpCount || 0) + 1;
-                                                await lead.save();
-                                                console.log(`✅ [AUTO-REPLY] Sent to ${lead.email} | followUpCount now: ${lead.followUpCount}`);
-                                            } else {
-                                                console.error(`❌ [AUTO-REPLY] Send failed: ${result.error}`);
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    console.log(`🔇 [AUTO-REPLY] Skipped. Action: ${aiResult?.action || 'NULL'} | Reason: ${aiResult?.reasoning || 'No reply generated'}`);
-                                }
-                            }
-                        } catch (aiErr) {
-                            console.error('❌ [AUTO-REPLY] Generation error:', aiErr.message);
-                        }
-                    } else {
-                        console.log(`⚪ [AUTO-REPLY] Disabled or no instructions set.`);
-                    }
-                } else {
-                    console.warn(`⚠️ [WEBHOOK] No lead found for ${fromEmail} under User ${ownerUserId}`);
-                }
-            }
-            return res.status(200).send('OK');
-        } catch (err) {
-            console.error('❌ Webhook Error:', err);
-            return res.status(500).send('Error');
-        }
-    }
-    res.status(405).send('Method Not Allowed');
-});
-
-// ════════════════════════════════════════════//  NOW apply express.json()
+//  NOW apply express.json()
 // ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
@@ -266,23 +62,22 @@ app.use(express.static(path.join(__dirname)));
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => {
         console.log('✅ MongoDB Connected');
-        startTokenRefreshJob();   // replaces the old proactiveTokenRefresh + setInterval
+        startTokenRefreshJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
 app.use('/api/auth', authRoutes);
 
-// ── NOTE: verifyToken, checkDailyLimit, checkSubscriptionExpiry are now imported
-// ── NOTE: refreshNylasToken is now imported from nylasTokenRefresh.js
+// ── NOTE: Middleware imports are active
 
 // ════════════════════════════════════════════
-//  CREATE FLUTTERWAVE PAYMENT LINK (WITH FULL TRACKING)
+//  CREATE FLUTTERWAVE PAYMENT LINK
 // ════════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
     console.log('💳 [PAYMENT] Request received for plan:', req.body.planType);
     
     try {
-        const { planType } = req.body; // 'go' or 'pro'
+        const { planType } = req.body;
         const user = await User.findById(req.userId);
         
         if (!user) {
@@ -306,23 +101,19 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid plan type' });
         }
 
-        // Create a unique transaction reference
         const txRef = `skyline_${planType}_${user._id}_${Date.now()}`;
         console.log('🔖 [PAYMENT] Transaction Reference:', txRef);
 
-        // Save txRef to user so webhook can find them later
         user.lastTxRef = txRef;
         await user.save();
         console.log('💾 [PAYMENT] TxRef saved to User document');
 
-        // Check if Secret Key is present
         if (!process.env.FLUTTERWAVE_SECRET_KEY) {
             console.error('❌ [PAYMENT] FLUTTERWAVE_SECRET_KEY is MISSING in Environment Variables');
             return res.status(500).json({ message: 'Server configuration error: Missing Payment Key' });
         }
         console.log('🔑 [PAYMENT] Secret Key found (starts with):', process.env.FLUTTERWAVE_SECRET_KEY.substring(0, 10) + '...');
 
-        // Flutterwave API Payload
         const payload = {
             tx_ref: txRef,
             amount: amount,
@@ -345,7 +136,6 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 
         console.log('🚀 [PAYMENT] Sending request to Flutterwave API...');
 
-        // Call Flutterwave API
         const response = await axios.post(
             'https://api.flutterwave.com/v3/payments',
             payload,
@@ -382,21 +172,21 @@ app.post('/api/create-flutterwave-payment', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 app.get('/api/conversations', verifyToken, async (req, res) => {
     try {
-        const leads         = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
+        const leads = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
         const conversations = leads.map(lead => {
             const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
-            const preview   = lastReply
+            const preview = lastReply
                 ? lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50)
                 : "No messages yet";
             return {
-                id:               lead._id,
-                name:             lead.name,
-                company:          lead.company,
-                email:            lead.email,
-                status:           lead.status,
-                lastMessage:      preview,
-                lastDate:         lead.lastContactDate,
-                unread:           !lastReply || lastReply.from === 'lead',
+                id: lead._id,
+                name: lead.name,
+                company: lead.company,
+                email: lead.email,
+                status: lead.status,
+                lastMessage: preview,
+                lastDate: lead.lastContactDate,
+                unread: !lastReply || lastReply.from === 'lead',
                 autoReplyEnabled: lead.autoReplyEnabled
             };
         });
@@ -416,12 +206,12 @@ app.get('/api/conversations/:leadId', verifyToken, async (req, res) => {
         }));
         res.json({
             lead: {
-                id:                   lead._id,
-                name:                 lead.name,
-                email:                lead.email,
-                company:              lead.company,
-                status:               lead.status,
-                autoReplyEnabled:     lead.autoReplyEnabled,
+                id: lead._id,
+                name: lead.name,
+                email: lead.email,
+                company: lead.company,
+                status: lead.status,
+                autoReplyEnabled: lead.autoReplyEnabled,
                 autoReplyInstructions: lead.autoReplyInstructions
             },
             messages: cleanHistory
@@ -462,7 +252,7 @@ app.put('/api/leads/:leadId/auto-reply', verifyToken, async (req, res) => {
 // ════════════════════════════════════════════
 app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
     try {
-        const { leads }    = req.body;
+        const { leads } = req.body;
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
             return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'No connection found.' });
@@ -480,35 +270,35 @@ app.post('/api/leads/batch-send', verifyToken, async (req, res) => {
             }
         }
         let sentCount = 0;
-        let errors    = [];
-        const now     = new Date();
+        let errors = [];
+        const now = new Date();
 
         for (const leadData of leads) {
             try {
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 if (!lead) {
                     lead = new Lead({
-                        userId:          req.userId,
-                        name:            leadData.name,
-                        email:           leadData.email,
-                        company:         leadData.company,
-                        status:          'Contacted',
+                        userId: req.userId,
+                        name: leadData.name,
+                        email: leadData.email,
+                        company: leadData.company,
+                        status: 'Contacted',
                         lastContactDate: now,
-                        followUpCount:   0
+                        followUpCount: 0
                     });
                 } else {
-                    lead.status          = 'Contacted';
+                    lead.status = 'Contacted';
                     lead.lastContactDate = now;
                 }
 
                 if (leadData.messages?.length > 0) {
                     if (!lead.replies) lead.replies = [];
                     lead.replies.push({
-                        date:    now,
+                        date: now,
                         content: leadData.messages[0].body,
                         subject: leadData.messages[0].subject,
-                        from:    'ai',
-                        status:  'sent'
+                        from: 'ai',
+                        status: 'sent'
                     });
                     lead.followUpCount = (lead.followUpCount || 0) + 1;
                 }
@@ -578,12 +368,13 @@ app.post('/api/reconnect-and-send', verifyToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  NOTIFICATIONS// ════════════════════════════════════════════
+//  NOTIFICATIONS
+// ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
     try {
         const replyNotifications = await Message.find({ userId: req.userId, sessionId: 'reply-notification' }).sort({ createdAt: -1 });
-        const adminMessages      = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
-        const allNotifications   = [...replyNotifications, ...adminMessages].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const adminMessages = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
+        const allNotifications = [...replyNotifications, ...adminMessages].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         res.json(allNotifications);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -594,7 +385,7 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
 //  NYLAS AUTH
 // ════════════════════════════════════════════
 app.get('/api/auth/nylas/url', verifyToken, (req, res) => {
-    const userId      = req.userId;
+    const userId = req.userId;
     const randomState = uuidv4();
     stateStore[randomState] = userId;
     setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
@@ -609,10 +400,10 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
     if (!userId) return res.status(400).send('Session expired. Please try connecting again.');
     delete stateStore[state];
     try {
-        const tokenData   = await exchangeCodeForToken(code);
-        const accessToken  = tokenData.access_token;
+        const tokenData = await exchangeCodeForToken(code);
+        const accessToken = tokenData.access_token;
         const refreshToken = tokenData.refresh_token;
-        const grantId      = tokenData.grant_id;
+        const grantId = tokenData.grant_id;
 
         if (!refreshToken) {
             console.error('❌ [NYLAS CALLBACK] No refresh_token returned from Nylas! Ensure offline_access scope is enabled in your Nylas app settings.');
@@ -625,10 +416,10 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
         }
 
         await User.findByIdAndUpdate(userId, {
-            'nylasIntegration.accessToken':  accessToken,
+            'nylasIntegration.accessToken': accessToken,
             'nylasIntegration.emailAddress': emailAddress,
-            'nylasIntegration.isConnected':  true,
-            'nylasIntegration.connectedAt':  new Date()
+            'nylasIntegration.isConnected': true,
+            'nylasIntegration.connectedAt': new Date()
         });
 
         if (grantId) {
@@ -637,11 +428,11 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
                 {
                     userId,
                     emailAddress,
-                    isConnected:      true,
-                    provider:         'gmail',
+                    isConnected: true,
+                    provider: 'gmail',
                     accessToken,
                     refreshToken,
-                    tokenExpiry:      new Date(Date.now() + 3600 * 1000),
+                    tokenExpiry: new Date(Date.now() + 3600 * 1000),
                     refreshFailCount: 0,
                     lastRefreshError: null
                 },
@@ -680,36 +471,36 @@ app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, asy
         await new Message({
             userId,
             sessionId: currentSessionId,
-            role:      'user',
-            content:   message,
-            title:     message.substring(0, 30) + '...'
+            role: 'user',
+            content: message,
+            title: message.substring(0, 30) + '...'
         }).save();
 
         let aiReply, updatedHistory;
         if (plan === 'free') {
-            const result  = await freeAI.generateFreeResponse(message, history || [], user);
-            aiReply       = result.reply;
+            const result = await freeAI.generateFreeResponse(message, history || [], user);
+            aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
             try {
-                const result  = await goAI.generateGoResponse(message, history || [], user);
-                aiReply       = result ? result.reply : "⚠️ Go AI Service unavailable.";
+                const result = await goAI.generateGoResponse(message, history || [], user);
+                aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
                 updatedHistory = result ? (result.updatedHistory || []) : [];
             } catch (goError) {
                 aiReply = "⚠️ Go AI Service currently unavailable.";
             }
         } else {
             const userProfile = {
-                fullName:    user.fullName,
-                country:     user.country,
-                skillLevel:  user.skillLevel,
+                fullName: user.fullName,
+                country: user.country,
+                skillLevel: user.skillLevel,
                 primaryGoal: user.primaryGoal,
-                interests:   user.interests,
-                bio:         user.bio,
-                userId:      user._id.toString()
+                interests: user.interests,
+                bio: user.bio,
+                userId: user._id.toString()
             };
-            const result  = await requestQueue.enqueue(async () => generateBusinessResponse(message, history || [], userProfile));
-            aiReply       = result.reply;
+            const result = await requestQueue.enqueue(async () => generateBusinessResponse(message, history || [], userProfile));
+            aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
 
@@ -749,9 +540,9 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, async (req, res) 
     try {
         const sessions = await Message.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
-            { $sort:  { createdAt: -1 } },
+            { $sort: { createdAt: -1 } },
             { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
-            { $sort:  { lastUpdated: -1 } }
+            { $sort: { lastUpdated: -1 } }
         ]);
         res.json(sessions);
     } catch (error) {
@@ -775,9 +566,9 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
     const currentSessionId = sessionId || uuidv4();
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' }).save();
-        const user        = await User.findById(userId);
+        const user = await User.findById(userId);
         const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result      = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
+        const result = await requestQueue.enqueue(async () => generateBusinessResponse(dream, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
@@ -792,9 +583,9 @@ app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyL
     const currentSessionId = sessionId || uuidv4();
     try {
         await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
-        const user        = await User.findById(userId);
+        const user = await User.findById(userId);
         const userProfile = { fullName: user.fullName, country: user.country, skillLevel: user.skillLevel, primaryGoal: user.primaryGoal, interests: user.interests, bio: user.bio, userId: user._id.toString() };
-        const result      = await requestQueue.enqueue(async () => generateBusinessResponse(followUpAnswer, [], userProfile));
+        const result = await requestQueue.enqueue(async () => generateBusinessResponse(followUpAnswer, [], userProfile));
         await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
@@ -817,12 +608,12 @@ app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-        if (fullName)       user.fullName       = fullName;
-        if (primaryGoal)    user.primaryGoal    = primaryGoal;
-        if (skillLevel)     user.skillLevel     = skillLevel;
-        if (interests)      user.interests      = interests;
-        if (country)        user.country        = country;
-        if (bio)            user.bio            = bio;
+        if (fullName) user.fullName = fullName;
+        if (primaryGoal) user.primaryGoal = primaryGoal;
+        if (skillLevel) user.skillLevel = skillLevel;
+        if (interests) user.interests = interests;
+        if (country) user.country = country;
+        if (bio) user.bio = bio;
         if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
         res.json(user);
@@ -839,7 +630,7 @@ app.put('/api/auth/change-password', verifyToken, async (req, res) => {
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) return res.status(400).json({ message: 'Current password is incorrect' });
         if (newPassword.length < 8) return res.status(400).json({ message: 'New password must be at least 8 characters' });
-        const salt    = await bcrypt.genSalt(10);
+        const salt = await bcrypt.genSalt(10);
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
         res.json({ message: 'Password updated successfully' });
@@ -872,7 +663,7 @@ app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        targetUser.isSuspended    = !targetUser.isSuspended;
+        targetUser.isSuspended = !targetUser.isSuspended;
         targetUser.suspensionEnds = targetUser.isSuspended ? new Date('2099-12-31') : null;
         await targetUser.save();
         res.json({ message: 'Status updated' });
@@ -927,11 +718,11 @@ app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
         await new Message({
-            userId:    req.params.id,
+            userId: req.params.id,
             sessionId: 'admin-direct-message',
-            role:      'ai',
-            content:   `[ADMIN MESSAGE]: ${messageContent}`,
-            title:     'Direct Message from Admin'
+            role: 'ai',
+            content: `[ADMIN MESSAGE]: ${messageContent}`,
+            title: 'Direct Message from Admin'
         }).save();
         res.json({ message: 'Message sent successfully' });
     } catch (err) {
@@ -972,7 +763,8 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
     }
 });
 
-// ════════════════════════════════════════════//  EXPIRY CHECK JOB
+// ════════════════════════════════════════════
+//  EXPIRY CHECK JOB
 // ════════════════════════════════════════════
 const scheduleExpiryCheck = async () => {
     try {
