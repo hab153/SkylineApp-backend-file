@@ -1,56 +1,71 @@
 // requestQueue.js
 
 class RequestQueue {
-    constructor(maxConcurrent = 2) {
-        this.maxConcurrent = maxConcurrent; // How many AI calls can run at once
+    constructor(maxConcurrent = 2, maxQueueSize = 150, taskTimeoutMs = 240000) { // 4 minutes
+        this.maxConcurrent = maxConcurrent;
+        this.maxQueueSize = maxQueueSize;
+        this.taskTimeoutMs = taskTimeoutMs;
         this.activeCount = 0;
         this.queue = [];
     }
 
     /**
-     * Adds a task to the queue and returns a Promise that resolves when the task is done.
-     * @param {Function} taskFunction - The async function to execute (e.g., calling OpenAI).
+     * Adds a task to the queue.
+     * Returns a Promise that resolves with the task result.
+     * Rejects with friendly messages if queue is full or task times out.
      */
     enqueue(taskFunction) {
         return new Promise((resolve, reject) => {
-            // Add the task to the line
+            // Friendly rejection when queue is full
+            if (this.queue.length >= this.maxQueueSize) {
+                return reject(new Error('Our AI assistant is very busy right now. Please wait a moment and try again.'));
+            }
+
             this.queue.push({ taskFunction, resolve, reject });
-            
-            // Try to process the queue immediately
             this.processQueue();
         });
     }
 
-    /**
-     * Processes the next item in the queue if there are available slots.
-     */
     async processQueue() {
-        // If we are at max capacity or the queue is empty, do nothing
         if (this.activeCount >= this.maxConcurrent || this.queue.length === 0) {
             return;
         }
 
-        // Take the next task from the front of the line
         const { taskFunction, resolve, reject } = this.queue.shift();
-        
-        // Increment active count
         this.activeCount++;
 
+        // Timeout promise with friendly error
+        const timeoutPromise = new Promise((_, rejectTimeout) => {
+            setTimeout(() => {
+                rejectTimeout(new Error('This request is taking longer than expected. Our AI is still working on it, but please try again in a few moments.'));
+            }, this.taskTimeoutMs);
+        });
+
         try {
-            // Execute the actual AI call
-            const result = await taskFunction();
+            const result = await Promise.race([taskFunction(), timeoutPromise]);
             resolve(result);
         } catch (error) {
             reject(error);
         } finally {
-            // Decrement active count and try to process the next waiting task
             this.activeCount--;
             this.processQueue();
         }
     }
+
+    // Optional: get queue stats for monitoring (admin use only)
+    getStats() {
+        return {
+            activeCount: this.activeCount,
+            queueLength: this.queue.length,
+            maxConcurrent: this.maxConcurrent,
+            maxQueueSize: this.maxQueueSize
+        };
+    }
 }
 
-// Export a single shared instance so all routes use the same queue
-// We set it to 2 concurrent requests to be safe for standard OpenAI tiers.
-// You can increase this if you have higher limits.
-module.exports = new RequestQueue(2);
+// Three queues with different concurrency limits and 4‑minute timeout
+const freeQueue = new RequestQueue(2, 150, 240000);   // Free: 2 concurrent, 150 waiting
+const goQueue   = new RequestQueue(5, 200, 240000);   // Go:   5 concurrent, 200 waiting
+const proQueue  = new RequestQueue(10, 300, 240000);  // Pro: 10 concurrent, 300 waiting
+
+module.exports = { freeQueue, goQueue, proQueue };
