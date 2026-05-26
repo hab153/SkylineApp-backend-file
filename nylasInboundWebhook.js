@@ -15,7 +15,7 @@ module.exports = async (req, res) => {
 
     if (req.method === 'POST') {
         // 🔒 Webhook secret validation (prevent fake calls)
-        const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET;
+        const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET_SKYLINE;
         const receivedSecret = req.headers['x-webhook-secret'];
         if (webhookSecret && (!receivedSecret || receivedSecret !== webhookSecret)) {
             console.warn('❌ Invalid or missing webhook secret');
