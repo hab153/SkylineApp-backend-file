@@ -21,6 +21,7 @@ const leadController = require('./leadController');
 const chatController = require('./chatController');
 const userController = require('./userController');
 const adminController = require('./adminController');
+const notificationController = require('./notificationController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -81,37 +82,11 @@ app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
 // ════════════════════════════════════════════
-//  NOTIFICATIONS (user‑facing)
+//  NOTIFICATIONS (extracted)
 // ════════════════════════════════════════════
-app.get('/api/my-notifications', verifyToken, async (req, res) => {
-    try {
-        const replyNotifications = await Message.find({ userId: req.userId, sessionId: 'reply-notification' }).sort({ createdAt: -1 });
-        const adminMessages = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
-        const allNotifications = [...replyNotifications, ...adminMessages].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        res.json(allNotifications);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-app.get('/api/notifications/replies', verifyToken, async (req, res) => {
-    try {
-        const repliedLeads = await Lead.find({ userId: req.userId, status: 'Replied' }).sort({ lastContactDate: -1 });
-        res.json({ count: repliedLeads.length, leads: repliedLeads });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.get('/api/notifications/count', verifyToken, async (req, res) => {
-    try {
-        const adminCount = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
-        const replyCount = await Message.countDocuments({ userId: req.userId, sessionId: 'reply-notification' });
-        res.json({ count: adminCount + replyCount });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error counting notifications' });
-    }
-});
+app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
+app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
+app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
 
 // ════════════════════════════════════════════
 //  NYLAS AUTH
@@ -201,7 +176,7 @@ app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 
 // ════════════════════════════════════════════
-//  ADMIN ROUTES (extracted)
+//  ADMIN ROUTES
 // ════════════════════════════════════════════
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
