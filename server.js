@@ -20,6 +20,7 @@ const { createFlutterwavePayment } = require('./Flutterwavepayment');
 const leadController = require('./leadController');
 const chatController = require('./chatController');
 const userController = require('./userController');
+const adminController = require('./adminController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -36,7 +37,6 @@ const Message = require('./Message');
 const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
-const { verifyLayer2, verifyLayer3 } = require('./authController'); // only needed for admin
 
 dotenv.config();
 const app = express();
@@ -81,7 +81,7 @@ app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
 // ════════════════════════════════════════════
-//  NOTIFICATIONS
+//  NOTIFICATIONS (user‑facing)
 // ════════════════════════════════════════════
 app.get('/api/my-notifications', verifyToken, async (req, res) => {
     try {
@@ -91,6 +91,25 @@ app.get('/api/my-notifications', verifyToken, async (req, res) => {
         res.json(allNotifications);
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/notifications/replies', verifyToken, async (req, res) => {
+    try {
+        const repliedLeads = await Lead.find({ userId: req.userId, status: 'Replied' }).sort({ lastContactDate: -1 });
+        res.json({ count: repliedLeads.length, leads: repliedLeads });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error' });
+    }
+});
+
+app.get('/api/notifications/count', verifyToken, async (req, res) => {
+    try {
+        const adminCount = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
+        const replyCount = await Message.countDocuments({ userId: req.userId, sessionId: 'reply-notification' });
+        res.json({ count: adminCount + replyCount });
+    } catch (err) {
+        res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
 
@@ -162,7 +181,7 @@ app.get('/api/auth/nylas/callback', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  CHAT & DREAMS ROUTES (extracted)
+//  CHAT & DREAMS ROUTES
 // ════════════════════════════════════════════
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.sendMessage);
 app.post('/api/feedback', verifyToken, chatController.submitFeedback);
@@ -172,7 +191,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  USER PROFILE ROUTES (extracted)
+//  USER PROFILE ROUTES
 // ════════════════════════════════════════════
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.updateUserProfile);
@@ -182,104 +201,21 @@ app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 
 // ════════════════════════════════════════════
-//  OTHER ROUTES (admin, reports, notifications, etc.)
+//  ADMIN ROUTES (extracted)
 // ════════════════════════════════════════════
-app.get('/api/notifications/replies', verifyToken, async (req, res) => {
-    try {
-        const repliedLeads = await Lead.find({ userId: req.userId, status: 'Replied' }).sort({ lastContactDate: -1 });
-        res.json({ count: repliedLeads.length, leads: repliedLeads });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
+app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
+app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
+app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
+app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
+app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
+app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
+app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserChatView);
+app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMessage);
+app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
-app.post('/api/admin/verify-layer-2', verifyToken, verifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, verifyLayer3);
-
-app.get('/api/admin/users', verifyToken, async (req, res) => {
-    try {
-        const user = await User.findById(req.userId);
-        if (!user || !user.isAdmin) return res.status(403).json({ message: 'Access denied. Admins only.' });
-        const users = await User.find().select('-password');
-        res.json(users);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.put('/api/admin/users/:id/suspend', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        targetUser.isSuspended = !targetUser.isSuspended;
-        targetUser.suspensionEnds = targetUser.isSuspended ? new Date('2099-12-31') : null;
-        await targetUser.save();
-        res.json({ message: 'Status updated' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.delete('/api/admin/users/:id', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        await User.findByIdAndDelete(req.params.id);
-        res.json({ message: 'User deleted' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.get('/api/admin/users/:id/details', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const targetUser = await User.findById(req.params.id).select('-password');
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
-        res.json({ user: targetUser, history: messages });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.get('/api/admin/users/:id/chat-view', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const targetUser = await User.findById(req.params.id).select('-password');
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
-        res.json({ user: targetUser, messages: chatMessages });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.post('/api/admin/users/:id/message', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const { messageContent } = req.body;
-        if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
-        const targetUser = await User.findById(req.params.id);
-        if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        await new Message({
-            userId: req.params.id,
-            sessionId: 'admin-direct-message',
-            role: 'ai',
-            content: `[ADMIN MESSAGE]: ${messageContent}`,
-            title: 'Direct Message from Admin'
-        }).save();
-        res.json({ message: 'Message sent successfully' });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
+// ════════════════════════════════════════════
+//  REPORTS (user submission)
+// ════════════════════════════════════════════
 app.post('/api/reports', verifyToken, async (req, res) => {
     try {
         const { subject, message } = req.body;
@@ -289,27 +225,6 @@ app.post('/api/reports', verifyToken, async (req, res) => {
         res.json({ message: 'Report submitted successfully' });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.get('/api/admin/reports', verifyToken, async (req, res) => {
-    try {
-        const admin = await User.findById(req.userId);
-        if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
-        const reports = await Report.find().sort({ createdAt: -1 });
-        res.json(reports);
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error' });
-    }
-});
-
-app.get('/api/notifications/count', verifyToken, async (req, res) => {
-    try {
-        const adminCount = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
-        const replyCount = await Message.countDocuments({ userId: req.userId, sessionId: 'reply-notification' });
-        res.json({ count: adminCount + replyCount });
-    } catch (err) {
-        res.status(500).json({ message: 'Server Error counting notifications' });
     }
 });
 
