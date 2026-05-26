@@ -19,7 +19,8 @@ const UserSchema = new mongoose.Schema({
     password: {
         type: String,
         required: true,
-        minlength: 8
+        minlength: 8,
+        select: false          // 🔒 Never returned in queries by default
     },
     // Profile Fields
     fullName: { type: String, default: '' },
@@ -52,14 +53,14 @@ const UserSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
-    adminAns_dish: { type: String, default: null },
-    adminAns_pn: { type: String, default: null },
-    adminAns_mum: { type: String, default: null },
-    adminAns_dm: { type: String, default: null },
-    adminAns_dad: { type: String, default: null },
-    adminAns_friend: { type: String, default: null },
-    adminAns_enemy: { type: String, default: null },
-    adminAns_app: { type: String, default: null },
+    adminAns_dish: { type: String, default: null, select: false },
+    adminAns_pn:   { type: String, default: null, select: false },
+    adminAns_mum:  { type: String, default: null, select: false },
+    adminAns_dm:   { type: String, default: null, select: false },
+    adminAns_dad:  { type: String, default: null, select: false },
+    adminAns_friend: { type: String, default: null, select: false },
+    adminAns_enemy:  { type: String, default: null, select: false },
+    adminAns_app:    { type: String, default: null, select: false },
 
     // --- USAGE LIMITING FIELDS ---
     usage: {
@@ -97,7 +98,8 @@ const UserSchema = new mongoose.Schema({
     
     paymentHistory: [{
         txRef: { type: String, required: true },
-        amount: { type: Number, required: true },        currency: { type: String, default: 'USD' },
+        amount: { type: Number, required: true },
+        currency: { type: String, default: 'USD' },
         status: { type: String, enum: ['pending', 'successful', 'failed'], default: 'pending' },
         paidAt: { type: Date, default: Date.now },
         subscriptionEndDate: { type: Date }
@@ -105,7 +107,7 @@ const UserSchema = new mongoose.Schema({
 
     // --- NYLAS EMAIL INTEGRATION (Month 2) ---
     nylasIntegration: {
-        accessToken: { type: String, default: null },
+        accessToken: { type: String, default: null, select: false }, // 🔒 Hide token
         emailAddress: { type: String, default: null },
         isConnected: { type: Boolean, default: false }
     },
@@ -146,7 +148,8 @@ UserSchema.methods.downgradeIfExpired = async function() {
         this.subscriptionTier = 'free';
         this.subscriptionEndDate = null;
         await this.save();
-        return true;    }
+        return true;
+    }
     return false;
 };
 
