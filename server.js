@@ -9,6 +9,9 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const crypto = require('crypto');
 
+// NEW IMPORT FOR AUTH MIDDLEWARE
+const { verifyToken } = require('./authMiddleware');
+
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
 const goAI = require('./Go');
@@ -414,19 +417,7 @@ mongoose.connect(process.env.MONGODB_URI)
 
 app.use('/api/auth', authRoutes);
 
-// ── Verify Token Middleware ──
-const verifyToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    const token      = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(403).json({ message: 'No token provided' });
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secretkey');
-        req.userId = decoded.user.id;
-        next();
-    } catch (err) {
-        return res.status(401).json({ message: 'Invalid token' });
-    }
-};
+// ── NOTE: verifyToken is now imported from authMiddleware.js
 
 // ── Daily Usage Limit Middleware ──
 const checkDailyLimit = async (req, res, next) => {
