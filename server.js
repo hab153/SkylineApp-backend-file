@@ -15,6 +15,8 @@ const { verifyToken } = require('./authMiddleware');
 const { checkDailyLimit } = require('./dailyLimitMiddleware');
 // NEW IMPORT FOR SUBSCRIPTION EXPIRY MIDDLEWARE
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
+// NEW IMPORT FOR NYLAS TOKEN REFRESH UTILITIES
+const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 
 // IMPORT NEW AI FILES FOR TIERS
 const freeAI = require('./Free');
@@ -40,85 +42,6 @@ dotenv.config();
 const app = express();
 app.use(cors());
 const stateStore = {};
-
-// ════════════════════════════════════════════
-//  refreshNylasToken
-//  Retries once with 2s delay before giving up.
-//  NEVER deletes the EmailAccount record.
-// ════════════════════════════════════════════
-async function refreshNylasToken(emailAccount, attempt = 1) {
-    try {
-        const response = await axios.post(
-            `${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/connect/token`,
-            {
-                client_id:     process.env.NYLAS_CLIENT_ID,
-                client_secret: process.env.NYLAS_CLIENT_SECRET,
-                grant_type:    'refresh_token',
-                refresh_token: emailAccount.refreshToken            }
-        );
-
-        const newAccessToken = response.data.access_token;
-
-        emailAccount.accessToken      = newAccessToken;
-        emailAccount.tokenExpiry      = new Date(Date.now() + 3600 * 1000);
-        emailAccount.refreshFailCount = 0;
-        await emailAccount.save();
-
-        console.log(`🔄 [NYLAS] Token refreshed successfully (attempt ${attempt}).`);
-        return newAccessToken;
-
-    } catch (err) {
-        console.error(
-            `❌ [NYLAS] Token refresh failed (attempt ${attempt}):`,
-            err.response?.status,
-            err.response?.data?.error_description || err.message
-        );
-
-        if (attempt === 1) {
-            console.log(`⏳ [NYLAS] Retrying token refresh in 2 seconds...`);
-            await new Promise(r => setTimeout(r, 2000));
-            return refreshNylasToken(emailAccount, 2);
-        }
-
-        try {
-            emailAccount.refreshFailCount = (emailAccount.refreshFailCount || 0) + 1;
-            emailAccount.lastRefreshError = err.response?.data?.error_description || err.message;
-            await emailAccount.save();
-        } catch (saveErr) {
-            console.warn('[NYLAS] Could not save fail count:', saveErr.message);
-        }
-
-        throw err;
-    }
-}
-
-// ════════════════════════════════════════════
-//  PROACTIVE TOKEN REFRESH JOB
-//  Runs every 10 minutes. Refreshes tokens
-//  expiring within the next 30 minutes.
-// ════════════════════════════════════════════
-async function proactiveTokenRefresh() {
-    try {
-        const soon = new Date(Date.now() + 30 * 60 * 1000);
-        const accounts = await EmailAccount.find({
-            isConnected:  true,
-            refreshToken: { $exists: true, $ne: null },
-            tokenExpiry:  { $lte: soon }
-        });
-        if (accounts.length === 0) return;
-        console.log(`🔁 [PROACTIVE] Refreshing ${accounts.length} token(s) before expiry...`);
-
-        for (const account of accounts) {
-            try {
-                await refreshNylasToken(account);
-            } catch (err) {
-                console.warn(`⚠️ [PROACTIVE] Could not refresh token for ${account.emailAddress}: ${err.message}`);
-            }
-        }
-    } catch (err) {
-        console.error('❌ [PROACTIVE] Token refresh job error:', err.message);
-    }
-}
 
 // ════════════════════════════════════════════
 //  WEBHOOK — MUST BE BEFORE express.json()
@@ -390,15 +313,14 @@ app.use(express.static(path.join(__dirname)));
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => {
         console.log('✅ MongoDB Connected');
-        proactiveTokenRefresh();
-        setInterval(proactiveTokenRefresh, 10 * 60 * 1000);
-        console.log('🔁 [PROACTIVE] Token refresh job started (every 10 min)');
+        startTokenRefreshJob();   // replaces the old proactiveTokenRefresh + setInterval
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
 app.use('/api/auth', authRoutes);
 
-// ── NOTE: verifyToken, checkDailyLimit, and checkSubscriptionExpiry are now imported
+// ── NOTE: verifyToken, checkDailyLimit, checkSubscriptionExpiry are now imported
+// ── NOTE: refreshNylasToken is now imported from nylasTokenRefresh.js
 
 // ════════════════════════════════════════════
 //  CREATE FLUTTERWAVE PAYMENT LINK (WITH FULL TRACKING)
