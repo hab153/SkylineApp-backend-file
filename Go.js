@@ -8,7 +8,7 @@ const net   = require('net');
 // SECTION 1 — CONFIG & CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const MAX_LEADS_RETURNED        = 3;   // CHANGED: max 3 leads
+const MAX_LEADS_RETURNED        = 5;
 const TAVILY_LIMIT              = 1000;
 const CONCURRENCY_LIMIT         = 2;
 const CACHE_TTL_MS              = 60 * 60 * 1000;
@@ -19,7 +19,7 @@ const EMAIL_CONFIDENCE_THRESHOLD = 28;
 // Output quantity control
 const QUANTITY_RULE_HARD_MIN     = 2;
 const QUANTITY_RULE_ABSOLUTE_MIN = 1;
-const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;   // now 3
+const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;
 
 // Minimum pool size before DM-focus fallback query fires
 const MIN_POOL_SIZE = 3;
@@ -1695,7 +1695,7 @@ Never return null for target or industry. Infer from context.`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 22 — MAIN ENTRY POINT (renamed to generateGoResponse)
+// SECTION 22 — MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function generateGoResponse(message, history, userProfile, onProgress) {
