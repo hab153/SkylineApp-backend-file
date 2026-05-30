@@ -33,7 +33,7 @@ const freeAI = require('./Free');
 const goAI = require('./Go');
 const { generateBusinessResponse } = require('./businessAI');
 const { generateAIReply } = require('./aiReplyGenerator');
-const { generateSuggestion } = require('./aiSuggestion'); // <--- NEW IMPORT
+const { generateSuggestion } = require('./aiSuggestion');
 
 // MODELS & SERVICES
 const Lead = require('./Lead');
@@ -50,37 +50,32 @@ const app = express();
 // ════════════════════════════════════════════
 //  SECURITY MIDDLEWARE
 // ════════════════════════════════════════════
-app.use(helmet());                     // Sets secure HTTP headers
-app.disable('x-powered-by');           // Hide Express signature
-app.set('trust proxy', 1);             // Trust first proxy (e.g., Nginx, Cloudflare)
+app.use(helmet());
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
 
-// Global rate limiter (prevents DDoS / brute force)
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,          // 15 minutes
-    max: 200,                          // limit each IP to 200 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 200,
     keyGenerator: (req) => req.userId || req.ip,
-    skipSuccessfulRequests: false,     // count successful requests as well
-    standardHeaders: true,             // Return rate limit info in `RateLimit-*` headers
+    skipSuccessfulRequests: false,
+    standardHeaders: true,
     legacyHeaders: false,
 });
 app.use(globalLimiter);
-
 app.use(cors());
 
 // ════════════════════════════════════════════
-//  WEBHOOKS — MUST BE BEFORE express.json()
+//  WEBHOOKS
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
 
-// ════════════════════════════════════════════
-//  NOW apply express.json()
-// ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 // ════════════════════════════════════════════
-//  MONGODB CONNECTION WITH LARGER POOL SIZE
+//  MONGODB CONNECTION
 // ════════════════════════════════════════════
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
@@ -96,12 +91,12 @@ mongoose.connect(process.env.MONGODB_URI, {
 app.use('/api/auth', authRoutes);
 
 // ════════════════════════════════════════════
-//  PAYMENT ROUTE// ════════════════════════════════════════════
+//  PAYMENT ROUTE
+// ════════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
 // ════════════════════════════════════════════
-//  LEAD / CONVERSATION ROUTES
-// ════════════════════════════════════════════
+//  LEAD / CONVERSATION ROUTES// ════════════════════════════════════════════
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
 app.put('/api/leads/:leadId/rename', verifyToken, leadController.renameLead);
@@ -134,19 +129,51 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (NEW)
+//  AI SUGGESTION ROUTE (UPDATED WITH LIMITS)
 // ════════════════════════════════════════════
 app.post('/api/ai/suggest', verifyToken, async (req, res) => {
     try {
+        const userId = req.userId;
+        const user = await User.findById(userId);
+        
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const tier = user.subscriptionTier || 'Free';
+        const today = new Date().toISOString().split('T')[0];
+
+        // Reset daily count if new day
+        if (user.usage.lastHintDate !== today) {
+            user.usage.dailyHintCount = 0;
+            user.usage.lastHintDate = today;
+        }
+        const limits = { 'Free': 0, 'GO': 10, 'PRO': 20 };
+        const limit = limits[tier] || 0;
+
+        // Check Limit
+        if (user.usage.dailyHintCount >= limit) {
+            return res.status(403).json({ 
+                error: 'Daily hint limit reached', 
+                tier: tier,
+                remaining: 0
+            });
+        }
+
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
             return res.status(400).json({ error: 'Invalid message format.' });
         }
         
-        // Limit to last 3 messages for context
         const contextMessages = messages.slice(-3);
-                const suggestion = await generateSuggestion(contextMessages);
-        res.json({ suggestion });
+        const suggestion = await generateSuggestion(contextMessages);
+        
+        // Increment Usage
+        user.usage.dailyHintCount += 1;
+        await user.save();
+
+        res.json({ 
+            suggestion, 
+            remainingHints: limit - user.usage.dailyHintCount 
+        });
     } catch (error) {
         console.error('AI Suggestion Error:', error);
         res.status(500).json({ error: 'Failed to generate suggestion.' });
@@ -167,8 +194,7 @@ app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 //  ADMIN ROUTES
 // ════════════════════════════════════════════
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
-app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
+app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
 app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
 app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
 app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
@@ -177,13 +203,13 @@ app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMe
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
 // ════════════════════════════════════════════
-//  REPORTS (user submission)
+//  REPORTS
 // ════════════════════════════════════════════
 app.post('/api/reports', verifyToken, reportController.submitReport);
 
 // ════════════════════════════════════════════
-//  START SERVER WITH 5-MINUTE TIMEOUT
+//  START SERVER
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
-server.timeout = 300000; // 5 minutes (300,000 ms)
+server.timeout = 300000;
