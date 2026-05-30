@@ -69,18 +69,27 @@ const UserSchema = new mongoose.Schema({
             type: Date,
             default: null
         },
-        dailyHintCount: {            // NEW
+        dailyHintCount: {
             type: Number,
             default: 0
         },
-        lastHintDate: {              // NEW
+        lastHintDate: {
             type: Date,
             default: null
         },
         dailyImageCount: { type: Number, default: 0 },
         lastImageUploadDate: { type: Date, default: null },
         dailyFileCount: { type: Number, default: 0 },
-        lastFileUploadDate: { type: Date, default: null }
+        lastFileUploadDate: { type: Date, default: null },
+        // NEW: email send limits
+        dailySentCount: {
+            type: Number,
+            default: 0
+        },
+        lastSentDate: {
+            type: Date,
+            default: null
+        }
     },
 
     // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
