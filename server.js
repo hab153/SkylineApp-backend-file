@@ -13,7 +13,7 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware'); // Updated Import
+const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
@@ -27,6 +27,7 @@ const adminController = require('./adminController');
 const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
+const { generateHint } = require('./hintController');   // NEW
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -47,6 +48,7 @@ const requestQueue = require('./requestQueue');
 
 dotenv.config();
 const app = express();
+
 // ════════════════════════════════════════════
 //  SECURITY MIDDLEWARE
 // ════════════════════════════════════════════
@@ -96,7 +98,8 @@ app.use('/api/auth', authRoutes);
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
 // ════════════════════════════════════════════
-//  LEAD / CONVERSATION ROUTES// ════════════════════════════════════════════
+//  LEAD / CONVERSATION ROUTES
+// ════════════════════════════════════════════
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
 app.put('/api/leads/:leadId/rename', verifyToken, leadController.renameLead);
@@ -129,26 +132,9 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (USING MIDDLEWARE)
+//  AI SUGGESTION ROUTE (now using controller)
 // ════════════════════════════════════════════
-app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
-    try {
-        const { messages } = req.body;
-        if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: 'Invalid message format.' });
-        }
-        
-        const contextMessages = messages.slice(-3);
-        const suggestion = await generateSuggestion(contextMessages);
-        
-        res.json({ 
-            suggestion, 
-            remainingHints: req.remainingHints // Passed from middleware
-        });
-    } catch (error) {        console.error('AI Suggestion Error:', error);
-        res.status(500).json({ error: 'Failed to generate suggestion.' });
-    }
-});
+app.post('/api/ai/suggest', verifyToken, checkHintLimit, generateHint);
 
 // ════════════════════════════════════════════
 //  USER PROFILE ROUTES
