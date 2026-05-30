@@ -129,7 +129,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (UPDATED WITH LOWERCASE CHECKS)
+//  AI SUGGESTION ROUTE (STRICT LIMITS)
 // ════════════════════════════════════════════
 app.post('/api/ai/suggest', verifyToken, async (req, res) => {
     try {
@@ -138,27 +138,33 @@ app.post('/api/ai/suggest', verifyToken, async (req, res) => {
         
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Normalize tier to lowercase to match your DB ('free', 'go', 'pro')
+        // Normalize tier to lowercase
         const tier = (user.subscriptionTier || 'free').toLowerCase();
-        const today = new Date().toISOString().split('T')[0];
-
-        // Initialize usage if missing
-        if (!user.usage) user.usage = {};
-        if (typeof user.usage.dailyHintCount === 'undefined') user.usage.dailyHintCount = 0;
-        // Reset daily count if new day
-        if (user.usage.lastHintDate !== today) {
-            user.usage.dailyHintCount = 0;
-            user.usage.lastHintDate = today;
+        
+        // Initialize usage object if missing
+        if (!user.usage) {
+            user.usage = { dailyHintCount: 0, lastHintDate: new Date() };
+        }
+        if (typeof user.usage.dailyHintCount === 'undefined') {            user.usage.dailyHintCount = 0;
         }
 
-        // Define limits based on lowercase tiers
+        // Daily Reset Logic (using toDateString for robust date comparison)
+        const todayStr = new Date().toDateString();
+        const lastStr = user.usage.lastHintDate ? new Date(user.usage.lastHintDate).toDateString() : '';
+        
+        if (lastStr !== todayStr) {
+            user.usage.dailyHintCount = 0;
+            user.usage.lastHintDate = new Date();
+        }
+
+        // Define limits for lowercase tiers
         const limits = { 'free': 0, 'go': 10, 'pro': 20 };
         const limit = limits[tier] !== undefined ? limits[tier] : 0;
 
-        // Check Limit
+        // Check Limit BEFORE generating suggestion
         if (user.usage.dailyHintCount >= limit) {
             return res.status(403).json({ 
-                error: 'Daily hint limit reached or plan not allowed', 
+                error: 'Daily hint limit reached', 
                 tier: tier,
                 remaining: 0
             });
@@ -172,7 +178,7 @@ app.post('/api/ai/suggest', verifyToken, async (req, res) => {
         const contextMessages = messages.slice(-3);
         const suggestion = await generateSuggestion(contextMessages);
         
-        // Increment Usage
+        // Increment Usage ONLY after successful generation
         user.usage.dailyHintCount += 1;
         await user.save();
 
@@ -188,13 +194,13 @@ app.post('/api/ai/suggest', verifyToken, async (req, res) => {
 
 // ════════════════════════════════════════════
 //  USER PROFILE ROUTES
-// ════════════════════════════════════════════
-app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
+// ════════════════════════════════════════════app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
 app.put('/api/auth/change-email', verifyToken, userController.changeEmail);
 app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
+
 // ════════════════════════════════════════════
 //  ADMIN ROUTES
 // ════════════════════════════════════════════
