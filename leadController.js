@@ -2,6 +2,7 @@ const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
 const { refreshNylasToken } = require('./nylasTokenRefresh');
 const { sendEmail } = require('./nylasService');
+const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
 // GET /api/conversations
 const getConversations = async (req, res) => {
@@ -104,11 +105,20 @@ const batchSend = async (req, res) => {
                 return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'Session expired. Please reconnect.' });
             }
         }
+
         let sentCount = 0;
         let errors = [];
         const now = new Date();
 
         for (const leadData of leads) {
+            // Check send limit before each email
+            try {
+                await checkAndIncrementSendLimit(req.userId);
+            } catch (limitError) {
+                errors.push({ email: leadData.email, error: limitError.message });
+                continue; // skip this email, do not attempt send
+            }
+
             try {
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 if (!lead) {
@@ -182,6 +192,14 @@ const reconnectAndSend = async (req, res) => {
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
             for (const msg of pendingMessages) {
+                // Check send limit before each email
+                try {
+                    await checkAndIncrementSendLimit(req.userId);
+                } catch (limitError) {
+                    console.warn(`Send limit reached, skipping message to ${lead.email}: ${limitError.message}`);
+                    continue;
+                }
+
                 const result = await sendEmail(
                     currentAccessToken,
                     lead.email,
