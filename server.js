@@ -33,6 +33,7 @@ const freeAI = require('./Free');
 const goAI = require('./Go');
 const { generateBusinessResponse } = require('./businessAI');
 const { generateAIReply } = require('./aiReplyGenerator');
+const { generateSuggestion } = require('./aiSuggestion'); // <--- NEW IMPORT
 
 // MODELS & SERVICES
 const Lead = require('./Lead');
@@ -46,7 +47,6 @@ const requestQueue = require('./requestQueue');
 
 dotenv.config();
 const app = express();
-
 // ════════════════════════════════════════════
 //  SECURITY MIDDLEWARE
 // ════════════════════════════════════════════
@@ -96,8 +96,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 app.use('/api/auth', authRoutes);
 
 // ════════════════════════════════════════════
-//  PAYMENT ROUTE
-// ════════════════════════════════════════════
+//  PAYMENT ROUTE// ════════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
 // ════════════════════════════════════════════
@@ -133,6 +132,26 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, chatController.ge
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.analyzeDream);
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
+
+// ════════════════════════════════════════════
+//  AI SUGGESTION ROUTE (NEW)
+// ════════════════════════════════════════════
+app.post('/api/ai/suggest', verifyToken, async (req, res) => {
+    try {
+        const { messages } = req.body;
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: 'Invalid message format.' });
+        }
+        
+        // Limit to last 3 messages for context
+        const contextMessages = messages.slice(-3);
+                const suggestion = await generateSuggestion(contextMessages);
+        res.json({ suggestion });
+    } catch (error) {
+        console.error('AI Suggestion Error:', error);
+        res.status(500).json({ error: 'Failed to generate suggestion.' });
+    }
+});
 
 // ════════════════════════════════════════════
 //  USER PROFILE ROUTES
