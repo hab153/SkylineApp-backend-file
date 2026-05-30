@@ -1,12 +1,12 @@
 const User = require('./User');
 
+// Existing daily limit for chat/dreams
 const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
         
-        // UPDATED LIMITS
         let limit = 7; // Free plan
         if (user.subscriptionTier === 'go')  limit = 30;
         if (user.subscriptionTier === 'pro') limit = 50;
@@ -32,4 +32,46 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 
-module.exports = { checkDailyLimit };
+// NEW: Hint limit middleware (free:0, go:10, pro:20)
+const checkHintLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) user.usage = {};
+        if (user.usage.dailyHintCount === undefined) user.usage.dailyHintCount = 0;
+        if (!user.usage.lastHintDate) user.usage.lastHintDate = null;
+
+        let limit = 0;
+        const tier = user.subscriptionTier;
+        if (tier === 'free') limit = 0;
+        else if (tier === 'go') limit = 10;
+        else if (tier === 'pro') limit = 20;
+
+        const today = new Date().toDateString();
+        const lastHintDateStr = user.usage.lastHintDate ? new Date(user.usage.lastHintDate).toDateString() : null;
+        if (lastHintDateStr !== today) {
+            user.usage.dailyHintCount = 0;
+            user.usage.lastHintDate = new Date();
+            await user.save();
+        }
+
+        if (user.usage.dailyHintCount >= limit) {
+            return res.status(403).json({
+                message: 'Daily hint limit reached. Upgrade your plan for more hints.',
+                redirect: '/dashboard'
+            });
+        }
+
+        user.usage.dailyHintCount += 1;
+        await user.save();
+
+        req.remainingHints = limit - user.usage.dailyHintCount;
+        next();
+    } catch (err) {
+        console.error('Hint limit error:', err);
+        res.status(500).json({ message: 'Server error checking hint limit' });
+    }
+};
+
+module.exports = { checkDailyLimit, checkHintLimit };
