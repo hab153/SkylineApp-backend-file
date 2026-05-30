@@ -32,7 +32,7 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 
-// NEW: Hint limit middleware (free:0, go:10, pro:20)
+// Hint limit middleware (free:0, go:10, pro:20)
 const checkHintLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
@@ -74,4 +74,34 @@ const checkHintLimit = async (req, res, next) => {
     }
 };
 
-module.exports = { checkDailyLimit, checkHintLimit };
+// NEW: Helper to check and increment daily email send limit (used in leadController and nylasInboundWebhook)
+const checkAndIncrementSendLimit = async (userId) => {
+    const user = await User.findById(userId);
+    if (!user) throw new Error('User not found');
+    if (!user.usage) user.usage = {};
+    if (user.usage.dailySentCount === undefined) user.usage.dailySentCount = 0;
+    if (!user.usage.lastSentDate) user.usage.lastSentDate = null;
+
+    let limit = 7; // free
+    const tier = user.subscriptionTier;
+    if (tier === 'go') limit = 30;
+    if (tier === 'pro') limit = 50;
+
+    const today = new Date().toDateString();
+    const lastSentStr = user.usage.lastSentDate ? new Date(user.usage.lastSentDate).toDateString() : null;
+    if (lastSentStr !== today) {
+        user.usage.dailySentCount = 0;
+        user.usage.lastSentDate = new Date();
+        await user.save();
+    }
+
+    if (user.usage.dailySentCount >= limit) {
+        throw new Error(`Daily email send limit reached (${limit}/${limit}). Upgrade to send more.`);
+    }
+
+    user.usage.dailySentCount += 1;
+    await user.save();
+    return { remaining: limit - user.usage.dailySentCount };
+};
+
+module.exports = { checkDailyLimit, checkHintLimit, checkAndIncrementSendLimit };
