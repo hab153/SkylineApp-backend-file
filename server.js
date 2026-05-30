@@ -129,7 +129,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (UPDATED WITH LIMITS)
+//  AI SUGGESTION ROUTE (UPDATED WITH LOWERCASE CHECKS)
 // ════════════════════════════════════════════
 app.post('/api/ai/suggest', verifyToken, async (req, res) => {
     try {
@@ -138,21 +138,27 @@ app.post('/api/ai/suggest', verifyToken, async (req, res) => {
         
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        const tier = user.subscriptionTier || 'Free';
+        // Normalize tier to lowercase to match your DB ('free', 'go', 'pro')
+        const tier = (user.subscriptionTier || 'free').toLowerCase();
         const today = new Date().toISOString().split('T')[0];
 
+        // Initialize usage if missing
+        if (!user.usage) user.usage = {};
+        if (typeof user.usage.dailyHintCount === 'undefined') user.usage.dailyHintCount = 0;
         // Reset daily count if new day
         if (user.usage.lastHintDate !== today) {
             user.usage.dailyHintCount = 0;
             user.usage.lastHintDate = today;
         }
-        const limits = { 'Free': 0, 'GO': 10, 'PRO': 20 };
-        const limit = limits[tier] || 0;
+
+        // Define limits based on lowercase tiers
+        const limits = { 'free': 0, 'go': 10, 'pro': 20 };
+        const limit = limits[tier] !== undefined ? limits[tier] : 0;
 
         // Check Limit
         if (user.usage.dailyHintCount >= limit) {
             return res.status(403).json({ 
-                error: 'Daily hint limit reached', 
+                error: 'Daily hint limit reached or plan not allowed', 
                 tier: tier,
                 remaining: 0
             });
@@ -189,12 +195,12 @@ app.put('/api/auth/change-password', verifyToken, userController.changePassword)
 app.put('/api/auth/change-email', verifyToken, userController.changeEmail);
 app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
-
 // ════════════════════════════════════════════
 //  ADMIN ROUTES
 // ════════════════════════════════════════════
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
+app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
+app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
 app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
 app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
 app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
