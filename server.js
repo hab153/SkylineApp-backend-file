@@ -27,7 +27,6 @@ const adminController = require('./adminController');
 const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
-const { generateHint } = require('./hintController');   // NEW
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -132,9 +131,25 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (now using controller)
+//  AI SUGGESTION ROUTE (inline – no external file needed)
 // ════════════════════════════════════════════
-app.post('/api/ai/suggest', verifyToken, checkHintLimit, generateHint);
+app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
+    try {
+        const { messages } = req.body;
+        if (!messages || !Array.isArray(messages)) {
+            return res.status(400).json({ error: 'Invalid message format.' });
+        }
+        const contextMessages = messages.slice(-3);
+        const suggestion = await generateSuggestion(contextMessages);
+        res.json({
+            suggestion,
+            remainingHints: req.remainingHints
+        });
+    } catch (error) {
+        console.error('AI Suggestion Error:', error);
+        res.status(500).json({ error: 'Failed to generate suggestion.' });
+    }
+});
 
 // ════════════════════════════════════════════
 //  USER PROFILE ROUTES
