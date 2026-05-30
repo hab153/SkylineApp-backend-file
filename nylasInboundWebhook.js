@@ -5,6 +5,7 @@ const User = require('./User');
 const { generateAIReply } = require('./aiReplyGenerator');
 const { refreshNylasToken } = require('./nylasTokenRefresh');
 const { sendEmail } = require('./nylasService');
+const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
 module.exports = async (req, res) => {
     if (req.method === 'GET') {
@@ -134,6 +135,14 @@ module.exports = async (req, res) => {
                                             }
                                         }
                                         if (accessToken) {
+                                            // Check send limit before actually sending the email
+                                            try {
+                                                await checkAndIncrementSendLimit(ownerUserId);
+                                            } catch (limitError) {
+                                                console.warn(`Send limit reached, skipping auto-reply to ${lead.email}: ${limitError.message}`);
+                                                return res.status(200).send('OK'); // still return OK to Nylas
+                                            }
+
                                             const result = await sendEmail(
                                                 accessToken,
                                                 lead.email,
