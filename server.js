@@ -131,7 +131,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (inline – no external file needed)
+//  AI SUGGESTION ROUTE
 // ════════════════════════════════════════════
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
