@@ -1,5 +1,3 @@
-// User.js
-
 const mongoose = require('mongoose');
 
 const UserSchema = new mongoose.Schema({
@@ -68,6 +66,14 @@ const UserSchema = new mongoose.Schema({
             default: 0
         },
         lastCallDate: {
+            type: Date,
+            default: null
+        },
+        dailyHintCount: {            // NEW
+            type: Number,
+            default: 0
+        },
+        lastHintDate: {              // NEW
             type: Date,
             default: null
         },
