@@ -13,7 +13,7 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit } = require('./dailyLimitMiddleware');
+const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware'); // Updated Import
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
@@ -129,41 +129,10 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (UPDATED WITH LOWERCASE CHECKS)
+//  AI SUGGESTION ROUTE (USING MIDDLEWARE)
 // ════════════════════════════════════════════
-app.post('/api/ai/suggest', verifyToken, async (req, res) => {
+app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
-        const userId = req.userId;
-        const user = await User.findById(userId);
-        
-        if (!user) return res.status(404).json({ error: 'User not found' });
-
-        // Normalize tier to lowercase to match your DB ('free', 'go', 'pro')
-        const tier = (user.subscriptionTier || 'free').toLowerCase();
-        const today = new Date().toISOString().split('T')[0];
-
-        // Initialize usage if missing
-        if (!user.usage) user.usage = {};
-        if (typeof user.usage.dailyHintCount === 'undefined') user.usage.dailyHintCount = 0;
-        // Reset daily count if new day
-        if (user.usage.lastHintDate !== today) {
-            user.usage.dailyHintCount = 0;
-            user.usage.lastHintDate = today;
-        }
-
-        // Define limits based on lowercase tiers
-        const limits = { 'free': 0, 'go': 10, 'pro': 20 };
-        const limit = limits[tier] !== undefined ? limits[tier] : 0;
-
-        // Check Limit
-        if (user.usage.dailyHintCount >= limit) {
-            return res.status(403).json({ 
-                error: 'Daily hint limit reached or plan not allowed', 
-                tier: tier,
-                remaining: 0
-            });
-        }
-
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
             return res.status(400).json({ error: 'Invalid message format.' });
@@ -172,16 +141,11 @@ app.post('/api/ai/suggest', verifyToken, async (req, res) => {
         const contextMessages = messages.slice(-3);
         const suggestion = await generateSuggestion(contextMessages);
         
-        // Increment Usage
-        user.usage.dailyHintCount += 1;
-        await user.save();
-
         res.json({ 
             suggestion, 
-            remainingHints: limit - user.usage.dailyHintCount 
+            remainingHints: req.remainingHints // Passed from middleware
         });
-    } catch (error) {
-        console.error('AI Suggestion Error:', error);
+    } catch (error) {        console.error('AI Suggestion Error:', error);
         res.status(500).json({ error: 'Failed to generate suggestion.' });
     }
 });
@@ -195,6 +159,7 @@ app.put('/api/auth/change-password', verifyToken, userController.changePassword)
 app.put('/api/auth/change-email', verifyToken, userController.changeEmail);
 app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
+
 // ════════════════════════════════════════════
 //  ADMIN ROUTES
 // ════════════════════════════════════════════
