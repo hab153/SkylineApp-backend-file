@@ -13,7 +13,7 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit } = require('./dailyLimitMiddleware');
+const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware'); // UPDATED
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
@@ -33,7 +33,7 @@ const freeAI = require('./Free');
 const goAI = require('./Go');
 const { generateBusinessResponse } = require('./businessAI');
 const { generateAIReply } = require('./aiReplyGenerator');
-const { generateSuggestion } = require('./aiSuggestion'); // <--- NEW IMPORT
+const { generateSuggestion } = require('./aiSuggestion');
 
 // MODELS & SERVICES
 const Lead = require('./Lead');
@@ -47,24 +47,23 @@ const requestQueue = require('./requestQueue');
 
 dotenv.config();
 const app = express();
+
 // ════════════════════════════════════════════
 //  SECURITY MIDDLEWARE
 // ════════════════════════════════════════════
-app.use(helmet());                     // Sets secure HTTP headers
-app.disable('x-powered-by');           // Hide Express signature
-app.set('trust proxy', 1);             // Trust first proxy (e.g., Nginx, Cloudflare)
+app.use(helmet());
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
 
-// Global rate limiter (prevents DDoS / brute force)
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,          // 15 minutes
-    max: 200,                          // limit each IP to 200 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 200,
     keyGenerator: (req) => req.userId || req.ip,
-    skipSuccessfulRequests: false,     // count successful requests as well
-    standardHeaders: true,             // Return rate limit info in `RateLimit-*` headers
+    skipSuccessfulRequests: false,
+    standardHeaders: true,
     legacyHeaders: false,
 });
 app.use(globalLimiter);
-
 app.use(cors());
 
 // ════════════════════════════════════════════
@@ -73,14 +72,11 @@ app.use(cors());
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
 
-// ════════════════════════════════════════════
-//  NOW apply express.json()
-// ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
 // ════════════════════════════════════════════
-//  MONGODB CONNECTION WITH LARGER POOL SIZE
+//  MONGODB CONNECTION
 // ════════════════════════════════════════════
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
@@ -96,7 +92,8 @@ mongoose.connect(process.env.MONGODB_URI, {
 app.use('/api/auth', authRoutes);
 
 // ════════════════════════════════════════════
-//  PAYMENT ROUTE// ════════════════════════════════════════════
+//  PAYMENT ROUTE
+// ════════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
 // ════════════════════════════════════════════
@@ -134,19 +131,17 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (NEW)
+//  AI SUGGESTION ROUTE (with hint limit middleware)
 // ════════════════════════════════════════════
-app.post('/api/ai/suggest', verifyToken, async (req, res) => {
+app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
             return res.status(400).json({ error: 'Invalid message format.' });
         }
-        
-        // Limit to last 3 messages for context
         const contextMessages = messages.slice(-3);
-                const suggestion = await generateSuggestion(contextMessages);
-        res.json({ suggestion });
+        const suggestion = await generateSuggestion(contextMessages);
+        res.json({ suggestion, remainingHints: req.remainingHints });
     } catch (error) {
         console.error('AI Suggestion Error:', error);
         res.status(500).json({ error: 'Failed to generate suggestion.' });
@@ -186,4 +181,4 @@ app.post('/api/reports', verifyToken, reportController.submitReport);
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
-server.timeout = 300000; // 5 minutes (300,000 ms)
+server.timeout = 300000;
