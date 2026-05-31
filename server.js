@@ -13,7 +13,7 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware'); // UPDATED
+const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
@@ -67,7 +67,7 @@ app.use(globalLimiter);
 app.use(cors());
 
 // ════════════════════════════════════════════
-//  WEBHOOKS — MUST BE BEFORE express.json()
+//  WEBHOOKS
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
@@ -131,7 +131,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (with hint limit middleware)
+//  AI SUGGESTION ROUTE (inline – no external file needed)
 // ════════════════════════════════════════════
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
@@ -141,7 +141,10 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
         }
         const contextMessages = messages.slice(-3);
         const suggestion = await generateSuggestion(contextMessages);
-        res.json({ suggestion, remainingHints: req.remainingHints });
+        res.json({
+            suggestion,
+            remainingHints: req.remainingHints
+        });
     } catch (error) {
         console.error('AI Suggestion Error:', error);
         res.status(500).json({ error: 'Failed to generate suggestion.' });
@@ -172,12 +175,12 @@ app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMe
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
 // ════════════════════════════════════════════
-//  REPORTS (user submission)
+//  REPORTS
 // ════════════════════════════════════════════
 app.post('/api/reports', verifyToken, reportController.submitReport);
 
 // ════════════════════════════════════════════
-//  START SERVER WITH 5-MINUTE TIMEOUT
+//  START SERVER
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
