@@ -44,7 +44,7 @@ const LeadSchema = new mongoose.Schema({
         emailId: String
     }],
 
-    // AUTO-REPLY SETTINGS (NEW)
+    // AUTO-REPLY SETTINGS
     autoReplyEnabled: {
         type: Boolean,
         default: false
@@ -54,7 +54,25 @@ const LeadSchema = new mongoose.Schema({
         default: ''
     },
 
-    // ─── NEW CONFIDENCE SCORING FIELDS (P0 FEATURE) ──────────────────────────────
+    // ─── FOLLOW-UP SYSTEM FIELDS (NEW) ──────────────────────────────
+    autoFollowUpEnabled: {
+        type: Boolean,
+        default: false
+    },
+    followUpScheduledDate: {
+        type: Date,
+        default: null
+    },
+    lastFollowUpSent: {
+        type: Date,
+        default: null
+    },
+    followUpCount: {
+        type: Number,
+        default: 0
+    },
+
+    // ─── CONFIDENCE SCORING FIELDS ──────────────────────────────
     confidenceScore: {
         type: Number,
         default: 0,
@@ -75,4 +93,7 @@ const LeadSchema = new mongoose.Schema({
 });
 
 LeadSchema.index({ nextActionDate: 1, status: 1 });
+// Index for follow-up job queries
+LeadSchema.index({ autoFollowUpEnabled: 1, followUpScheduledDate: 1 });
+
 module.exports = mongoose.model('Lead', LeadSchema);
