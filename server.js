@@ -17,6 +17,7 @@ const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
+const { startFollowUpJob } = require('./followUpJob'); // NEW
 const flutterwaveWebhook = require('./flutterwaveWebhook');
 const nylasInboundWebhook = require('./nylasInboundWebhook');
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
@@ -27,6 +28,7 @@ const adminController = require('./adminController');
 const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
+const followUpController = require('./followUpController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -86,6 +88,7 @@ mongoose.connect(process.env.MONGODB_URI, {
         console.log('✅ MongoDB Connected');
         startTokenRefreshJob();
         startExpiryJob();
+        startFollowUpJob(); // NEW: start the follow-up cron job
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
@@ -106,6 +109,13 @@ app.put('/api/leads/:leadId/auto-reply', verifyToken, leadController.updateAutoR
 app.post('/api/leads/batch-send', verifyToken, leadController.batchSend);
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
+
+// ════════════════════════════════════════════
+//  FOLLOW-UP ROUTES
+// ════════════════════════════════════════════
+app.post('/api/leads/:leadId/auto-follow-up', verifyToken, followUpController.toggleAutoFollowUp);
+app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, followUpController.suggestFollowUp);
+app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 
 // ════════════════════════════════════════════
 //  NOTIFICATIONS
@@ -131,7 +141,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
 // ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE (inline – no external file needed)
+//  AI SUGGESTION ROUTE
 // ════════════════════════════════════════════
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
