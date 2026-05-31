@@ -6,6 +6,10 @@ const { sendEmail } = require('./nylasService');
 // GET /api/conversations
 const getConversations = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('getConversations: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const leads = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
         const conversations = leads.map(lead => {
             const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
@@ -26,6 +30,7 @@ const getConversations = async (req, res) => {
         });
         res.json(conversations);
     } catch (err) {
+        console.error('Error in getConversations:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -33,6 +38,10 @@ const getConversations = async (req, res) => {
 // GET /api/conversations/:leadId
 const getConversationById = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('getConversationById: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Conversation not found' });
         const cleanHistory = (lead.replies || []).map(msg => ({
@@ -52,6 +61,7 @@ const getConversationById = async (req, res) => {
             messages: cleanHistory
         });
     } catch (err) {
+        console.error('Error in getConversationById:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -59,12 +69,17 @@ const getConversationById = async (req, res) => {
 // PUT /api/leads/:leadId/rename
 const renameLead = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('renameLead: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.name = req.body.newName;
         await lead.save();
         res.json({ success: true, newName: lead.name });
     } catch (err) {
+        console.error('Error in renameLead:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -72,6 +87,10 @@ const renameLead = async (req, res) => {
 // PUT /api/leads/:leadId/auto-reply
 const updateAutoReply = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('updateAutoReply: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const { enabled, instructions } = req.body;
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
@@ -80,6 +99,7 @@ const updateAutoReply = async (req, res) => {
         await lead.save();
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
+        console.error('Error in updateAutoReply:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -87,6 +107,10 @@ const updateAutoReply = async (req, res) => {
 // POST /api/leads/batch-send
 const batchSend = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('batchSend: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const { leads } = req.body;
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
@@ -169,6 +193,10 @@ const batchSend = async (req, res) => {
 // POST /api/reconnect-and-send
 const reconnectAndSend = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('reconnectAndSend: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) return res.status(400).json({ message: 'Nylas not connected' });
 
@@ -203,9 +231,14 @@ const reconnectAndSend = async (req, res) => {
 // GET /api/leads (list all leads – simple version)
 const getAllLeads = async (req, res) => {
     try {
+        if (!req.userId) {
+            console.error('getAllLeads: No userId in request');
+            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        }
         const leads = await Lead.find({ userId: req.userId }).sort({ createdAt: -1 });
         res.json(leads);
     } catch (err) {
+        console.error('Error in getAllLeads:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
