@@ -48,7 +48,6 @@ const checkHintLimit = async (req, res, next) => {
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 20;
         if (tier === 'pro') limit = Infinity; // Unlimited
-
         const today = new Date().toDateString();
         const lastHintDateStr = user.usage.lastHintDate ? new Date(user.usage.lastHintDate).toDateString() : null;
         if (lastHintDateStr !== today) {
@@ -98,7 +97,6 @@ const checkAndIncrementSendLimit = async (userId) => {
         user.usage.lastSentDate = new Date();
         await user.save();
     }
-
     if (user.usage.dailySentCount >= limit) {
         throw new Error(`Daily email send limit reached (${limit}/${limit}). Upgrade to send more.`);
     }
