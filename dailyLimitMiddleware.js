@@ -1,15 +1,17 @@
 const User = require('./User');
 
-// Existing daily limit for chat/dreams
+// Daily limit for chat/dreams (Free:10, Go:50, Pro:150)
 const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
         
-        let limit = 7; // Free plan
-        if (user.subscriptionTier === 'go')  limit = 30;
-        if (user.subscriptionTier === 'pro') limit = 50;
+        let limit = 10; // Free plan
+        const tier = user.subscriptionTier;
+        if (tier === 'go') limit = 50;
+        if (tier === 'pro') limit = 150;
+        
         const todayStr = new Date().toDateString();
         const lastStr  = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
         
@@ -20,7 +22,7 @@ const checkDailyLimit = async (req, res, next) => {
         }
         
         if (user.usage.dailyCallCount >= limit) {
-            return res.status(429).json({ message: `Daily limit reached (${limit}/${limit}). Upgrade for more.` });
+            return res.status(429).json({ message: `Daily chat limit reached (${limit}/${limit}). Upgrade for more.` });
         }
         
         user.usage.dailyCallCount += 1;
@@ -32,7 +34,7 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 
-// NEW: Hint limit middleware (free:0, go:10, pro:20)
+// Hint limit middleware (free:0, go:10, pro:20) – unchanged
 const checkHintLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
