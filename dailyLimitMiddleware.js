@@ -1,5 +1,26 @@
 const User = require('./User');
 
+// Helper to get chat limit message based on tier
+function getChatLimitMessage(tier, limit) {
+    if (tier === 'free') return `Daily chat limit reached (10/10). Upgrade to Go (50/day) or Pro (150/day) for more conversations.`;
+    if (tier === 'go') return `Daily chat limit reached (50/50). Upgrade to Pro for 150 chats per day.`;
+    return `Daily chat limit reached (150/150). Please continue tomorrow.`;
+}
+
+// Helper to get hint limit message
+function getHintLimitMessage(tier, limit) {
+    if (tier === 'free') return `You've used all your free hints (3/3). Upgrade to Go (20/day) or Pro (300/day) for more AI suggestions.`;
+    if (tier === 'go') return `Daily hint limit reached (20/20). Upgrade to Pro for 300 hints per day.`;
+    return `Daily hint limit reached (300/300). Please try again tomorrow.`;
+}
+
+// Helper to get email send limit message
+function getSendLimitMessage(tier, limit) {
+    if (tier === 'free') return `Daily email send limit reached (5/5). Upgrade to Go (25/day) or Pro (100/day) to send more emails.`;
+    if (tier === 'go') return `Daily email send limit reached (25/25). Upgrade to Pro for 100 emails per day.`;
+    return `Daily email send limit reached (100/100). Please try again tomorrow.`;
+}
+
 // Daily limit for chat/dreams (Free:10, Go:50, Pro:150)
 const checkDailyLimit = async (req, res, next) => {
     try {
@@ -13,16 +34,17 @@ const checkDailyLimit = async (req, res, next) => {
         if (tier === 'pro') limit = 150;
         
         const todayStr = new Date().toDateString();
-        const lastStr  = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
+        const lastStr = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
         
         if (lastStr !== todayStr) {
             user.usage.dailyCallCount = 0;
-            user.usage.lastCallDate   = new Date();
+            user.usage.lastCallDate = new Date();
             await user.save();
         }
         
         if (user.usage.dailyCallCount >= limit) {
-            return res.status(429).json({ message: `Daily chat limit reached (${limit}/${limit}). Upgrade for more.` });
+            const message = getChatLimitMessage(tier, limit);
+            return res.status(429).json({ message });
         }
         
         user.usage.dailyCallCount += 1;
@@ -58,10 +80,8 @@ const checkHintLimit = async (req, res, next) => {
         }
 
         if (user.usage.dailyHintCount >= limit) {
-            return res.status(403).json({
-                message: 'Daily hint limit reached. Upgrade your plan for more hints.',
-                redirect: '/dashboard'
-            });
+            const message = getHintLimitMessage(tier, limit);
+            return res.status(403).json({ message, redirect: '/dashboard' });
         }
 
         user.usage.dailyHintCount += 1;
@@ -97,7 +117,8 @@ const checkAndIncrementSendLimit = async (userId) => {
     }
 
     if (user.usage.dailySentCount >= limit) {
-        throw new Error(`Daily email send limit reached (${limit}/${limit}). Upgrade to send more.`);
+        const message = getSendLimitMessage(tier, limit);
+        throw new Error(message);
     }
 
     user.usage.dailySentCount += 1;
