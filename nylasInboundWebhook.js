@@ -5,7 +5,6 @@ const User = require('./User');
 const { generateAIReply } = require('./aiReplyGenerator');
 const { refreshNylasToken } = require('./nylasTokenRefresh');
 const { sendEmail } = require('./nylasService');
-const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
 module.exports = async (req, res) => {
     if (req.method === 'GET') {
@@ -75,12 +74,9 @@ module.exports = async (req, res) => {
                     if (lead.autoReplyEnabled && lead.autoReplyInstructions) {
                         try {
                             const ownerUser = await User.findById(ownerUserId);
-                            
-                            // NEW AUTO-REPLY LIMITS (Free:0, Go:20, Pro:100)
-                            let autoReplyLimit = 0;
-                            const tier = ownerUser.subscriptionTier;
-                            if (tier === 'go') autoReplyLimit = 20;
-                            if (tier === 'pro') autoReplyLimit = 100;
+                            let autoReplyLimit = 10; // Free
+                            if (ownerUser.subscriptionTier === 'go') autoReplyLimit = 40;
+                            if (ownerUser.subscriptionTier === 'pro') autoReplyLimit = 70;
 
                             if (!ownerUser.usage) ownerUser.usage = { autoReplyCount: 0, lastAutoReplyDate: new Date() };
                             const todayStr = new Date().toDateString();
@@ -92,11 +88,7 @@ module.exports = async (req, res) => {
                             }
 
                             if (ownerUser.usage.autoReplyCount >= autoReplyLimit) {
-                                if (autoReplyLimit === 0) {
-                                    console.log(`⚪ [AUTO-REPLY] Auto-reply is not available for Free plan.`);
-                                } else {
-                                    console.log(`🚫 [AUTO-REPLY] Limit reached for user ${ownerUserId} (${autoReplyLimit}/${autoReplyLimit})`);
-                                }
+                                console.log(`🚫 [AUTO-REPLY] Limit reached for user ${ownerUserId} (${autoReplyLimit}/${autoReplyLimit})`);
                             } else {
                                 ownerUser.usage.autoReplyCount += 1;
                                 await ownerUser.save();
@@ -142,14 +134,6 @@ module.exports = async (req, res) => {
                                             }
                                         }
                                         if (accessToken) {
-                                            // Check send limit before actually sending the email
-                                            try {
-                                                await checkAndIncrementSendLimit(ownerUserId);
-                                            } catch (limitError) {
-                                                console.warn(`Send limit reached, skipping auto-reply to ${lead.email}: ${limitError.message}`);
-                                                return res.status(200).send('OK');
-                                            }
-
                                             const result = await sendEmail(
                                                 accessToken,
                                                 lead.email,
@@ -194,4 +178,3 @@ module.exports = async (req, res) => {
     }
     res.status(405).send('Method Not Allowed');
 };
-                                
