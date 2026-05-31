@@ -7,10 +7,12 @@ const { sendEmail } = require('./nylasService');
 const getConversations = async (req, res) => {
     try {
         if (!req.userId) {
-            console.error('getConversations: No userId in request');
+            console.error('❌ [getConversations] No userId in request');
             return res.status(401).json({ message: 'Unauthorized: No user ID' });
         }
+        console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
         const leads = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
+        console.log(`✅ [getConversations] Found ${leads.length} leads`);
         const conversations = leads.map(lead => {
             const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
             const preview = lastReply
@@ -30,7 +32,7 @@ const getConversations = async (req, res) => {
         });
         res.json(conversations);
     } catch (err) {
-        console.error('Error in getConversations:', err);
+        console.error('❌ [getConversations] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -39,11 +41,15 @@ const getConversations = async (req, res) => {
 const getConversationById = async (req, res) => {
     try {
         if (!req.userId) {
-            console.error('getConversationById: No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+            console.error('❌ [getConversationById] No userId');
+            return res.status(401).json({ message: 'Unauthorized' });
         }
+        console.log(`📡 [getConversationById] Fetching lead ${req.params.leadId} for user ${req.userId}`);
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
-        if (!lead) return res.status(404).json({ message: 'Conversation not found' });
+        if (!lead) {
+            console.warn(`⚠️ [getConversationById] Lead not found`);
+            return res.status(404).json({ message: 'Conversation not found' });
+        }
         const cleanHistory = (lead.replies || []).map(msg => ({
             ...msg.toObject(),
             content: msg.content.replace(/<[^>]*>?/gm, '')
@@ -61,7 +67,7 @@ const getConversationById = async (req, res) => {
             messages: cleanHistory
         });
     } catch (err) {
-        console.error('Error in getConversationById:', err);
+        console.error('❌ [getConversationById] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -69,17 +75,15 @@ const getConversationById = async (req, res) => {
 // PUT /api/leads/:leadId/rename
 const renameLead = async (req, res) => {
     try {
-        if (!req.userId) {
-            console.error('renameLead: No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
-        }
+        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.name = req.body.newName;
         await lead.save();
+        console.log(`✏️ [renameLead] Lead ${lead._id} renamed to ${lead.name}`);
         res.json({ success: true, newName: lead.name });
     } catch (err) {
-        console.error('Error in renameLead:', err);
+        console.error('❌ [renameLead] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -87,19 +91,17 @@ const renameLead = async (req, res) => {
 // PUT /api/leads/:leadId/auto-reply
 const updateAutoReply = async (req, res) => {
     try {
-        if (!req.userId) {
-            console.error('updateAutoReply: No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
-        }
+        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         const { enabled, instructions } = req.body;
         const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = instructions;
         await lead.save();
+        console.log(`🤖 [updateAutoReply] Lead ${lead._id} auto-reply enabled=${enabled}`);
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
-        console.error('Error in updateAutoReply:', err);
+        console.error('❌ [updateAutoReply] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -107,10 +109,8 @@ const updateAutoReply = async (req, res) => {
 // POST /api/leads/batch-send
 const batchSend = async (req, res) => {
     try {
-        if (!req.userId) {
-            console.error('batchSend: No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
-        }
+        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
+        console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
         const { leads } = req.body;
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
@@ -172,7 +172,7 @@ const batchSend = async (req, res) => {
                     );
                     if (result.success) {
                         sentCount++;
-                        console.log(`✅ Email sent to ${leadData.email}`);
+                        console.log(`✅ [batchSend] Email sent to ${leadData.email}`);
                     } else {
                         lead.status = 'Failed';
                         await lead.save();
@@ -185,7 +185,7 @@ const batchSend = async (req, res) => {
         }
         res.json({ success: true, message: `Sent ${sentCount} emails.`, errors });
     } catch (err) {
-        console.error('Batch Send Error:', err);
+        console.error('❌ [batchSend] Error:', err);
         res.status(500).json({ message: 'Server Error during batch send' });
     }
 };
@@ -193,10 +193,8 @@ const batchSend = async (req, res) => {
 // POST /api/reconnect-and-send
 const reconnectAndSend = async (req, res) => {
     try {
-        if (!req.userId) {
-            console.error('reconnectAndSend: No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
-        }
+        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
+        console.log(`🔄 [reconnectAndSend] For user ${req.userId}`);
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) return res.status(400).json({ message: 'Nylas not connected' });
 
@@ -223,22 +221,19 @@ const reconnectAndSend = async (req, res) => {
         }
         res.json({ success: true, sentCount });
     } catch (err) {
-        console.error('Auto-send Error:', err);
+        console.error('❌ [reconnectAndSend] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// GET /api/leads (list all leads – simple version)
+// GET /api/leads
 const getAllLeads = async (req, res) => {
     try {
-        if (!req.userId) {
-            console.error('getAllLeads: No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
-        }
+        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         const leads = await Lead.find({ userId: req.userId }).sort({ createdAt: -1 });
         res.json(leads);
     } catch (err) {
-        console.error('Error in getAllLeads:', err);
+        console.error('❌ [getAllLeads] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
