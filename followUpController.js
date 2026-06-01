@@ -6,7 +6,7 @@ const { generateFollowUpSuggestion } = require('./followUpAI');
 const toggleAutoFollowUp = async (req, res) => {
     try {
         const { leadId } = req.params;
-        const { enabled } = req.body; // true or false
+        const { enabled, delayDays } = req.body; // delayDays = number of days to wait
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
         if (!lead) {
@@ -14,9 +14,10 @@ const toggleAutoFollowUp = async (req, res) => {
         }
 
         if (enabled === true) {
-            // Turning ON: schedule first follow-up for 3 days from now
+            // Use provided delayDays or default to 3
+            const days = (delayDays && typeof delayDays === 'number' && delayDays > 0) ? delayDays : 3;
             const scheduledDate = new Date();
-            scheduledDate.setDate(scheduledDate.getDate() + 3);
+            scheduledDate.setDate(scheduledDate.getDate() + days);
             
             lead.autoFollowUpEnabled = true;
             lead.followUpScheduledDate = scheduledDate;
@@ -28,7 +29,7 @@ const toggleAutoFollowUp = async (req, res) => {
                 success: true, 
                 autoFollowUpEnabled: true, 
                 followUpScheduledDate: scheduledDate,
-                message: `Auto follow-up enabled. First follow-up scheduled for ${scheduledDate.toLocaleDateString()}`
+                message: `Auto follow-up enabled. First follow-up scheduled in ${days} day(s).`
             });
         } else {
             // Turning OFF
@@ -58,7 +59,6 @@ const suggestFollowUp = async (req, res) => {
             return res.status(404).json({ message: 'Lead not found' });
         }
 
-        // Get last 2-3 messages from conversation
         const messages = lead.replies || [];
         if (messages.length === 0) {
             return res.status(400).json({ 
@@ -66,7 +66,6 @@ const suggestFollowUp = async (req, res) => {
             });
         }
 
-        // Format messages for AI
         const formattedMessages = messages.slice(-3).map(msg => ({
             from: msg.from,
             content: msg.content,
