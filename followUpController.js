@@ -6,15 +6,19 @@ const { generateFollowUpSuggestion } = require('./followUpAI');
 const toggleAutoFollowUp = async (req, res) => {
     try {
         const { leadId } = req.params;
-        const { enabled, delayDays } = req.body; // delayDays = number of days to wait
+        const { enabled, delayDays } = req.body;
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
-        if (!lead) {
-            return res.status(404).json({ message: 'Lead not found' });
-        }
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         if (enabled === true) {
-            // Use provided delayDays or default to 3
+            // Use user object attached by middleware (checkAutoFollowUpLimit)
+            const user = req.userWithAutoLimit;
+            if (!user) {
+                // Fallback – should not happen because middleware already ran
+                return res.status(500).json({ message: 'User not found in request' });
+            }
+
             const days = (delayDays && typeof delayDays === 'number' && delayDays > 0) ? delayDays : 3;
             const scheduledDate = new Date();
             scheduledDate.setDate(scheduledDate.getDate() + days);
@@ -22,8 +26,12 @@ const toggleAutoFollowUp = async (req, res) => {
             lead.autoFollowUpEnabled = true;
             lead.followUpScheduledDate = scheduledDate;
             lead.followUpCount = 0;
-            
             await lead.save();
+
+            // Increment daily auto follow-up counter
+            if (!user.usage) user.usage = {};
+            user.usage.dailyAutoFollowUpCount = (user.usage.dailyAutoFollowUpCount || 0) + 1;
+            await user.save();
             
             return res.json({ 
                 success: true, 
@@ -32,11 +40,10 @@ const toggleAutoFollowUp = async (req, res) => {
                 message: `Auto follow-up enabled. First follow-up scheduled in ${days} day(s).`
             });
         } else {
-            // Turning OFF
+            // Disable
             lead.autoFollowUpEnabled = false;
             lead.followUpScheduledDate = null;
             await lead.save();
-            
             return res.json({ 
                 success: true, 
                 autoFollowUpEnabled: false,
@@ -55,9 +62,7 @@ const suggestFollowUp = async (req, res) => {
         const { leadId } = req.params;
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
-        if (!lead) {
-            return res.status(404).json({ message: 'Lead not found' });
-        }
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         const messages = lead.replies || [];
         if (messages.length === 0) {
@@ -78,6 +83,14 @@ const suggestFollowUp = async (req, res) => {
             lead.company || 'the team'
         );
 
+        // Increment daily suggest follow-up counter
+        const user = req.userWithSuggestLimit;
+        if (user) {
+            if (!user.usage) user.usage = {};
+            user.usage.dailySuggestFollowUpCount = (user.usage.dailySuggestFollowUpCount || 0) + 1;
+            await user.save();
+        }
+
         res.json({ 
             success: true, 
             suggestion,
@@ -96,9 +109,7 @@ const getFollowUpStatus = async (req, res) => {
         const { leadId } = req.params;
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
-        if (!lead) {
-            return res.status(404).json({ message: 'Lead not found' });
-        }
+        if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         res.json({
             autoFollowUpEnabled: lead.autoFollowUpEnabled || false,
