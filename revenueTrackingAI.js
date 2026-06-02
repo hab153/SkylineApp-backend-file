@@ -2,8 +2,20 @@ const axios = require('axios');
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// Helper to clean markdown code fences from AI response
+function cleanAIResponse(responseText) {
+    let cleaned = responseText.trim();
+    // Remove ```json ... ``` or ``` ... ```
+    const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
+    const match = cleaned.match(jsonBlockRegex);
+    if (match) {
+        cleaned = match[1].trim();
+    }
+    return cleaned;
+}
+
 /**
- * Categorises a list of leads into five buckets based on conversation history.
+ * Categorises a list of leads into five buckets.
  * @param {Array} leads - Array of lead objects with replies and status
  * @returns {Promise<Object>} - { contacted, replied, interested, ongoing, win }
  */
@@ -18,21 +30,15 @@ async function categorizeLeads(leads) {
         };
     }
 
-    // Build a compact representation for each lead
-    const leadsForAI = leads.map(lead => {
-        const lastMessage = lead.replies && lead.replies.length > 0
-            ? lead.replies[lead.replies.length - 1].content
-            : '';
-        return {
-            id: lead._id,
-            name: lead.name,
-            company: lead.company,
-            status: lead.status,
-            lastMessage: lastMessage.substring(0, 300),
-            messageCount: lead.replies ? lead.replies.length : 0,
-            sentiment: lead.sentiment || 'Unknown'
-        };
-    });
+    const leadsForAI = leads.map(lead => ({
+        id: lead._id,
+        name: lead.name,
+        company: lead.company,
+        status: lead.status,
+        lastMessage: (lead.replies && lead.replies.length ? lead.replies[lead.replies.length - 1].content : '').substring(0, 300),
+        messageCount: lead.replies ? lead.replies.length : 0,
+        sentiment: lead.sentiment || 'Unknown'
+    }));
 
     const prompt = `
 You are an expert sales analyst. Analyse the following leads and categorise each one into exactly one of these categories:
@@ -45,7 +51,7 @@ You are an expert sales analyst. Analyse the following leads and categorise each
 
 Use the lead's conversation history, status, message count, and sentiment to decide.
 
-Return ONLY valid JSON in the following format:
+Return ONLY valid JSON in the following format (no markdown, no extra text):
 {
   "contacted": [{"id": "...", "name": "...", "company": "..."}, ...],
   "replied": [...],
@@ -74,7 +80,9 @@ ${JSON.stringify(leadsForAI, null, 2)}
                 }
             }
         );
-        const result = JSON.parse(response.data.choices[0].message.content);
+        let content = response.data.choices[0].message.content;
+        content = cleanAIResponse(content);
+        const result = JSON.parse(content);
         return {
             contacted: result.contacted || [],
             replied: result.replied || [],
@@ -107,10 +115,10 @@ ${JSON.stringify(leadsForAI, null, 2)}
 }
 
 /**
- * Generates strategic advice for each non‑empty category (Go & Pro plans).
- * @param {Object} categories - The output from categorizeLeads
+ * Generates strategic advice for each non‑empty category.
+ * @param {Object} categories - Output from categorizeLeads
  * @param {string} tier - 'go' or 'pro'
- * @returns {Promise<Object>} - { contactedAdvice, repliedAdvice, interestedAdvice, ongoingAdvice, winAdvice }
+ * @returns {Promise<Object>} - Advice per category
  */
 async function generateAdvice(categories, tier) {
     const prompt = `
@@ -125,6 +133,7 @@ CATEGORIES:
 
 Return ONLY a JSON object with fields only for categories that have leads > 0. Use keys: contactedAdvice, repliedAdvice, interestedAdvice, ongoingAdvice, winAdvice.
 Example: { "contactedAdvice": "Send a follow-up email with a case study...", "interestedAdvice": "Schedule a demo call..." }
+Return valid JSON, no markdown, no extra text.
 `;
 
     try {
@@ -143,7 +152,9 @@ Example: { "contactedAdvice": "Send a follow-up email with a case study...", "in
                 }
             }
         );
-        return JSON.parse(response.data.choices[0].message.content);
+        let content = response.data.choices[0].message.content;
+        content = cleanAIResponse(content);
+        return JSON.parse(content);
     } catch (error) {
         console.error('Advice generation error:', error);
         return {};
@@ -152,13 +163,12 @@ Example: { "contactedAdvice": "Send a follow-up email with a case study...", "in
 
 /**
  * Generates specific actions for top 20 leads (Pro only).
- * @param {Array} allLeads - Complete lead objects (with replies)
- * @returns {Promise<Array>} - Array of { leadName, leadId, action }
+ * @param {Array} allLeads - Complete lead objects
+ * @returns {Promise<Array>} - Array of { leadId, leadName, action }
  */
 async function generateActions(allLeads) {
     if (!allLeads || allLeads.length === 0) return [];
 
-    // Prepare data for AI scoring
     const leadsForScoring = allLeads.map(lead => ({
         id: lead._id,
         name: lead.name,
@@ -181,6 +191,7 @@ Return ONLY a JSON array, e.g.:
   { "leadId": "xxx", "leadName": "John Doe", "action": "Follow up with a personalized video" },
   ...
 ]
+No markdown, no extra text.
 
 LEADS DATA:
 ${JSON.stringify(leadsForScoring, null, 2)}
@@ -202,7 +213,9 @@ ${JSON.stringify(leadsForScoring, null, 2)}
                 }
             }
         );
-        const actions = JSON.parse(response.data.choices[0].message.content);
+        let content = response.data.choices[0].message.content;
+        content = cleanAIResponse(content);
+        const actions = JSON.parse(content);
         return Array.isArray(actions) ? actions.slice(0, 20) : [];
     } catch (error) {
         console.error('Action generation error:', error);
