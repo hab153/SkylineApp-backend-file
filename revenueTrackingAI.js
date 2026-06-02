@@ -14,8 +14,7 @@ function cleanAIResponse(responseText) {
 }
 
 /**
- * Categorises a list of leads into five buckets.
- * Sends last 3 messages for context, and includes a robust fallback.
+ * Categorises leads into five buckets using full conversation history.
  */
 async function categorizeLeads(leads) {
     if (!leads || leads.length === 0) {
@@ -28,45 +27,69 @@ async function categorizeLeads(leads) {
         };
     }
 
-    // Prepare rich data for AI: include last 3 messages
-    const leadsForAI = leads.map(lead => {
-        const messages = (lead.replies || []).slice(-3).map(msg => ({
-            from: msg.from,
-            content: msg.content.substring(0, 200),
-            date: msg.date
-        }));
+    // First, separate leads that never replied (contacted)
+    const contacted = [];
+    const repliedLeads = []; // leads that have at least one reply from 'lead'
+    
+    leads.forEach(lead => {
+        const hasLeadReply = (lead.replies || []).some(msg => msg.from === 'lead');
+        if (hasLeadReply) {
+            repliedLeads.push(lead);
+        } else {
+            contacted.push({ id: lead._id, name: lead.name, company: lead.company });
+        }
+    });
+
+    // For leads that have replied, we need to classify interest level using AI
+    if (repliedLeads.length === 0) {
+        return {
+            contacted,
+            replied: [],
+            interested: [],
+            ongoing: [],
+            win: []
+        };
+    }
+
+    // Prepare rich data: full conversation (compact string) for each lead
+    const leadsForAI = repliedLeads.map(lead => {
+        // Build a compact conversation log
+        const conversation = (lead.replies || []).map(msg => 
+            `${msg.from === 'lead' ? 'Lead' : 'You'}: ${msg.content}`
+        ).join('\n');
+        // Trim to avoid token explosion (last ~2000 chars)
+        const trimmedConversation = conversation.length > 2000 
+            ? '...(earlier messages omitted)\n' + conversation.slice(-2000)
+            : conversation;
         return {
             id: lead._id,
             name: lead.name,
             company: lead.company,
             status: lead.status,
-            messageCount: lead.replies ? lead.replies.length : 0,
-            lastMessages: messages,
-            sentiment: lead.sentiment || 'Unknown'
+            conversation: trimmedConversation,
+            totalMessages: lead.replies ? lead.replies.length : 0
         };
     });
 
     const prompt = `
-You are an expert sales analyst. Analyse the following leads and categorise each one into exactly one of these categories:
+You are an expert sales analyst. For each lead below, analyse their full conversation and decide which stage they are in:
 
-1. "contacted" – the user has sent at least one message, but the lead has NOT replied yet.
-2. "replied" – the lead has replied at least once, but no clear interest or progression.
-3. "interested" – the lead has shown interest (e.g., asked for pricing, demo, features, or responded positively).
-4. "ongoing" – the conversation is active, close to a sale (e.g., negotiation, trial, contract discussion).
-5. "win" – the deal is closed, the lead has converted or explicitly confirmed purchase.
+- "interested" – the lead has shown interest (e.g., asked for pricing, demo, features, or responded positively).
+- "ongoing" – the conversation is active, close to a sale (e.g., negotiation, trial, contract discussion).
+- "win" – the deal is closed, the lead has converted or explicitly confirmed purchase.
 
-IMPORTANT: Use the lead's actual messages (lastMessages) to determine if they have replied. If the lead has never replied, they belong to "contacted". If they have replied but no positive signals, they belong to "replied". Only use "interested", "ongoing", or "win" if the message content clearly indicates those stages.
+Do NOT classify a lead as "contacted" or "replied" – those are already handled. Only use these three categories. If a lead has replied but shows no clear interest, you may still place them in "interested" as a default, but try to be accurate.
 
-Return ONLY valid JSON in the following format (no markdown, no extra text):
+Return ONLY a JSON object with three arrays: "interested", "ongoing", "win". Each item must have "id", "name", "company".
+
+Example:
 {
-  "contacted": [{"id": "...", "name": "...", "company": "..."}, ...],
-  "replied": [...],
-  "interested": [...],
-  "ongoing": [...],
-  "win": [...]
+  "interested": [{"id":"1","name":"John","company":"Acme"}],
+  "ongoing": [],
+  "win": []
 }
 
-LEADS DATA:
+LEADS DATA (full conversation included):
 ${JSON.stringify(leadsForAI, null, 2)}
 `;
 
@@ -89,63 +112,48 @@ ${JSON.stringify(leadsForAI, null, 2)}
         let content = response.data.choices[0].message.content;
         content = cleanAIResponse(content);
         const result = JSON.parse(content);
+        
         return {
-            contacted: result.contacted || [],
-            replied: result.replied || [],
+            contacted,
+            replied: [], // no need – all replied leads are in interest categories
             interested: result.interested || [],
             ongoing: result.ongoing || [],
             win: result.win || []
         };
     } catch (error) {
-        console.error('Categorisation AI error, using fallback:', error.message);
-        // FALLBACK: deterministic rule-based categorisation using replies and status
-        const fallback = {
-            contacted: [],
-            replied: [],
-            interested: [],
-            ongoing: [],
-            win: []
-        };
-        leads.forEach(lead => {
-            const status = lead.status;
-            const replies = lead.replies || [];
-            const lastMessage = replies.length > 0 ? replies[replies.length - 1].content.toLowerCase() : '';
+        console.error('AI classification error, using fallback:', error.message);
+        // Fallback: use keyword matching on last message and status
+        const interested = [];
+        const ongoing = [];
+        const win = [];
+        repliedLeads.forEach(lead => {
+            const repliesFromLead = (lead.replies || []).filter(m => m.from === 'lead');
+            const lastLeadMsg = repliesFromLead.length ? repliesFromLead[repliesFromLead.length - 1].content.toLowerCase() : '';
             const entry = { id: lead._id, name: lead.name, company: lead.company };
-
-            // 1. Win if status is 'Closed' or 'Win' or last message contains "purchased", "bought", "signed"
-            if (status === 'Closed' || status === 'Win' || 
-                lastMessage.includes('purchased') || lastMessage.includes('bought') || 
-                lastMessage.includes('signed') || lastMessage.includes('deal closed')) {
-                fallback.win.push(entry);
-            }
-            // 2. Interested if status is 'Interested' or last message contains "price", "demo", "interested", "quote"
-            else if (status === 'Interested' || 
-                     lastMessage.includes('price') || lastMessage.includes('demo') || 
-                     lastMessage.includes('interested') || lastMessage.includes('quote')) {
-                fallback.interested.push(entry);
-            }
-            // 3. Ongoing if status is 'Ongoing' or last message contains "next steps", "contract", "trial"
-            else if (status === 'Ongoing' || 
-                     lastMessage.includes('next steps') || lastMessage.includes('contract') || 
-                     lastMessage.includes('trial')) {
-                fallback.ongoing.push(entry);
-            }
-            // 4. Replied if there is at least one reply from lead (any message from 'lead')
-            else if (replies.some(msg => msg.from === 'lead')) {
-                fallback.replied.push(entry);
-            }
-            // 5. Otherwise contacted
-            else {
-                fallback.contacted.push(entry);
+            if (lead.status === 'Win' || lastLeadMsg.includes('purchased') || lastLeadMsg.includes('bought') || lastLeadMsg.includes('signed')) {
+                win.push(entry);
+            } else if (lead.status === 'Interested' || lastLeadMsg.includes('price') || lastLeadMsg.includes('demo') || lastLeadMsg.includes('interested') || lastLeadMsg.includes('quote')) {
+                interested.push(entry);
+            } else if (lead.status === 'Ongoing' || lastLeadMsg.includes('next steps') || lastLeadMsg.includes('contract') || lastLeadMsg.includes('trial')) {
+                ongoing.push(entry);
+            } else {
+                // Default to interested if they replied but no clear signal
+                interested.push(entry);
             }
         });
-        return fallback;
+        return {
+            contacted,
+            replied: [],
+            interested,
+            ongoing,
+            win
+        };
     }
 }
 
 /**
  * Generates strategic advice for each non‑empty category.
- * (unchanged from previous version)
+ * (unchanged – works on the final categories)
  */
 async function generateAdvice(categories, tier) {
     const prompt = `
@@ -190,7 +198,7 @@ Return valid JSON, no markdown, no extra text.
 
 /**
  * Generates specific actions for top 20 leads (Pro only).
- * (unchanged from previous version)
+ * (unchanged – uses full lead data)
  */
 async function generateActions(allLeads) {
     if (!allLeads || allLeads.length === 0) return [];
@@ -203,7 +211,7 @@ async function generateActions(allLeads) {
         messageCount: lead.replies ? lead.replies.length : 0,
         status: lead.status,
         sentiment: lead.sentiment || 'Unknown',
-        lastMessages: (lead.replies || []).slice(-2).map(m => ({ from: m.from, content: m.content.substring(0, 100) }))
+        lastMessages: (lead.replies || []).slice(-3).map(m => ({ from: m.from, content: m.content.substring(0, 100) }))
     }));
 
     const prompt = `
