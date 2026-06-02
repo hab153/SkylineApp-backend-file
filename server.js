@@ -13,11 +13,11 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit, checkHintLimit } = require('./dailyLimitMiddleware');
+const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
-const { startFollowUpJob } = require('./followUpJob'); // NEW
+const { startFollowUpJob } = require('./followUpJob');
 const flutterwaveWebhook = require('./flutterwaveWebhook');
 const nylasInboundWebhook = require('./nylasInboundWebhook');
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
@@ -88,7 +88,7 @@ mongoose.connect(process.env.MONGODB_URI, {
         console.log('✅ MongoDB Connected');
         startTokenRefreshJob();
         startExpiryJob();
-        startFollowUpJob(); // NEW: start the follow-up cron job
+        startFollowUpJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
@@ -96,7 +96,7 @@ app.use('/api/auth', authRoutes);
 
 // ════════════════════════════════════════════
 //  PAYMENT ROUTE
-// ════════════════════════════════════════════
+// ════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
 // ════════════════════════════════════════════
@@ -111,10 +111,10 @@ app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
 // ════════════════════════════════════════════
-//  FOLLOW-UP ROUTES
+//  FOLLOW-UP ROUTES (with limit middleware)
 // ════════════════════════════════════════════
-app.post('/api/leads/:leadId/auto-follow-up', verifyToken, followUpController.toggleAutoFollowUp);
-app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, followUpController.suggestFollowUp);
+app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, followUpController.toggleAutoFollowUp);
+app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 
 // ════════════════════════════════════════════
