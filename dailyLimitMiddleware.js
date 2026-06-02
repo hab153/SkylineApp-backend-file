@@ -126,4 +126,95 @@ const checkAndIncrementSendLimit = async (userId) => {
     return { remaining: limit - user.usage.dailySentCount };
 };
 
-module.exports = { checkDailyLimit, checkHintLimit, checkAndIncrementSendLimit };
+// NEW: Suggest follow-up limit (Free:5, Go:30, Pro:200)
+const checkSuggestFollowUpLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) user.usage = {};
+        if (user.usage.dailySuggestFollowUpCount === undefined) user.usage.dailySuggestFollowUpCount = 0;
+        if (!user.usage.lastSuggestFollowUpDate) user.usage.lastSuggestFollowUpDate = null;
+
+        let limit = 5; // Free
+        const tier = user.subscriptionTier;
+        if (tier === 'go') limit = 30;
+        if (tier === 'pro') limit = 200;
+
+        const today = new Date().toDateString();
+        const lastDateStr = user.usage.lastSuggestFollowUpDate ? new Date(user.usage.lastSuggestFollowUpDate).toDateString() : null;
+        if (lastDateStr !== today) {
+            user.usage.dailySuggestFollowUpCount = 0;
+            user.usage.lastSuggestFollowUpDate = new Date();
+            await user.save();
+        }
+
+        if (user.usage.dailySuggestFollowUpCount >= limit) {
+            let message = '';
+            if (tier === 'free') message = 'Daily suggest follow-up limit reached (5/5). Upgrade to Go (30/day) or Pro (200/day) for more.';
+            else if (tier === 'go') message = 'Daily suggest follow-up limit reached (30/30). Upgrade to Pro for 200/day.';
+            else message = 'Daily suggest follow-up limit reached (200/200). Please try again tomorrow.';
+            return res.status(429).json({ message });
+        }
+
+        // Store user object for later increment
+        req.userWithSuggestLimit = user;
+        next();
+    } catch (err) {
+        console.error('Suggest follow-up limit error:', err);
+        res.status(500).json({ message: 'Server error checking limit' });
+    }
+};
+
+// NEW: Auto follow-up enable limit (Free:0, Go:15, Pro:100)
+const checkAutoFollowUpLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) user.usage = {};
+        if (user.usage.dailyAutoFollowUpCount === undefined) user.usage.dailyAutoFollowUpCount = 0;
+        if (!user.usage.lastAutoFollowUpDate) user.usage.lastAutoFollowUpDate = null;
+
+        let limit = 0; // Free
+        const tier = user.subscriptionTier;
+        if (tier === 'go') limit = 15;
+        if (tier === 'pro') limit = 100;
+
+        if (limit === 0) {
+            return res.status(403).json({
+                message: 'Auto follow-up is not available on the Free plan. Upgrade to Go (15/day) or Pro (100/day).'
+            });
+        }
+
+        const today = new Date().toDateString();
+        const lastDateStr = user.usage.lastAutoFollowUpDate ? new Date(user.usage.lastAutoFollowUpDate).toDateString() : null;
+        if (lastDateStr !== today) {
+            user.usage.dailyAutoFollowUpCount = 0;
+            user.usage.lastAutoFollowUpDate = new Date();
+            await user.save();
+        }
+
+        if (user.usage.dailyAutoFollowUpCount >= limit) {
+            let message = '';
+            if (tier === 'go') message = 'Daily auto follow-up limit reached (15/15). Upgrade to Pro for 100/day.';
+            else message = 'Daily auto follow-up limit reached (100/100). Please try again tomorrow.';
+            return res.status(429).json({ message });
+        }
+
+        // Store user object for later increment
+        req.userWithAutoLimit = user;
+        next();
+    } catch (err) {
+        console.error('Auto follow-up limit error:', err);
+        res.status(500).json({ message: 'Server error checking limit' });
+    }
+};
+
+module.exports = { 
+    checkDailyLimit, 
+    checkHintLimit, 
+    checkAndIncrementSendLimit,
+    checkSuggestFollowUpLimit,
+    checkAutoFollowUpLimit
+};
