@@ -29,6 +29,7 @@ const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
 const followUpController = require('./followUpController');
+const revenueController = require('./revenueController'); // NEW
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -116,6 +117,11 @@ app.get('/api/leads', verifyToken, leadController.getAllLeads);
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, followUpController.toggleAutoFollowUp);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
+
+// ════════════════════════════════════════════
+//  REVENUE TRACKING ROUTE (NEW)
+// ════════════════════════════════════════════
+app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
 
 // ════════════════════════════════════════════
 //  NOTIFICATIONS
