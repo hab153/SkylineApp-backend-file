@@ -61,26 +61,21 @@ const UserSchema = new mongoose.Schema({
 
     // --- USAGE LIMITING FIELDS ---
     usage: {
-        dailyCallCount: {
-            type: Number,
-            default: 0
-        },
-        lastCallDate: {
-            type: Date,
-            default: null
-        },
-        dailyHintCount: {            // NEW
-            type: Number,
-            default: 0
-        },
-        lastHintDate: {              // NEW
-            type: Date,
-            default: null
-        },
+        dailyCallCount: { type: Number, default: 0 },
+        lastCallDate: { type: Date, default: null },
+        dailyHintCount: { type: Number, default: 0 },
+        lastHintDate: { type: Date, default: null },
         dailyImageCount: { type: Number, default: 0 },
         lastImageUploadDate: { type: Date, default: null },
         dailyFileCount: { type: Number, default: 0 },
-        lastFileUploadDate: { type: Date, default: null }
+        lastFileUploadDate: { type: Date, default: null },
+        dailySentCount: { type: Number, default: 0 },
+        lastSentDate: { type: Date, default: null },
+        // NEW: follow-up limits
+        dailySuggestFollowUpCount: { type: Number, default: 0 },
+        lastSuggestFollowUpDate: { type: Date, default: null },
+        dailyAutoFollowUpCount: { type: Number, default: 0 },
+        lastAutoFollowUpDate: { type: Date, default: null }
     },
 
     // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
