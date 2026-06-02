@@ -1,4 +1,6 @@
+// revenueController.js
 const Lead = require('./Lead');
+const User = require('./User');   // <-- ADD THIS LINE
 const { categorizeLeads, generateAdvice, generateActions } = require('./revenueTrackingAI');
 
 // GET /api/revenue/tracking
