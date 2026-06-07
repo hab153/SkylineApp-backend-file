@@ -19,10 +19,10 @@ const createFlutterwavePayment = async (req, res) => {
         let planName = '';
 
         if (planType === 'go') {
-            amount = 49;
+            amount = 39;      // Updated from 49 to 39
             planName = 'GO Plan';
         } else if (planType === 'pro') {
-            amount = 129;
+            amount = 89;      // Updated from 129 to 89
             planName = 'PRO Plan';
         } else {
             console.error('❌ [PAYMENT] Invalid plan type:', planType);
