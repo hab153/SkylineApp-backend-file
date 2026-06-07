@@ -7,18 +7,18 @@ function getChatLimitMessage(tier, limit) {
     return `Daily chat limit reached (150/150). Please continue tomorrow.`;
 }
 
-// Helper to get hint limit message
+// Helper to get hint limit message (Free:3, Go:15, Pro:70)
 function getHintLimitMessage(tier, limit) {
-    if (tier === 'free') return `You've used all your free hints (3/3). Upgrade to Go (20/day) or Pro (300/day) for more AI suggestions.`;
-    if (tier === 'go') return `Daily hint limit reached (20/20). Upgrade to Pro for 300 hints per day.`;
-    return `Daily hint limit reached (300/300). Please try again tomorrow.`;
+    if (tier === 'free') return `You've used all your free hints (3/3). Upgrade to Go (15/day) or Pro (70/day) for more AI suggestions.`;
+    if (tier === 'go') return `Daily hint limit reached (15/15). Upgrade to Pro for 70 hints per day.`;
+    return `Daily hint limit reached (70/70). Please try again tomorrow.`;
 }
 
-// Helper to get email send limit message
+// Helper to get email send limit message (Free:5, Go:200, Pro:1000)
 function getSendLimitMessage(tier, limit) {
-    if (tier === 'free') return `Daily email send limit reached (5/5). Upgrade to Go (25/day) or Pro (100/day) to send more emails.`;
-    if (tier === 'go') return `Daily email send limit reached (25/25). Upgrade to Pro for 100 emails per day.`;
-    return `Daily email send limit reached (100/100). Please try again tomorrow.`;
+    if (tier === 'free') return `Daily email send limit reached (5/5). Upgrade to Go (200/day) or Pro (1000/day) to send more emails.`;
+    if (tier === 'go') return `Daily email send limit reached (200/200). Upgrade to Pro for 1000 emails per day.`;
+    return `Daily email send limit reached (1000/1000). Please try again tomorrow.`;
 }
 
 // Daily limit for chat/dreams (Free:10, Go:50, Pro:150)
@@ -56,7 +56,7 @@ const checkDailyLimit = async (req, res, next) => {
     }
 };
 
-// Hint limit middleware (Free:3, Go:20, Pro:300)
+// Hint limit middleware (Free:3, Go:15, Pro:70)
 const checkHintLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
@@ -68,8 +68,8 @@ const checkHintLimit = async (req, res, next) => {
 
         let limit = 3; // Free plan
         const tier = user.subscriptionTier;
-        if (tier === 'go') limit = 20;
-        if (tier === 'pro') limit = 300;
+        if (tier === 'go') limit = 15;
+        if (tier === 'pro') limit = 70;
 
         const today = new Date().toDateString();
         const lastHintDateStr = user.usage.lastHintDate ? new Date(user.usage.lastHintDate).toDateString() : null;
@@ -95,7 +95,7 @@ const checkHintLimit = async (req, res, next) => {
     }
 };
 
-// Helper to check and increment daily email send limit (Free:5, Go:25, Pro:100)
+// Helper to check and increment daily email send limit (Free:5, Go:200, Pro:1000)
 const checkAndIncrementSendLimit = async (userId) => {
     const user = await User.findById(userId);
     if (!user) throw new Error('User not found');
@@ -105,8 +105,8 @@ const checkAndIncrementSendLimit = async (userId) => {
 
     let limit = 5; // Free
     const tier = user.subscriptionTier;
-    if (tier === 'go') limit = 25;
-    if (tier === 'pro') limit = 100;
+    if (tier === 'go') limit = 200;
+    if (tier === 'pro') limit = 1000;
 
     const today = new Date().toDateString();
     const lastSentStr = user.usage.lastSentDate ? new Date(user.usage.lastSentDate).toDateString() : null;
@@ -126,7 +126,7 @@ const checkAndIncrementSendLimit = async (userId) => {
     return { remaining: limit - user.usage.dailySentCount };
 };
 
-// NEW: Suggest follow-up limit (Free:5, Go:30, Pro:200)
+// Suggest follow-up limit (Free:5, Go:30, Pro:200)
 const checkSuggestFollowUpLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
@@ -157,7 +157,6 @@ const checkSuggestFollowUpLimit = async (req, res, next) => {
             return res.status(429).json({ message });
         }
 
-        // Store user object for later increment
         req.userWithSuggestLimit = user;
         next();
     } catch (err) {
@@ -166,7 +165,7 @@ const checkSuggestFollowUpLimit = async (req, res, next) => {
     }
 };
 
-// NEW: Auto follow-up enable limit (Free:0, Go:15, Pro:100)
+// Auto follow-up enable limit (Free:0, Go:15, Pro:100)
 const checkAutoFollowUpLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
@@ -202,7 +201,6 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
             return res.status(429).json({ message });
         }
 
-        // Store user object for later increment
         req.userWithAutoLimit = user;
         next();
     } catch (err) {
