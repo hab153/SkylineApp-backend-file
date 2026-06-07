@@ -6,13 +6,41 @@ const { getAuthUrl, exchangeCodeForToken, getUserEmail } = require('./nylasServi
 // In-memory store for OAuth state (cleaned up after 10 minutes)
 const stateStore = {};
 
+// Helper: max connections per subscription tier
+function getMaxConnections(tier) {
+    if (tier === 'free') return 1;
+    if (tier === 'go') return 2;
+    if (tier === 'pro') return 5;
+    return 1; // default fallback
+}
+
 // GET /api/auth/nylas/url
-const getAuthUrlHandler = (req, res) => {
+const getAuthUrlHandler = async (req, res) => {
     const userId = req.userId;
-    const randomState = uuidv4();
-    stateStore[randomState] = userId;
-    setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
-    res.json({ url: getAuthUrl(randomState) });
+    try {
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const currentCount = await EmailAccount.countDocuments({ userId });
+        const max = getMaxConnections(user.subscriptionTier);
+
+        if (currentCount >= max) {
+            return res.status(403).json({
+                message: `You have already reached the maximum number of connected email accounts (${max}/${max}). Upgrade your plan to connect more.`,
+                redirect: '/dashboard'
+            });
+        }
+
+        const randomState = uuidv4();
+        stateStore[randomState] = userId;
+        setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
+        res.json({ url: getAuthUrl(randomState) });
+    } catch (err) {
+        console.error('Error in /url:', err);
+        res.status(500).json({ message: 'Server error' });
+    }
 };
 
 // GET /api/auth/nylas/callback
@@ -29,7 +57,20 @@ const handleCallback = async (req, res) => {
         return res.status(400).send('Session expired. Please try connecting again.');
     }
     delete stateStore[state];
+
     try {
+        // Check limit again before creating new account (prevent race condition)
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(400).send('User not found');
+        }
+        const currentCount = await EmailAccount.countDocuments({ userId });
+        const max = getMaxConnections(user.subscriptionTier);
+        if (currentCount >= max) {
+            console.warn(`User ${userId} tried to add another email account but limit (${max}) already reached.`);
+            return res.redirect(`https://skylineai-app.vercel.app/dashboard.html?connected=false&error=limit_reached&limit=${max}`);
+        }
+
         const tokenData = await exchangeCodeForToken(code);
         const accessToken = tokenData.access_token;
         const refreshToken = tokenData.refresh_token;
@@ -45,6 +86,7 @@ const handleCallback = async (req, res) => {
             console.warn(`⚠️ Could not retrieve email: ${emailErr.message}`);
         }
 
+        // Update user's nylasIntegration (optional – may keep for backward compatibility)
         await User.findByIdAndUpdate(userId, {
             'nylasIntegration.accessToken': accessToken,
             'nylasIntegration.emailAddress': emailAddress,
