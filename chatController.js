@@ -1,5 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
-const Message = require('./Message');
+const ChatMessage = require('./ChatMessage');   // NEW
 const User = require('./User');
 const freeAI = require('./Free');
 const goAI = require('./Go');
@@ -27,13 +27,13 @@ const sendMessage = async (req, res) => {
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
     try {
-        await new Message({
+        await ChatMessage.create({
             userId,
             sessionId: currentSessionId,
             role: 'user',
             content: message,
             title: message.substring(0, 30) + '...'
-        }).save();
+        });
 
         let aiReply, updatedHistory;
         if (plan === 'free') {
@@ -59,7 +59,7 @@ const sendMessage = async (req, res) => {
             updatedHistory = result.updatedHistory;
         }
 
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply }).save();
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply });
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
     } catch (error) {
         // Check if error is from queue (has friendly message)
@@ -76,7 +76,7 @@ const submitFeedback = async (req, res) => {
     try {
         const { messageId, type } = req.body;
         if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });
-        const message = await Message.findById(messageId);
+        const message = await ChatMessage.findById(messageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
         if (message.userId.toString() !== req.userId) return res.status(403).json({ message: 'Unauthorized' });
         message.feedback = message.feedback === type ? null : type;
@@ -91,7 +91,7 @@ const submitFeedback = async (req, res) => {
 const getSessions = async (req, res) => {
     try {
         const mongoose = require('mongoose');
-        const sessions = await Message.aggregate([
+        const sessions = await ChatMessage.aggregate([
             { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
             { $sort: { createdAt: -1 } },
             { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
@@ -106,7 +106,7 @@ const getSessions = async (req, res) => {
 // GET /api/history/:sessionId
 const getHistory = async (req, res) => {
     try {
-        const messages = await Message.find({ userId: req.userId, sessionId: req.params.sessionId }).sort({ createdAt: 1 });
+        const messages = await ChatMessage.find({ userId: req.userId, sessionId: req.params.sessionId }).sort({ createdAt: 1 });
         res.json(messages);
     } catch (error) {
         res.status(500).json({ message: 'Server Error fetching history' });
@@ -120,7 +120,7 @@ const analyzeDream = async (req, res) => {
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
     const currentSessionId = sessionId || uuidv4();
     try {
-        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' }).save();
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' });
         const user = await User.findById(userId);
         const userProfile = {
             fullName: user.fullName,
@@ -132,7 +132,7 @@ const analyzeDream = async (req, res) => {
             userId: user._id.toString()
         };
         const result = await proQueue.enqueue(() => generateBusinessResponse(dream, [], userProfile));
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply });
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
@@ -150,7 +150,7 @@ const refineDream = async (req, res) => {
     if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
     const currentSessionId = sessionId || uuidv4();
     try {
-        await new Message({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer }).save();
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer });
         const user = await User.findById(userId);
         const userProfile = {
             fullName: user.fullName,
@@ -162,7 +162,7 @@ const refineDream = async (req, res) => {
             userId: user._id.toString()
         };
         const result = await proQueue.enqueue(() => generateBusinessResponse(followUpAnswer, [], userProfile));
-        await new Message({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply }).save();
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply });
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
