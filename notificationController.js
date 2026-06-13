@@ -1,13 +1,11 @@
-const Message = require('./Message');
+const Notification = require('./Notification');   // NEW
 const Lead = require('./Lead');
 
 // GET /api/my-notifications
 const getMyNotifications = async (req, res) => {
     try {
-        const replyNotifications = await Message.find({ userId: req.userId, sessionId: 'reply-notification' }).sort({ createdAt: -1 });
-        const adminMessages = await Message.find({ userId: req.userId, sessionId: 'admin-direct-message' }).sort({ createdAt: -1 });
-        const allNotifications = [...replyNotifications, ...adminMessages].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        res.json(allNotifications);
+        const notifications = await Notification.find({ userId: req.userId }).sort({ createdAt: -1 });
+        res.json(notifications);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -26,9 +24,8 @@ const getRepliesCount = async (req, res) => {
 // GET /api/notifications/count
 const getNotificationCount = async (req, res) => {
     try {
-        const adminCount = await Message.countDocuments({ userId: req.userId, sessionId: 'admin-direct-message' });
-        const replyCount = await Message.countDocuments({ userId: req.userId, sessionId: 'reply-notification' });
-        res.json({ count: adminCount + replyCount });
+        const count = await Notification.countDocuments({ userId: req.userId, isRead: false });
+        res.json({ count });
     } catch (err) {
         res.status(500).json({ message: 'Server Error counting notifications' });
     }
