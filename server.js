@@ -29,7 +29,7 @@ const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
 const followUpController = require('./followUpController');
-const revenueController = require('./revenueController'); // NEW
+const revenueController = require('./revenueController'); // if this file exists, keep it; otherwise remove the line
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -43,7 +43,7 @@ const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
 const authRoutes = require('./authRoutes');
-const Message = require('./Message');
+// const Message = require('./Message');  // REMOVED – no longer used
 const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
@@ -97,7 +97,7 @@ app.use('/api/auth', authRoutes);
 
 // ════════════════════════════════════════════
 //  PAYMENT ROUTE
-// ════════════════════════════════════════
+// ════════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
 // ════════════════════════════════════════════
@@ -119,9 +119,11 @@ app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollow
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 
 // ════════════════════════════════════════════
-//  REVENUE TRACKING ROUTE (NEW)
+//  REVENUE TRACKING ROUTE (if revenueController exists)
 // ════════════════════════════════════════════
-app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
+if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
+    app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
+}
 
 // ════════════════════════════════════════════
 //  NOTIFICATIONS
