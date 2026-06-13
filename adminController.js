@@ -1,5 +1,6 @@
 const User = require('./User');
-const Message = require('./Message');
+const ChatMessage = require('./ChatMessage');   // NEW
+const Notification = require('./Notification'); // NEW
 const Report = require('./Report');
 const { verifyLayer2, verifyLayer3 } = require('./authController');
 
@@ -47,35 +48,35 @@ const deleteUser = async (req, res) => {
     }
 };
 
-// GET /api/admin/users/:id/details
+// GET /api/admin/users/:id/details (includes full message history – now uses ChatMessage)
 const getUserDetails = async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        const messages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
+        const messages = await ChatMessage.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, history: messages });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// GET /api/admin/users/:id/chat-view
+// GET /api/admin/users/:id/chat-view (only chat messages)
 const getUserChatView = async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
         if (!admin || !admin.isAdmin) return res.status(403).json({ message: 'Access denied' });
         const targetUser = await User.findById(req.params.id).select('-password');
-        if (!targetUser) return res.status(404). json({ message: 'User not found' });
-        const chatMessages = await Message.find({ userId: req.params.id }).sort({ createdAt: 1 });
+        if (!targetUser) return res.status(404).json({ message: 'User not found' });
+        const chatMessages = await ChatMessage.find({ userId: req.params.id }).sort({ createdAt: 1 });
         res.json({ user: targetUser, messages: chatMessages });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// POST /api/admin/users/:id/message
+// POST /api/admin/users/:id/message – send an admin message (becomes Notification)
 const sendUserMessage = async (req, res) => {
     try {
         const admin = await User.findById(req.userId);
@@ -84,13 +85,12 @@ const sendUserMessage = async (req, res) => {
         if (!messageContent) return res.status(400).json({ message: 'Message content is required' });
         const targetUser = await User.findById(req.params.id);
         if (!targetUser) return res.status(404).json({ message: 'User not found' });
-        await new Message({
+        await Notification.create({
             userId: req.params.id,
-            sessionId: 'admin-direct-message',
-            role: 'ai',
+            type: 'admin_message',
             content: `[ADMIN MESSAGE]: ${messageContent}`,
-            title: 'Direct Message from Admin'
-        }).save();
+            isRead: false
+        });
         res.json({ message: 'Message sent successfully' });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
