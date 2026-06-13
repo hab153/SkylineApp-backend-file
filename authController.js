@@ -1,8 +1,9 @@
 const User = require('./User');
+const ChatMessage = require('./ChatMessage'); // NEW: for chat history
+const Notification = require('./Notification'); // NEW: for notifications
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const Message = require('./Message'); // Import Message for cleanup
-const Report = require('./Report');   // Import Report for cleanup
+const Report = require('./Report');
 
 // Register a new user
 const register = async (req, res) => {
@@ -27,7 +28,7 @@ const register = async (req, res) => {
 
         const payload = { user: { id: user.id } };
         
-        // CHANGED: expiresIn to '30d' (30 Days)
+        // ✅ JWT expires in 30 days
         jwt.sign(
             payload, 
             process.env.JWT_SECRET || 'secretkey', 
@@ -47,7 +48,8 @@ const register = async (req, res) => {
             return res.status(400).json({ message: 'Duplicate field value entered' });
         }
         res.status(500).json({ message: 'Server Error during registration' });
-    }};
+    }
+};
 
 // Login user (Upgraded for Admin Detection)
 const login = async (req, res) => {
@@ -96,7 +98,8 @@ const login = async (req, res) => {
                 { user: { id: user.id }, step: 'layer2' }, 
                 process.env.JWT_SECRET || 'secretkey', 
                 { expiresIn: '10m' } // Short expiry for security
-            );            return res.json({ 
+            );
+            return res.json({ 
                 token: layerToken, 
                 message: 'Layer 1 Passed', 
                 nextStep: 'admin-layer2.html' 
@@ -106,7 +109,7 @@ const login = async (req, res) => {
         // Normal User Login
         const payload = { user: { id: user.id } };
         
-        // CHANGED: expiresIn to '30d' (30 Days)
+        // ✅ JWT expires in 30 days
         jwt.sign(
             payload, 
             process.env.JWT_SECRET || 'secretkey', 
@@ -145,7 +148,8 @@ const verifyLayer2 = async (req, res) => {
                 { user: { id: user.id }, step: 'layer3' }, 
                 process.env.JWT_SECRET || 'secretkey', 
                 { expiresIn: '10m' }
-            );            return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
+            );
+            return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
     } catch (err) {        
@@ -168,7 +172,7 @@ const verifyLayer3 = async (req, res) => {
         if (d1 && d2 && d3 && d4) {
             // Final Admin Token
             const payload = { user: { id: user.id }, isAdmin: true };
-            // CHANGED: Admin token lasts 7 days so you don't have to re-verify every hour
+            // Admin token lasts 7 days
             const token = jwt.sign(payload, process.env.JWT_SECRET || 'secretkey', { expiresIn: '7d' });
             return res.json({ token, message: 'Admin Access Granted', nextStep: 'admin-dashboard.html' });
         }
@@ -189,13 +193,13 @@ const verifyAge = async (req, res) => {
         }
 
         // Calculate Age
-        const birthDate = new Date(year, month - 1, day); // Month is 0-indexed in JS
+        const birthDate = new Date(year, month - 1, day);
         const today = new Date();
         let age = today.getFullYear() - birthDate.getFullYear();
         const m = today.getMonth() - birthDate.getMonth();
         if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
-            age--;        }
-        // Update DOB
+            age--;
+        }
         user.dateOfBirth = birthDate;
         if (age < 13) {
             // Suspend Account until 13th birthday
@@ -229,23 +233,20 @@ const changeEmail = async (req, res) => {
     const { currentPassword, newEmail } = req.body;
 
     try {
-        // 1. Find user
         let user = await User.findById(req.userId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // 2. Verify current password
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: 'Current password is incorrect' });
         }
 
-        // 3. Check if new email is already taken by another user
         const existingUser = await User.findOne({ email: newEmail });
-        if (existingUser && existingUser._id.toString() !== user._id.toString()) {            return res.status(400).json({ message: 'Email is already in use' });
+        if (existingUser && existingUser._id.toString() !== user._id.toString()) {
+            return res.status(400).json({ message: 'Email is already in use' });
         }
-        // 4. Update email
         user.email = newEmail.toLowerCase().trim();
         await user.save();
 
@@ -257,31 +258,31 @@ const changeEmail = async (req, res) => {
     }
 };
 
-// Delete Account
+// Delete Account – now removes ChatMessage and Notification instead of old Message model
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
 
     try {
-        // 1. Find user
         let user = await User.findById(req.userId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // 2. Verify password one last time
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: 'Incorrect password. Account not deleted.' });
         }
 
-        // 3. Delete associated data (Optional but recommended)
-        // Delete all messages for this user
-        await Message.deleteMany({ userId: req.userId });
+        // Delete all chat messages for this user
+        await ChatMessage.deleteMany({ userId: req.userId });
+        
+        // Delete all notifications for this user
+        await Notification.deleteMany({ userId: req.userId });
         
         // Delete all reports for this user
         await Report.deleteMany({ userId: req.userId });
 
-        // 4. Delete the user
+        // Delete the user
         await User.findByIdAndDelete(req.userId);
 
         res.json({ message: 'Account permanently deleted.' });
@@ -292,7 +293,8 @@ const deleteAccount = async (req, res) => {
     }
 };
 
-module.exports = {     register, 
+module.exports = { 
+    register, 
     login, 
     verifyAge, 
     changeEmail, 
