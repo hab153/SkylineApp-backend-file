@@ -1,10 +1,11 @@
 const EmailAccount = require('./EmailAccount');
 const Lead = require('./Lead');
-const Message = require('./Message');
+const Notification = require('./Notification');        // NEW
 const User = require('./User');
 const { generateAIReply } = require('./aiReplyGenerator');
 const { refreshNylasToken } = require('./nylasTokenRefresh');
 const { sendEmail } = require('./nylasService');
+const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');  // NEW
 
 module.exports = async (req, res) => {
     if (req.method === 'GET') {
@@ -56,17 +57,14 @@ module.exports = async (req, res) => {
                     });
                     await lead.save();
 
-                    // 3. Create notification
-                    await new Message({
+                    // 3. Create notification (using Notification model)
+                    await Notification.create({
                         userId: ownerUserId,
-                        sessionId: 'reply-notification',
-                        role: 'ai',
-                        title: '📬 New Lead Reply',
+                        type: 'lead_reply',
                         content: `${lead.name} replied:\n\n"${bodyText.substring(0, 200)}..."`,
-                        notificationType: 'reply',
                         leadId: lead._id,
                         isRead: false
-                    }).save();
+                    });
                     console.log(`🔔 Notification saved for User: ${ownerUserId}`);
 
                     // 4. Auto‑reply logic
@@ -75,8 +73,8 @@ module.exports = async (req, res) => {
                         try {
                             const ownerUser = await User.findById(ownerUserId);
                             
-                            // NEW AUTO-REPLY LIMITS: Free=0 (OFF), Go=20, Pro=100
-                            let autoReplyLimit = 0; // Free
+                            // AUTO-REPLY LIMITS: Free=0, Go=20, Pro=100
+                            let autoReplyLimit = 0;
                             const tier = ownerUser.subscriptionTier;
                             if (tier === 'go') autoReplyLimit = 20;
                             if (tier === 'pro') autoReplyLimit = 100;
@@ -141,7 +139,7 @@ module.exports = async (req, res) => {
                                             }
                                         }
                                         if (accessToken) {
-                                            // Check send limit before actually sending the email
+                                            // Check send limit before sending
                                             try {
                                                 await checkAndIncrementSendLimit(ownerUserId);
                                             } catch (limitError) {
