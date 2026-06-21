@@ -1399,7 +1399,7 @@ async function _handleBusinessQA(message, history, userProfile, apiKey) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 21 — LEAD GEN PIPELINE ORCHESTRATOR (with search cache integration)
+// SECTION 21 — LEAD GEN PIPELINE ORCHESTRATOR (FIXED – duplicate removed)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, userId) {
@@ -1409,97 +1409,6 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
     console.log(`🔢 [QUANTITY] User requested: ${requestedCount} leads`);
-
-    const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
-Return ONLY valid JSON:
-{
-  "target": "description of ideal customer or company type",
-  "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",
-  "location": "city, country, region — null if not mentioned",
-  "preferredContact": "CEO | Founder | Marketing | Sales | Owner | Any"
-}
-Never return null for target or industry. Infer from context.`;
-
-    let intent = { target: 'small businesses', industry: 'general', location: null, preferredContact: 'Any' };
-    try {
-        const intentRes = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: intentPrompt }],
-            max_tokens:  150,
-            temperature: 0.1,
-        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
-
-        if (intentRes) {
-            recordOpenAiUsage(intentRes.data?.usage?.prompt_tokens || 0, intentRes.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
-            intent = { ...intent, ...JSON.parse(intentRes.data.choices[0].message.content.replace(/```json|```/g, '')) };
-            console.log(`🎯 Intent: ${JSON.stringify(intent)}`);
-        }
-    } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
-
-    // --- NEW: Check search cache before any Tavily call ---
-    const queryParams = {
-        industry: intent.industry,
-        location: intent.location,
-        target: intent.target,
-        preferredContact: intent.preferredContact,
-    };
-    const queryHash = generateQueryHash(queryParams);
-    const cachedLeads = await getCachedSearchResults(queryHash);
-    if (cachedLeads && cachedLeads.length > 0) {
-        console.log(`🎉 [CACHE HIT] Returning ${cachedLeads.length} leads from memory (no Tavily calls)`);
-        // Convert cached company documents to the lead format expected by the frontend
-        const leads = cachedLeads.map(company => ({
-            name: company.name || company.companyName,
-            company: company.name || company.companyName,
-            domain: company.domain,
-            email: company.emails?.[0] || '',
-            emailConfidence: 'confirmed-other',
-            emailLabel: 'From cached company',
-            verificationGrade: company.research?.verificationGrade || 'B',
-            role: 'Decision Maker',
-            linkedIn: null,
-            companySize: company.size || 'unknown',
-            companyModel: company.model || 'unknown',
-            industry: intent.industry,
-            hq: company.hq || null,
-            recentNews: company.research?.recentNews || null,
-            leadScore: company.leadScore || 50,
-            messages: [{
-                type: 'initial',
-                subject: 'Revisiting our conversation',
-                body: `Hi,\n\nWe previously connected about ${intent.industry} opportunities. Still relevant?\n\nBest,\n${userProfile?.senderName || 'Alex'}`
-            }]
-        }));
-        const finalLeads = _applyOutputQuantityRules(leads, requestedCount);
-        recordSearchHistory(userId, safeMessage, finalLeads);
-        const memStats = getCompanyMemoryStats();
-        const _meta = {
-            fromCache: true,
-            cacheHit: true,
-            memoryStats: {
-                companiesStored: memStats.totalCompanies,
-                contactsStored: memStats.totalContacts,
-                researchRecords: memStats.totalResearch,
-                analyticsRecords: memStats.totalAnalytics,
-            },
-        };
-        return {
-            reply: JSON.stringify(finalLeads),
-            updatedHistory: [
-                ...history,
-                { role: 'user', content: safeMessage },
-                { role: 'assistant', content: `[Retrieved ${finalLeads.length} leads from memory]` },
-            ],
-            _meta,
-        };
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // LAYER 4: APPLICATION & ORCHESTRATION (Lead Generation Pipeline)
-    // This layer orchestrates the entire lead generation process, leveraging capabilities
-    // from the underlying layers to understand user intent, retrieve data, process models,
-    // and deliver actionable leads.
-    // ═══════════════════════════════════════════════════════════════════════════════
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // B2B AI EXECUTION PIPELINE — 8 LAYERS ARCHITECTURE
