@@ -1113,7 +1113,7 @@ async function generateEmailsForLead(companyData, contactPerson, domain, userPro
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 19 — SINGLE COMPANY PIPELINE (UPGRADED)
+// SECTION 19 — SINGLE COMPANY PIPELINE (UPGRADED WITH RELAXED MODE)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
@@ -1199,21 +1199,34 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             candidateEmails.map(email => AdvancedEmailValidator.validate(email, domain, { skipCache: false }))
         );
 
-        // Filter those above threshold
+        // ---- NEW: RELAXED MODE ----
+        // Filter those above threshold (strict)
         const passing = validationResults
             .filter(v => v.valid)
             .sort((a, b) => b.confidence - a.confidence);
 
-        if (passing.length === 0) {
-            console.warn(`🗑️ [REJECTED] ${companyName} — no emails passed validation`);
-            return null;
+        let topValidation;
+        let isProbable = false;
+
+        if (passing.length > 0) {
+            topValidation = passing[0];
+        } else {
+            // No strict pass – pick the best candidate if confidence > 10
+            const sorted = validationResults.sort((a, b) => b.confidence - a.confidence);
+            if (sorted.length > 0 && sorted[0].confidence > 10) {
+                topValidation = sorted[0];
+                isProbable = true;
+                console.log(`⚠️ [PROBABLE] Using best available email with confidence ${topValidation.confidence}`);
+            } else {
+                console.warn(`🗑️ [REJECTED] ${companyName} — no email with confidence > 10`);
+                return null;
+            }
         }
 
-        const topValidation = passing[0];
-        const resolvedEmail = candidateEmails[validationResults.indexOf(topValidation)]; // map back
+        const resolvedEmail = candidateEmails[validationResults.indexOf(topValidation)];
         const classification = classifyEmail(resolvedEmail, domain);
 
-        console.log(`✅ ${companyName} → ${resolvedEmail} [${classification.type}] confidence:${topValidation.confidence} smtp:${topValidation.smtpResult} grade:${topValidation.grade}`);
+        console.log(`✅ ${companyName} → ${resolvedEmail} [${classification.type}] confidence:${topValidation.confidence} smtp:${topValidation.smtpResult} grade:${topValidation.grade} ${isProbable ? '(PROBABLE)' : ''}`);
 
         // Store validation in contact memory
         setContactMemory(resolvedEmail, {
@@ -1256,10 +1269,15 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             pageScore,
             hallucinationCount: (companyData?._hallucinationFlags || []).length,
             domainReputation: 70, // placeholder; we could compute
-            multipleEmailsFound: passing.length > 1,
+            multipleEmailsFound: candidateEmails.length > 1,
             sourceCount: companyData?.contactEmails?.length || 0,
         };
-        const leadScore = MLConfidenceScorer.score(features);
+        let leadScore = MLConfidenceScorer.score(features);
+
+        // If probable, reduce score to reflect lower confidence
+        if (isProbable) {
+            leadScore = Math.max(20, leadScore - 15);
+        }
 
         if (leadScore < 15) { console.warn(`🗑️ [SCORE GATE] ${companyName} rejected (${leadScore}/100)`); return null; }
 
@@ -1289,7 +1307,8 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         // Record outcome
         recordOutcome({ domain, industry: intent.industry, role: bestContact?.role, companySize: companyData?.size, leadScore }, 'viewed');
 
-        return {
+        // Build return object
+        const lead = {
             name: bestContact?.name || companyName,
             company: companyName,
             domain,
@@ -1299,13 +1318,14 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             verificationGrade: topValidation.grade || MLConfidenceScorer.grade(leadScore),
             emailValidation: {
                 confidenceScore: topValidation.confidence,
-                verdict: topValidation.valid ? 'verified' : 'rejected',
+                verdict: isProbable ? 'probable' : (topValidation.valid ? 'verified' : 'rejected'),
                 smtpResult: topValidation.smtpResult,
                 reason: topValidation.reason,
                 grade: topValidation.grade,
                 catchAll: topValidation.catchAll || false,
+                warning: isProbable ? 'This email is likely correct but could not be fully verified via SMTP. Use with caution.' : '',
             },
-            allEmailOptions: passing.map(v => v.email),
+            allEmailOptions: validationResults.filter(v => v.confidence > 10).map(v => v.email),
             role: bestContact?.role || (companyData?.model === 'B2B' ? 'Decision Maker' : 'Owner'),
             linkedIn: bestContact?.linkedIn || null,
             companySize: companyData?.size || 'unknown',
@@ -1326,6 +1346,8 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
                 { type: 'breakup', subject: emailSequence.breakup.subject, body: emailSequence.breakup.body },
             ],
         };
+
+        return lead;
 
     } catch (err) {
         console.warn(`[processOneCompany Error] ${err.message}`);
@@ -1355,7 +1377,7 @@ async function _handleBusinessQA(message, history, userProfile, apiKey) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 21 — LEAD GEN PIPELINE ORCHESTRATOR (unchanged, but uses new processOneCompany)
+// SECTION 21 — LEAD GEN PIPELINE ORCHESTRATOR (modified final message)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, userId) {
@@ -1559,25 +1581,33 @@ Never return null for target or industry. Infer from context.`;
         },
     };
 
-    console.log(`🏁 Done. ${leadsToReturn.length} verified leads returned.`);
+    console.log(`🏁 Done. ${leadsToReturn.length} leads returned (${allVerifiedLeads.filter(l => l.emailValidation.verdict === 'verified').length} verified, ${allVerifiedLeads.filter(l => l.emailValidation.verdict === 'probable').length} probable).`);
     console.log(`🧠 Memory: ${memStats.totalCompanies} companies | ${memStats.totalContacts} contacts | ${memStats.totalResearch} research records`);
     console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
     console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
 
     if (leadsToReturn.length === 0) {
         return {
-            reply:          'Found companies but no emails passed verification. Try a different industry or location.',
-            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No verified leads.' }],
+            reply:          'We found companies, but unfortunately could not discover any usable emails. Try a different industry or location.',
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: 'No usable leads.' }],
             _meta,
         };
     }
+
+    // Build a summary message
+    const verifiedCount = leadsToReturn.filter(l => l.emailValidation.verdict === 'verified').length;
+    const probableCount = leadsToReturn.filter(l => l.emailValidation.verdict === 'probable').length;
+    let summary = `Generated ${leadsToReturn.length} lead${leadsToReturn.length > 1 ? 's' : ''}`;
+    if (verifiedCount > 0) summary += ` (${verifiedCount} verified`;
+    if (probableCount > 0) summary += `${verifiedCount > 0 ? ', ' : ''}${probableCount} probable`;
+    if (verifiedCount > 0 || probableCount > 0) summary += ')';
 
     return {
         reply: JSON.stringify(leadsToReturn),
         updatedHistory: [
             ...history,
             { role: 'user',      content: safeMessage },
-            { role: 'assistant', content: `[Generated ${leadsToReturn.length} verified leads]` },
+            { role: 'assistant', content: `[${summary}]` },
         ],
         _meta,
     };
@@ -2191,4 +2221,4 @@ class MLConfidenceScorer {
         if (score >= 40) return 'C';
         return 'D';
     }
-        }
+    }
