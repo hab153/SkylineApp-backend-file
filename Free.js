@@ -1113,7 +1113,7 @@ async function generateEmailsForLead(companyData, contactPerson, domain, userPro
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 19 — SINGLE COMPANY PIPELINE (UPGRADED WITH RELAXED MODE)
+// SECTION 19 — SINGLE COMPANY PIPELINE (UPGRADED WITH RELAXED MODE + FIX)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
@@ -1281,7 +1281,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 
         if (leadScore < 15) { console.warn(`🗑️ [SCORE GATE] ${companyName} rejected (${leadScore}/100)`); return null; }
 
-        // Save to MongoDB
+        // Save to MongoDB – FIX: stringify the research object
         const savedCompany = await saveCompanyFromLead({
             company: companyName,
             domain,
@@ -1289,7 +1289,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             country: companyData?.hq,
             companySize: companyData?.size,
             emails: [resolvedEmail],
-            research: companyData,
+            research: JSON.stringify(companyData), // <-- FIX: stringify to avoid CastError
             leadScore,
         });
 
@@ -2221,4 +2221,4 @@ class MLConfidenceScorer {
         if (score >= 40) return 'C';
         return 'D';
     }
-    }
+        }
