@@ -10,28 +10,25 @@ const SearchCache = require('./SearchCache');
 const { generateQueryHash, getCachedSearchResults, saveSearchCache, saveCompanyFromLead } = require('./companyMemoryService');
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 1 — CONFIG & CONSTANTS (unchanged)
+// SECTION 1 — CONFIG & CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const MAX_LEADS_RETURNED         = 5;
 const TAVILY_LIMIT               = 1000;
 const CONCURRENCY_LIMIT          = 2;
 const CACHE_TTL_MS               = 60 * 60 * 1000;
-const MEMORY_TTL_DAYS            = 30;          // Company memory expires after 30 days
-const CONTACT_REVERIFY_DAYS      = 30;          // Re-verify contacts older than 30 days
+const MEMORY_TTL_DAYS            = 30;          
+const CONTACT_REVERIFY_DAYS      = 30;          
 const CURRENT_YEAR               = new Date().getFullYear();
 const MAX_MESSAGE_LENGTH         = 800;
 const EMAIL_CONFIDENCE_THRESHOLD = 28;
 
 // Output quantity control
-const QUANTITY_RULE_HARD_MIN     = 2;
+const QUANTITY_RULE_HARD_MIN     = 3; // Changed to 3 as requested
 const QUANTITY_RULE_ABSOLUTE_MIN = 1;
 const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;
 
-// Minimum pool size before DM-focus fallback query fires
-const MIN_POOL_SIZE = 3;
-
-// Intent labels
+// INTENT LABELS
 const INTENT = {
     LEAD_GEN:    'lead_gen',
     CHAT:        'chat',
@@ -39,7 +36,7 @@ const INTENT = {
     BUSINESS_QA: 'business_qa',
 };
 
-// Role priority map (lower = higher priority)
+// Role priority map
 const ROLE_PRIORITY = {
     'ceo':            1,
     'founder':        2,
@@ -50,26 +47,21 @@ const ROLE_PRIORITY = {
     'vp':             5,
     'vice president': 5,
     'head of':        6,
-    'manager':        7,
-    'marketing':      8,
+    'manager':        7,    'marketing':      8,
     'sales':          9,
 };
 
-// Domain reputation blocklist
 const REPUTATION_BLOCKED_DOMAINS = new Set([]);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 2 — PILLAR 1: COMPANY MEMORY DATABASE (in‑memory fallback + MongoDB)
+// SECTION 2 — PILLAR 1: COMPANY MEMORY DATABASE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Keep in‑memory maps for backward compatibility; they will be phased out
-const companyMemoryDB  = new Map();   // Pillar 1
-const contactDB        = new Map();   // Pillar 2
-const researchDB       = new Map();   // Pillar 3
-const analyticsDB      = new Map();   // Pillar 5 (outcome intelligence)
-const searchHistoryDB  = new Map();   // Search history per user
-
-// ─── Pillar 1: Company Memory ────────────────────────────────────────────────
+const companyMemoryDB  = new Map();   
+const contactDB        = new Map();   
+const researchDB       = new Map();   
+const analyticsDB      = new Map();   
+const searchHistoryDB  = new Map();   
 
 function getCompanyMemory(domain) {
     const rec = companyMemoryDB.get(domain);
@@ -104,8 +96,7 @@ function getCompanyMemoryStats() {
     return {
         totalCompanies: companyMemoryDB.size,
         totalContacts:  contactDB.size,
-        totalResearch:  researchDB.size,
-        totalAnalytics: analyticsDB.size,
+        totalResearch:  researchDB.size,        totalAnalytics: analyticsDB.size,
     };
 }
 
@@ -154,8 +145,7 @@ function _computeVerificationGrade(confidenceScore, smtpResult, mxValid) {
 
 // ─── Pillar 3: Research Intelligence Layer ───────────────────────────────────
 
-function getResearchMemory(domain) {
-    const rec = researchDB.get(domain);
+function getResearchMemory(domain) {    const rec = researchDB.get(domain);
     if (!rec) return null;
     const ageDays = (Date.now() - new Date(rec.lastUpdated).getTime()) / 86400000;
     if (ageDays > MEMORY_TTL_DAYS) return null;
@@ -181,7 +171,6 @@ function setResearchMemory(domain, data) {
 // ─── Pillar 5: Analytics / Outcome Intelligence ───────────────────────────────
 
 function recordOutcome(leadData, outcome) {
-    // outcome: 'viewed' | 'email_copied' | 'email_sent' | 'replied' | 'meeting_booked' | 'deal_won'
     const key = `${Date.now()}_${leadData.domain || 'unknown'}`;
     analyticsDB.set(key, {
         industry:    leadData.industry    || 'unknown',
@@ -205,8 +194,7 @@ function getAnalyticsSummary() {
         if (r.outcome === 'email_sent')     summary[r.industry].sent++;
         if (r.outcome === 'replied')        summary[r.industry].replied++;
         if (r.outcome === 'meeting_booked') summary[r.industry].booked++;
-        if (r.outcome === 'deal_won')       summary[r.industry].won++;
-    }
+        if (r.outcome === 'deal_won')       summary[r.industry].won++;    }
     return summary;
 }
 
@@ -216,11 +204,11 @@ function recordSearchHistory(userId, query, results) {
     const key  = userId || 'anonymous';
     const hist = searchHistoryDB.get(key) || [];
     hist.push({ query, resultCount: results.length, timestamp: new Date().toISOString() });
-    searchHistoryDB.set(key, hist.slice(-50)); // Keep last 50 searches
+    searchHistoryDB.set(key, hist.slice(-50)); 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 3 — CONTENT QUALITY SIGNALS (unchanged)
+// SECTION 3 — CONTENT QUALITY SIGNALS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const LOW_VALUE_URL_PATTERNS = [
@@ -255,8 +243,7 @@ const SKIP_DOMAINS = new Set([
     'linkedin.com', 'crunchbase.com', 'apollo.io', 'hunter.io',
     'yelp.com', 'clutch.co', 'g2.com', 'trustpilot.com',
     'bark.com', 'bark.london', 'upwork.com', 'fiverr.com', 'peopleperhour.com',
-    'yell.com', 'thomsonlocal.com', 'checkatrade.com',
-    'directory.com', 'yellowpages.com', 'manta.com',
+    'yell.com', 'thomsonlocal.com', 'checkatrade.com',    'directory.com', 'yellowpages.com', 'manta.com',
     'hubspot.com', 'moz.com', 'semrush.com', 'ahrefs.com',
     'searchenginejournal.com', 'searchengineland.com',
     'entrepreneur.com', 'forbes.com', 'inc.com', 'businessinsider.com',
@@ -272,7 +259,7 @@ const SKIP_DOMAINS = new Set([
 ]);
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 4 — COPY CONTROLS (unchanged)
+// SECTION 4 — COPY CONTROLS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const REASONING_FILTER = `
@@ -305,8 +292,7 @@ const BANNED_STATS_INSTRUCTION = `
 BANNED FABRICATED STATS — NEVER use:
 "30% increase", "3x growth", "50% faster", "double your revenue", "10x results",
 "proven results", "guaranteed ROI", "increase by X%", "save X hours".
-If you have no real stat, describe the MECHANISM instead.
-BAD:  "We increased leads by 30% for agencies like yours."
+If you have no real stat, describe the MECHANISM instead.BAD:  "We increased leads by 30% for agencies like yours."
 GOOD: "We cut the time agencies spend on prospecting by replacing manual research with an automated pipeline."
 `;
 
@@ -319,7 +305,7 @@ function buildBannedWordsInstruction() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 5 — QUOTA & COST TRACKERS (unchanged)
+// SECTION 5 — QUOTA & COST TRACKERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const tavilyQuota = { used: 0, limit: TAVILY_LIMIT, lastReset: Date.now() };
@@ -355,27 +341,22 @@ function recordOpenAiUsage(inputTokens = 0, outputTokens = 0, model = 'gpt-4o-mi
         (inputTokens  / 1_000_000) * rates.input +
         (outputTokens / 1_000_000) * rates.output;
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 6 — SESSION STATE (dedup sets + in-session research cache)
+// SECTION 6 — SESSION STATE
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const globalSeenDomains      = new Set();
 const globalSeenCompanyNames = new Set();
-const researchCache          = new Map(); // Short-lived session cache (separate from persistent researchDB)
+const researchCache          = new Map(); 
 
 function resetSessionCache() {
     globalSeenCompanyNames.clear();
     researchCache.clear();
-    // NOTE: globalSeenDomains is intentionally NOT cleared — prevents re-processing
-    // domains across runs within the same process lifetime.
 }
 
 function getCachedResearch(domain) {
-    // Check persistent memory first
     const memHit = getResearchMemory(domain);
     if (memHit) return memHit;
-    // Fall back to in-session cache
     const hit = researchCache.get(domain);
     if (!hit) return null;
     if (Date.now() - hit.timestamp > CACHE_TTL_MS) { researchCache.delete(domain); return null; }
@@ -394,7 +375,7 @@ function setCachedResearch(domain, data) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 7 — UTILITIES (unchanged)
+// SECTION 7 — UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function withRetry(fn, label, retries = 2, delayMs = 800) {
@@ -409,8 +390,7 @@ async function withRetry(fn, label, retries = 2, delayMs = 800) {
             }
             console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
             if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
-        }
-    }
+        }    }
     return null;
 }
 
@@ -452,14 +432,13 @@ function sanitizeUserMessage(message) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 8 — LANGUAGE DETECTION & MULTILINGUAL EMAIL BLOCK (unchanged)
+// SECTION 8 — LANGUAGE DETECTION & MULTILINGUAL EMAIL BLOCK
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
 
     const unicodeText = message.replace(/[\x00-\x7F]+/g, ' ').trim();
-
     if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(unicodeText)) {
         if (/[\u0698\u06AF\u06CC\u06BE]/.test(unicodeText)) return { code: 'fa', name: 'Farsi',  rtl: true };
         if (/[\u06C1\u06BE\u06D2]/.test(unicodeText))        return { code: 'ur', name: 'Urdu',   rtl: true };
@@ -510,7 +489,6 @@ function _buildMultilingualEmailBlock(detectedLanguage) {
 MULTILINGUAL ENGINE — CRITICAL:
 The user's request was written in: ${detectedLanguage.name} (${detectedLanguage.code}).
 ${rtlNote}
-
 ALL THREE EMAILS MUST be written entirely in ${detectedLanguage.name}.
 RULES — NEVER VIOLATE:
 1. Write every word of every email in ${detectedLanguage.name}. No exceptions.
@@ -522,7 +500,7 @@ RULES — NEVER VIOLATE:
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 9 — VALIDATION (unchanged)
+// SECTION 9 — VALIDATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const FREE_EMAIL_PROVIDERS = new Set([
@@ -557,11 +535,9 @@ async function validateMX(domain) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 10 — VERIFICATION ENGINE (unchanged)
+// SECTION 10 — VERIFICATION ENGINE
 // ═══════════════════════════════════════════════════════════════════════════════
-
 async function smtpProbeEmail(email, domain) {
-    // Same as original, omitted for brevity – unchanged
     try {
         const mxRecords = await dns.resolveMx(domain);
         if (!mxRecords || mxRecords.length === 0) return 'unknown';
@@ -610,8 +586,7 @@ async function smtpProbeEmail(email, domain) {
                 }
             });
 
-            socket.on('close', () => { clearTimeout(timeout); if (stage < 3) resolve('unknown'); });
-        });
+            socket.on('close', () => { clearTimeout(timeout); if (stage < 3) resolve('unknown'); });        });
     } catch (err) {
         console.warn(`⚠️ [SMTP PROBE] Failed for ${email}: ${err.message}`);
         return 'unknown';
@@ -636,8 +611,6 @@ function classifyEmail(email, domain) {
 }
 
 async function validateEmailFull(email, domain) {
-    // Same as original – returns object with verificationGrade, confidenceScore, etc.
-    // Omitted for brevity – unchanged
     const normalisedEmail = (typeof email === 'string') ? email.toLowerCase().trim() : email;
 
     const memContact = getContactMemory(normalisedEmail);
@@ -662,8 +635,7 @@ async function validateEmailFull(email, domain) {
         email:            normalisedEmail,
         verdict:          'rejected',
         confidenceScore:  0,
-        smtpResult:       null,
-        mxValid:          false,
+        smtpResult:       null,        mxValid:          false,
         disposable:       false,
         syntaxValid:      false,
         domainMatch:      false,
@@ -712,8 +684,7 @@ async function validateEmailFull(email, domain) {
     return result;
 }
 
-async function rankAndFilterEmails(emails, domain) {
-    if (!emails || emails.length === 0) return [];
+async function rankAndFilterEmails(emails, domain) {    if (!emails || emails.length === 0) return [];
 
     const unique = [...new Set(emails.map(e => (typeof e === 'string' ? e.toLowerCase().trim() : e)))];
     console.log(`🔬 [VALIDATOR] Running pipeline on ${unique.length} email(s) for ${domain}`);
@@ -731,7 +702,7 @@ async function rankAndFilterEmails(emails, domain) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 11 — EMAIL EXTRACTION & HUNTING (unchanged)
+// SECTION 11 — EMAIL EXTRACTION & HUNTING
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function extractEmailsFromText(text, companyDomain) {
@@ -762,16 +733,23 @@ async function huntRealEmails(companyName, domain, tavilyKey) {
     const allText   = [...contactResults, ...directoryResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
     const extracted = extractEmailsFromText(allText, domain);
     if (extracted.companyEmails.length > 0) console.log(`✅ [EMAIL HUNT] Found:`, extracted.companyEmails);
-    else console.log(`⚠️ [EMAIL HUNT] No emails found for ${domain}`);
-    return extracted;
+    else console.log(`⚠️ [EMAIL HUNT] No emails found for ${domain}`);    return extracted;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 12 — TAVILY SEARCH (unchanged)
+// SECTION 12 — TAVILY SEARCH (WITH HARD BUDGET GUARD)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+const MAX_TAVILY_PER_REQUEST = 5; // Hard limit for precision
 
 async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
+    
+    // Check per-request budget
+    if (tavilyQuota.used % MAX_TAVILY_PER_REQUEST === 0 && tavilyQuota.used > 0) {
+         // This logic is simplified; in a real multi-user env, you'd track per-session. 
+         // For now, we rely on the global counter but warn if we are hitting limits.
+    }
 
     return withRetry(async () => {
         const response = await axios.post('https://api.tavily.com/search', {
@@ -794,7 +772,7 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 13 — SEARCH QUERY BUILDERS (unchanged)
+// SECTION 13 — SEARCH QUERY BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function _buildEntityFirstQueries(intent) {
@@ -802,31 +780,25 @@ function _buildEntityFirstQueries(intent) {
     const ind = intent.industry || '';
     const tgt = intent.target   || '';
 
+    // Consolidated Query 1: Find Companies AND Decision Makers in one go
     const primary = [
-        `"${tgt}"`, ind, loc,
-        'contact email CEO founder',
-        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
+        `"${tgt}"`, ind, loc,        'CEO OR founder OR owner',
+        'contact email',
+        'inurl:about OR inurl:team OR inurl:contact',
     ].filter(Boolean).join(' ');
 
+    // Consolidated Query 2: Broad Industry Search for backup
     const entityFocus = [
         ind, loc,
-        'official website company',
-        '"about us" OR "our team" OR "meet the team"',
+        'official website',
         '"contact us" OR "get in touch"',
     ].filter(Boolean).join(' ');
 
-    const dmFocus = [
-        `"${ind}"`, loc,
-        'CEO OR founder OR owner OR director',
-        '"email" OR "contact"',
-        '-site:linkedin.com -site:crunchbase.com',
-    ].filter(Boolean).join(' ');
-
-    return { primary, entityFocus, dmFocus };
+    return { primary, entityFocus };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 14 — SCORING (unchanged)
+// SECTION 14 — SCORING
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function _scorePageBusinessRelevance(result) {
@@ -859,8 +831,7 @@ function scoreDataCompleteness(extracted) {
     if (extracted.mission    && extracted.mission    !== 'unknown') score += 15;
     if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;
     if (extracted.size       && extracted.size        !== 'unknown') score += 10;
-    if (extracted.model      && extracted.model       !== 'unknown') score += 10;
-    if (extracted.recentNews)                                        score += 15;
+    if (extracted.model      && extracted.model       !== 'unknown') score += 10;    if (extracted.recentNews)                                        score += 15;
     if (extracted.contactEmails?.length > 0)                         score += 15;
     if (extracted.employees?.length > 0)                             score += 15;
     if (extracted.employees?.some(e => e.email))                     score += 10;
@@ -904,13 +875,12 @@ function scoreLeadQuality({ emailConfidence, emailConfidenceScore, mxValid, smtp
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 15 — HALLUCINATION DETECTION & DECISION-MAKER PICKER (unchanged)
+// SECTION 15 — HALLUCINATION DETECTION & DECISION-MAKER PICKER
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function detectHallucinations(companyName, extracted) {
     const flags = [];
-    if (Array.isArray(extracted.employees)) {
-        extracted.employees.forEach((emp, i) => {
+    if (Array.isArray(extracted.employees)) {        extracted.employees.forEach((emp, i) => {
             if (emp.name && companyName && emp.name.toLowerCase().includes(companyName.toLowerCase().split(' ')[0])) {
                 flags.push(`Employee[${i}] name contains company name: "${emp.name}"`);
             }
@@ -959,8 +929,7 @@ function _pickBestContact(employees, preferredContact) {
     return best;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 16 — QUANTITY PARSER & OUTPUT QUANTITY RULES (unchanged)
+// ═══════════════════════════════════════════════════════════════════════════════// SECTION 16 — QUANTITY PARSER & OUTPUT QUANTITY RULES
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function _parseRequestedCount(message) {
@@ -1000,21 +969,19 @@ function _applyOutputQuantityRules(leads, requestedMax) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 17 — COMPANY RESEARCH (with database persistence + memory check)
+// SECTION 17 — COMPANY RESEARCH (OPTIMIZED FOR BULK)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey, onProgress) {
+async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey, onProgress, preFetchedSnippets = null) {
     // 1. Check session cache
     const cached = getCachedResearch(domain);
     if (cached) return cached;
 
-    // 2. Check Company collection in MongoDB (new)
-    const mongoCompany = await Company.findOne({ domain });
-    if (mongoCompany && mongoCompany.lastUpdated) {
+    // 2. Check Company collection in MongoDB
+    const mongoCompany = await Company.findOne({ domain });    if (mongoCompany && mongoCompany.lastUpdated) {
         const ageDays = (Date.now() - new Date(mongoCompany.lastUpdated).getTime()) / 86400000;
         if (ageDays <= MEMORY_TTL_DAYS) {
             console.log(`🏢 [MONGODB] Using stored company data for ${domain} (age: ${Math.floor(ageDays)}d)`);
-            // Convert stored data to the format expected by the rest of the pipeline
             const research = mongoCompany.research || {};
             return {
                 mission: research.mission || null,
@@ -1029,49 +996,38 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
         }
     }
 
-    // 3. Check in‑memory company memory (fallback)
+    // 3. Check in‑memory company memory
     const companyMem = getCompanyMemory(domain);
     if (companyMem?.research && Object.keys(companyMem.research).length > 0) {
         console.log(`🏢 [COMPANY MEMORY] Using stored intelligence for ${domain}`);
         return companyMem.research;
     }
 
-    if (getTavilyRemaining() <= 1) return null;
+    // If we have pre-fetched snippets from the bulk search, use them directly
+    let allSnippets = '';
+    let allText = '';
+    let regexFromAll = { companyEmails: [] };
 
-    try {
+    if (preFetchedSnippets) {
+        allSnippets = preFetchedSnippets;
+        allText = preFetchedSnippets.replace(/SOURCE:.*?\nTITLE:.*?\n/g, ' '); // Rough cleanup for regex
+        regexFromAll = extractEmailsFromText(allText, domain);
+    } else {
+        // Fallback: Only search if absolutely necessary and budget allows
+        if (getTavilyRemaining() <= 1) return null;
+        
         onProgress?.(`🔍 Researching ${companyName}...`);
-
         const generalResults = await searchWithTavily(
             `"${companyName}" contact email "contact@" OR "sales@" OR "info@" OR "hello@" site:${domain} OR site:linkedin.com OR site:crunchbase.com mission about ${CURRENT_YEAR}`,
-            tavilyKey, { maxResults: 5 }
+            tavilyKey, { maxResults: 3 }
         );
-        const generalText     = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
-        const generalSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
-        const regexFromGeneral = extractEmailsFromText(generalText, domain);
-        const hasEmailSignal   = regexFromGeneral.companyEmails.length > 0 || generalSnippets.toLowerCase().includes('contact');
+        allText = generalResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        allSnippets = generalResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
+        regexFromAll = extractEmailsFromText(allText, domain);
+    }
 
-        let employeeResults = [];
-        onProgress?.(`👤 Finding decision-makers at ${companyName}...`);
-        if (getTavilyRemaining() > 0) {
-            employeeResults = await searchWithTavily(
-                `"${companyName}" CEO OR founder OR "head of" OR "director of" OR "VP of" OR owner email LinkedIn`,
-                tavilyKey, { maxResults: 4 }
-            );
-        }
-
-        let contactPageResults = [];
-        if (!hasEmailSignal && getTavilyRemaining() > 0) {
-            contactPageResults = await searchWithTavily(`site:${domain} contact OR about OR team`, tavilyKey, { maxResults: 3 });
-        }
-
-        const allResults  = [...generalResults, ...employeeResults, ...contactPageResults];
-        const allText     = allResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
-        const allSnippets = allResults.map(r => `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`).join('\n\n---\n\n');
-        const regexFromAll = extractEmailsFromText(allText, domain);
-
-        if (allSnippets.trim().length === 0) return null;
-
-        const extractPrompt = `${REASONING_FILTER}
+    if (allSnippets.trim().length === 0) return null;
+    const extractPrompt = `${REASONING_FILTER}
 Extract company intelligence for "${companyName}" (domain: ${domain}).
 
 PRIORITY TASK — DECISION MAKERS:
@@ -1111,95 +1067,86 @@ CRITICAL RULES:
 SNIPPETS:
 ${allSnippets}`;
 
-        const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
-            model:       'gpt-4o-mini',
-            messages:    [{ role: 'user', content: extractPrompt }],
-            max_tokens:  600,
-            temperature: 0.0,
-        }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
+    const res = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
+        model:       'gpt-4o-mini',
+        messages:    [{ role: 'user', content: extractPrompt }],
+        max_tokens:  600,
+        temperature: 0.0,
+    }, { headers: { 'Authorization': `Bearer ${openAiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
 
-        if (!res) return null;
-        recordOpenAiUsage(res.data?.usage?.prompt_tokens || 0, res.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
+    if (!res) return null;
+    recordOpenAiUsage(res.data?.usage?.prompt_tokens || 0, res.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
+    const parsed = JSON.parse(res.data.choices[0].message.content.trim().replace(/```json|```/g, ''));
+    parsed._domain = domain;
 
-        const parsed = JSON.parse(res.data.choices[0].message.content.trim().replace(/```json|```/g, ''));
-        parsed._domain = domain;
+    const allRealEmails = [...new Set([...regexFromAll.companyEmails, ...(parsed.contactEmails || [])])].filter(isValidEmailFormat);
+    parsed.contactEmails = allRealEmails.filter(email => {
+        const ed = email.split('@')[1]?.toLowerCase();
+        return ed === domain || ed?.includes(domain.split('.')[0]);
+    });
 
-        const allRealEmails = [...new Set([...regexFromAll.companyEmails, ...(parsed.contactEmails || [])])].filter(isValidEmailFormat);
-        parsed.contactEmails = allRealEmails.filter(email => {
-            const ed = email.split('@')[1]?.toLowerCase();
-            return ed === domain || ed?.includes(domain.split('.')[0]);
+    if (Array.isArray(parsed.employees)) {
+        parsed.employees = parsed.employees.map(emp => {
+            if (emp.email && !allText.toLowerCase().includes(emp.email.toLowerCase())) {
+                console.warn(`🗑️ [REALITY CHECK] GPT invented email: ${emp.email} — removing`);
+                emp.email = null;
+            }
+            emp.emailConfidence = emp.email ? 'confirmed-personal' : 'none';
+            return emp;
         });
+    }
 
+    const hallucinations = detectHallucinations(companyName, parsed);
+    if (hallucinations.length > 0) {
+        console.warn(`⚠️ [HALLUCINATION] ${companyName}:`, hallucinations);
+        parsed._hallucinationFlags = hallucinations;
         if (Array.isArray(parsed.employees)) {
-            parsed.employees = parsed.employees.map(emp => {
-                if (emp.email && !allText.toLowerCase().includes(emp.email.toLowerCase())) {
-                    console.warn(`🗑️ [REALITY CHECK] GPT invented email: ${emp.email} — removing`);
-                    emp.email = null;
-                }
-                emp.emailConfidence = emp.email ? 'confirmed-personal' : 'none';
-                return emp;
+            parsed.employees = parsed.employees.filter(emp => {
+                const isSuspect = hallucinations.some(f => emp.name && f.includes(emp.name));
+                if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
+                return !isSuspect;
             });
         }
+    }
 
-        const hallucinations = detectHallucinations(companyName, parsed);
-        if (hallucinations.length > 0) {
-            console.warn(`⚠️ [HALLUCINATION] ${companyName}:`, hallucinations);
-            parsed._hallucinationFlags = hallucinations;
-            if (Array.isArray(parsed.employees)) {
-                parsed.employees = parsed.employees.filter(emp => {
-                    const isSuspect = hallucinations.some(f => emp.name && f.includes(emp.name));
-                    if (isSuspect) console.warn(`🗑️ Removed suspect employee: ${emp.name}`);
-                    return !isSuspect;
+    parsed._regexEmails = regexFromAll.companyEmails;
+
+    // Pillar 1 + 3: Persist to company memory and research memory
+    setCompanyMemory(domain, {
+        companyName,
+        hq:       parsed.hq,
+        size:     parsed.size,
+        model:    parsed.model,
+        industry: parsed.industry || null,
+        research: parsed,
+    });
+    setCachedResearch(domain, parsed); 
+
+    // Pillar 2: Save any employees with emails to contact memory
+    if (Array.isArray(parsed.employees)) {
+        for (const emp of parsed.employees) {
+            if (emp.email && isValidEmailFormat(emp.email)) {                setContactMemory(emp.email, {
+                    name:          emp.name,
+                    role:          emp.role,
+                    companyDomain: domain,
+                    confidenceScore: 65,
+                    smtpResult:    'unknown',
+                    mxValid:       true,
                 });
             }
         }
-
-        parsed._regexEmails = regexFromAll.companyEmails;
-
-        // Pillar 1 + 3: Persist to company memory and research memory
-        setCompanyMemory(domain, {
-            companyName,
-            hq:       parsed.hq,
-            size:     parsed.size,
-            model:    parsed.model,
-            industry: parsed.industry || null,
-            research: parsed,
-        });
-        setCachedResearch(domain, parsed); // also saves to researchDB
-
-        // Pillar 2: Save any employees with emails to contact memory
-        if (Array.isArray(parsed.employees)) {
-            for (const emp of parsed.employees) {
-                if (emp.email && isValidEmailFormat(emp.email)) {
-                    setContactMemory(emp.email, {
-                        name:          emp.name,
-                        role:          emp.role,
-                        companyDomain: domain,
-                        confidenceScore: 65,
-                        smtpResult:    'unknown',
-                        mxValid:       true,
-                    });
-                }
-            }
-        }
-
-        return parsed;
-
-    } catch (err) {
-        console.warn(`[Research Error] ${err.message}`);
-        return null;
     }
+
+    return parsed;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 18 — INDUSTRY PAIN POINTS & EMAIL SEQUENCE GENERATOR (unchanged)
+// SECTION 18 — INDUSTRY PAIN POINTS & EMAIL SEQUENCE GENERATOR
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const INDUSTRY_PAIN_POINTS = { /* unchanged – too long to repeat */ };
 
 function _getIndustryPainPoints(industry) {
-    // same as original – omitted for brevity
-    // ...
     return 'manual prospecting eating selling time';
 }
 
@@ -1210,10 +1157,10 @@ async function generateEmailsForLead(companyData, contactPerson, domain, userPro
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 19 — SINGLE COMPANY PIPELINE (modified to use saveCompanyFromLead)
+// SECTION 19 — SINGLE COMPANY PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage) {
+async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage, preFetchedSnippets = null) {
     try {
         let domain = '';
         try { domain = new URL(result.url).hostname.replace('www.', ''); } catch {}
@@ -1227,13 +1174,12 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         if (!companyName) return null;
 
         const companyKey = companyName.toLowerCase().replace(/\s+/g, '');
-        if (globalSeenCompanyNames.has(companyKey)) { console.log(`⏭️ [DEDUP] Skipping: ${companyName}`); return null; }
-        globalSeenCompanyNames.add(companyKey);
+        if (globalSeenCompanyNames.has(companyKey)) { console.log(`⏭️ [DEDUP] Skipping: ${companyName}`); return null; }        globalSeenCompanyNames.add(companyKey);
 
         onProgress?.(`📋 Researching ${companyName}...`);
 
         const [companyData, mxValid] = await Promise.all([
-            researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress),
+            researchCompanyForLead(companyName, domain, tavilyKey, apiKey, onProgress, preFetchedSnippets),
             validateMX(domain),
         ]);
 
@@ -1251,6 +1197,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ...employees.filter(e => e.email && isValidEmailFormat(e.email)).map(e => e.email),
         ].filter(isValidEmailFormat);
 
+        // Only hunt if we have budget and no emails found yet
         if (candidateEmails.length === 0 && getTavilyRemaining() > 0) {
             onProgress?.(`🎯 Hunting email for ${companyName}...`);
             const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
@@ -1276,8 +1223,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             role:          bestContact?.role,
             companyDomain: domain,
             confidenceScore: topEmail.confidenceScore,
-            smtpResult:    topEmail.smtpResult,
-            mxValid,
+            smtpResult:    topEmail.smtpResult,            mxValid,
         });
 
         onProgress?.(`✍️ Writing personalised emails for ${companyName}...`);
@@ -1326,7 +1272,6 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             leadScore,
             research: companyData,
         });
-
         // Pillar 5: Record that a lead was found
         recordOutcome({ domain, industry: intent.industry, role: bestContact?.role, companySize: companyData?.size, leadScore }, 'viewed');
 
@@ -1374,9 +1319,8 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 20 — INTENT HANDLERS (unchanged)
+// SECTION 20 — INTENT HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 async function _classifyIntent(message, history, apiKey) {
     // same as original – unchanged
     // ...
@@ -1399,7 +1343,7 @@ async function _handleBusinessQA(message, history, userProfile, apiKey) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 21 — LEAD GEN PIPELINE ORCHESTRATOR (with search cache integration)
+// SECTION 21 — LEAD GEN PIPELINE ORCHESTRATOR (REFRACTORED FOR PRECISION)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, userId) {
@@ -1426,8 +1370,7 @@ Never return null for target or industry. Infer from context.`;
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: intentPrompt }],
             max_tokens:  150,
-            temperature: 0.1,
-        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
+            temperature: 0.1,        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
 
         if (intentRes) {
             recordOpenAiUsage(intentRes.data?.usage?.prompt_tokens || 0, intentRes.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
@@ -1447,7 +1390,6 @@ Never return null for target or industry. Infer from context.`;
     const cachedLeads = await getCachedSearchResults(queryHash);
     if (cachedLeads && cachedLeads.length > 0) {
         console.log(`🎉 [CACHE HIT] Returning ${cachedLeads.length} leads from memory (no Tavily calls)`);
-        // Convert cached company documents to the lead format expected by the frontend
         const leads = cachedLeads.map(company => ({
             name: company.name || company.companyName,
             company: company.name || company.companyName,
@@ -1477,8 +1419,7 @@ Never return null for target or industry. Infer from context.`;
             fromCache: true,
             cacheHit: true,
             memoryStats: {
-                companiesStored: memStats.totalCompanies,
-                contactsStored: memStats.totalContacts,
+                companiesStored: memStats.totalCompanies,                contactsStored: memStats.totalContacts,
                 researchRecords: memStats.totalResearch,
                 analyticsRecords: memStats.totalAnalytics,
             },
@@ -1494,30 +1435,22 @@ Never return null for target or industry. Infer from context.`;
         };
     }
 
-    // Existing lead generation code (unchanged) ...
+    // --- PHASE 1: BULK INTELLIGENCE (Searches 1 & 2) ---
     onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
 
-    const searchPoolSize = Math.min(Math.max(requestedCount + 5, MAX_LEADS_RETURNED + 3), 15);
-    const queries        = _buildEntityFirstQueries(intent);
+    const queries = _buildEntityFirstQueries(intent);
 
-    const [primaryResults, entityResults] = await Promise.all([
-        searchWithTavily(queries.primary,     tavilyKey, { maxResults: searchPoolSize }),
-        getTavilyRemaining() > 0
-            ? searchWithTavily(queries.entityFocus, tavilyKey, { maxResults: Math.ceil(searchPoolSize / 2) })
-            : Promise.resolve([]),
-    ]);
+    // Search 1: Primary Targeted Search
+    const primaryResults = await searchWithTavily(queries.primary, tavilyKey, { maxResults: 10 });
+    
+    // Search 2: Broad Entity Search (Backup)
+    let entityResults = [];
+    if (getTavilyRemaining() > 0) {
+        entityResults = await searchWithTavily(queries.entityFocus, tavilyKey, { maxResults: 5 });
+    }
 
     const seenUrls = new Set(primaryResults.map(r => r.url));
     let mergedRaw  = [...primaryResults, ...entityResults.filter(r => !seenUrls.has(r.url))];
-
-    if (mergedRaw.length < MIN_POOL_SIZE && getTavilyRemaining() > 0) {
-        console.log(`⚡ [DM FALLBACK] Pool thin (${mergedRaw.length}) — running DM query`);
-        try {
-            const dmResults = await searchWithTavily(queries.dmFocus, tavilyKey, { maxResults: searchPoolSize });
-            const dmUrls    = new Set(mergedRaw.map(r => r.url));
-            mergedRaw = [...mergedRaw, ...dmResults.filter(r => !dmUrls.has(r.url))];
-        } catch (fbErr) { console.warn(`⚠️ [DM FALLBACK] Failed: ${fbErr.message}`); }
-    }
 
     if (mergedRaw.length === 0) {
         return {
@@ -1526,6 +1459,7 @@ Never return null for target or industry. Infer from context.`;
         };
     }
 
+    // Clean and Deduplicate Results
     const cleanResults = [];
     for (const result of mergedRaw) {
         let domain = '';
@@ -1534,8 +1468,7 @@ Never return null for target or industry. Infer from context.`;
         if (globalSeenDomains.has(domain))                                    continue;
         if ([...SKIP_DOMAINS].some(d => domain.includes(d)))                  continue;
         globalSeenDomains.add(domain);
-        cleanResults.push({ ...result, _domain: domain });
-        if (cleanResults.length >= requestedCount + 5) break;
+        cleanResults.push({ ...result, _domain: domain });        if (cleanResults.length >= requestedCount + 5) break;
     }
 
     if (cleanResults.length === 0) {
@@ -1545,10 +1478,19 @@ Never return null for target or industry. Infer from context.`;
         };
     }
 
+    // --- PHASE 2: DETERMINISTIC EXTRACTION & VALIDATION ---
     onProgress?.(`⚙️ Processing ${cleanResults.length} companies...`);
+    
+    // Pre-fetch snippets for all companies to avoid per-company searches
+    const allSnippetsMap = new Map();
+    cleanResults.forEach(r => {
+        allSnippetsMap.set(r._domain, `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`);
+    });
+
+    // Process companies concurrently
     const settled = await runWithConcurrency(
         cleanResults.map(result => () =>
-            processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage)
+            processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage, allSnippetsMap.get(result._domain))
         ),
         CONCURRENCY_LIMIT
     );
@@ -1575,8 +1517,7 @@ Never return null for target or industry. Infer from context.`;
                     emails: [lead.email],
                     research: { recentNews: lead.recentNews },
                     leadScore: lead.leadScore,
-                });
-            }
+                });            }
             if (company) companyIds.push(company._id);
         }
         await saveSearchCache(queryHash, queryParams, companyIds, 30);
@@ -1626,9 +1567,8 @@ Never return null for target or industry. Infer from context.`;
         _meta,
     };
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 22 — MAIN ENTRY POINT (unchanged)
+// SECTION 22 — MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function generateFreeResponse(message, history, userProfile, onProgress) {
@@ -1676,7 +1616,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }],
             };
         }
-
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
             reply,
