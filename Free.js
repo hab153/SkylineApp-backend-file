@@ -15,7 +15,7 @@ const { generateQueryHash, getCachedSearchResults, saveSearchCache, saveCompanyF
 
 const MAX_LEADS_RETURNED         = 5;
 const TAVILY_LIMIT               = 1000;
-const CONCURRENCY_LIMIT          = 2;
+const CONCURRENCY_LIMIT          = 1; // CHANGED TO 1 TO PREVENT SEARCH STORMS
 const CACHE_TTL_MS               = 60 * 60 * 1000;
 const MEMORY_TTL_DAYS            = 30;          
 const CONTACT_REVERIFY_DAYS      = 30;          
@@ -24,7 +24,7 @@ const MAX_MESSAGE_LENGTH         = 800;
 const EMAIL_CONFIDENCE_THRESHOLD = 28;
 
 // Output quantity control
-const QUANTITY_RULE_HARD_MIN     = 3; // Changed to 3 as requested
+const QUANTITY_RULE_HARD_MIN     = 3; 
 const QUANTITY_RULE_ABSOLUTE_MIN = 1;
 const QUANTITY_RULE_DEFAULT_MAX  = MAX_LEADS_RETURNED;
 
@@ -718,39 +718,55 @@ function extractEmailsFromText(text, companyDomain) {
     return { companyEmails, allEmails: allFound };
 }
 
-async function huntRealEmails(companyName, domain, tavilyKey) {
-    if (getTavilyRemaining() <= 0) return { companyEmails: [], allEmails: [] };
-    console.log(`🎯 [EMAIL HUNT] ${companyName} @ ${domain}`);
+// REMOVED huntRealEmails to prevent search storms. We now rely on Pattern Generation.
 
-    const contactResults = await searchWithTavily(
-        `"${companyName}" contact email "@${domain}" OR "contact us" OR "email us"`,
-        tavilyKey, { maxResults: 3 }
-    );
-    const directoryResults = getTavilyRemaining() > 0
-        ? await searchWithTavily(`Email formats corporate email addresses for ${companyName}`, tavilyKey, { maxResults: 3 })
-        : [];
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 11b — EMAIL PATTERN GENERATION (The "Always-On" Engine)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-    const allText   = [...contactResults, ...directoryResults].map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
-    const extracted = extractEmailsFromText(allText, domain);
-    if (extracted.companyEmails.length > 0) console.log(`✅ [EMAIL HUNT] Found:`, extracted.companyEmails);
-    else console.log(`⚠️ [EMAIL HUNT] No emails found for ${domain}`);    return extracted;
+async function generateAndVerifyPatterns(name, domain) {
+    if (!name || !domain) return [];
+    
+    // Clean the name for email formatting
+    const parts = name.trim().toLowerCase().split(' ');
+    if (parts.length < 2) return []; // Need at least first and last name
+
+    const first = parts[0];
+    const last = parts[parts.length - 1];
+        // Common corporate patterns
+    const patterns = [
+        `${first}.${last}`,
+        `${first}${last}`,
+        `${first[0]}.${last}`,
+        `${first[0]}${last}`,
+        `${first}_${last}`,
+        `${first}-${last}`
+    ];
+
+    const candidates = patterns.map(p => `${p}@${domain}`);
+    console.log(`🛠️ [PATTERN GEN] Testing ${candidates.length} patterns for ${name} @ ${domain}`);
+
+    // Verify each pattern via SMTP (without sending an actual email)
+    const verified = [];
+    for (const email of candidates) {
+        const result = await validateEmailFull(email, domain);
+        if (result.verdict === 'verified' || result.verdict === 'probable') {
+            verified.push(result);
+            console.log(`✅ [PATTERN HIT] Found valid email: ${email}`);
+            break; // Stop at the first valid one to save resources
+        }
+    }
+
+    return verified;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 12 — TAVILY SEARCH (WITH HARD BUDGET GUARD)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const MAX_TAVILY_PER_REQUEST = 5; // Hard limit for precision
-
 async function searchWithTavily(query, tavilyKey, options = {}) {
     if (getTavilyRemaining() <= 0) throw new Error('Tavily quota exhausted');
     
-    // Check per-request budget
-    if (tavilyQuota.used % MAX_TAVILY_PER_REQUEST === 0 && tavilyQuota.used > 0) {
-         // This logic is simplified; in a real multi-user env, you'd track per-session. 
-         // For now, we rely on the global counter but warn if we are hitting limits.
-    }
-
     return withRetry(async () => {
         const response = await axios.post('https://api.tavily.com/search', {
             api_key:             tavilyKey,
@@ -766,8 +782,7 @@ async function searchWithTavily(query, tavilyKey, options = {}) {
             title:   r.title   || '',
             url:     r.url     || '',
             snippet: r.content || '',
-            date:    r.published_date || null,
-        }));
+            date:    r.published_date || null,        }));
     }, `Tavily:${query.slice(0, 40)}`) ?? [];
 }
 
@@ -782,7 +797,8 @@ function _buildEntityFirstQueries(intent) {
 
     // Consolidated Query 1: Find Companies AND Decision Makers in one go
     const primary = [
-        `"${tgt}"`, ind, loc,        'CEO OR founder OR owner',
+        `"${tgt}"`, ind, loc,
+        'CEO OR founder OR owner',
         'contact email',
         'inurl:about OR inurl:team OR inurl:contact',
     ].filter(Boolean).join(' ');
@@ -815,8 +831,7 @@ function _scorePageBusinessRelevance(result) {
     if (snippet.includes('@'))                              score += 15;
     if (snippet.includes('contact'))                        score += 8;
     if (/ceo|founder|owner|director/.test(snippet))         score += 15;
-    if (/agency|studio|solutions|services/.test(snippet))   score += 10;
-    if (/about us|our team|meet the team/.test(snippet))    score += 10;
+    if (/agency|studio|solutions|services/.test(snippet))   score += 10;    if (/about us|our team|meet the team/.test(snippet))    score += 10;
     if (/official website|company website/.test(snippet))   score += 8;
     if (/how to|what is|tutorial|step.by.step/.test(snippet)) score -= 20;
     if (/read more|subscribe|newsletter|download free/.test(snippet)) score -= 15;
@@ -831,7 +846,8 @@ function scoreDataCompleteness(extracted) {
     if (extracted.mission    && extracted.mission    !== 'unknown') score += 15;
     if (extracted.hq         && extracted.hq         !== 'unknown') score += 10;
     if (extracted.size       && extracted.size        !== 'unknown') score += 10;
-    if (extracted.model      && extracted.model       !== 'unknown') score += 10;    if (extracted.recentNews)                                        score += 15;
+    if (extracted.model      && extracted.model       !== 'unknown') score += 10;
+    if (extracted.recentNews)                                        score += 15;
     if (extracted.contactEmails?.length > 0)                         score += 15;
     if (extracted.employees?.length > 0)                             score += 15;
     if (extracted.employees?.some(e => e.email))                     score += 10;
@@ -865,7 +881,6 @@ function scoreLeadQuality({ emailConfidence, emailConfidenceScore, mxValid, smtp
     if (pageScore && pageScore >= 70)      score += 10;
     else if (pageScore && pageScore >= 50) score += 5;
     else if (pageScore && pageScore >= 40) score += 2;
-
     const hallucinationPenalty = Math.min((hallucinationCount || 0) * 10, 30);
     score -= hallucinationPenalty;
 
@@ -880,7 +895,8 @@ function scoreLeadQuality({ emailConfidence, emailConfidenceScore, mxValid, smtp
 
 function detectHallucinations(companyName, extracted) {
     const flags = [];
-    if (Array.isArray(extracted.employees)) {        extracted.employees.forEach((emp, i) => {
+    if (Array.isArray(extracted.employees)) {
+        extracted.employees.forEach((emp, i) => {
             if (emp.name && companyName && emp.name.toLowerCase().includes(companyName.toLowerCase().split(' ')[0])) {
                 flags.push(`Employee[${i}] name contains company name: "${emp.name}"`);
             }
@@ -913,8 +929,7 @@ function _pickBestContact(employees, preferredContact) {
 
     if (preferred && preferred !== 'any') {
         const match = employees.find(e => e.role && e.role.toLowerCase().includes(preferred));
-        if (match) { console.log(`👤 [DM PICKER] Preferred match: ${match.name} (${match.role})`); return match; }
-    }
+        if (match) { console.log(`👤 [DM PICKER] Preferred match: ${match.name} (${match.role})`); return match; }    }
 
     const ranked = [...employees].sort((a, b) => {
         const aRole  = (a.role || '').toLowerCase();
@@ -929,7 +944,8 @@ function _pickBestContact(employees, preferredContact) {
     return best;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════// SECTION 16 — QUANTITY PARSER & OUTPUT QUANTITY RULES
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 16 — QUANTITY PARSER & OUTPUT QUANTITY RULES
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function _parseRequestedCount(message) {
@@ -962,8 +978,7 @@ function _parseRequestedCount(message) {
 function _applyOutputQuantityRules(leads, requestedMax) {
     if (!Array.isArray(leads)) return [];
     const cap     = Math.min(requestedMax, QUANTITY_RULE_DEFAULT_MAX);
-    const sliceTo = Math.max(QUANTITY_RULE_HARD_MIN, Math.min(cap, leads.length));
-    const final   = leads.slice(0, sliceTo);
+    const sliceTo = Math.max(QUANTITY_RULE_HARD_MIN, Math.min(cap, leads.length));    const final   = leads.slice(0, sliceTo);
     console.log(`📐 [QUANTITY] Verified:${leads.length} | Requested:${requestedMax} | Returning:${final.length}`);
     return final;
 }
@@ -978,7 +993,8 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     if (cached) return cached;
 
     // 2. Check Company collection in MongoDB
-    const mongoCompany = await Company.findOne({ domain });    if (mongoCompany && mongoCompany.lastUpdated) {
+    const mongoCompany = await Company.findOne({ domain });
+    if (mongoCompany && mongoCompany.lastUpdated) {
         const ageDays = (Date.now() - new Date(mongoCompany.lastUpdated).getTime()) / 86400000;
         if (ageDays <= MEMORY_TTL_DAYS) {
             console.log(`🏢 [MONGODB] Using stored company data for ${domain} (age: ${Math.floor(ageDays)}d)`);
@@ -1011,8 +1027,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     if (preFetchedSnippets) {
         allSnippets = preFetchedSnippets;
         allText = preFetchedSnippets.replace(/SOURCE:.*?\nTITLE:.*?\n/g, ' '); // Rough cleanup for regex
-        regexFromAll = extractEmailsFromText(allText, domain);
-    } else {
+        regexFromAll = extractEmailsFromText(allText, domain);    } else {
         // Fallback: Only search if absolutely necessary and budget allows
         if (getTavilyRemaining() <= 1) return null;
         
@@ -1027,6 +1042,7 @@ async function researchCompanyForLead(companyName, domain, tavilyKey, openAiKey,
     }
 
     if (allSnippets.trim().length === 0) return null;
+
     const extractPrompt = `${REASONING_FILTER}
 Extract company intelligence for "${companyName}" (domain: ${domain}).
 
@@ -1060,8 +1076,7 @@ Return ONLY valid JSON:
 
 CRITICAL RULES:
 - Do NOT construct any email address. If not in snippets: null.
-- Do NOT invent names. If no person named in snippets: empty employees array.
-- Extract up to 5 employees.
+- Do NOT invent names. If no person named in snippets: empty employees array.- Extract up to 5 employees.
 - NEVER guess. NEVER hallucinate. Source text only.
 
 SNIPPETS:
@@ -1076,6 +1091,7 @@ ${allSnippets}`;
 
     if (!res) return null;
     recordOpenAiUsage(res.data?.usage?.prompt_tokens || 0, res.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
+
     const parsed = JSON.parse(res.data.choices[0].message.content.trim().replace(/```json|```/g, ''));
     parsed._domain = domain;
 
@@ -1110,7 +1126,6 @@ ${allSnippets}`;
     }
 
     parsed._regexEmails = regexFromAll.companyEmails;
-
     // Pillar 1 + 3: Persist to company memory and research memory
     setCompanyMemory(domain, {
         companyName,
@@ -1125,7 +1140,8 @@ ${allSnippets}`;
     // Pillar 2: Save any employees with emails to contact memory
     if (Array.isArray(parsed.employees)) {
         for (const emp of parsed.employees) {
-            if (emp.email && isValidEmailFormat(emp.email)) {                setContactMemory(emp.email, {
+            if (emp.email && isValidEmailFormat(emp.email)) {
+                setContactMemory(emp.email, {
                     name:          emp.name,
                     role:          emp.role,
                     companyDomain: domain,
@@ -1159,7 +1175,6 @@ async function generateEmailsForLead(companyData, contactPerson, domain, userPro
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 19 — SINGLE COMPANY PIPELINE
 // ═══════════════════════════════════════════════════════════════════════════════
-
 async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage, preFetchedSnippets = null) {
     try {
         let domain = '';
@@ -1174,7 +1189,8 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         if (!companyName) return null;
 
         const companyKey = companyName.toLowerCase().replace(/\s+/g, '');
-        if (globalSeenCompanyNames.has(companyKey)) { console.log(`⏭️ [DEDUP] Skipping: ${companyName}`); return null; }        globalSeenCompanyNames.add(companyKey);
+        if (globalSeenCompanyNames.has(companyKey)) { console.log(`⏭️ [DEDUP] Skipping: ${companyName}`); return null; }
+        globalSeenCompanyNames.add(companyKey);
 
         onProgress?.(`📋 Researching ${companyName}...`);
 
@@ -1197,15 +1213,16 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             ...employees.filter(e => e.email && isValidEmailFormat(e.email)).map(e => e.email),
         ].filter(isValidEmailFormat);
 
-        // Only hunt if we have budget and no emails found yet
-        if (candidateEmails.length === 0 && getTavilyRemaining() > 0) {
-            onProgress?.(`🎯 Hunting email for ${companyName}...`);
-            const huntResult = await huntRealEmails(companyName, domain, tavilyKey);
-            if (huntResult.companyEmails.length > 0) candidateEmails.push(...huntResult.companyEmails.filter(isValidEmailFormat));
+        // Fallback 2: Pattern Generation (The "Always-On" Safety Net)
+        if (candidateEmails.length === 0 && bestContact?.name) {
+            onProgress?.(`🛠️ Constructing email patterns for ${bestContact.name}...`);
+            const patternResults = await generateAndVerifyPatterns(bestContact.name, domain);
+            if (patternResults.length > 0) {
+                candidateEmails.push(patternResults[0].email);
+            }
         }
 
         if (candidateEmails.length === 0) { console.warn(`🗑️ [REJECTED] ${companyName} — no source-discoverable emails`); return null; }
-
         onProgress?.(`🔬 Validating emails for ${companyName}...`);
         const validatedEmails = await rankAndFilterEmails(candidateEmails, domain);
 
@@ -1223,7 +1240,8 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             role:          bestContact?.role,
             companyDomain: domain,
             confidenceScore: topEmail.confidenceScore,
-            smtpResult:    topEmail.smtpResult,            mxValid,
+            smtpResult:    topEmail.smtpResult,
+            mxValid,
         });
 
         onProgress?.(`✍️ Writing personalised emails for ${companyName}...`);
@@ -1254,8 +1272,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
         const savedCompany = await saveCompanyFromLead({
             company: companyName,
             domain,
-            industry: intent.industry,
-            country: companyData?.hq,
+            industry: intent.industry,            country: companyData?.hq,
             companySize: companyData?.size,
             emails: [resolvedEmail],
             research: companyData,
@@ -1272,6 +1289,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             leadScore,
             research: companyData,
         });
+
         // Pillar 5: Record that a lead was found
         recordOutcome({ domain, industry: intent.industry, role: bestContact?.role, companySize: companyData?.size, leadScore }, 'viewed');
 
@@ -1303,8 +1321,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
             mxValid,
             dataScore,
             hallucinationFlags: companyData?._hallucinationFlags || [],
-            emailLanguage:   detectedLanguage.code,
-            _memoryStats:    getCompanyMemoryStats(),
+            emailLanguage:   detectedLanguage.code,            _memoryStats:    getCompanyMemoryStats(),
             messages: [
                 { type: 'initial',  subject: emailSequence.initial.subject,  body: emailSequence.initial.body  },
                 { type: 'followup', subject: emailSequence.followup.subject, body: emailSequence.followup.body },
@@ -1321,6 +1338,7 @@ async function processOneCompany(result, intent, tavilyKey, apiKey, userProfile,
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 20 — INTENT HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
+
 async function _classifyIntent(message, history, apiKey) {
     // same as original – unchanged
     // ...
@@ -1353,7 +1371,6 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
     console.log(`🔢 [QUANTITY] User requested: ${requestedCount} leads`);
-
     const intentPrompt = `Extract lead generation parameters from: "${safeMessage}".
 Return ONLY valid JSON:
 {
@@ -1370,7 +1387,8 @@ Never return null for target or industry. Infer from context.`;
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: intentPrompt }],
             max_tokens:  150,
-            temperature: 0.1,        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
+            temperature: 0.1,
+        }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
 
         if (intentRes) {
             recordOpenAiUsage(intentRes.data?.usage?.prompt_tokens || 0, intentRes.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
@@ -1401,8 +1419,7 @@ Never return null for target or industry. Infer from context.`;
             role: 'Decision Maker',
             linkedIn: null,
             companySize: company.size || 'unknown',
-            companyModel: company.model || 'unknown',
-            industry: intent.industry,
+            companyModel: company.model || 'unknown',            industry: intent.industry,
             hq: company.hq || null,
             recentNews: company.research?.recentNews || null,
             leadScore: company.leadScore || 50,
@@ -1419,7 +1436,8 @@ Never return null for target or industry. Infer from context.`;
             fromCache: true,
             cacheHit: true,
             memoryStats: {
-                companiesStored: memStats.totalCompanies,                contactsStored: memStats.totalContacts,
+                companiesStored: memStats.totalCompanies,
+                contactsStored: memStats.totalContacts,
                 researchRecords: memStats.totalResearch,
                 analyticsRecords: memStats.totalAnalytics,
             },
@@ -1451,7 +1469,6 @@ Never return null for target or industry. Infer from context.`;
 
     const seenUrls = new Set(primaryResults.map(r => r.url));
     let mergedRaw  = [...primaryResults, ...entityResults.filter(r => !seenUrls.has(r.url))];
-
     if (mergedRaw.length === 0) {
         return {
             reply:          'No companies found. Try narrowing the industry or adding a location.',
@@ -1468,7 +1485,8 @@ Never return null for target or industry. Infer from context.`;
         if (globalSeenDomains.has(domain))                                    continue;
         if ([...SKIP_DOMAINS].some(d => domain.includes(d)))                  continue;
         globalSeenDomains.add(domain);
-        cleanResults.push({ ...result, _domain: domain });        if (cleanResults.length >= requestedCount + 5) break;
+        cleanResults.push({ ...result, _domain: domain });
+        if (cleanResults.length >= requestedCount + 5) break;
     }
 
     if (cleanResults.length === 0) {
@@ -1487,7 +1505,7 @@ Never return null for target or industry. Infer from context.`;
         allSnippetsMap.set(r._domain, `SOURCE: ${r.url}\nTITLE: ${r.title}\n${r.snippet}`);
     });
 
-    // Process companies concurrently
+    // Process companies concurrently (LIMITED TO 1 TO PREVENT STORMS)
     const settled = await runWithConcurrency(
         cleanResults.map(result => () =>
             processOneCompany(result, intent, tavilyKey, apiKey, userProfile, onProgress, detectedLanguage, allSnippetsMap.get(result._domain))
@@ -1499,7 +1517,6 @@ Never return null for target or industry. Infer from context.`;
         .filter(r => r.status === 'fulfilled' && r.value !== null)
         .map(r => r.value)
         .sort((a, b) => b.leadScore - a.leadScore);
-
     const leadsToReturn = _applyOutputQuantityRules(allVerifiedLeads, requestedCount);
 
     // NEW: Save search cache for future requests
@@ -1517,7 +1534,8 @@ Never return null for target or industry. Infer from context.`;
                     emails: [lead.email],
                     research: { recentNews: lead.recentNews },
                     leadScore: lead.leadScore,
-                });            }
+                });
+            }
             if (company) companyIds.push(company._id);
         }
         await saveSearchCache(queryHash, queryParams, companyIds, 30);
@@ -1548,7 +1566,6 @@ Never return null for target or industry. Infer from context.`;
     console.log(`🧠 Memory: ${memStats.totalCompanies} companies | ${memStats.totalContacts} contacts | ${memStats.totalResearch} research records`);
     console.log(`📊 GPT: ${openAiTracker.totalCallsThisSession} calls | ~$${costTracker.estimatedUSDThisSession.toFixed(4)}`);
     console.log(`🔍 Tavily: ${tavilyQuota.used}/${tavilyQuota.limit}`);
-
     if (leadsToReturn.length === 0) {
         return {
             reply:          'Found companies but no emails passed verification. Try a different industry or location.',
@@ -1567,6 +1584,7 @@ Never return null for target or industry. Infer from context.`;
         _meta,
     };
 }
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 22 — MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1597,8 +1615,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log(`🎯 [INTENT] ${intent}`);
         onProgress?.(`🧠 Mode: ${intent.replace('_', ' ')}...`);
 
-        if (intent === INTENT.LEAD_GEN) {
-            return await _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, userId);
+        if (intent === INTENT.LEAD_GEN) {            return await _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey, userId);
         }
 
         if (intent === INTENT.EMAIL_DRAFT) {
@@ -1616,6 +1633,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }],
             };
         }
+
         const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
         return {
             reply,
