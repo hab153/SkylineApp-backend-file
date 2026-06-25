@@ -658,7 +658,7 @@ async function searchWithTavily(query, tavilyKey, options = {}, requestState = n
             search_depth:        'advanced',
             max_results:         options.maxResults || 5,
             include_answer:      false,
-            include_raw_content: options.includeRawContent || false,   // <-- now used
+            include_raw_content: options.includeRawContent || false,
         };
 
         const response = await axios.post('https://api.tavily.com/search', payload, {
@@ -671,42 +671,37 @@ async function searchWithTavily(query, tavilyKey, options = {}, requestState = n
             title:      r.title   || '',
             url:        r.url     || '',
             snippet:    r.content || '',
-            rawContent: r.raw_content || null,   // <-- available when requested
+            rawContent: r.raw_content || null,
             date:       r.published_date || null,
         }));
     }, `Tavily:${query.slice(0, 40)}`) ?? [];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 13 — SEARCH QUERY BUILDERS (kept for potential reference)
+// SECTION 13 — SMART SEARCH QUERY BUILDER (NEW)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function _buildEntityFirstQueries(intent) {
-    const loc = intent.location ? `"${intent.location}"` : '';
-    const ind = intent.industry || '';
-    const tgt = intent.target   || '';
+function _buildSmartSearchQuery(intent) {
+    // Build a query that targets a page listing multiple companies with emails,
+    // respecting the user's industry, location, and preferred contact.
+    const parts = [];
 
-    const primary = [
-        `"${tgt}"`, ind, loc,
-        'contact email CEO founder',
-        'inurl:about OR inurl:team OR inurl:contact OR inurl:contact-us',
-    ].filter(Boolean).join(' ');
+    if (intent.location) {
+        parts.push(`"${intent.location}"`);
+    }
+    parts.push(`"${intent.industry}"`);
 
-    const entityFocus = [
-        ind, loc,
-        'official website company',
-        '"about us" OR "our team" OR "meet the team"',
-        '"contact us" OR "get in touch"',
-    ].filter(Boolean).join(' ');
+    // Focus on emails and decision-maker contacts if specified
+    if (intent.preferredContact && intent.preferredContact !== 'Any') {
+        parts.push(`"${intent.preferredContact}" email`);
+    } else {
+        parts.push('contact email "@" OR "email us"');
+    }
 
-    const dmFocus = [
-        `"${ind}"`, loc,
-        'CEO OR founder OR owner OR director',
-        '"email" OR "contact"',
-        '-site:linkedin.com -site:crunchbase.com',
-    ].filter(Boolean).join(' ');
+    // Exclude known directories
+    parts.push('-site:linkedin.com -site:crunchbase.com -site:yelp.com -site:yellowpages.com -site:apollo.io -site:hunter.io');
 
-    return { primary, entityFocus, dmFocus };
+    return parts.join(' ');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1323,14 +1318,11 @@ When answering:
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 21 — NEW LEAN LEAD GEN PIPELINE (MAX 4 TAVILY CALLS, GPT EXTRACTION)
+// SECTION 21 — IMPROVED LEAD GEN PIPELINE (MAX 4 TAVILY CALLS, GPT EXTRACTION)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, tavilyKey) {
-    // Per‑request state to enforce max 4 Tavily calls
     const requestState = { callCount: 0, maxCallsPerRequest: 4 };
-
-    // Reset session caches (Bug Fix #1)
     resetSessionCache();
 
     const requestedCount = _parseRequestedCount(safeMessage) ?? QUANTITY_RULE_DEFAULT_MAX;
@@ -1341,7 +1333,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 Return ONLY valid JSON:
 {
   "target": "description of ideal customer or company type",
-  "industry": "specific industry or niche — be precise e.g. 'plumbing', 'fashion retail', 'SaaS', 'digital marketing agency'",
+  "industry": "specific industry or niche — be precise",
   "location": "city, country, region — null if not mentioned",
   "preferredContact": "CEO | Founder | Marketing | Sales | Owner | Any"
 }
@@ -1355,7 +1347,6 @@ Never return null for target or industry. Infer from context.`;
             max_tokens:  150,
             temperature: 0.1,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:intent');
-
         if (intentRes) {
             recordOpenAiUsage(intentRes.data?.usage?.prompt_tokens || 0, intentRes.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
             intent = { ...intent, ...JSON.parse(intentRes.data.choices[0].message.content.replace(/```json|```/g, '')) };
@@ -1363,30 +1354,25 @@ Never return null for target or industry. Infer from context.`;
         }
     } catch (e) { console.warn('[Intent Parse Failed]:', e.message); }
 
-    onProgress?.(`🔍 Searching for a list of ${intent.industry} companies with emails...`);
+    onProgress?.(`🔍 Searching for ${intent.industry} companies${intent.location ? ' in ' + intent.location : ''}...`);
 
-    // ─── SMART SEARCH (up to 2 Tavily calls) ───
+    // ─── STEP 2: SMART SEARCH (up to 2 Tavily calls) ───
     const allRawContents = [];
 
-    // First search: directory-style page
-    const directoryQuery = [
-        `"${intent.industry}"`,
-        intent.location ? `"${intent.location}"` : '',
-        'list of companies contact email "@" OR "email us" OR "contact us"',
-        '-linkedin.com -crunchbase.com -yelp.com -yellowpages.com -apollo.io -hunter.io'
-    ].filter(Boolean).join(' ');
+    // Primary query built from intent
+    const primaryQuery = _buildSmartSearchQuery(intent);
+    console.log(`🔍 Primary query: ${primaryQuery}`);
 
-    const firstResults = await searchWithTavily(directoryQuery, tavilyKey, {
+    const firstResults = await searchWithTavily(primaryQuery, tavilyKey, {
         maxResults: 2,
         includeRawContent: true
     }, requestState);
-
     firstResults.forEach(r => { if (r.rawContent) allRawContents.push(r.rawContent); });
 
-    // Fallback search if needed and under call limit
-    if (allRawContents.length === 0 && requestState.callCount < requestState.maxCallsPerRequest) {
+    // Fallback if not enough content or no results
+    if (allRawContents.length < 2 && requestState.callCount < requestState.maxCallsPerRequest) {
         onProgress?.('🔁 Trying broader search...');
-        const fallbackQuery = `${intent.industry} company email addresses list ${CURRENT_YEAR}`;
+        const fallbackQuery = `${intent.industry} ${intent.location || ''} company list contact email`.trim();
         const fallbackResults = await searchWithTavily(fallbackQuery, tavilyKey, {
             maxResults: 2,
             includeRawContent: true
@@ -1401,32 +1387,37 @@ Never return null for target or industry. Infer from context.`;
         };
     }
 
-    // ─── STEP 2: GPT extraction of companies & emails from raw content ───
-    onProgress?.('🧠 Extracting companies and emails from the page...');
-    const combinedContent = allRawContents.join('\n\n===NEXT PAGE===\n\n').substring(0, 8000); // limit to 8k chars
+    // ─── STEP 3: GPT extraction of companies, emails, and decision-maker names ───
+    onProgress?.('🧠 Extracting companies and emails...');
+    const combinedContent = allRawContents.join('\n\n===NEXT PAGE===\n\n').substring(0, 8000);
 
-    const extractionPrompt = `You are an expert data extractor. Extract ALL companies and their email addresses from the following text.
-Only include companies that have at least one email address present. For each, provide:
-- "name": the company name (exactly as written)
-- "email": the best contact email found (prefer personal/role email if available, otherwise any valid company email)
-- "domain": the domain part of the email (e.g., "company.com")
+    // Build a precise extraction prompt that respects location and preferred contact
+    const extractionPrompt = `You are a lead extraction expert. Extract ALL companies from the text below that:
+- Are in the industry "${intent.industry}"
+- ${intent.location ? `Are located in or near "${intent.location}" (look for address, city, country mentions)` : 'Any location'}
+- Have at least one email address present in the text.
+
+For each company, provide:
+- "name": the company name exactly as written.
+- "email": the BEST contact email. Prefer a personal/CEO/Founder email if available (e.g., john@company.com). If only generic (info@, contact@), still include it.
+- "contactName": the full name of the CEO/Founder/person if explicitly mentioned alongside their email; otherwise null.
+- "domain": the domain part of the email (e.g., company.com).
+
+Focus on companies that clearly match the industry and location. Skip any that don't.
 
 Text content:
 ${combinedContent}
 
-Return ONLY a valid JSON array of objects like:
-[{"name": "Acme Corp", "email": "contact@acmecorp.com", "domain": "acmecorp.com"}]
-No other text. Maximum 20 items.`;
+Return ONLY a valid JSON array of objects. Maximum ${requestedCount + 5} items.`;
 
     let extractedCompanies = [];
     try {
         const extractRes = await withRetry(() => axios.post('https://api.openai.com/v1/chat/completions', {
             model:       'gpt-4o-mini',
             messages:    [{ role: 'user', content: extractionPrompt }],
-            max_tokens:  1500,
+            max_tokens:  2000,
             temperature: 0.0,
         }, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } }), 'OpenAI:extract');
-
         if (extractRes) {
             recordOpenAiUsage(extractRes.data?.usage?.prompt_tokens || 0, extractRes.data?.usage?.completion_tokens || 0, 'gpt-4o-mini');
             const cleaned = extractRes.data.choices[0].message.content.replace(/```json|```/g, '').trim();
@@ -1435,13 +1426,13 @@ No other text. Maximum 20 items.`;
         }
     } catch (e) {
         console.warn('[GPT Extraction Failed]:', e.message);
-        // fallback to simple regex extraction
+        // Fallback to simple regex extraction
         const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
         const allEmails = [...new Set(combinedContent.match(emailRegex) || [])];
         for (const email of allEmails) {
             const domain = email.split('@')[1]?.toLowerCase();
             if (!domain || isFreeEmailDomain(domain)) continue;
-            extractedCompanies.push({ name: domain.split('.')[0], email, domain });
+            extractedCompanies.push({ name: domain.split('.')[0], email, contactName: null, domain });
         }
     }
 
@@ -1452,8 +1443,8 @@ No other text. Maximum 20 items.`;
         };
     }
 
-    // ─── STEP 3: Validate emails locally (MX, SMTP) — zero Tavily ───
-    onProgress?.('🔬 Validating email addresses...');
+    // ─── STEP 4: Validate emails locally (MX, SMTP) — zero Tavily ───
+    onProgress?.('🔬 Validating emails...');
     const leads = [];
     for (const comp of extractedCompanies) {
         if (leads.length >= requestedCount + 3) break;
@@ -1473,7 +1464,7 @@ No other text. Maximum 20 items.`;
             emailConfidenceScore: topEmail.confidenceScore,
             mxValid:              true,
             smtpResult:           topEmail.smtpResult,
-            hasRealName:          false,
+            hasRealName:          !!comp.contactName,
             hasRealRole:          false,
             hasLinkedIn:          false,
             hasNews:              false,
@@ -1486,7 +1477,7 @@ No other text. Maximum 20 items.`;
         if (leadScore < 15) continue;
 
         leads.push({
-            name:            comp.name,
+            name:            comp.contactName || comp.name,
             company:         comp.name,
             domain,
             email:           topEmail.email,
@@ -1499,7 +1490,7 @@ No other text. Maximum 20 items.`;
                 reason:          topEmail.reason,
             },
             allEmailOptions: validated.map(v => v.email),
-            role:            intent.preferredContact || 'Decision Maker',
+            role:            comp.contactName ? 'CEO/Founder' : (intent.preferredContact || 'Decision Maker'),
             linkedIn:        null,
             companySize:     'unknown',
             companyModel:    'unknown',
@@ -1516,7 +1507,7 @@ No other text. Maximum 20 items.`;
         });
     }
 
-    // ─── STEP 4: Generate cold emails for top leads (GPT, zero Tavily) ───
+    // ─── STEP 5: Generate cold emails for top leads ───
     onProgress?.('✍️ Writing personalised emails...');
     const leadsToGenerate = leads
         .sort((a, b) => b.leadScore - a.leadScore)
@@ -1525,13 +1516,7 @@ No other text. Maximum 20 items.`;
     for (const lead of leadsToGenerate) {
         try {
             const emailSequence = await generateEmailsForLead(
-                {
-                    name:       lead.company,
-                    mission:    null,
-                    recentNews: null,
-                    industry:   intent.industry,
-                    model:      'unknown'
-                },
+                { name: lead.company, mission: null, recentNews: null, industry: intent.industry, model: 'unknown' },
                 { name: lead.name, role: lead.role },
                 lead.domain,
                 userProfile,
