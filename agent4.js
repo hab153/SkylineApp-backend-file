@@ -28,7 +28,7 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 400;
+const MAX_OUTPUT_TOKENS = 600;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
@@ -228,22 +228,125 @@ async function searchQualificationSignals(prospect, tavilyKey) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Main Agent 4 Function
+// 7. FIX: Safe JSON Parsing with Auto-Fix
 // ────────────────────────────────────────────────────────────────
 
-/**
- * Qualifies and prioritizes prospects from Agent 3.
- * 
- * @param {Object} params
- * @param {Array}  params.enriched_prospects - The enriched prospects from Agent 3.
- * @param {Object} params.intent - The original intent from Agent 1.
- * @param {string} params.apiKey - OpenAI API key.
- * @param {string} params.tavilyKey - Tavily API key.
- * @param {string} params.userId - User identifier for logging.
- * @param {Function} params.onProgress - Optional progress callback.
- * 
- * @returns {Object} Structured qualification result.
- */
+function safeJsonParse(jsonString) {
+    // Try normal parse first
+    try {
+        return { success: true, data: JSON.parse(jsonString) };
+    } catch (error) {
+        console.warn(`⚠️ [JSON] Parse error: ${error.message}`);
+        console.warn(`⚠️ [JSON] Attempting to auto-fix...`);
+        
+        let fixed = jsonString;
+        
+        // Fix 1: Incomplete numbers (0. → 0.0, 1. → 1.0)
+        fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
+        fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
+        fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
+        
+        // Fix 2: Trailing commas before } or ]
+        fixed = fixed.replace(/,\s*}/g, '}');
+        fixed = fixed.replace(/,\s*\]/g, ']');
+        
+        // Fix 3: Unterminated strings - find strings that don't have closing quotes
+        // Look for a quote that starts a string but doesn't have a closing quote before } or ]
+        const lines = fixed.split('\n');
+        let fixedLines = [];
+        let inString = false;
+        let stringStartLine = -1;
+        
+        for (let i = 0; i < lines.length; i++) {
+            let line = lines[i];
+            
+            // Count quotes in this line (ignoring escaped quotes)
+            const quotes = (line.match(/"/g) || []).length;
+            const escapedQuotes = (line.match(/\\"/g) || []).length;
+            const effectiveQuotes = quotes - escapedQuotes;
+            
+            if (inString) {
+                // We're inside a string - check if this line closes it
+                if (effectiveQuotes % 2 === 1) {
+                    // Odd quotes means the string closes in this line
+                    inString = false;
+                    fixedLines.push(line);
+                } else {
+                    // String continues - add line as-is
+                    fixedLines.push(line);
+                }
+            } else {
+                // We're not in a string - check if this line starts one
+                if (effectiveQuotes % 2 === 1) {
+                    // Odd quotes means a string starts and ends in this line? Or just starts?
+                    // Check if the line ends with a quote that would close it
+                    const trimmedLine = line.trim();
+                    if (trimmedLine.endsWith('"') || trimmedLine.endsWith('",') || trimmedLine.endsWith('":')) {
+                        // Likely the string is closed in this line
+                        fixedLines.push(line);
+                    } else {
+                        // String starts in this line but doesn't close
+                        inString = true;
+                        stringStartLine = i;
+                        // Add a closing quote at the end of the line
+                        if (!line.endsWith('"') && !line.endsWith('",') && !line.endsWith('":')) {
+                            line = line + '"';
+                        }
+                        fixedLines.push(line);
+                    }
+                } else {
+                    fixedLines.push(line);
+                }
+            }
+        }
+        
+        // If we finished the file and we're still in a string, add a closing quote
+        if (inString) {
+            fixedLines[fixedLines.length - 1] = fixedLines[fixedLines.length - 1] + '"';
+            console.log(`🔧 [JSON] Added closing quote for unterminated string at line ${stringStartLine + 1}`);
+        }
+        
+        fixed = fixedLines.join('\n');
+        
+        // Fix 4: Missing closing brackets (add if unbalanced)
+        const openBraces = (fixed.match(/\{/g) || []).length;
+        const closeBraces = (fixed.match(/\}/g) || []).length;
+        const openBrackets = (fixed.match(/\[/g) || []).length;
+        const closeBrackets = (fixed.match(/\]/g) || []).length;
+        
+        if (openBraces > closeBraces) {
+            fixed += '}'.repeat(openBraces - closeBraces);
+        }
+        if (openBrackets > closeBrackets) {
+            fixed += ']'.repeat(openBrackets - closeBrackets);
+        }
+        
+        // Fix 5: Remove anything after the last complete JSON structure
+        const lastBrace = fixed.lastIndexOf('}');
+        const lastBracket = fixed.lastIndexOf(']');
+        const lastEnd = Math.max(lastBrace, lastBracket);
+        if (lastEnd > 0 && lastEnd < fixed.length - 1) {
+            const trailing = fixed.substring(lastEnd + 1).trim();
+            if (trailing && !trailing.startsWith(',') && !trailing.startsWith(']') && !trailing.startsWith('}')) {
+                fixed = fixed.substring(0, lastEnd + 1);
+            }
+        }
+        
+        try {
+            const data = JSON.parse(fixed);
+            console.log(`✅ [JSON] Auto-fix successful`);
+            return { success: true, data };
+        } catch (retryError) {
+            console.error(`❌ [JSON] Auto-fix failed: ${retryError.message}`);
+            return { success: false, error: retryError };
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 8. FIX: Main Agent 4 Function with Retry & Safe Parsing
+// ────────────────────────────────────────────────────────────────
+
 async function qualifyProspects({ enriched_prospects, intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
     console.log(`🏆 [AGENT4] Starting qualification for user ${userId}...`);
     onProgress?.('🏆 Evaluating and prioritizing leads...');
@@ -393,126 +496,139 @@ Return ONLY valid JSON with this schema:
 }
 `;
 
-    try {
-        const response = await withRetry(() => axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            {
-                model: MODEL,
-                messages: [
-                    { role: 'system', content: AGENT4_SYSTEM_PROMPT },
-                    { role: 'user', content: qualificationPrompt }
-                ],
-                max_tokens: MAX_OUTPUT_TOKENS,
-                temperature: 0.0,
-                response_format: { type: 'json_object' }
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
+    // ─── Step 3: Try qualification with retries and safe parsing ───
+    let lastError = null;
+    
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            console.log(`🏆 [AGENT4] Qualification attempt ${attempt}/3...`);
+            
+            const response = await withRetry(() => axios.post(
+                'https://api.openai.com/v1/chat/completions',
+                {
+                    model: MODEL,
+                    messages: [
+                        { role: 'system', content: AGENT4_SYSTEM_PROMPT },
+                        { role: 'user', content: qualificationPrompt }
+                    ],
+                    max_tokens: MAX_OUTPUT_TOKENS,
+                    temperature: 0.0,
+                    response_format: { type: 'json_object' }
                 },
-                timeout: 15000
-            }
-        ), 'GPT:qualifyProspects');
+                {
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 20000
+                }
+            ), 'GPT:qualifyProspects');
 
-        if (!response) {
-            return {
-                intent: 'lead_qualification',
-                confidence: 0.0,
-                needs_clarification: true,
-                clarification_question: 'Qualification failed. Please try again.',
-                next_pipeline: null,
-                entities: intent?.entities || {},
-                risk_level: 'medium',
-                policy_flags: ['qualification_failure'],
-                reason: 'GPT qualification failed.',
-                qualified_prospects: [],
-                stats: { reviewed: enriched_prospects.length, qualified: 0, rejected: 0, returned: 0 }
+            if (!response) {
+                console.warn(`⚠️ [AGENT4] Qualification attempt ${attempt} returned null`);
+                if (attempt === 3) break;
+                continue;
+            }
+
+            const rawContent = response.data.choices[0].message.content.trim();
+            
+            // ─── SAFE JSON PARSE with auto-fix ───
+            const parseResult = safeJsonParse(rawContent);
+            
+            if (!parseResult.success) {
+                console.warn(`⚠️ [AGENT4] JSON parse failed on attempt ${attempt}`);
+                if (attempt === 3) break;
+                continue;
+            }
+
+            const parsed = parseResult.data;
+
+            // ─── Step 4: Extract and validate the result ───
+            const qualifiedProspects = parsed.qualified_prospects || [];
+            const stats = parsed.stats || {
+                reviewed: enriched_prospects.length,
+                qualified: 0,
+                rejected: 0,
+                returned: 0
             };
+
+            // Calculate confidence
+            const totalQualified = qualifiedProspects.filter(p => p.qualification_status === 'qualified').length;
+            const confidence = parsed.confidence || (totalQualified / enriched_prospects.length);
+            const needsClarification = parsed.needs_clarification || confidence < CONFIDENCE_THRESHOLD_CLARIFY;
+
+            const result = {
+                intent: 'lead_qualification',
+                confidence: Math.round(confidence * 100) / 100,
+                needs_clarification: needsClarification,
+                clarification_question: needsClarification 
+                    ? 'I found some leads but the qualification is uncertain. Could you confirm your ICP or provide more specific criteria?'
+                    : null,
+                next_pipeline: totalQualified > 0 ? 'outreach_drafting' : null,
+                entities: intent?.entities || {
+                    industry: intent?.industry || null,
+                    location: intent?.location || null,
+                    role: intent?.role || null,
+                    company: intent?.company || null,
+                    lead_count: totalQualified,
+                    email: null,
+                    domain: null,
+                    source_type: 'web_search'
+                },
+                risk_level: totalQualified / enriched_prospects.length < 0.3 ? 'medium' : 'low',
+                policy_flags: totalQualified === 0 ? ['no_qualified_leads'] : [],
+                reason: parsed.reason || `Qualified ${totalQualified} out of ${enriched_prospects.length} prospects.`,
+                qualified_prospects: qualifiedProspects.map(p => ({
+                    name: p.name || null,
+                    company: p.company || null,
+                    domain: p.domain || null,
+                    website: p.website || null,
+                    location: p.location || null,
+                    role: p.role || null,
+                    fit_score: p.fit_score || 0.5,
+                    priority: p.priority || 'medium',
+                    qualification_status: p.qualification_status || 'review',
+                    personalization_angle: p.personalization_angle || null,
+                    notes: p.notes || null,
+                })),
+                stats: {
+                    reviewed: stats.reviewed || enriched_prospects.length,
+                    qualified: stats.qualified || totalQualified,
+                    rejected: stats.rejected || 0,
+                    returned: stats.returned || qualifiedProspects.length,
+                }
+            };
+
+            console.log(`✅ [AGENT4] Qualification complete: ${totalQualified} qualified, ${result.stats.rejected} rejected (attempt ${attempt})`);
+            return result;
+
+        } catch (error) {
+            lastError = error;
+            console.error(`❌ [AGENT4] Qualification attempt ${attempt} failed:`, error.message);
+            if (attempt === 3) break;
         }
-
-        const rawContent = response.data.choices[0].message.content.trim();
-        const parsed = JSON.parse(rawContent);
-
-        // ─── Step 3: Build and return result ───
-        const qualifiedProspects = parsed.qualified_prospects || [];
-        const stats = parsed.stats || {
-            reviewed: enriched_prospects.length,
-            qualified: 0,
-            rejected: 0,
-            returned: 0
-        };
-
-        const totalQualified = qualifiedProspects.filter(p => p.qualification_status === 'qualified').length;
-        const confidence = parsed.confidence || (totalQualified / enriched_prospects.length);
-
-        const needsClarification = parsed.needs_clarification || confidence < CONFIDENCE_THRESHOLD_CLARIFY;
-
-        const result = {
-            intent: 'lead_qualification',
-            confidence: Math.round(confidence * 100) / 100,
-            needs_clarification: needsClarification,
-            clarification_question: needsClarification 
-                ? 'I found some leads but the qualification is uncertain. Could you confirm your ICP or provide more specific criteria?'
-                : null,
-            next_pipeline: totalQualified > 0 ? 'outreach_drafting' : null,
-            entities: intent?.entities || {
-                industry: intent?.industry || null,
-                location: intent?.location || null,
-                role: intent?.role || null,
-                company: intent?.company || null,
-                lead_count: totalQualified,
-                email: null,
-                domain: null,
-                source_type: 'web_search'
-            },
-            risk_level: totalQualified / enriched_prospects.length < 0.3 ? 'medium' : 'low',
-            policy_flags: totalQualified === 0 ? ['no_qualified_leads'] : [],
-            reason: parsed.reason || `Qualified ${totalQualified} out of ${enriched_prospects.length} prospects.`,
-            qualified_prospects: qualifiedProspects.map(p => ({
-                name: p.name || null,
-                company: p.company || null,
-                domain: p.domain || null,
-                website: p.website || null,
-                location: p.location || null,
-                role: p.role || null,
-                fit_score: p.fit_score || 0.5,
-                priority: p.priority || 'medium',
-                qualification_status: p.qualification_status || 'review',
-                personalization_angle: p.personalization_angle || null,
-                notes: p.notes || null,
-            })),
-            stats: {
-                reviewed: stats.reviewed || enriched_prospects.length,
-                qualified: stats.qualified || totalQualified,
-                rejected: stats.rejected || 0,
-                returned: stats.returned || qualifiedProspects.length,
-            }
-        };
-
-        console.log(`✅ [AGENT4] Qualification complete: ${totalQualified} qualified, ${result.stats.rejected} rejected`);
-        return result;
-
-    } catch (error) {
-        console.error(`❌ [AGENT4] Qualification failed:`, error.message);
-        return {
-            intent: 'lead_qualification',
-            confidence: 0.0,
-            needs_clarification: true,
-            clarification_question: 'Qualification failed. Please try again.',
-            next_pipeline: null,
-            entities: intent?.entities || {},
-            risk_level: 'medium',
-            policy_flags: ['qualification_failure'],
-            reason: `Qualification failed: ${error.message}`,
-            qualified_prospects: [],
-            stats: { reviewed: enriched_prospects.length, qualified: 0, rejected: 0, returned: 0 }
-        };
     }
+
+    // ─── Step 5: All attempts failed – return a graceful error ───
+    console.error(`❌ [AGENT4] All qualification attempts failed. Last error: ${lastError?.message || 'Unknown error'}`);
+    
+    return {
+        intent: 'lead_qualification',
+        confidence: 0.0,
+        needs_clarification: true,
+        clarification_question: 'Qualification failed. Please try again or provide more specific criteria.',
+        next_pipeline: null,
+        entities: intent?.entities || {},
+        risk_level: 'medium',
+        policy_flags: ['qualification_failure'],
+        reason: `Qualification failed after 3 attempts: ${lastError?.message || 'Unknown error'}`,
+        qualified_prospects: [],
+        stats: { reviewed: enriched_prospects.length, qualified: 0, rejected: 0, returned: 0 }
+    };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. Public Exports
+// 9. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -520,6 +636,7 @@ module.exports = {
     buildQualificationQueries,
     searchQualificationSignals,
     searchTavily,
+    safeJsonParse,
     CONFIDENCE_THRESHOLD_ROUTE,
     CONFIDENCE_THRESHOLD_CLARIFY,
 };
