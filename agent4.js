@@ -97,7 +97,9 @@ Return valid JSON only using this schema:
       "priority": "high" | "medium" | "low",
       "qualification_status": "qualified" | "unqualified" | "review",
       "personalization_angle": string|null,
-      "notes": string|null
+      "notes": string|null,
+      "email_candidates": string[],
+      "email": string|null
     }
   ],
   "stats": {
@@ -368,6 +370,12 @@ async function qualifyProspects({ enriched_prospects, intent, apiKey, tavilyKey,
         };
     }
 
+    // ─── LOG: What Agent 4 received ───
+    console.log(`📥 [AGENT4] RECEIVED ${enriched_prospects.length} prospects from Agent 3`);
+    enriched_prospects.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
+    });
+
     // ─── Step 1: Gather qualification signals for each prospect ───
     const prospectsWithSignals = [];
     for (const prospect of enriched_prospects) {
@@ -407,6 +415,9 @@ async function qualifyProspects({ enriched_prospects, intent, apiKey, tavilyKey,
                 verification_status: prospect.verification_status || 'unverified',
                 notes: prospect.notes || 'No notes.',
                 linkedin_url: prospect.linkedin_url || null,
+                // --- PRESERVE EMAIL FROM AGENT 3 ---
+                email_candidates: prospect.email_candidates || [],
+                email: prospect.email || null,
             },
             signals: signalText,
         };
@@ -434,6 +445,8 @@ PROSPECT ${i + 1}:
 - Verification Status: ${p.prospect.verification_status}
 - Notes: ${p.prospect.notes}
 - LinkedIn: ${p.prospect.linkedin_url || 'Not found'}
+- Email Candidates: ${JSON.stringify(p.prospect.email_candidates || [])}
+- Email: ${p.prospect.email || 'null'}
 - Additional Signals:
 ${p.signals}
 `).join('\n---\n')}
@@ -481,7 +494,9 @@ Return ONLY valid JSON with this schema:
       "priority": "high" | "medium" | "low",
       "qualification_status": "qualified" | "unqualified" | "review",
       "personalization_angle": string|null,
-      "notes": string|null
+      "notes": string|null,
+      "email_candidates": string[],
+      "email": string|null
     }
   ],
   "stats": {
@@ -557,6 +572,7 @@ Return ONLY valid JSON with this schema:
             const confidence = parsed.confidence || (totalQualified / enriched_prospects.length);
             const needsClarification = parsed.needs_clarification || confidence < CONFIDENCE_THRESHOLD_CLARIFY;
 
+            // --- FIX: Ensure we preserve email_candidates and email from the original prospects ---
             const result = {
                 intent: 'lead_qualification',
                 confidence: Math.round(confidence * 100) / 100,
@@ -578,19 +594,26 @@ Return ONLY valid JSON with this schema:
                 risk_level: totalQualified / enriched_prospects.length < 0.3 ? 'medium' : 'low',
                 policy_flags: totalQualified === 0 ? ['no_qualified_leads'] : [],
                 reason: parsed.reason || `Qualified ${totalQualified} out of ${enriched_prospects.length} prospects.`,
-                qualified_prospects: qualifiedProspects.map(p => ({
-                    name: p.name || null,
-                    company: p.company || null,
-                    domain: p.domain || null,
-                    website: p.website || null,
-                    location: p.location || null,
-                    role: p.role || null,
-                    fit_score: p.fit_score || 0.5,
-                    priority: p.priority || 'medium',
-                    qualification_status: p.qualification_status || 'review',
-                    personalization_angle: p.personalization_angle || null,
-                    notes: p.notes || null,
-                })),
+                qualified_prospects: qualifiedProspects.map((p, index) => {
+                    // Find the original prospect to preserve email data
+                    const originalProspect = enriched_prospects[index] || {};
+                    return {
+                        name: p.name || null,
+                        company: p.company || null,
+                        domain: p.domain || null,
+                        website: p.website || null,
+                        location: p.location || null,
+                        role: p.role || null,
+                        fit_score: p.fit_score || 0.5,
+                        priority: p.priority || 'medium',
+                        qualification_status: p.qualification_status || 'review',
+                        personalization_angle: p.personalization_angle || null,
+                        notes: p.notes || null,
+                        // --- CRITICAL FIX: Preserve email from original prospect ---
+                        email_candidates: originalProspect.email_candidates || p.email_candidates || [],
+                        email: originalProspect.email || p.email || null,
+                    };
+                }),
                 stats: {
                     reviewed: stats.reviewed || enriched_prospects.length,
                     qualified: stats.qualified || totalQualified,
@@ -598,6 +621,12 @@ Return ONLY valid JSON with this schema:
                     returned: stats.returned || qualifiedProspects.length,
                 }
             };
+
+            // --- LOG: What Agent 4 is returning ---
+            console.log(`📤 [AGENT4] Returning ${result.qualified_prospects.length} qualified prospects`);
+            result.qualified_prospects.forEach((p, i) => {
+                console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
+            });
 
             console.log(`✅ [AGENT4] Qualification complete: ${totalQualified} qualified, ${result.stats.rejected} rejected (attempt ${attempt})`);
             return result;
