@@ -21,6 +21,13 @@ function getSendLimitMessage(tier, limit) {
     return `Daily email send limit reached (1000/1000). Please try again tomorrow.`;
 }
 
+// Helper to get assistant limit message (Free:20, Go:70, Pro:200)
+function getAssistantLimitMessage(tier, limit) {
+    if (tier === 'free') return `Daily assistant limit reached (20/20). Upgrade to Go (70/day) or Pro (200/day) for more assistance.`;
+    if (tier === 'go') return `Daily assistant limit reached (70/70). Upgrade to Pro for 200 assistant messages per day.`;
+    return `Daily assistant limit reached (200/200). Please try again tomorrow.`;
+}
+
 // Daily limit for chat/dreams (Free:10, Go:50, Pro:150)
 const checkDailyLimit = async (req, res, next) => {
     try {
@@ -209,10 +216,51 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
     }
 };
 
+// NEW: Assistant limit middleware (Free:20, Go:70, Pro:200)
+const checkAssistantLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) user.usage = {};
+        if (user.usage.assistantCount === undefined) user.usage.assistantCount = 0;
+        if (!user.usage.assistantLastDate) user.usage.assistantLastDate = null;
+
+        let limit = 20; // Free plan
+        const tier = user.subscriptionTier;
+        if (tier === 'go') limit = 70;
+        if (tier === 'pro') limit = 200;
+
+        const today = new Date().toDateString();
+        const lastDateStr = user.usage.assistantLastDate ? new Date(user.usage.assistantLastDate).toDateString() : null;
+        if (lastDateStr !== today) {
+            user.usage.assistantCount = 0;
+            user.usage.assistantLastDate = new Date();
+            await user.save();
+        }
+
+        if (user.usage.assistantCount >= limit) {
+            const message = getAssistantLimitMessage(tier, limit);
+            return res.status(429).json({ message });
+        }
+
+        // Store user and remaining count in req for later use
+        req.userDoc = user;
+        req.assistantLimit = limit;
+        req.assistantRemaining = limit - user.usage.assistantCount;
+
+        next();
+    } catch (err) {
+        console.error('Assistant limit error:', err);
+        res.status(500).json({ message: 'Server error checking assistant limit' });
+    }
+};
+
 module.exports = { 
     checkDailyLimit, 
     checkHintLimit, 
     checkAndIncrementSendLimit,
     checkSuggestFollowUpLimit,
-    checkAutoFollowUpLimit
+    checkAutoFollowUpLimit,
+    checkAssistantLimit  // <-- NEW
 };
