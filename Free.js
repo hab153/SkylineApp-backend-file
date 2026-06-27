@@ -370,7 +370,7 @@ When answering:
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED - pass string directly)
+// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED - with complete lead caching)
 // ────────────────────────────────────────────────────────────────
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, userId) {
@@ -419,7 +419,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
         console.log(`🎯 [ORCHESTRATOR] Lead generation confirmed:`, leadIntent);
 
-        // ─── Step 4: Check cache ───
+        // ─── Step 4: Check cache (FIXED - handles complete leads) ───
         const queryParams = {
             industry: leadIntent.industry,
             location: leadIntent.location,
@@ -427,22 +427,79 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             preferredContact: leadIntent.preferredContact,
         };
         const queryHash = generateQueryHash(queryParams);
-        const cachedLeads = await getCachedSearchResults(queryHash);
+        const cachedData = await getCachedSearchResults(queryHash);
 
-        if (cachedLeads && cachedLeads.length > 0) {
-            console.log(`🎉 [CACHE HIT] Returning ${cachedLeads.length} leads from memory`);
+        if (cachedData && cachedData.length > 0) {
+            console.log(`🎉 [CACHE HIT] Returning ${cachedData.length} items from memory`);
+            
+            // Detect if cached data is raw companies or complete leads
+            const isRawCompany = cachedData[0] && cachedData[0]._id && !cachedData[0].messages;
+            
+            let leads;
+            if (isRawCompany) {
+                // Auto-convert raw companies to complete leads
+                console.log(`🔄 [CACHE] Auto-converting ${cachedData.length} raw companies to leads`);
+                const senderName = userProfile?.senderName || 'Alex';
+                
+                leads = cachedData.map(company => ({
+                    name: company.name || company.companyName || company.domain || 'Unknown',
+                    company: company.name || company.companyName || company.domain || 'Unknown',
+                    domain: company.domain || null,
+                    email: company.emails?.[0] || '',
+                    emailConfidence: 'cached',
+                    emailLabel: 'From cached company',
+                    verificationGrade: company.research?.verificationGrade || 'B',
+                    role: 'Decision Maker',
+                    linkedIn: null,
+                    companySize: company.size || 'unknown',
+                    companyModel: company.model || 'unknown',
+                    industry: leadIntent.industry || 'general',
+                    hq: company.hq || leadIntent.location || null,
+                    recentNews: company.research?.recentNews || null,
+                    leadScore: company.leadScore || 50,
+                    messages: [
+                        {
+                            type: 'initial',
+                            subject: `Revisiting ${company.name || company.domain || 'your company'}`,
+                            body: `Hi,\n\nWe previously connected about ${leadIntent.industry || 'your industry'} opportunities. Still relevant?\n\nBest,\n${senderName}`
+                        },
+                        {
+                            type: 'followup',
+                            subject: `Re: ${company.name || company.domain || 'your company'}`,
+                            body: `Hi,\n\nJust circling back on this. Still interested in exploring how we can help?\n\nBest,\n${senderName}`
+                        },
+                        {
+                            type: 'breakup',
+                            subject: `Closing the loop`,
+                            body: `Hi,\n\nHaven't heard back so I'll assume timing isn't right. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
+                        }
+                    ]
+                }));
+                
+                // Auto-update cache with complete leads for future requests
+                await saveSearchCache(queryHash, queryParams, leads, 90);
+                console.log(`💾 [CACHE] Updated cache with complete leads for future requests`);
+                
+            } else {
+                // Already complete leads
+                leads = cachedData;
+                console.log(`✅ [CACHE] Using ${leads.length} complete leads from cache`);
+            }
+            
+            const finalLeads = _applyOutputQuantityRules(leads, leadIntent.lead_count || QUANTITY_RULE_DEFAULT_MAX);
+            
             return {
-                reply: JSON.stringify(cachedLeads),
+                reply: JSON.stringify(finalLeads),
                 updatedHistory: [
                     ...history,
                     { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: `[Retrieved ${cachedLeads.length} leads from memory]` },
+                    { role: 'assistant', content: `[Retrieved ${finalLeads.length} leads from memory]` },
                 ],
                 _meta: { fromCache: true, cacheHit: true, leadIntent }
             };
         }
 
-        // ─── Step 5: Call Agent 2 ───
+        // ─── Step 5: Cache miss – Call Agent 2 ───
         console.log(`🔁 [CACHE MISS] Calling agent2 for prospect discovery...`);
         onProgress?.('🔎 Searching for matching prospects...');
 
@@ -596,15 +653,17 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 9: Save leads to cache (FIXED - pass string directly) ───
+        // ─── Step 9: Save leads to cache (FIXED - stores complete leads) ───
         if (finalLeads.length > 0) {
-            const companyIds = [];
+            // Save complete leads to cache (not just company IDs)
+            await saveSearchCache(queryHash, queryParams, finalLeads, 90);
+            console.log(`💾 [ORCHESTRATOR] Saved ${finalLeads.length} complete leads to cache`);
+            
+            // Also save to Company collection for fallback
             for (const lead of finalLeads) {
                 if (!lead.domain) continue;
-                
-                let company = await Company.findOne({ domain: lead.domain });
-                if (!company) {
-                    // Build a clean research object
+                const existing = await Company.findOne({ domain: lead.domain });
+                if (!existing) {
                     const researchData = {
                         recentNews: lead.recentNews || null,
                         website: lead.website || null,
@@ -628,27 +687,18 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                         emailLanguage: lead.emailLanguage || 'en',
                         _memoryStats: lead._memoryStats || {}
                     };
-
-                    // IMPORTANT: Convert to string - pass directly as researchSummary
                     const researchSummaryString = JSON.stringify(researchData);
-
-                    company = await saveCompanyFromLead({
+                    await saveCompanyFromLead({
                         company: lead.company,
                         domain: lead.domain,
                         industry: lead.industry || leadIntent.industry,
                         country: lead.hq || leadIntent.location,
                         companySize: lead.companySize || 'unknown',
                         emails: lead.email ? [lead.email] : [],
-                        researchSummary: researchSummaryString,  // Pass string directly
+                        researchSummary: researchSummaryString,
                         leadScore: lead.leadScore || 50,
                     });
                 }
-                if (company) companyIds.push(company._id);
-            }
-            
-            if (companyIds.length > 0) {
-                await saveSearchCache(queryHash, queryParams, companyIds, 30);
-                console.log(`💾 [ORCHESTRATOR] Saved ${companyIds.length} companies to cache`);
             }
         }
 
