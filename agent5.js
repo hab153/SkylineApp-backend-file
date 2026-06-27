@@ -46,6 +46,7 @@ OUTPUT RULES
 - Return only a JSON object (not an array) for a single lead.
 - If a field is unknown, set it to null or an empty array.
 - Keep messages SHORT (under 80 words each).
+- CRITICAL: The email field MUST be populated. DO NOT return null for email if provided in the prospect data.
 
 SCHEMA (use these exact field names):
 {
@@ -303,19 +304,32 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Format a Single Lead (FIXED: Email properly passed to GPT)
+// 7. Format a Single Lead (WITH LOGGING)
 // ────────────────────────────────────────────────────────────────
 
 async function formatSingleLead(prospect, intent, userProfile, apiKey, tavilyKey) {
     const senderName = userProfile?.senderName || 'Alex';
     const usp = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
 
-    // --- CRITICAL FIX: Extract email from prospect BEFORE calling GPT ---
-    // The email comes from Agent 2/Agent 3 as email_candidates
+    // --- LOG: What we received from Agent 4 ---
+    console.log(`📥 [AGENT5] RECEIVED PROSPECT:`);
+    console.log(`   - Company: ${prospect.company || 'Unknown'}`);
+    console.log(`   - Name: ${prospect.name || 'Unknown'}`);
+    console.log(`   - Domain: ${prospect.domain || 'Unknown'}`);
+    console.log(`   - email_candidates: ${JSON.stringify(prospect.email_candidates || [])}`);
+    console.log(`   - email field: ${prospect.email || 'null'}`);
+    console.log(`   - fit_score: ${prospect.fit_score || 0}`);
+    console.log(`   - priority: ${prospect.priority || 'medium'}`);
+    console.log(`   - qualification_status: ${prospect.qualification_status || 'unknown'}`);
+
+    // --- Extract email from prospect ---
     const email = prospect.email_candidates?.[0] || prospect.email || null;
     const emailOptions = prospect.email_candidates || [];
 
-    // --- CRITICAL FIX: Include email in the prompt ---
+    console.log(`📧 [AGENT5] Extracted email: ${email || 'null'}`);
+    console.log(`📧 [AGENT5] Email options: ${JSON.stringify(emailOptions)}`);
+
+    // --- Build prompt with email included ---
     const formattingPrompt = `
 You are Agent 5, the final output formatter. Convert this ONE prospect into a final lead object.
 
@@ -326,7 +340,7 @@ PROSPECT:
 - Name: ${prospect.name || 'Unknown'}
 - Company: ${prospect.company || 'Unknown'}
 - Domain: ${prospect.domain || 'Unknown'}
-- Email: ${email || 'null'}   <-- EMAIL IS NOW INCLUDED!
+- Email: ${email || 'null'}
 - Website: ${prospect.website || 'Unknown'}
 - Location: ${prospect.location || 'Unknown'}
 - Role: ${prospect.role || 'Unknown'}
@@ -337,8 +351,12 @@ PROSPECT:
 - Personalization Angle: ${prospect.personalization_angle || null}
 - Notes: ${prospect.notes || null}
 
+CRITICAL INSTRUCTION:
+- The email field MUST be set to "${email}" in the output. DO NOT return null for email.
+- If email is "${email}", set email to "${email}".
+
 Create a final lead object with:
-1. All identity fields (name, company, domain, email) - SET THE EMAIL FIELD to "${email}" if provided
+1. All identity fields (name, company, domain, email) - SET THE EMAIL FIELD
 2. Email validation fields (set defaults based on qualification status)
 3. Company details (size, model, industry, HQ)
 4. Scoring fields (leadScore, etc.)
@@ -351,6 +369,8 @@ IMPORTANT:
 - Keep messages SHORT and DIRECT. No fluff. One clear CTA max.`;
 
     try {
+        console.log(`📤 [AGENT5] Sending to GPT with email: ${email || 'null'}...`);
+
         const response = await withRetry(() => axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
@@ -387,15 +407,33 @@ IMPORTANT:
 
         const lead = parseResult.data;
         
-        // --- FIX: Ensure email is set if GPT didn't set it ---
-        if (!lead.email && email) {
-            lead.email = email;
-            console.log(`📧 [AGENT5] Set email from prospect data: ${email}`);
+        // --- LOG: What GPT returned ---
+        console.log(`📥 [AGENT5] GPT RETURNED:`);
+        console.log(`   - Company: ${lead.company || 'Unknown'}`);
+        console.log(`   - Name: ${lead.name || 'Unknown'}`);
+        console.log(`   - Email from GPT: ${lead.email || 'null'}`);
+        console.log(`   - allEmailOptions from GPT: ${JSON.stringify(lead.allEmailOptions || [])}`);
+        
+        // --- FORCE: Set email from prospect data if GPT didn't set it ---
+        if (email) {
+            if (!lead.email || lead.email === 'null' || lead.email === '') {
+                lead.email = email;
+                console.log(`📧 [AGENT5] FORCE SET email from prospect data: ${email}`);
+            }
         }
         
-        // --- FIX: Ensure allEmailOptions is set ---
-        if (!lead.allEmailOptions || lead.allEmailOptions.length === 0) {
-            lead.allEmailOptions = emailOptions;
+        // --- FORCE: Set allEmailOptions ---
+        if (emailOptions.length > 0) {
+            if (!lead.allEmailOptions || lead.allEmailOptions.length === 0) {
+                lead.allEmailOptions = emailOptions;
+                console.log(`📧 [AGENT5] FORCE SET allEmailOptions: ${JSON.stringify(emailOptions)}`);
+            }
+        }
+        
+        // --- FORCE: Ensure email is never null if we have it ---
+        if (email && (lead.email === null || lead.email === undefined)) {
+            lead.email = email;
+            console.log(`📧 [AGENT5] FORCE SET email (null check): ${email}`);
         }
         
         // Ensure messages exist
@@ -421,6 +459,14 @@ IMPORTANT:
                 }
             ];
         }
+
+        // --- LOG: What we are returning ---
+        console.log(`📤 [AGENT5] FINAL LEAD OUTPUT:`);
+        console.log(`   - Company: ${lead.company || 'Unknown'}`);
+        console.log(`   - Name: ${lead.name || 'Unknown'}`);
+        console.log(`   - Email FINAL: ${lead.email || 'null'}`);
+        console.log(`   - allEmailOptions FINAL: ${JSON.stringify(lead.allEmailOptions || [])}`);
+        console.log(`   - Has messages: ${lead.messages ? lead.messages.length : 0}`);
 
         return lead;
 
@@ -470,7 +516,7 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
         if (lead) {
             formattedLeads.push(lead);
             successCount++;
-            console.log(`✅ [AGENT5] Successfully formatted: ${lead.company || 'Unknown'}`);
+            console.log(`✅ [AGENT5] Successfully formatted: ${lead.company || 'Unknown'} (email: ${lead.email || 'null'})`);
         } else {
             failureCount++;
             console.log(`❌ [AGENT5] Failed to format: ${prospect.company || 'Unknown'}`);
@@ -478,6 +524,10 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
     }
 
     console.log(`📦 [AGENT5] Formatting complete: ${successCount} succeeded, ${failureCount} failed`);
+    console.log(`📧 [AGENT5] FINAL LEADS EMAIL SUMMARY:`);
+    formattedLeads.forEach((lead, i) => {
+        console.log(`   ${i + 1}. ${lead.company || 'Unknown'} → email: ${lead.email || 'null'}`);
+    });
 
     const confidence = successCount > 0 ? Math.min(0.95, 0.7 + (successCount / qualified_prospects.length) * 0.25) : 0.4;
     const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
