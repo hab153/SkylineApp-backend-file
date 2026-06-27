@@ -28,7 +28,7 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 500;
+const MAX_OUTPUT_TOKENS = 600;
 const MAX_SEARCH_RESULTS = 3;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
@@ -210,23 +210,144 @@ function buildFinalQueries(prospects) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 6. Main Agent 5 Function
+// 6. FIX: Safe JSON Parsing with Auto-Fix (Enhanced)
 // ────────────────────────────────────────────────────────────────
 
-/**
- * Converts qualified prospects into final lead objects with outreach messages.
- * 
- * @param {Object} params
- * @param {Array}  params.qualified_prospects - The qualified prospects from Agent 4.
- * @param {Object} params.intent - The original intent from Agent 1.
- * @param {string} params.userProfile - User profile for sender name and USP.
- * @param {string} params.apiKey - OpenAI API key.
- * @param {string} params.tavilyKey - Tavily API key.
- * @param {string} params.userId - User identifier for logging.
- * @param {Function} params.onProgress - Optional progress callback.
- * 
- * @returns {Object} Structured final output result.
- */
+function safeJsonParse(jsonString) {
+    // Try normal parse first
+    try {
+        return { success: true, data: JSON.parse(jsonString) };
+    } catch (error) {
+        console.warn(`⚠️ [JSON] Parse error: ${error.message}`);
+        console.warn(`⚠️ [JSON] Attempting to auto-fix...`);
+        
+        let fixed = jsonString;
+        
+        // Fix 1: Incomplete numbers (0. → 0.0, 1. → 1.0)
+        fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
+        fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
+        fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
+        
+        // Fix 2: Trailing commas before } or ]
+        fixed = fixed.replace(/,\s*}/g, '}');
+        fixed = fixed.replace(/,\s*\]/g, ']');
+        
+        // Fix 3: Missing commas between array/object items
+        // Look for } followed by { without a comma
+        fixed = fixed.replace(/}\s*{/g, '},{');
+        // Look for ] followed by { without a comma
+        fixed = fixed.replace(/\]\s*{/g, '],{');
+        // Look for } followed by " without a comma
+        fixed = fixed.replace(/}\s*"/g, '},"');
+        // Look for ] followed by " without a comma
+        fixed = fixed.replace(/\]\s*"/g, '],"');
+        
+        // Fix 4: Unterminated strings - find strings that don't have closing quotes
+        // Look for a quote that starts a string but doesn't have a closing quote
+        const lines = fixed.split('\n');
+        let fixedLines = [];
+        let inString = false;
+        let stringStartLine = -1;
+        let currentLine = '';
+        
+        for (let i = 0; i < lines.length; i++) {
+            let line = lines[i];
+            
+            // Count quotes in this line (ignoring escaped quotes)
+            const quotes = (line.match(/"/g) || []).length;
+            const escapedQuotes = (line.match(/\\"/g) || []).length;
+            const effectiveQuotes = quotes - escapedQuotes;
+            
+            if (inString) {
+                // We're inside a string - check if this line closes it
+                if (effectiveQuotes % 2 === 1) {
+                    // Odd quotes means the string closes in this line
+                    inString = false;
+                    fixedLines.push(line);
+                } else {
+                    // String continues - add line as-is
+                    fixedLines.push(line);
+                }
+            } else {
+                // We're not in a string - check if this line starts one
+                if (effectiveQuotes % 2 === 1) {
+                    // Odd quotes means a string starts and ends in this line? Or just starts?
+                    // Check if the line ends with a quote that would close it
+                    const trimmedLine = line.trim();
+                    if (trimmedLine.endsWith('"') || trimmedLine.endsWith('",') || trimmedLine.endsWith('":')) {
+                        // Likely the string is closed in this line
+                        fixedLines.push(line);
+                    } else {
+                        // String starts in this line but doesn't close
+                        inString = true;
+                        stringStartLine = i;
+                        // Add a closing quote at the end of the line
+                        if (!line.endsWith('"') && !line.endsWith('",') && !line.endsWith('":')) {
+                            line = line + '"';
+                        }
+                        fixedLines.push(line);
+                    }
+                } else {
+                    fixedLines.push(line);
+                }
+            }
+        }
+        
+        // If we finished the file and we're still in a string, add a closing quote
+        if (inString) {
+            fixedLines[fixedLines.length - 1] = fixedLines[fixedLines.length - 1] + '"';
+            console.log(`🔧 [JSON] Added closing quote for unterminated string at line ${stringStartLine + 1}`);
+        }
+        
+        fixed = fixedLines.join('\n');
+        
+        // Fix 5: Missing closing brackets (add if unbalanced)
+        const openBraces = (fixed.match(/\{/g) || []).length;
+        const closeBraces = (fixed.match(/\}/g) || []).length;
+        const openBrackets = (fixed.match(/\[/g) || []).length;
+        const closeBrackets = (fixed.match(/\]/g) || []).length;
+        
+        if (openBraces > closeBraces) {
+            fixed += '}'.repeat(openBraces - closeBraces);
+        }
+        if (openBrackets > closeBrackets) {
+            fixed += ']'.repeat(openBrackets - closeBrackets);
+        }
+        
+        // Fix 6: Remove anything after the last complete JSON structure
+        const lastBrace = fixed.lastIndexOf('}');
+        const lastBracket = fixed.lastIndexOf(']');
+        const lastEnd = Math.max(lastBrace, lastBracket);
+        if (lastEnd > 0 && lastEnd < fixed.length - 1) {
+            const trailing = fixed.substring(lastEnd + 1).trim();
+            if (trailing && !trailing.startsWith(',') && !trailing.startsWith(']') && !trailing.startsWith('}')) {
+                fixed = fixed.substring(0, lastEnd + 1);
+            }
+        }
+        
+        // Fix 7: Try to fix "Expected ',' or '}' after property value"
+        // Look for "value" followed by newline and then a property without a comma
+        fixed = fixed.replace(/"\s*\n\s*"/g, '",\n"');
+        fixed = fixed.replace(/}\s*\n\s*"/g, '},\n"');
+        fixed = fixed.replace(/\]\s*\n\s*"/g, '],\n"');
+        fixed = fixed.replace(/}\s*\n\s*{/g, '},\n{');
+        fixed = fixed.replace(/\]\s*\n\s*{/g, '],\n{');
+        
+        try {
+            const data = JSON.parse(fixed);
+            console.log(`✅ [JSON] Auto-fix successful`);
+            return { success: true, data };
+        } catch (retryError) {
+            console.error(`❌ [JSON] Auto-fix failed: ${retryError.message}`);
+            return { success: false, error: retryError };
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 7. FIX: Main Agent 5 Function with Retry & Safe Parsing
+// ────────────────────────────────────────────────────────────────
+
 async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
     console.log(`📦 [AGENT5] Formatting final leads for user ${userId}...`);
     onProgress?.('📦 Packaging final leads...');
@@ -316,156 +437,170 @@ OUTREACH MESSAGE GUIDELINES:
 
 Return ONLY a JSON array of lead objects following the exact schema provided in the system prompt.`;
 
-    try {
-        const response = await withRetry(() => axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            {
-                model: MODEL,
-                messages: [
-                    { role: 'system', content: AGENT5_SYSTEM_PROMPT },
-                    { role: 'user', content: formattingPrompt }
-                ],
-                max_tokens: MAX_OUTPUT_TOKENS,
-                temperature: 0.3,
-                response_format: { type: 'json_object' }
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
+    // ─── Step 3: Try formatting with retries and safe parsing ───
+    let lastError = null;
+    
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            console.log(`📦 [AGENT5] Formatting attempt ${attempt}/3...`);
+            
+            const response = await withRetry(() => axios.post(
+                'https://api.openai.com/v1/chat/completions',
+                {
+                    model: MODEL,
+                    messages: [
+                        { role: 'system', content: AGENT5_SYSTEM_PROMPT },
+                        { role: 'user', content: formattingPrompt }
+                    ],
+                    max_tokens: MAX_OUTPUT_TOKENS,
+                    temperature: 0.3,
+                    response_format: { type: 'json_object' }
                 },
-                timeout: 20000
+                {
+                    headers: {
+                        'Authorization': `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 20000
+                }
+            ), 'GPT:formatLeads');
+
+            if (!response) {
+                console.warn(`⚠️ [AGENT5] Formatting attempt ${attempt} returned null`);
+                if (attempt === 3) break;
+                continue;
             }
-        ), 'GPT:formatLeads');
 
-        if (!response) {
-            return {
-                intent: 'lead_output',
-                confidence: 0.0,
-                needs_clarification: true,
-                clarification_question: 'Failed to format leads. Please try again.',
-                next_pipeline: null,
-                entities: intent?.entities || {},
-                risk_level: 'medium',
-                policy_flags: ['formatting_failure'],
-                reason: 'GPT formatting failed.',
-                leads: [],
-                stats: { input: qualified_prospects.length, output: 0, searched }
-            };
-        }
+            const rawContent = response.data.choices[0].message.content.trim();
+            
+            // ─── SAFE JSON PARSE with auto-fix ───
+            const parseResult = safeJsonParse(rawContent);
+            
+            if (!parseResult.success) {
+                console.warn(`⚠️ [AGENT5] JSON parse failed on attempt ${attempt}`);
+                if (attempt === 3) break;
+                continue;
+            }
 
-        const rawContent = response.data.choices[0].message.content.trim();
-        const parsed = JSON.parse(rawContent);
+            const parsed = parseResult.data;
 
-        // ─── Step 3: Extract leads from response ───
-        let leads = [];
-        if (Array.isArray(parsed)) {
-            leads = parsed;
-        } else if (parsed.leads && Array.isArray(parsed.leads)) {
-            leads = parsed.leads;
-        } else if (parsed.qualified_prospects && Array.isArray(parsed.qualified_prospects)) {
-            leads = parsed.qualified_prospects;
-        } else {
-            // Try to find any array in the object
-            for (const key of Object.keys(parsed)) {
-                if (Array.isArray(parsed[key])) {
-                    leads = parsed[key];
-                    break;
+            // ─── Step 4: Extract leads from response ───
+            let leads = [];
+            if (Array.isArray(parsed)) {
+                leads = parsed;
+            } else if (parsed.leads && Array.isArray(parsed.leads)) {
+                leads = parsed.leads;
+            } else if (parsed.qualified_prospects && Array.isArray(parsed.qualified_prospects)) {
+                leads = parsed.qualified_prospects;
+            } else {
+                // Try to find any array in the object
+                for (const key of Object.keys(parsed)) {
+                    if (Array.isArray(parsed[key])) {
+                        leads = parsed[key];
+                        break;
+                    }
                 }
             }
+
+            // ─── Step 5: Ensure each lead has messages ───
+            leads = leads.map(lead => {
+                // Ensure messages exist
+                if (!lead.messages || lead.messages.length === 0) {
+                    const name = lead.name || lead.company || 'there';
+                    const company = lead.company || 'your company';
+                    const angle = lead.personalization_angle || 'growth and efficiency';
+                    
+                    lead.messages = [
+                        {
+                            type: 'initial',
+                            subject: `One thought on ${company}`,
+                            body: `Hi ${name},\n\nRunning a ${lead.industry || 'business'} means most of your day goes to work that doesn't directly close deals.\n\n${usp}\n\nWorth 15 minutes this week?\n\nBest,\n${senderName}`
+                        },
+                        {
+                            type: 'followup',
+                            subject: `Re: One thought on ${company}`,
+                            body: `Hi ${name},\n\nFloating this back up — most ${lead.industry || 'business'} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${senderName}`
+                        },
+                        {
+                            type: 'breakup',
+                            subject: `Closing my file on ${company}`,
+                            body: `Hi ${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
+                        }
+                    ];
+                }
+                return lead;
+            });
+
+            // ─── Step 6: Calculate confidence ───
+            const confidence = leads.length > 0 ? Math.min(0.95, 0.7 + (leads.length / qualified_prospects.length) * 0.25) : 0.4;
+            const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
+
+            const result = {
+                intent: 'lead_output',
+                confidence: Math.round(confidence * 100) / 100,
+                needs_clarification: needsClarification,
+                clarification_question: needsClarification 
+                    ? 'I formatted the leads but some fields are missing. Please check the output.'
+                    : null,
+                next_pipeline: 'complete',
+                entities: intent?.entities || {
+                    industry: intent?.industry || null,
+                    location: intent?.location || null,
+                    role: intent?.role || null,
+                    company: intent?.company || null,
+                    lead_count: leads.length,
+                    email: null,
+                    domain: null,
+                    source_type: 'web_search'
+                },
+                risk_level: leads.length / qualified_prospects.length < 0.5 ? 'medium' : 'low',
+                policy_flags: leads.length === 0 ? ['no_output'] : [],
+                reason: `Formatted ${leads.length} final leads from ${qualified_prospects.length} qualified prospects.`,
+                leads: leads,
+                stats: {
+                    input: qualified_prospects.length,
+                    output: leads.length,
+                    searched: searched
+                }
+            };
+
+            console.log(`✅ [AGENT5] Formatting complete: ${leads.length} leads output (attempt ${attempt})`);
+            return result;
+
+        } catch (error) {
+            lastError = error;
+            console.error(`❌ [AGENT5] Formatting attempt ${attempt} failed:`, error.message);
+            if (attempt === 3) break;
         }
-
-        // ─── Step 4: Ensure each lead has messages ───
-        leads = leads.map(lead => {
-            // Ensure messages exist
-            if (!lead.messages || lead.messages.length === 0) {
-                const name = lead.name || lead.company || 'there';
-                const company = lead.company || 'your company';
-                const angle = lead.personalization_angle || 'growth and efficiency';
-                
-                lead.messages = [
-                    {
-                        type: 'initial',
-                        subject: `One thought on ${company}`,
-                        body: `Hi ${name},\n\nRunning a ${lead.industry || 'business'} means most of your day goes to work that doesn't directly close deals.\n\n${usp}\n\nWorth 15 minutes this week?\n\nBest,\n${senderName}`
-                    },
-                    {
-                        type: 'followup',
-                        subject: `Re: One thought on ${company}`,
-                        body: `Hi ${name},\n\nFloating this back up — most ${lead.industry || 'business'} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${senderName}`
-                    },
-                    {
-                        type: 'breakup',
-                        subject: `Closing my file on ${company}`,
-                        body: `Hi ${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
-                    }
-                ];
-            }
-            return lead;
-        });
-
-        // ─── Step 5: Calculate confidence ───
-        const confidence = leads.length > 0 ? Math.min(0.95, 0.7 + (leads.length / qualified_prospects.length) * 0.25) : 0.4;
-        const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
-
-        const result = {
-            intent: 'lead_output',
-            confidence: Math.round(confidence * 100) / 100,
-            needs_clarification: needsClarification,
-            clarification_question: needsClarification 
-                ? 'I formatted the leads but some fields are missing. Please check the output.'
-                : null,
-            next_pipeline: 'complete',
-            entities: intent?.entities || {
-                industry: intent?.industry || null,
-                location: intent?.location || null,
-                role: intent?.role || null,
-                company: intent?.company || null,
-                lead_count: leads.length,
-                email: null,
-                domain: null,
-                source_type: 'web_search'
-            },
-            risk_level: leads.length / qualified_prospects.length < 0.5 ? 'medium' : 'low',
-            policy_flags: leads.length === 0 ? ['no_output'] : [],
-            reason: `Formatted ${leads.length} final leads from ${qualified_prospects.length} qualified prospects.`,
-            leads: leads,
-            stats: {
-                input: qualified_prospects.length,
-                output: leads.length,
-                searched: searched
-            }
-        };
-
-        console.log(`✅ [AGENT5] Formatting complete: ${leads.length} leads output`);
-        return result;
-
-    } catch (error) {
-        console.error(`❌ [AGENT5] Formatting failed:`, error.message);
-        return {
-            intent: 'lead_output',
-            confidence: 0.0,
-            needs_clarification: true,
-            clarification_question: 'Failed to format leads. Please try again.',
-            next_pipeline: null,
-            entities: intent?.entities || {},
-            risk_level: 'medium',
-            policy_flags: ['formatting_failure'],
-            reason: `Formatting failed: ${error.message}`,
-            leads: [],
-            stats: { input: qualified_prospects.length, output: 0, searched }
-        };
     }
+
+    // ─── Step 7: All attempts failed – return a graceful error ───
+    console.error(`❌ [AGENT5] All formatting attempts failed. Last error: ${lastError?.message || 'Unknown error'}`);
+    
+    return {
+        intent: 'lead_output',
+        confidence: 0.0,
+        needs_clarification: true,
+        clarification_question: 'Failed to format leads. Please try again.',
+        next_pipeline: null,
+        entities: intent?.entities || {},
+        risk_level: 'medium',
+        policy_flags: ['formatting_failure'],
+        reason: `Formatting failed after 3 attempts: ${lastError?.message || 'Unknown error'}`,
+        leads: [],
+        stats: { input: qualified_prospects.length, output: 0, searched }
+    };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Public Exports
+// 8. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
     formatFinalLeads,
     buildFinalQueries,
     searchTavily,
+    safeJsonParse,
     CONFIDENCE_THRESHOLD_ROUTE,
     CONFIDENCE_THRESHOLD_CLARIFY,
 };
