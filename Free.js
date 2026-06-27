@@ -370,7 +370,7 @@ When answering:
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED DATABASE SAVING)
+// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED WITH STRING CONVERSION)
 // ────────────────────────────────────────────────────────────────
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, userId) {
@@ -596,7 +596,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 9: Save leads to cache (FIXED) ───
+        // ─── Step 9: Save leads to cache (FIXED: Convert to string) ───
         if (finalLeads.length > 0) {
             const companyIds = [];
             for (const lead of finalLeads) {
@@ -604,8 +604,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                 
                 let company = await Company.findOne({ domain: lead.domain });
                 if (!company) {
-                    // Build a clean research object with proper values
-                    const research = {
+                    // Build a clean research object
+                    const researchData = {
                         recentNews: lead.recentNews || null,
                         website: lead.website || null,
                         linkedin_url: lead.linkedIn || null,
@@ -629,6 +629,9 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                         _memoryStats: lead._memoryStats || {}
                     };
 
+                    // IMPORTANT: Convert to string for researchSummary field
+                    const researchSummary = JSON.stringify(researchData);
+
                     company = await saveCompanyFromLead({
                         company: lead.company,
                         domain: lead.domain,
@@ -636,7 +639,9 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                         country: lead.hq || leadIntent.location,
                         companySize: lead.companySize || 'unknown',
                         emails: lead.email ? [lead.email] : [],
-                        research: research,
+                        research: {
+                            researchSummary: researchSummary  // This is a string
+                        },
                         leadScore: lead.leadScore || 50,
                     });
                 }
