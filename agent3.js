@@ -32,7 +32,7 @@ const dns = require('dns').promises;
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 500;
+const MAX_OUTPUT_TOKENS = 1000;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_QUERIES_PER_PROSPECT = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
