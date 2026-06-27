@@ -37,7 +37,7 @@ const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 2 System Prompt (locked, production-grade)
+// 2. The Agent 2 System Prompt
 // ────────────────────────────────────────────────────────────────
 
 const AGENT2_SYSTEM_PROMPT = `You are Agent 2, the Prospecting / Discovery layer in a B2B lead-generation system.
@@ -180,7 +180,7 @@ async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 5. Build Search Queries from Intent
+// 5. Build Search Queries from Intent (UPDATED: includes email)
 // ────────────────────────────────────────────────────────────────
 
 function buildSearchQueries(intent) {
@@ -190,17 +190,22 @@ function buildSearchQueries(intent) {
     const role = intent.role || '';
     const company = intent.company || '';
 
-    // Primary query: industry + location + role
+    // Primary query: industry + location + role with email
     if (industry && location && role) {
-        queries.push(`"${industry}" "${location}" "${role}" company contact`);
+        queries.push(`"${industry}" "${location}" "${role}" company contact email`);
     } else if (industry && location) {
-        queries.push(`"${industry}" companies in "${location}"`);
+        queries.push(`"${industry}" companies in "${location}" email contact`);
     } else if (industry && role) {
-        queries.push(`"${industry}" "${role}" company`);
+        queries.push(`"${industry}" "${role}" company email`);
     } else if (industry) {
         queries.push(`"${industry}" companies list contact email`);
     } else if (company) {
         queries.push(`"${company}" company contact email`);
+    }
+
+    // Add a query that specifically looks for email addresses
+    if (industry) {
+        queries.push(`"${industry}" "@" email contact`);
     }
 
     // Fallback query
@@ -213,11 +218,21 @@ function buildSearchQueries(intent) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 6. FIX: Safe JSON Parsing with Auto-Fix
+// 6. FIX: Extract Emails with Regex
+// ────────────────────────────────────────────────────────────────
+
+function extractEmailsWithRegex(text) {
+    if (!text) return [];
+    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const matches = text.match(emailRegex) || [];
+    return [...new Set(matches)];
+}
+
+// ────────────────────────────────────────────────────────────────
+// 7. FIX: Safe JSON Parsing with Auto-Fix
 // ────────────────────────────────────────────────────────────────
 
 function safeJsonParse(jsonString) {
-    // Try normal parse first
     try {
         return { success: true, data: JSON.parse(jsonString) };
     } catch (error) {
@@ -226,40 +241,68 @@ function safeJsonParse(jsonString) {
         
         let fixed = jsonString;
         
-        // Fix 1: Incomplete numbers (0. → 0.0, 1. → 1.0)
         fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
         fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
         fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
-        
-        // Fix 2: Trailing commas before } or ]
         fixed = fixed.replace(/,\s*}/g, '}');
         fixed = fixed.replace(/,\s*\]/g, ']');
+        fixed = fixed.replace(/}\s*{/g, '},{');
+        fixed = fixed.replace(/\]\s*{/g, '],{');
+        fixed = fixed.replace(/}\s*"/g, '},"');
+        fixed = fixed.replace(/\]\s*"/g, '],"');
+        fixed = fixed.replace(/"\s*"/g, '","');
+        fixed = fixed.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
         
-        // Fix 3: Missing closing brackets (add if unbalanced)
+        let result = '';
+        let inString = false;
+        let escapeNext = false;
+        
+        for (let i = 0; i < fixed.length; i++) {
+            const char = fixed[i];
+            if (escapeNext) { escapeNext = false; result += char; continue; }
+            if (char === '\\') { escapeNext = true; result += char; continue; }
+            if (char === '"') {
+                if (!inString) {
+                    inString = true;
+                    result += char;
+                } else {
+                    let nextChar = '';
+                    let j = i + 1;
+                    while (j < fixed.length && /\s/.test(fixed[j])) j++;
+                    if (j < fixed.length) nextChar = fixed[j];
+                    if (nextChar === ',' || nextChar === ']' || nextChar === '}' || nextChar === '' || nextChar === ' ' || nextChar === '\n') {
+                        inString = false;
+                        result += char;
+                    } else {
+                        result += char;
+                    }
+                }
+                continue;
+            }
+            result += char;
+        }
+        if (inString) { result += '"'; console.log(`🔧 [JSON] Added closing quote`); }
+        fixed = result;
+        
         const openBraces = (fixed.match(/\{/g) || []).length;
         const closeBraces = (fixed.match(/\}/g) || []).length;
         const openBrackets = (fixed.match(/\[/g) || []).length;
         const closeBrackets = (fixed.match(/\]/g) || []).length;
+        if (openBraces > closeBraces) fixed += '}'.repeat(openBraces - closeBraces);
+        if (openBrackets > closeBrackets) fixed += ']'.repeat(openBrackets - closeBrackets);
         
-        if (openBraces > closeBraces) {
-            fixed += '}'.repeat(openBraces - closeBraces);
-        }
-        if (openBrackets > closeBrackets) {
-            fixed += ']'.repeat(openBrackets - closeBrackets);
-        }
-        
-        // Fix 4: Remove anything after the last complete JSON structure
-        // Find the last } or ] that closes the main structure
         const lastBrace = fixed.lastIndexOf('}');
         const lastBracket = fixed.lastIndexOf(']');
         const lastEnd = Math.max(lastBrace, lastBracket);
         if (lastEnd > 0 && lastEnd < fixed.length - 1) {
-            // Check if what follows is likely trailing text
             const trailing = fixed.substring(lastEnd + 1).trim();
             if (trailing && !trailing.startsWith(',') && !trailing.startsWith(']') && !trailing.startsWith('}')) {
                 fixed = fixed.substring(0, lastEnd + 1);
             }
         }
+        
+        fixed = fixed.replace(/\}\}\}/g, '}}');
+        fixed = fixed.replace(/^\uFEFF/, '');
         
         try {
             const data = JSON.parse(fixed);
@@ -273,115 +316,70 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. FIX: Fallback Regex Extraction (when GPT fails)
+// 8. FIX: Create Fallback Prospects from Regex Emails
 // ────────────────────────────────────────────────────────────────
 
-function extractProspectsWithRegex(searchResults, intent) {
-    console.log(`🔧 [AGENT2] Using fallback regex extraction...`);
-    const prospects = [];
-    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-    const domainRegex = /https?:\/\/(?:www\.)?([^\/]+)/;
+function createFallbackProspects(searchResults, regexEmails, intent) {
+    console.log(`🔧 [AGENT2] Creating fallback prospects from ${searchResults.length} results`);
+    console.log(`📧 [AGENT2] Fallback emails: ${JSON.stringify(regexEmails)}`);
     
+    const prospects = [];
+    const domainRegex = /https?:\/\/(?:www\.)?([^\/]+)/;
     const seenDomains = new Set();
     
     for (const result of searchResults) {
-        // Extract domain from URL
         const domainMatch = result.url.match(domainRegex);
         let domain = domainMatch ? domainMatch[1] : null;
-        
-        // Clean domain (remove www, subdomains)
         if (domain) {
-            // Keep only the main domain (example.com)
             const parts = domain.split('.');
-            if (parts.length > 2) {
-                // Try to extract main domain (e.g., www.example.com → example.com)
-                domain = parts.slice(-2).join('.');
-            }
+            if (parts.length > 2) domain = parts.slice(-2).join('.');
         }
         
-        // Skip if no domain or already seen
         if (!domain || seenDomains.has(domain)) continue;
         seenDomains.add(domain);
         
-        // Extract emails from snippet
-        const emails = result.snippet.match(emailRegex) || [];
-        
-        // Determine location from snippet
-        let location = null;
-        const locationPatterns = [
-            /(?:in|based in|located in|from)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/,
-            /([A-Z][a-z]+),\s+[A-Z]{2}/,
-            /([A-Z][a-z]+)\s+[A-Z]{2}/,
-        ];
-        for (const pattern of locationPatterns) {
-            const match = result.snippet.match(pattern);
-            if (match) {
-                location = match[1];
-                break;
-            }
-        }
-        
-        // Determine role from snippet
-        let role = null;
-        const rolePatterns = [
-            /\b(CEO|Founder|Co-Founder|Owner|Director|VP|Head|Manager)\b/i,
-            /\b(Founder|Co-Founder|Co Founder)\b/i,
-        ];
-        for (const pattern of rolePatterns) {
-            const match = result.snippet.match(pattern);
-            if (match) {
-                role = match[1];
-                break;
-            }
-        }
-        
-        // Extract company name from title or domain
-        let companyName = result.title || domain;
-        // Clean up company name (remove common suffixes)
-        companyName = companyName
-            .replace(/\b(Ltd|LLC|Inc|Limited|PLC|Corp|Corporation)\b/gi, '')
-            .replace(/\s*[|\-–].*$/, '')
-            .trim();
-        
-        // Calculate fit score based on matches
-        let fitScore = 0.5;
-        if (intent.industry && companyName.toLowerCase().includes(intent.industry.toLowerCase())) {
-            fitScore += 0.2;
-        }
-        if (intent.location && location && location.toLowerCase().includes(intent.location.toLowerCase())) {
-            fitScore += 0.15;
-        }
-        if (intent.role && role && role.toLowerCase().includes(intent.role.toLowerCase())) {
-            fitScore += 0.15;
-        }
-        fitScore = Math.min(fitScore, 0.95);
+        // Extract emails that might belong to this domain
+        const matchingEmails = regexEmails.filter(email => {
+            const emailDomain = email.split('@')[1] || '';
+            return emailDomain === domain || emailDomain.includes(domain.split('.')[0]);
+        });
         
         prospects.push({
-            name: role ? `${role} at ${companyName}` : companyName,
-            company: companyName,
+            name: result.title || domain,
+            company: result.title || domain,
             domain: domain,
             source: 'web_search',
             source_url: result.url,
-            location: location || intent.location || null,
-            role: role || intent.role || null,
-            fit_score: Math.round(fitScore * 100) / 100,
-            email_candidates: emails.slice(0, 3),
-            notes: `Extracted via fallback regex from: ${result.title}`
+            location: intent.location || null,
+            role: intent.role || null,
+            fit_score: matchingEmails.length > 0 ? 0.7 : 0.4,
+            email_candidates: matchingEmails.slice(0, 3),
+            notes: `Fallback extraction from search result`
         });
+        
+        if (prospects.length >= (intent.lead_count || 5)) break;
     }
     
-    console.log(`🔧 [AGENT2] Regex fallback extracted ${prospects.length} prospects`);
-    return prospects;
+    console.log(`🔧 [AGENT2] Fallback extracted ${prospects.length} prospects with ${regexEmails.length} emails`);
+    return { prospects, found: prospects.length };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. FIX: Extract Prospects with Retry & Fallback
+// 9. FIX: Extract Prospects with Retry, Email Extraction & Fallback
 // ────────────────────────────────────────────────────────────────
 
 async function extractProspectsFromResults(searchResults, intent, apiKey) {
     if (!searchResults || searchResults.length === 0) {
         return { prospects: [], found: 0 };
     }
+
+    // --- LOG: What we received ---
+    console.log(`📥 [AGENT2] Extracting from ${searchResults.length} search results`);
+
+    // --- FIX: Extract emails using regex from ALL snippets ---
+    const allText = searchResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+    const regexEmails = extractEmailsWithRegex(allText);
+    console.log(`📧 [AGENT2] Regex found ${regexEmails.length} email(s): ${JSON.stringify(regexEmails)}`);
 
     // Build a compact text from search results
     const snippets = searchResults.map((r, i) => 
@@ -401,7 +399,10 @@ USER REQUEST:
 SEARCH RESULTS:
 ${snippets}
 
-Extract all companies that match the user's request. For each company, extract:
+EXTRACTED EMAILS FROM SEARCH TEXT (USE THESE):
+${JSON.stringify(regexEmails)}
+
+For each company, extract:
 - name: Company name exactly as written
 - company: Same as name
 - domain: The company's domain (e.g., example.com) if present in URL or text, otherwise null
@@ -410,8 +411,11 @@ Extract all companies that match the user's request. For each company, extract:
 - location: City/Country if mentioned, otherwise null
 - role: CEO/Founder/Director if mentioned, otherwise null
 - fit_score: 0.0 to 1.0 based on how well it matches the user's request
-- email_candidates: Any emails found in the text (max 3), empty array if none
+- email_candidates: MUST include any emails found for this company. Use the extracted emails above. Max 3.
 - notes: Brief note on why this company matches
+
+CRITICAL: For each prospect, extract ALL emails that belong to that company from the search results.
+If an email is found in the text, include it in email_candidates.
 
 Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} items.
 `;
@@ -445,38 +449,32 @@ Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} 
             if (!response) {
                 console.warn(`⚠️ [AGENT2] GPT extraction attempt ${attempt} returned null`);
                 if (attempt === 3) {
-                    // Fallback to regex
-                    const fallbackProspects = extractProspectsWithRegex(searchResults, intent);
-                    return { prospects: fallbackProspects, found: fallbackProspects.length };
+                    console.log(`🔄 [AGENT2] Falling back to regex extraction...`);
+                    return createFallbackProspects(searchResults, regexEmails, intent);
                 }
                 continue;
             }
 
             const rawContent = response.data.choices[0].message.content.trim();
-            
-            // ─── SAFE JSON PARSE with auto-fix ───
             const parseResult = safeJsonParse(rawContent);
             
             if (!parseResult.success) {
                 console.warn(`⚠️ [AGENT2] JSON parse failed on attempt ${attempt}`);
                 if (attempt === 3) {
-                    // Fallback to regex
-                    const fallbackProspects = extractProspectsWithRegex(searchResults, intent);
-                    return { prospects: fallbackProspects, found: fallbackProspects.length };
+                    console.log(`🔄 [AGENT2] Falling back to regex extraction...`);
+                    return createFallbackProspects(searchResults, regexEmails, intent);
                 }
                 continue;
             }
 
             const parsed = parseResult.data;
 
-            // Handle both array and object responses
             let prospects = [];
             if (Array.isArray(parsed)) {
                 prospects = parsed;
             } else if (parsed.prospects && Array.isArray(parsed.prospects)) {
                 prospects = parsed.prospects;
             } else {
-                // Try to find any array in the object
                 for (const key of Object.keys(parsed)) {
                     if (Array.isArray(parsed[key])) {
                         prospects = parsed[key];
@@ -485,35 +483,54 @@ Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} 
                 }
             }
 
-            // If we got prospects but they're empty, try again
-            if (!prospects || prospects.length === 0) {
-                console.warn(`⚠️ [AGENT2] No prospects extracted on attempt ${attempt}`);
-                if (attempt === 3) {
-                    const fallbackProspects = extractProspectsWithRegex(searchResults, intent);
-                    return { prospects: fallbackProspects, found: fallbackProspects.length };
+            // --- FIX: Ensure email_candidates is populated ---
+            prospects = prospects.map(p => {
+                // If GPT didn't extract emails but regex found some, try to assign them
+                if ((!p.email_candidates || p.email_candidates.length === 0) && regexEmails.length > 0) {
+                    const companyDomain = p.domain || '';
+                    const companyName = (p.company || p.name || '').toLowerCase().replace(/\s/g, '');
+                    const matchingEmails = regexEmails.filter(email => {
+                        const emailDomain = email.split('@')[1] || '';
+                        // Match by domain
+                        if (companyDomain && emailDomain === companyDomain) return true;
+                        if (companyDomain && emailDomain.includes(companyDomain.split('.')[0])) return true;
+                        // Match by company name (fuzzy)
+                        const emailLocal = email.split('@')[0].toLowerCase();
+                        if (companyName && emailLocal.includes(companyName.substring(0, 5))) return true;
+                        return false;
+                    });
+                    if (matchingEmails.length > 0) {
+                        p.email_candidates = matchingEmails.slice(0, 3);
+                        console.log(`📧 [AGENT2] Assigned emails to ${p.company || p.name}: ${JSON.stringify(p.email_candidates)}`);
+                    }
                 }
-                continue;
-            }
+                return p;
+            });
 
+            // --- LOG: What we extracted ---
             console.log(`✅ [AGENT2] Extracted ${prospects.length} prospects from search results (attempt ${attempt})`);
+            prospects.forEach((p, i) => {
+                console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}`);
+            });
+
             return { prospects, found: prospects.length };
 
         } catch (error) {
             console.error(`❌ [AGENT2] GPT extraction attempt ${attempt} failed:`, error.message);
             if (attempt === 3) {
-                const fallbackProspects = extractProspectsWithRegex(searchResults, intent);
-                return { prospects: fallbackProspects, found: fallbackProspects.length };
+                console.log(`🔄 [AGENT2] Falling back to regex extraction...`);
+                return createFallbackProspects(searchResults, regexEmails, intent);
             }
         }
     }
 
     // Final fallback
-    const fallbackProspects = extractProspectsWithRegex(searchResults, intent);
-    return { prospects: fallbackProspects, found: fallbackProspects.length };
+    console.log(`🔄 [AGENT2] Using final fallback regex extraction...`);
+    return createFallbackProspects(searchResults, regexEmails, intent);
 }
 
 // ────────────────────────────────────────────────────────────────
-// 9. Deduplicate Prospects
+// 10. Deduplicate Prospects
 // ────────────────────────────────────────────────────────────────
 
 function deduplicateProspects(prospects) {
@@ -523,11 +540,8 @@ function deduplicateProspects(prospects) {
     const deduped = [];
 
     for (const p of prospects) {
-        // Create a key from company name or domain or name
         const key = (p.company || p.name || '').toLowerCase().trim();
         if (!key) continue;
-        
-        // Check if we've seen this company before (fuzzy match on first word)
         const firstWord = key.split(' ')[0];
         let isDuplicate = false;
         for (const s of seen) {
@@ -536,7 +550,6 @@ function deduplicateProspects(prospects) {
                 break;
             }
         }
-        
         if (!isDuplicate) {
             seen.add(firstWord);
             deduped.push(p);
@@ -549,7 +562,7 @@ function deduplicateProspects(prospects) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 10. Sort Prospects by Fit Score
+// 11. Sort Prospects by Fit Score
 // ────────────────────────────────────────────────────────────────
 
 function sortProspectsByFit(prospects) {
@@ -557,26 +570,14 @@ function sortProspectsByFit(prospects) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 11. Main Agent 2 Function
+// 12. Main Agent 2 Function
 // ────────────────────────────────────────────────────────────────
 
-/**
- * Discovers prospects based on the intent from Agent 1.
- * 
- * @param {Object} params
- * @param {Object} params.intent - The structured intent from Agent 1.
- * @param {string} params.apiKey - OpenAI API key.
- * @param {string} params.tavilyKey - Tavily API key.
- * @param {string} params.userId - User identifier for logging.
- * @param {Function} params.onProgress - Optional progress callback.
- * 
- * @returns {Object} Structured prospect discovery result.
- */
 async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
     console.log(`🔍 [AGENT2] Starting prospect discovery for user ${userId}...`);
+    console.log(`📋 [AGENT2] Intent received:`, JSON.stringify(intent, null, 2));
     onProgress?.('🔎 Searching for matching prospects...');
 
-    // Validate input
     if (!intent) {
         return {
             intent: 'lead_prospecting',
@@ -593,7 +594,6 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
         };
     }
 
-    // Check if we have enough information to search
     const hasIndustry = intent.industry && intent.industry !== 'general';
     const hasLocation = intent.location && intent.location.trim().length > 0;
     const hasRole = intent.role && intent.role.trim().length > 0;
@@ -632,6 +632,14 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
         if (results && results.length > 0) {
             allResults = allResults.concat(results);
             console.log(`✅ [AGENT2] Found ${results.length} results for query: "${query}"`);
+            results.forEach((r, i) => {
+                console.log(`   ${i + 1}. ${r.title} → ${r.url}`);
+                // Log if email appears in snippet
+                const emailMatch = r.snippet.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+                if (emailMatch) {
+                    console.log(`   📧 Email found in snippet: ${emailMatch[0]}`);
+                }
+            });
         } else {
             console.log(`⚠️ [AGENT2] No results for query: "${query}"`);
         }
@@ -665,9 +673,15 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
         };
     }
 
-    // ─── Step 5: Extract prospects using GPT (with retry & fallback) ───
+    // ─── Step 5: Extract prospects using GPT ───
     onProgress?.('🧠 Extracting companies and contacts...');
     const { prospects, found } = await extractProspectsFromResults(allResults, intent, apiKey);
+
+    // --- LOG: What we extracted ---
+    console.log(`📤 [AGENT2] Final extracted ${prospects.length} prospects`);
+    prospects.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}`);
+    });
 
     if (!prospects || prospects.length === 0) {
         return {
@@ -747,11 +761,16 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
     };
 
     console.log(`✅ [AGENT2] Discovery complete: ${returnedProspects.length} prospects returned`);
+    console.log(`📤 [AGENT2] Returning prospects with emails:`);
+    result.prospects.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}`);
+    });
+
     return result;
 }
 
 // ────────────────────────────────────────────────────────────────
-// 12. Public Exports
+// 13. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -762,7 +781,8 @@ module.exports = {
     deduplicateProspects,
     sortProspectsByFit,
     safeJsonParse,
-    extractProspectsWithRegex,
+    extractEmailsWithRegex,
+    createFallbackProspects,
     CONFIDENCE_THRESHOLD_ROUTE,
     CONFIDENCE_THRESHOLD_CLARIFY,
 };
