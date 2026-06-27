@@ -28,7 +28,7 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 800;  // Reduced because we process one at a time
+const MAX_OUTPUT_TOKENS = 800;
 const MAX_SEARCH_RESULTS = 3;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
@@ -46,6 +46,7 @@ OUTPUT RULES
 - Return only a JSON object (not an array) for a single lead.
 - If a field is unknown, set it to null or an empty array.
 - Keep messages SHORT (under 80 words each).
+- IMPORTANT: The email field MUST be populated with the email provided in the prospect data.
 
 SCHEMA (use these exact field names):
 {
@@ -313,13 +314,19 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Format a Single Lead
+// 7. Format a Single Lead (FIXED: Email is passed to GPT)
 // ────────────────────────────────────────────────────────────────
 
 async function formatSingleLead(prospect, intent, userProfile, apiKey, tavilyKey) {
     const senderName = userProfile?.senderName || 'Alex';
     const usp = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
 
+    // --- FIX: Extract email from prospect BEFORE calling GPT ---
+    // The email comes from Agent 2/Agent 3 as email_candidates
+    const email = prospect.email_candidates?.[0] || prospect.email || null;
+    const emailOptions = prospect.email_candidates || [];
+
+    // --- FIX: Include email in the prompt so GPT knows it ---
     const formattingPrompt = `
 You are Agent 5, the final output formatter. Convert this ONE prospect into a final lead object.
 
@@ -330,6 +337,7 @@ PROSPECT:
 - Name: ${prospect.name || 'Unknown'}
 - Company: ${prospect.company || 'Unknown'}
 - Domain: ${prospect.domain || 'Unknown'}
+- Email: ${email || 'Not found (set to null)'}   <-- FIX: EMAIL IS NOW INCLUDED
 - Website: ${prospect.website || 'Unknown'}
 - Location: ${prospect.location || 'Unknown'}
 - Role: ${prospect.role || 'Unknown'}
@@ -341,7 +349,7 @@ PROSPECT:
 - Notes: ${prospect.notes || null}
 
 Create a final lead object with:
-1. All identity fields (name, company, domain, email)
+1. All identity fields (name, company, domain, email) - SET THE EMAIL FIELD to "${email}" if provided
 2. Email validation fields (set defaults based on qualification status)
 3. Company details (size, model, industry, HQ)
 4. Scoring fields (leadScore, etc.)
@@ -349,7 +357,9 @@ Create a final lead object with:
 
 Use the EXACT SCHEMA from the system prompt. Return ONLY a JSON object.
 
-IMPORTANT: Keep messages SHORT and DIRECT. No fluff. One clear CTA max.`;
+IMPORTANT: 
+- The email field MUST be set to "${email}" if provided in the prospect data.
+- Keep messages SHORT and DIRECT. No fluff. One clear CTA max.`;
 
     try {
         const response = await withRetry(() => axios.post(
@@ -387,6 +397,17 @@ IMPORTANT: Keep messages SHORT and DIRECT. No fluff. One clear CTA max.`;
         }
 
         const lead = parseResult.data;
+        
+        // --- FIX: Ensure email is set from prospect data if GPT didn't set it ---
+        if (!lead.email && email) {
+            lead.email = email;
+            console.log(`📧 [AGENT5] Set email from prospect data: ${email}`);
+        }
+        
+        // --- FIX: Ensure allEmailOptions is set ---
+        if (!lead.allEmailOptions || lead.allEmailOptions.length === 0) {
+            lead.allEmailOptions = emailOptions;
+        }
         
         // Ensure messages exist
         if (!lead.messages || lead.messages.length === 0) {
