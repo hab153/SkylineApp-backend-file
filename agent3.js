@@ -37,7 +37,7 @@ const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 3 System Prompt (locked, production-grade)
+// 2. The Agent 3 System Prompt (Updated to include email fields)
 // ────────────────────────────────────────────────────────────────
 
 const AGENT3_SYSTEM_PROMPT = `You are Agent 3, the Enrichment / Verification layer in a B2B lead-generation system.
@@ -100,7 +100,9 @@ Return valid JSON only using this schema:
       "linkedin_url": string|null,
       "confidence": number|null,
       "verification_status": "verified" | "partial" | "unverified",
-      "notes": string|null
+      "notes": string|null,
+      "email_candidates": string[],
+      "email": string|null
     }
   ],
   "stats": {
@@ -209,11 +211,13 @@ function buildEnrichmentQueries(prospect) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 6. Enrich a Single Prospect Using Search Results
+// 6. Enrich a Single Prospect Using Search Results (FIXED: Preserves email)
 // ────────────────────────────────────────────────────────────────
 
 async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
     console.log(`🔍 [AGENT3] Enriching: ${prospect.company || prospect.name || 'Unknown'}`);
+    console.log(`📧 [AGENT3] Input email_candidates: ${JSON.stringify(prospect.email_candidates || [])}`);
+    console.log(`📧 [AGENT3] Input email: ${prospect.email || 'null'}`);
 
     // If the prospect already has high confidence, skip heavy enrichment
     if (prospect.fit_score >= 0.85 && prospect.domain && prospect.email_candidates?.length > 0) {
@@ -223,6 +227,9 @@ async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
             confidence: prospect.fit_score || 0.7,
             verification_status: 'partial',
             notes: prospect.notes || 'Already has strong signals.',
+            // --- PRESERVE EMAIL ---
+            email_candidates: prospect.email_candidates || [],
+            email: prospect.email || null,
         };
     }
 
@@ -234,6 +241,9 @@ async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
             confidence: prospect.fit_score || 0.4,
             verification_status: 'unverified',
             notes: 'No search queries could be built.',
+            // --- PRESERVE EMAIL ---
+            email_candidates: prospect.email_candidates || [],
+            email: prospect.email || null,
         };
     }
 
@@ -252,6 +262,9 @@ async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
             confidence: prospect.fit_score || 0.4,
             verification_status: 'unverified',
             notes: 'No public information found to enrich this prospect.',
+            // --- PRESERVE EMAIL ---
+            email_candidates: prospect.email_candidates || [],
+            email: prospect.email || null,
         };
     }
 
@@ -319,13 +332,16 @@ Be conservative. Only update fields when you have clear evidence from the search
                 confidence: prospect.fit_score || 0.4,
                 verification_status: 'unverified',
                 notes: 'GPT enrichment failed.',
+                // --- PRESERVE EMAIL ---
+                email_candidates: prospect.email_candidates || [],
+                email: prospect.email || null,
             };
         }
 
         const rawContent = response.data.choices[0].message.content.trim();
         const enriched = JSON.parse(rawContent);
 
-        // Merge enriched data with original
+        // Merge enriched data with original - PRESERVING EMAIL
         const merged = {
             ...prospect,
             name: enriched.name || prospect.name,
@@ -339,9 +355,14 @@ Be conservative. Only update fields when you have clear evidence from the search
             confidence: enriched.confidence || prospect.fit_score || 0.5,
             verification_status: enriched.verification_status || 'partial',
             notes: enriched.notes || 'Enriched from public sources.',
+            // --- CRITICAL: PRESERVE EMAIL FROM AGENT 2 ---
+            email_candidates: prospect.email_candidates || [],
+            email: prospect.email || null,
         };
 
         console.log(`✅ [AGENT3] Enriched: ${merged.company} → confidence: ${merged.confidence}`);
+        console.log(`📧 [AGENT3] Output email_candidates: ${JSON.stringify(merged.email_candidates || [])}`);
+        console.log(`📧 [AGENT3] Output email: ${merged.email || 'null'}`);
         return merged;
 
     } catch (error) {
@@ -351,6 +372,9 @@ Be conservative. Only update fields when you have clear evidence from the search
             confidence: prospect.fit_score || 0.4,
             verification_status: 'unverified',
             notes: 'Enrichment failed due to an error.',
+            // --- PRESERVE EMAIL ---
+            email_candidates: prospect.email_candidates || [],
+            email: prospect.email || null,
         };
     }
 }
@@ -392,6 +416,12 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
             stats: { checked: 0, enriched: 0, verified: 0, returned: 0 }
         };
     }
+
+    // ─── LOG: What Agent 3 received from Agent 2 ───
+    console.log(`📥 [AGENT3] RECEIVED ${prospects.length} prospects from Agent 2`);
+    prospects.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
+    });
 
     // ─── Step 1: Enrich each prospect ───
     const enriched = [];
@@ -454,6 +484,9 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
             confidence: p.confidence || 0.5,
             verification_status: p.verification_status || 'unverified',
             notes: p.notes || null,
+            // --- PRESERVE EMAIL IN OUTPUT ---
+            email_candidates: p.email_candidates || [],
+            email: p.email || null,
         })),
         stats: {
             checked: prospects.length,
@@ -462,6 +495,12 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
             returned: enriched.length,
         }
     };
+
+    // ─── LOG: What Agent 3 is returning ───
+    console.log(`📤 [AGENT3] Returning ${result.enriched_prospects.length} enriched prospects`);
+    result.enriched_prospects.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
+    });
 
     console.log(`✅ [AGENT3] Enrichment complete: ${verifiedCount} verified, ${enrichedCount} enriched`);
     return result;
