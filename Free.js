@@ -370,8 +370,7 @@ When answering:
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED - with email preservation)
-// ────────────────────────────────────────────────────────────────
+// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED - email preserved in cache) ───
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, userId) {
 
@@ -419,7 +418,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
         console.log(`🎯 [ORCHESTRATOR] Lead generation confirmed:`, leadIntent);
 
-        // ─── Step 4: Check cache (FIXED - preserves email) ───
+        // ─── Step 4: Check cache ───
         const queryParams = {
             industry: leadIntent.industry,
             location: leadIntent.location,
@@ -437,7 +436,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             
             let leads;
             if (isRawCompany) {
-                // Auto-convert raw companies to complete leads WITH EMAIL
+                // Auto-convert raw companies to complete leads with email
                 console.log(`🔄 [CACHE] Auto-converting ${cachedData.length} raw companies to leads`);
                 const senderName = userProfile?.senderName || 'Alex';
                 
@@ -445,11 +444,14 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                     // Get the email from the company's emails array
                     const email = company.emails && company.emails.length > 0 ? company.emails[0] : '';
                     const companyName = company.name || company.companyName || company.domain || 'Unknown';
+                    const domain = company.domain || '';
+                    
+                    console.log(`📧 [CACHE] Auto-converting ${companyName} with email: ${email || 'none'}`);
                     
                     return {
                         name: companyName,
                         company: companyName,
-                        domain: company.domain || null,
+                        domain: domain,
                         email: email,  // ← EMAIL IS PRESERVED!
                         emailConfidence: email ? 'found' : 'cached',
                         emailLabel: email ? 'From cached company' : 'No email found',
@@ -484,7 +486,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                 
                 // Auto-update cache with complete leads for future requests
                 await saveSearchCache(queryHash, queryParams, leads, 90);
-                console.log(`💾 [CACHE] Updated cache with complete leads for future requests`);
+                console.log(`💾 [CACHE] Updated cache with ${leads.length} complete leads for future requests`);
                 
             } else {
                 // Already complete leads
@@ -492,4 +494,364 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                 console.log(`✅ [CACHE] Using ${leads.length} complete leads from cache`);
                 // Log emails for debugging
                 leads.forEach((l, i) => {
-                    if (l.email) console.log(`📧 [C
+                    if (l.email) console.log(`📧 [CACHE] Lead ${i+1} email: ${l.email}`);
+                });
+            }
+            
+            const finalLeads = _applyOutputQuantityRules(leads, leadIntent.lead_count || QUANTITY_RULE_DEFAULT_MAX);
+            
+            return {
+                reply: JSON.stringify(finalLeads),
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: `[Retrieved ${finalLeads.length} leads from memory]` },
+                ],
+                _meta: { fromCache: true, cacheHit: true, leadIntent }
+            };
+        }
+
+        // ─── Step 5: Cache miss – Call Agent 2 ───
+        console.log(`🔁 [CACHE MISS] Calling agent2 for prospect discovery...`);
+        onProgress?.('🔎 Searching for matching prospects...');
+
+        const tavilyKey = process.env.TAVILY_API_KEY;
+        const agent2Result = await agent2.discoverProspects({
+            intent: leadIntent,
+            apiKey: apiKey,
+            tavilyKey: tavilyKey,
+            userId: userId,
+            onProgress: onProgress,
+        });
+
+        if (agent2Result.needs_clarification) {
+            return {
+                reply: agent2Result.clarification_question || 'I need more information to find the right prospects.',
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: agent2Result.clarification_question }
+                ],
+                _meta: { needsClarification: true, agent2Result }
+            };
+        }
+
+        if (!agent2Result.prospects || agent2Result.prospects.length === 0) {
+            return {
+                reply: `I couldn't find any matching prospects for ${leadIntent.industry || 'your industry'}${leadIntent.location ? ' in ' + leadIntent.location : ''}. Try a different industry or location.`,
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'No matching prospects found.' }
+                ],
+                _meta: { found: 0, agent2Stats: agent2Result.stats }
+            };
+        }
+
+        // ─── Step 6: Call Agent 3 ───
+        console.log(`🔁 [ORCHESTRATOR] Calling agent3 for enrichment...`);
+        onProgress?.('🔬 Enriching and verifying prospects...');
+
+        const agent3Result = await agent3.enrichProspects({
+            prospects: agent2Result.prospects,
+            intent: leadIntent,
+            apiKey: apiKey,
+            tavilyKey: tavilyKey,
+            userId: userId,
+            onProgress: onProgress,
+        });
+
+        if (agent3Result.needs_clarification) {
+            return {
+                reply: agent3Result.clarification_question || 'I enriched the prospects but many records are incomplete.',
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: agent3Result.clarification_question }
+                ],
+                _meta: { needsClarification: true, agent3Result }
+            };
+        }
+
+        if (!agent3Result.enriched_prospects || agent3Result.enriched_prospects.length === 0) {
+            return {
+                reply: `I found prospects but couldn't verify any of them. Try a different industry or location.`,
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'No verified prospects found.' }
+                ],
+                _meta: { found: 0, agent3Stats: agent3Result.stats }
+            };
+        }
+
+        // ─── Step 7: Call Agent 4 ───
+        console.log(`🔁 [ORCHESTRATOR] Calling agent4 for qualification...`);
+        onProgress?.('🏆 Evaluating and prioritizing leads...');
+
+        const agent4Result = await agent4.qualifyProspects({
+            enriched_prospects: agent3Result.enriched_prospects,
+            intent: leadIntent,
+            apiKey: apiKey,
+            tavilyKey: tavilyKey,
+            userId: userId,
+            onProgress: onProgress,
+        });
+
+        if (agent4Result.needs_clarification) {
+            return {
+                reply: agent4Result.clarification_question || 'I found some leads but the qualification is uncertain.',
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: agent4Result.clarification_question }
+                ],
+                _meta: { needsClarification: true, agent4Result }
+            };
+        }
+
+        const qualifiedProspects = agent4Result.qualified_prospects || [];
+        const qualified = qualifiedProspects.filter(p => p.qualification_status === 'qualified');
+
+        if (qualified.length === 0) {
+            return {
+                reply: `I reviewed ${agent4Result.stats.reviewed} prospects but none met the qualification criteria. Try broadening your search.`,
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'No qualified leads found.' }
+                ],
+                _meta: { found: 0, agent4Stats: agent4Result.stats }
+            };
+        }
+
+        // ─── Step 8: Call Agent 5 ───
+        console.log(`🔁 [ORCHESTRATOR] Calling agent5 for final formatting...`);
+        onProgress?.('📦 Packaging final leads...');
+
+        const agent5Result = await agent5.formatFinalLeads({
+            qualified_prospects: qualified,
+            intent: leadIntent,
+            userProfile: userProfile,
+            apiKey: apiKey,
+            tavilyKey: tavilyKey,
+            userId: userId,
+            onProgress: onProgress,
+        });
+
+        if (agent5Result.needs_clarification) {
+            return {
+                reply: agent5Result.clarification_question || 'I formatted the leads but some fields are missing. Please check the output.',
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: agent5Result.clarification_question }
+                ],
+                _meta: { needsClarification: true, agent5Result }
+            };
+        }
+
+        const finalLeads = agent5Result.leads || [];
+
+        if (finalLeads.length === 0) {
+            return {
+                reply: `I processed ${qualified.length} qualified prospects but couldn't generate final leads. Please try again.`,
+                updatedHistory: [
+                    ...history,
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'No final leads generated.' }
+                ],
+                _meta: { found: 0, agent5Stats: agent5Result.stats }
+            };
+        }
+
+        // ─── Step 9: Save leads to cache AND Company collection ───
+        if (finalLeads.length > 0) {
+            // Save complete leads to cache
+            await saveSearchCache(queryHash, queryParams, finalLeads, 90);
+            console.log(`💾 [ORCHESTRATOR] Saved ${finalLeads.length} complete leads to cache`);
+            
+            // Also save to Company collection for fallback (with emails preserved)
+            for (const lead of finalLeads) {
+                if (!lead.domain) continue;
+                
+                // Check if company already exists
+                let company = await Company.findOne({ domain: lead.domain });
+                
+                if (!company) {
+                    // Get the email from lead
+                    const email = lead.email || (lead.allEmailOptions && lead.allEmailOptions.length > 0 ? lead.allEmailOptions[0] : '');
+                    
+                    // Build research data
+                    const researchData = {
+                        recentNews: lead.recentNews || null,
+                        website: lead.website || null,
+                        linkedin_url: lead.linkedIn || null,
+                        verificationGrade: lead.verificationGrade || null,
+                        emailValidation: lead.emailValidation || null,
+                        messages: lead.messages || [],
+                        emailConfidence: lead.emailConfidence || null,
+                        emailLabel: lead.emailLabel || null,
+                        allEmailOptions: lead.allEmailOptions || [],
+                        role: lead.role || null,
+                        companySize: lead.companySize || null,
+                        companyModel: lead.companyModel || null,
+                        industry: lead.industry || null,
+                        hq: lead.hq || null,
+                        leadScore: lead.leadScore || 0,
+                        pageScore: lead.pageScore || 0,
+                        mxValid: lead.mxValid || false,
+                        dataScore: lead.dataScore || 0,
+                        hallucinationFlags: lead.hallucinationFlags || [],
+                        emailLanguage: lead.emailLanguage || 'en',
+                        _memoryStats: lead._memoryStats || {}
+                    };
+                    
+                    const researchSummaryString = JSON.stringify(researchData);
+                    
+                    // Save company with email
+                    company = await saveCompanyFromLead({
+                        company: lead.company,
+                        domain: lead.domain,
+                        industry: lead.industry || leadIntent.industry,
+                        country: lead.hq || leadIntent.location,
+                        companySize: lead.companySize || 'unknown',
+                        emails: email ? [email] : [],
+                        researchSummary: researchSummaryString,
+                        leadScore: lead.leadScore || 50,
+                    });
+                    
+                    console.log(`💾 [ORCHESTRATOR] Saved company ${lead.company} with email: ${email || 'none'}`);
+                }
+            }
+        }
+
+        // ─── Step 10: Return final leads to user ───
+        return {
+            reply: JSON.stringify(finalLeads),
+            updatedHistory: [
+                ...history,
+                { role: 'user', content: safeMessage },
+                { role: 'assistant', content: `[Generated ${finalLeads.length} final leads]` },
+            ],
+            _meta: {
+                fromCache: false,
+                cacheHit: false,
+                leadIntent,
+                totalGenerated: finalLeads.length,
+                agent2Stats: agent2Result.stats,
+                agent2Confidence: agent2Result.confidence,
+                agent3Stats: agent3Result.stats,
+                agent3Confidence: agent3Result.confidence,
+                agent4Stats: agent4Result.stats,
+                agent4Confidence: agent4Result.confidence,
+                agent5Stats: agent5Result.stats,
+                agent5Confidence: agent5Result.confidence,
+            }
+        };
+    }
+
+    // ─── Handle general_chat ───
+    if (routerResult.intent === 'general_chat') {
+        const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
+        return {
+            reply,
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }],
+        };
+    }
+
+    // ─── Handle other intents ───
+    return {
+        reply: `I understood you want "${routerResult.intent}". This feature is being built. For now, try asking for leads or business advice.`,
+        updatedHistory: [
+            ...history,
+            { role: 'user', content: safeMessage },
+            { role: 'assistant', content: `I understood you want ${routerResult.intent}. This feature is coming soon.` }
+        ],
+        _meta: {
+            intent: routerResult.intent,
+            confidence: routerResult.confidence,
+            needsClarification: false,
+        }
+    };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 9. Helper: Apply quantity rules
+// ────────────────────────────────────────────────────────────────
+
+function _applyOutputQuantityRules(leads, requestedMax) {
+    if (!Array.isArray(leads)) return [];
+    const cap = Math.min(requestedMax || QUANTITY_RULE_DEFAULT_MAX, QUANTITY_RULE_DEFAULT_MAX);
+    const sliceTo = Math.max(QUANTITY_RULE_HARD_MIN, Math.min(cap, leads.length));
+    return leads.slice(0, sliceTo);
+}
+
+// ────────────────────────────────────────────────────────────────
+// 10. MAIN ENTRY POINT
+// ────────────────────────────────────────────────────────────────
+
+async function generateFreeResponse(message, history, userProfile, onProgress) {
+    try {
+        console.log('🟢 [AI ENGINE] Pipeline started...');
+        onProgress?.('🧠 Understanding your request...');
+
+        const apiKey = process.env.OPENAI_API_KEY;
+        const userId = userProfile?.userId || userProfile?.id || 'anonymous';
+
+        const rawMessage = typeof message === 'string' ? message.slice(0, MAX_MESSAGE_LENGTH) : '';
+        const safeMessage = sanitizeUserMessage(rawMessage);
+
+        if (!safeMessage.trim()) {
+            return {
+                reply: 'How can I help you today? I can find leads, draft emails, answer business questions, or just chat.',
+                updatedHistory: history,
+            };
+        }
+
+        const detectedLanguage = _detectLanguage(safeMessage);
+        console.log(`🌐 [LANGUAGE] Detected: ${detectedLanguage.name} (${detectedLanguage.code})`);
+
+        const intent = await _classifyIntent(safeMessage, history, apiKey);
+        console.log(`🎯 [INTENT] ${intent}`);
+        onProgress?.(`🧠 Mode: ${intent.replace('_', ' ')}...`);
+
+        if (intent === INTENT.LEAD_GEN) {
+            return await _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, userId);
+        }
+
+        if (intent === INTENT.EMAIL_DRAFT) {
+            const reply = await _handleEmailDraft(safeMessage, history, userProfile, apiKey);
+            return {
+                reply,
+                updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }],
+            };
+        }
+
+        if (intent === INTENT.BUSINESS_QA) {
+            const reply = await _handleBusinessQA(safeMessage, history, userProfile, apiKey);
+            return {
+                reply,
+                updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }],
+            };
+        }
+
+        const reply = await _handleChat(safeMessage, history, userProfile, apiKey);
+        return {
+            reply,
+            updatedHistory: [...history, { role: 'user', content: safeMessage }, { role: 'assistant', content: reply }],
+        };
+
+    } catch (error) {
+        console.error('❌ [AI ENGINE] Fatal error:', error.message);
+        return { reply: 'An error occurred. Please try again.', updatedHistory: history };
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 11. PUBLIC EXPORTS
+// ────────────────────────────────────────────────────────────────
+
+module.exports = {
+    generateFreeResponse,
+};
