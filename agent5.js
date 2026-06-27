@@ -35,7 +35,7 @@ const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 5 System Prompt (for a SINGLE lead)
+// 2. The Agent 5 System Prompt
 // ────────────────────────────────────────────────────────────────
 
 const AGENT5_SYSTEM_PROMPT = `You are Agent 5, the final Lead Output and Outreach Drafting layer in a B2B lead-generation system.
@@ -46,7 +46,6 @@ OUTPUT RULES
 - Return only a JSON object (not an array) for a single lead.
 - If a field is unknown, set it to null or an empty array.
 - Keep messages SHORT (under 80 words each).
-- IMPORTANT: The email field MUST be populated with the email provided in the prospect data.
 
 SCHEMA (use these exact field names):
 {
@@ -204,26 +203,18 @@ function safeJsonParse(jsonString) {
         
         let fixed = jsonString;
         
-        // Fix incomplete numbers
         fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
         fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
         fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
-        
-        // Fix trailing commas
         fixed = fixed.replace(/,\s*}/g, '}');
         fixed = fixed.replace(/,\s*\]/g, ']');
-        
-        // Fix missing commas
         fixed = fixed.replace(/}\s*{/g, '},{');
         fixed = fixed.replace(/\]\s*{/g, '],{');
         fixed = fixed.replace(/}\s*"/g, '},"');
         fixed = fixed.replace(/\]\s*"/g, '],"');
         fixed = fixed.replace(/"\s*"/g, '","');
-        
-        // Remove control characters
         fixed = fixed.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
         
-        // Fix unterminated strings
         let result = '';
         let inString = false;
         let escapeNext = false;
@@ -275,7 +266,6 @@ function safeJsonParse(jsonString) {
         
         fixed = result;
         
-        // Fix missing closing brackets
         const openBraces = (fixed.match(/\{/g) || []).length;
         const closeBraces = (fixed.match(/\}/g) || []).length;
         const openBrackets = (fixed.match(/\[/g) || []).length;
@@ -288,7 +278,6 @@ function safeJsonParse(jsonString) {
             fixed += ']'.repeat(openBrackets - closeBrackets);
         }
         
-        // Remove trailing text after last JSON structure
         const lastBrace = fixed.lastIndexOf('}');
         const lastBracket = fixed.lastIndexOf(']');
         const lastEnd = Math.max(lastBrace, lastBracket);
@@ -314,19 +303,19 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Format a Single Lead (FIXED: Email is passed to GPT)
+// 7. Format a Single Lead (FIXED: Email properly passed to GPT)
 // ────────────────────────────────────────────────────────────────
 
 async function formatSingleLead(prospect, intent, userProfile, apiKey, tavilyKey) {
     const senderName = userProfile?.senderName || 'Alex';
     const usp = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
 
-    // --- FIX: Extract email from prospect BEFORE calling GPT ---
+    // --- CRITICAL FIX: Extract email from prospect BEFORE calling GPT ---
     // The email comes from Agent 2/Agent 3 as email_candidates
     const email = prospect.email_candidates?.[0] || prospect.email || null;
     const emailOptions = prospect.email_candidates || [];
 
-    // --- FIX: Include email in the prompt so GPT knows it ---
+    // --- CRITICAL FIX: Include email in the prompt ---
     const formattingPrompt = `
 You are Agent 5, the final output formatter. Convert this ONE prospect into a final lead object.
 
@@ -337,7 +326,7 @@ PROSPECT:
 - Name: ${prospect.name || 'Unknown'}
 - Company: ${prospect.company || 'Unknown'}
 - Domain: ${prospect.domain || 'Unknown'}
-- Email: ${email || 'Not found (set to null)'}   <-- FIX: EMAIL IS NOW INCLUDED
+- Email: ${email || 'null'}   <-- EMAIL IS NOW INCLUDED!
 - Website: ${prospect.website || 'Unknown'}
 - Location: ${prospect.location || 'Unknown'}
 - Role: ${prospect.role || 'Unknown'}
@@ -358,7 +347,7 @@ Create a final lead object with:
 Use the EXACT SCHEMA from the system prompt. Return ONLY a JSON object.
 
 IMPORTANT: 
-- The email field MUST be set to "${email}" if provided in the prospect data.
+- The email field MUST be set to "${email}" if provided.
 - Keep messages SHORT and DIRECT. No fluff. One clear CTA max.`;
 
     try {
@@ -398,7 +387,7 @@ IMPORTANT:
 
         const lead = parseResult.data;
         
-        // --- FIX: Ensure email is set from prospect data if GPT didn't set it ---
+        // --- FIX: Ensure email is set if GPT didn't set it ---
         if (!lead.email && email) {
             lead.email = email;
             console.log(`📧 [AGENT5] Set email from prospect data: ${email}`);
@@ -442,7 +431,7 @@ IMPORTANT:
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. Main Agent 5 Function (Processes leads one by one)
+// 8. Main Agent 5 Function
 // ────────────────────────────────────────────────────────────────
 
 async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
@@ -470,7 +459,6 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
     let successCount = 0;
     let failureCount = 0;
 
-    // Process each prospect one at a time
     for (let i = 0; i < qualified_prospects.length; i++) {
         const prospect = qualified_prospects[i];
         onProgress?.(`📦 Formatting ${i + 1}/${qualified_prospects.length}: ${prospect.company || prospect.name || 'Unknown'}...`);
@@ -491,7 +479,6 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
 
     console.log(`📦 [AGENT5] Formatting complete: ${successCount} succeeded, ${failureCount} failed`);
 
-    // Calculate confidence based on success rate
     const confidence = successCount > 0 ? Math.min(0.95, 0.7 + (successCount / qualified_prospects.length) * 0.25) : 0.4;
     const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
 
