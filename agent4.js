@@ -28,7 +28,7 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 600;
+const MAX_OUTPUT_TOKENS = 900;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
