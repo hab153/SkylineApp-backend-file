@@ -1,4 +1,6 @@
 const { generateAssistantResponse } = require('./assist');
+const ChatMessage = require('./ChatMessage');
+const User = require('./User');
 
 /**
  * Handle POST /api/assistant requests
@@ -20,44 +22,48 @@ async function assistantChat(req, res) {
             return res.status(400).json({ error: 'Message is required and cannot be empty.' });
         }
 
-        // 4. Optional: Check daily limit for assistant
-        // You can add a limit check here if you want to restrict assistant usage
-        // Example: Free=10, Go=50, Pro=200 messages per day
-        // const user = await User.findById(userId);
-        // if (user.usage?.assistantCount >= user.usage?.assistantLimit) {
-        //     return res.status(429).json({ error: 'Daily assistant limit reached. Upgrade your plan for more.' });
-        // }
+        // 4. Get user and remaining count from middleware
+        const user = req.userDoc;
+        const remaining = req.assistantRemaining || 0;
+
+        if (!user) {
+            return res.status(401).json({ error: 'User not found. Please log in again.' });
+        }
 
         // 5. Generate AI response
         const response = await generateAssistantResponse(userId, message);
 
-        // 6. Optional: Save to chat history
-        // You can save assistant conversations to ChatMessage with sessionId = 'assistant'
-        // await ChatMessage.create({
-        //     userId,
-        //     sessionId: 'assistant',
-        //     role: 'user',
-        //     content: message
-        // });
-        // await ChatMessage.create({
-        //     userId,
-        //     sessionId: 'assistant',
-        //     role: 'assistant',
-        //     content: response
-        // });
+        // 6. Save to chat history (ChatMessage with sessionId = 'assistant')
+        await ChatMessage.create({
+            userId: userId,
+            sessionId: 'assistant',  // Special session ID for assistant
+            role: 'user',
+            content: message,
+            createdAt: new Date()
+        });
+        await ChatMessage.create({
+            userId: userId,
+            sessionId: 'assistant',
+            role: 'assistant',
+            content: response,
+            createdAt: new Date()
+        });
 
-        // 7. Optional: Increment assistant usage counter
-        // await User.findByIdAndUpdate(userId, {
-        //     $inc: { 'usage.assistantCount': 1 }
-        // });
+        // 7. Increment assistant usage counter
+        await User.findByIdAndUpdate(userId, {
+            $inc: { 'usage.assistantCount': 1 }
+        });
 
-        // 8. Return response
-        return res.json({ response });
+        // 8. Return response with remaining count
+        return res.json({
+            response: response,
+            remaining: remaining - 1  // Subtract the one we just used
+        });
 
     } catch (error) {
         console.error('[assistantController] Error:', error);
-        return res.status(500).json({ 
-            error: 'Assistant is temporarily unavailable. Please try again in a moment.' 
+        return res.status(500).json({
+            error: 'Assistant is temporarily unavailable. Please try again in a moment.'
         });
     }
 }
