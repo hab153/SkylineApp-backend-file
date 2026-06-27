@@ -28,98 +28,86 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 1200;
+const MAX_OUTPUT_TOKENS = 800;  // Reduced because we process one at a time
 const MAX_SEARCH_RESULTS = 3;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 5 System Prompt (ORIGINAL FIELD NAMES)
+// 2. The Agent 5 System Prompt (for a SINGLE lead)
 // ────────────────────────────────────────────────────────────────
 
 const AGENT5_SYSTEM_PROMPT = `You are Agent 5, the final Lead Output and Outreach Drafting layer in a B2B lead-generation system.
 
-Your job is to take qualified prospects from Agent 4 and return a clean JSON array of final lead objects. Each object should be ready for the user interface, export, or outbound workflow.
-
-PRIMARY RESPONSIBILITIES
-1. Read Agent 4 output carefully.
-2. Transform each qualified prospect into a final lead object.
-3. Include contact, company, email, scoring, verification, and outreach fields.
-4. Write concise outreach drafts: initial, followup, breakup.
-5. Return JSON array only.
-
-YOU MUST NOT
-- Return plain text.
-- Invent facts.
-- Over-search.
-- Produce commentary outside the JSON array.
+Your job is to take ONE qualified prospect and return a single lead object ready for the user interface.
 
 OUTPUT RULES
-- Return only a JSON array.
-- One array item per final lead.
+- Return only a JSON object (not an array) for a single lead.
 - If a field is unknown, set it to null or an empty array.
 - Keep messages SHORT (under 80 words each).
 
 SCHEMA (use these exact field names):
-[
-  {
-    "name": string|null,
-    "company": string|null,
-    "domain": string|null,
-    "email": string|null,
-    "emailConfidence": string|null,
-    "emailLabel": string|null,
-    "verificationGrade": string|null,
-    "emailValidation": {
-      "confidenceScore": number|null,
-      "verdict": string|null,
-      "smtpResult": string|null,
-      "reason": string|null,
-      "grade": string|null
+{
+  "name": string|null,
+  "company": string|null,
+  "domain": string|null,
+  "email": string|null,
+  "emailConfidence": string|null,
+  "emailLabel": string|null,
+  "verificationGrade": string|null,
+  "emailValidation": {
+    "confidenceScore": number|null,
+    "verdict": string|null,
+    "smtpResult": string|null,
+    "reason": string|null,
+    "grade": string|null
+  },
+  "allEmailOptions": string[],
+  "role": string|null,
+  "linkedIn": string|null,
+  "companySize": string|null,
+  "companyModel": string|null,
+  "industry": string|null,
+  "hq": string|null,
+  "recentNews": string|null,
+  "leadScore": number|null,
+  "pageScore": number|null,
+  "mxValid": boolean|null,
+  "dataScore": number|null,
+  "hallucinationFlags": string[],
+  "emailLanguage": string|null,
+  "_memoryStats": {
+    "totalCompanies": number|null,
+    "totalContacts": number|null,
+    "totalResearch": number|null,
+    "totalAnalytics": number|null
+  },
+  "messages": [
+    {
+      "type": "initial",
+      "subject": string,
+      "body": string
     },
-    "allEmailOptions": string[],
-    "role": string|null,
-    "linkedIn": string|null,
-    "companySize": string|null,
-    "companyModel": string|null,
-    "industry": string|null,
-    "hq": string|null,
-    "recentNews": string|null,
-    "leadScore": number|null,
-    "pageScore": number|null,
-    "mxValid": boolean|null,
-    "dataScore": number|null,
-    "hallucinationFlags": string[],
-    "emailLanguage": string|null,
-    "_memoryStats": {
-      "totalCompanies": number|null,
-      "totalContacts": number|null,
-      "totalResearch": number|null,
-      "totalAnalytics": number|null
+    {
+      "type": "followup",
+      "subject": string,
+      "body": string
     },
-    "messages": [
-      {
-        "type": "initial" | "followup" | "breakup",
-        "subject": string,
-        "body": string
-      }
-    ]
-  }
-]
+    {
+      "type": "breakup",
+      "subject": string,
+      "body": string
+    }
+  ]
+}
 
 MESSAGE RULES
 - initial: first outreach message (3-4 sentences max).
 - followup: short polite bump (2-3 sentences).
 - breakup: close the loop politely (2-3 sentences).
 - Keep each body SHORT and direct.
-- One clear CTA max.
-
-CONFIDENCE GUIDELINES
-- 0.90 to 1.00 = very clear, strong final output.
-- 0.70 to 0.89 = mostly clear.
-- 0.50 to 0.69 = mixed, needs caution.
-- below 0.50 = stop and clarify.`;
+- One clear CTA max.`;
 
 // ────────────────────────────────────────────────────────────────
 // 3. Utility: Retry helper
@@ -188,23 +176,22 @@ async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
 // 5. Build Final Output Queries
 // ────────────────────────────────────────────────────────────────
 
-function buildFinalQueries(prospects) {
+function buildFinalQueries(prospect) {
     const queries = [];
     
-    const firstProspect = prospects[0];
-    if (firstProspect && !firstProspect.recentNews && firstProspect.company) {
-        queries.push(`"${firstProspect.company}" news recent`);
+    if (prospect && !prospect.recentNews && prospect.company) {
+        queries.push(`"${prospect.company}" news recent`);
     }
 
-    if (firstProspect && !firstProspect.website && firstProspect.company) {
-        queries.push(`"${firstProspect.company}" official website`);
+    if (prospect && !prospect.website && prospect.company) {
+        queries.push(`"${prospect.company}" official website`);
     }
 
     return queries.slice(0, MAX_QUERIES);
 }
 
 // ────────────────────────────────────────────────────────────────
-// 6. Enhanced Safe JSON Parsing with Auto-Fix
+// 6. Safe JSON Parsing with Auto-Fix
 // ────────────────────────────────────────────────────────────────
 
 function safeJsonParse(jsonString) {
@@ -216,16 +203,23 @@ function safeJsonParse(jsonString) {
         
         let fixed = jsonString;
         
+        // Fix incomplete numbers
         fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
         fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
         fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
+        
+        // Fix trailing commas
         fixed = fixed.replace(/,\s*}/g, '}');
         fixed = fixed.replace(/,\s*\]/g, ']');
+        
+        // Fix missing commas
         fixed = fixed.replace(/}\s*{/g, '},{');
         fixed = fixed.replace(/\]\s*{/g, '],{');
         fixed = fixed.replace(/}\s*"/g, '},"');
         fixed = fixed.replace(/\]\s*"/g, '],"');
         fixed = fixed.replace(/"\s*"/g, '","');
+        
+        // Remove control characters
         fixed = fixed.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
         
         // Fix unterminated strings
@@ -280,6 +274,7 @@ function safeJsonParse(jsonString) {
         
         fixed = result;
         
+        // Fix missing closing brackets
         const openBraces = (fixed.match(/\{/g) || []).length;
         const closeBraces = (fixed.match(/\}/g) || []).length;
         const openBrackets = (fixed.match(/\[/g) || []).length;
@@ -292,6 +287,7 @@ function safeJsonParse(jsonString) {
             fixed += ']'.repeat(openBrackets - closeBrackets);
         }
         
+        // Remove trailing text after last JSON structure
         const lastBrace = fixed.lastIndexOf('}');
         const lastBracket = fixed.lastIndexOf(']');
         const lastEnd = Math.max(lastBrace, lastBracket);
@@ -304,14 +300,6 @@ function safeJsonParse(jsonString) {
         
         fixed = fixed.replace(/\}\}\}/g, '}}');
         fixed = fixed.replace(/^\uFEFF/, '');
-        fixed = fixed.replace(/"\s*\n\s*"/g, '",\n"');
-        fixed = fixed.replace(/}\s*\n\s*"/g, '},\n"');
-        fixed = fixed.replace(/\]\s*\n\s*"/g, '],\n"');
-        fixed = fixed.replace(/}\s*\n\s*{/g, '},\n{');
-        fixed = fixed.replace(/\]\s*\n\s*{/g, '],\n{');
-        fixed = fixed.replace(/"\s+"([^"]+?)"\s*:/g, '", "$1":');
-        fixed = fixed.replace(/}\s+"([^"]+?)"\s*:/g, '}, "$1":');
-        fixed = fixed.replace(/\]\s+"([^"]+?)"\s*:/g, '], "$1":');
         
         try {
             const data = JSON.parse(fixed);
@@ -325,11 +313,120 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Main Agent 5 Function
+// 7. Format a Single Lead
+// ────────────────────────────────────────────────────────────────
+
+async function formatSingleLead(prospect, intent, userProfile, apiKey, tavilyKey) {
+    const senderName = userProfile?.senderName || 'Alex';
+    const usp = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
+
+    const formattingPrompt = `
+You are Agent 5, the final output formatter. Convert this ONE prospect into a final lead object.
+
+SENDER: ${senderName}
+VALUE: ${usp}
+
+PROSPECT:
+- Name: ${prospect.name || 'Unknown'}
+- Company: ${prospect.company || 'Unknown'}
+- Domain: ${prospect.domain || 'Unknown'}
+- Website: ${prospect.website || 'Unknown'}
+- Location: ${prospect.location || 'Unknown'}
+- Role: ${prospect.role || 'Unknown'}
+- Industry: ${prospect.industry || 'Unknown'}
+- Fit Score: ${prospect.fit_score || 0}
+- Priority: ${prospect.priority || 'medium'}
+- Qualification Status: ${prospect.qualification_status || 'qualified'}
+- Personalization Angle: ${prospect.personalization_angle || null}
+- Notes: ${prospect.notes || null}
+
+Create a final lead object with:
+1. All identity fields (name, company, domain, email)
+2. Email validation fields (set defaults based on qualification status)
+3. Company details (size, model, industry, HQ)
+4. Scoring fields (leadScore, etc.)
+5. 3 SHORT outreach messages: initial, followup, breakup (under 80 words each)
+
+Use the EXACT SCHEMA from the system prompt. Return ONLY a JSON object.
+
+IMPORTANT: Keep messages SHORT and DIRECT. No fluff. One clear CTA max.`;
+
+    try {
+        const response = await withRetry(() => axios.post(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                model: MODEL,
+                messages: [
+                    { role: 'system', content: AGENT5_SYSTEM_PROMPT },
+                    { role: 'user', content: formattingPrompt }
+                ],
+                max_tokens: MAX_OUTPUT_TOKENS,
+                temperature: 0.3,
+                response_format: { type: 'json_object' }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000
+            }
+        ), 'GPT:formatSingleLead');
+
+        if (!response) {
+            console.warn(`⚠️ [AGENT5] Formatting returned null for ${prospect.company}`);
+            return null;
+        }
+
+        const rawContent = response.data.choices[0].message.content.trim();
+        const parseResult = safeJsonParse(rawContent);
+        
+        if (!parseResult.success) {
+            console.warn(`⚠️ [AGENT5] JSON parse failed for ${prospect.company}`);
+            return null;
+        }
+
+        const lead = parseResult.data;
+        
+        // Ensure messages exist
+        if (!lead.messages || lead.messages.length === 0) {
+            const name = lead.name || lead.company || 'there';
+            const company = lead.company || 'your company';
+            
+            lead.messages = [
+                {
+                    type: 'initial',
+                    subject: `One thought on ${company}`,
+                    body: `Hi ${name},\n\nRunning a business means most of your day goes to work that doesn't close deals. We build outreach pipelines that cut manual prospecting time.\n\nWorth 15 minutes?\n\nBest,\n${senderName}`
+                },
+                {
+                    type: 'followup',
+                    subject: `Re: One thought on ${company}`,
+                    body: `Hi ${name},\n\nFloating this back up — most business owners say there aren't enough hours to prospect and deliver.\n\nStill worth a quick chat?\n\nBest,\n${senderName}`
+                },
+                {
+                    type: 'breakup',
+                    subject: `Closing my file on ${company}`,
+                    body: `Hi ${name},\n\nAssuming timing isn't right — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
+                }
+            ];
+        }
+
+        return lead;
+
+    } catch (error) {
+        console.error(`❌ [AGENT5] Formatting failed for ${prospect.company}:`, error.message);
+        return null;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 8. Main Agent 5 Function (Processes leads one by one)
 // ────────────────────────────────────────────────────────────────
 
 async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
     console.log(`📦 [AGENT5] Formatting final leads for user ${userId}...`);
+    console.log(`📦 [AGENT5] Processing ${qualified_prospects.length} prospects one by one...`);
     onProgress?.('📦 Packaging final leads...');
 
     if (!qualified_prospects || qualified_prospects.length === 0) {
@@ -348,221 +445,73 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
         };
     }
 
-    // ─── Step 1: Optional search for fresh signals ───
-    let searchResults = [];
-    let searched = 0;
-    
-    if (tavilyKey) {
-        const queries = buildFinalQueries(qualified_prospects);
-        if (queries.length > 0) {
-            onProgress?.('🔍 Checking for fresh signals...');
-            for (const query of queries) {
-                const results = await searchTavily(query, tavilyKey, 3);
-                if (results && results.length > 0) {
-                    searchResults = searchResults.concat(results);
-                    searched++;
-                }
-            }
+    let formattedLeads = [];
+    let successCount = 0;
+    let failureCount = 0;
+
+    // Process each prospect one at a time
+    for (let i = 0; i < qualified_prospects.length; i++) {
+        const prospect = qualified_prospects[i];
+        onProgress?.(`📦 Formatting ${i + 1}/${qualified_prospects.length}: ${prospect.company || prospect.name || 'Unknown'}...`);
+        
+        console.log(`📦 [AGENT5] Formatting prospect ${i + 1}/${qualified_prospects.length}: ${prospect.company || 'Unknown'}`);
+        
+        const lead = await formatSingleLead(prospect, intent, userProfile, apiKey, tavilyKey);
+        
+        if (lead) {
+            formattedLeads.push(lead);
+            successCount++;
+            console.log(`✅ [AGENT5] Successfully formatted: ${lead.company || 'Unknown'}`);
+        } else {
+            failureCount++;
+            console.log(`❌ [AGENT5] Failed to format: ${prospect.company || 'Unknown'}`);
         }
     }
 
-    // ─── Step 2: Build input for GPT formatting ───
-    const senderName = userProfile?.senderName || 'Alex';
-    const usp = userProfile?.usp || 'We build outreach pipelines that cut manual prospecting time.';
+    console.log(`📦 [AGENT5] Formatting complete: ${successCount} succeeded, ${failureCount} failed`);
 
-    const searchSnippets = searchResults.length > 0
-        ? searchResults.map(r => `- ${r.title}: ${r.snippet}`).join('\n')
-        : 'No additional signals found.';
+    // Calculate confidence based on success rate
+    const confidence = successCount > 0 ? Math.min(0.95, 0.7 + (successCount / qualified_prospects.length) * 0.25) : 0.4;
+    const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
 
-    const formattingPrompt = `
-You are Agent 5, the final output formatter. Convert these qualified prospects into final lead objects using the ORIGINAL SCHEMA.
-
-SENDER: ${senderName}
-VALUE: ${usp}
-
-PROSPECTS:
-${qualified_prospects.map((p, i) => `
-${i+1}. ${p.name || 'Unknown'} | ${p.company || 'Unknown'} | ${p.role || 'Unknown'}
-   Domain: ${p.domain || 'Unknown'}
-   Location: ${p.location || 'Unknown'}
-   Industry: ${p.industry || 'Unknown'}
-   Fit: ${p.fit_score || 0} | Priority: ${p.priority || 'medium'}
-   Angle: ${p.personalization_angle || 'growth'}
-   Notes: ${p.notes || 'N/A'}
-`).join('\n')}
-
-${searchSnippets ? `\nSIGNALS:\n${searchSnippets}` : ''}
-
-For each prospect, create a lead object with the ORIGINAL SCHEMA field names:
-- name, company, domain, email
-- emailConfidence, emailLabel, verificationGrade
-- emailValidation (with confidenceScore, verdict, smtpResult, reason, grade)
-- allEmailOptions (array)
-- role, linkedIn, companySize, companyModel, industry, hq, recentNews
-- leadScore, pageScore, mxValid, dataScore
-- hallucinationFlags (array), emailLanguage
-- _memoryStats (with totalCompanies, totalContacts, totalResearch, totalAnalytics)
-- messages (3 emails: initial, followup, breakup)
-
-Keep emails SHORT (under 80 words each). Set unknown fields to null.
-
-Return ONLY a JSON array. Use the EXACT field names from the schema.`;
-
-    // ─── Step 3: Try formatting with retries ───
-    let lastError = null;
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            console.log(`📦 [AGENT5] Formatting attempt ${attempt}/3...`);
-            
-            const response = await withRetry(() => axios.post(
-                'https://api.openai.com/v1/chat/completions',
-                {
-                    model: MODEL,
-                    messages: [
-                        { role: 'system', content: AGENT5_SYSTEM_PROMPT },
-                        { role: 'user', content: formattingPrompt }
-                    ],
-                    max_tokens: MAX_OUTPUT_TOKENS,
-                    temperature: 0.3,
-                    response_format: { type: 'json_object' }
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 20000
-                }
-            ), 'GPT:formatLeads');
-
-            if (!response) {
-                console.warn(`⚠️ [AGENT5] Formatting attempt ${attempt} returned null`);
-                if (attempt === 3) break;
-                continue;
-            }
-
-            const rawContent = response.data.choices[0].message.content.trim();
-            
-            const parseResult = safeJsonParse(rawContent);
-            
-            if (!parseResult.success) {
-                console.warn(`⚠️ [AGENT5] JSON parse failed on attempt ${attempt}`);
-                if (attempt === 3) break;
-                continue;
-            }
-
-            const parsed = parseResult.data;
-
-            // ─── Step 4: Extract leads ───
-            let leads = [];
-            if (Array.isArray(parsed)) {
-                leads = parsed;
-            } else if (parsed.leads && Array.isArray(parsed.leads)) {
-                leads = parsed.leads;
-            } else if (parsed.prospects && Array.isArray(parsed.prospects)) {
-                leads = parsed.prospects;
-            } else {
-                for (const key of Object.keys(parsed)) {
-                    if (Array.isArray(parsed[key])) {
-                        leads = parsed[key];
-                        break;
-                    }
-                }
-            }
-
-            // ─── Step 5: Ensure messages exist ───
-            leads = leads.map(lead => {
-                if (!lead.messages || lead.messages.length === 0) {
-                    const name = lead.name || lead.company || 'there';
-                    const company = lead.company || 'your company';
-                    
-                    lead.messages = [
-                        {
-                            type: 'initial',
-                            subject: `One thought on ${company}`,
-                            body: `Hi ${name},\n\nRunning a business means most of your day goes to work that doesn't close deals. We build outreach pipelines that cut manual prospecting time.\n\nWorth 15 minutes?\n\nBest,\n${senderName}`
-                        },
-                        {
-                            type: 'followup',
-                            subject: `Re: One thought on ${company}`,
-                            body: `Hi ${name},\n\nFloating this back up — most business owners say there aren't enough hours to prospect and deliver.\n\nStill worth a quick chat?\n\nBest,\n${senderName}`
-                        },
-                        {
-                            type: 'breakup',
-                            subject: `Closing my file on ${company}`,
-                            body: `Hi ${name},\n\nAssuming timing isn't right — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
-                        }
-                    ];
-                }
-                return lead;
-            });
-
-            const confidence = leads.length > 0 ? Math.min(0.95, 0.7 + (leads.length / qualified_prospects.length) * 0.25) : 0.4;
-            const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
-
-            const result = {
-                intent: 'lead_output',
-                confidence: Math.round(confidence * 100) / 100,
-                needs_clarification: needsClarification,
-                clarification_question: needsClarification 
-                    ? 'I formatted the leads but some fields are missing. Please check the output.'
-                    : null,
-                next_pipeline: 'complete',
-                entities: intent?.entities || {
-                    industry: intent?.industry || null,
-                    location: intent?.location || null,
-                    role: intent?.role || null,
-                    company: intent?.company || null,
-                    lead_count: leads.length,
-                    email: null,
-                    domain: null,
-                    source_type: 'web_search'
-                },
-                risk_level: leads.length / qualified_prospects.length < 0.5 ? 'medium' : 'low',
-                policy_flags: leads.length === 0 ? ['no_output'] : [],
-                reason: `Formatted ${leads.length} final leads from ${qualified_prospects.length} qualified prospects.`,
-                leads: leads,
-                stats: {
-                    input: qualified_prospects.length,
-                    output: leads.length,
-                    searched: searched
-                }
-            };
-
-            console.log(`✅ [AGENT5] Formatting complete: ${leads.length} leads output (attempt ${attempt})`);
-            return result;
-
-        } catch (error) {
-            lastError = error;
-            console.error(`❌ [AGENT5] Formatting attempt ${attempt} failed:`, error.message);
-            if (attempt === 3) break;
-        }
-    }
-
-    console.error(`❌ [AGENT5] All formatting attempts failed. Last error: ${lastError?.message || 'Unknown error'}`);
-    
     return {
         intent: 'lead_output',
-        confidence: 0.0,
-        needs_clarification: true,
-        clarification_question: 'Failed to format leads. Please try again.',
-        next_pipeline: null,
-        entities: intent?.entities || {},
-        risk_level: 'medium',
-        policy_flags: ['formatting_failure'],
-        reason: `Formatting failed after 3 attempts: ${lastError?.message || 'Unknown error'}`,
-        leads: [],
-        stats: { input: qualified_prospects.length, output: 0, searched }
+        confidence: Math.round(confidence * 100) / 100,
+        needs_clarification: needsClarification,
+        clarification_question: needsClarification 
+            ? 'Some leads failed to format. Please try again.'
+            : null,
+        next_pipeline: formattedLeads.length > 0 ? 'complete' : null,
+        entities: intent?.entities || {
+            industry: intent?.industry || null,
+            location: intent?.location || null,
+            role: intent?.role || null,
+            company: intent?.company || null,
+            lead_count: formattedLeads.length,
+            email: null,
+            domain: null,
+            source_type: 'web_search'
+        },
+        risk_level: formattedLeads.length / qualified_prospects.length < 0.5 ? 'medium' : 'low',
+        policy_flags: formattedLeads.length === 0 ? ['no_output'] : [],
+        reason: `Formatted ${formattedLeads.length} final leads from ${qualified_prospects.length} qualified prospects.`,
+        leads: formattedLeads,
+        stats: {
+            input: qualified_prospects.length,
+            output: formattedLeads.length,
+            searched: 0,
+            failed: failureCount
+        }
     };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. Public Exports
+// 9. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
     formatFinalLeads,
+    formatSingleLead,
     buildFinalQueries,
     searchTavily,
     safeJsonParse,
