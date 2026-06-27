@@ -32,7 +32,7 @@ const dns = require('dns').promises;
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 1000;
+const MAX_OUTPUT_TOKENS = 1200;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_QUERIES_PER_PROSPECT = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
@@ -553,7 +553,7 @@ function createFallbackEnrichment(prospect, domain) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 10. Main Agent 3 Function
+// 10. Main Agent 3 Function (FIXED: No unnecessary clarification)
 // ────────────────────────────────────────────────────────────────
 
 async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
@@ -606,7 +606,9 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
     if (avgConfidence > 0.7) confidence += 0.1;
     confidence = Math.min(confidence, 0.98);
 
-    const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY || verifiedCount === 0;
+    // --- FIX: Only check confidence, NOT verifiedCount ---
+    // Even if no prospects are "verified", we still have enriched data to return
+    const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
 
     const result = {
         intent: 'lead_enrichment',
@@ -615,7 +617,8 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
         clarification_question: needsClarification 
             ? 'I enriched the prospects but many records are incomplete. Could you provide more specific details about your ideal customer profile?'
             : null,
-        next_pipeline: enriched.length > 0 && verifiedCount > 0 ? 'lead_verification' : null,
+        // --- FIX: Always send to qualification if we have enriched prospects ---
+        next_pipeline: enriched.length > 0 ? 'lead_qualification' : null,
         entities: intent?.entities || {
             industry: intent?.industry || null,
             location: intent?.location || null,
