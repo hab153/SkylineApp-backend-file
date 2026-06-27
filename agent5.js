@@ -35,7 +35,7 @@ const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 5 System Prompt (COMPRESSED SCHEMA)
+// 2. The Agent 5 System Prompt (ORIGINAL FIELD NAMES)
 // ────────────────────────────────────────────────────────────────
 
 const AGENT5_SYSTEM_PROMPT = `You are Agent 5, the final Lead Output and Outreach Drafting layer in a B2B lead-generation system.
@@ -61,45 +61,49 @@ OUTPUT RULES
 - If a field is unknown, set it to null or an empty array.
 - Keep messages SHORT (under 80 words each).
 
-COMPRESSED SCHEMA (use these short field names):
+SCHEMA (use these exact field names):
 [
   {
     "name": string|null,
     "company": string|null,
     "domain": string|null,
     "email": string|null,
-    "eConf": string|null,
-    "eLabel": string|null,
-    "vGrade": string|null,
-    "eVal": {
-      "score": number|null,
+    "emailConfidence": string|null,
+    "emailLabel": string|null,
+    "verificationGrade": string|null,
+    "emailValidation": {
+      "confidenceScore": number|null,
       "verdict": string|null,
-      "smtp": string|null,
+      "smtpResult": string|null,
       "reason": string|null,
       "grade": string|null
     },
-    "emails": string[],
+    "allEmailOptions": string[],
     "role": string|null,
-    "linkedin": string|null,
-    "size": string|null,
-    "model": string|null,
+    "linkedIn": string|null,
+    "companySize": string|null,
+    "companyModel": string|null,
     "industry": string|null,
     "hq": string|null,
-    "news": string|null,
+    "recentNews": string|null,
     "leadScore": number|null,
     "pageScore": number|null,
     "mxValid": boolean|null,
     "dataScore": number|null,
-    "flags": string[],
-    "lang": string|null,
-    "_mem": {
-      "companies": number|null,
-      "contacts": number|null,
-      "research": number|null,
-      "analytics": number|null
+    "hallucinationFlags": string[],
+    "emailLanguage": string|null,
+    "_memoryStats": {
+      "totalCompanies": number|null,
+      "totalContacts": number|null,
+      "totalResearch": number|null,
+      "totalAnalytics": number|null
     },
     "messages": [
-      { "type": "initial" | "followup" | "breakup", "subject": string, "body": string }
+      {
+        "type": "initial" | "followup" | "breakup",
+        "subject": string,
+        "body": string
+      }
     ]
   }
 ]
@@ -188,7 +192,7 @@ function buildFinalQueries(prospects) {
     const queries = [];
     
     const firstProspect = prospects[0];
-    if (firstProspect && !firstProspect.news && firstProspect.company) {
+    if (firstProspect && !firstProspect.recentNews && firstProspect.company) {
         queries.push(`"${firstProspect.company}" news recent`);
     }
 
@@ -212,26 +216,19 @@ function safeJsonParse(jsonString) {
         
         let fixed = jsonString;
         
-        // Fix 1: Incomplete numbers
         fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
         fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
         fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
-        
-        // Fix 2: Trailing commas
         fixed = fixed.replace(/,\s*}/g, '}');
         fixed = fixed.replace(/,\s*\]/g, ']');
-        
-        // Fix 3: Missing commas
         fixed = fixed.replace(/}\s*{/g, '},{');
         fixed = fixed.replace(/\]\s*{/g, '],{');
         fixed = fixed.replace(/}\s*"/g, '},"');
         fixed = fixed.replace(/\]\s*"/g, '],"');
         fixed = fixed.replace(/"\s*"/g, '","');
-        
-        // Fix 4: Remove control characters
         fixed = fixed.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
         
-        // Fix 5: Fix unterminated strings (character by character)
+        // Fix unterminated strings
         let result = '';
         let inString = false;
         let escapeNext = false;
@@ -283,7 +280,6 @@ function safeJsonParse(jsonString) {
         
         fixed = result;
         
-        // Fix 6: Missing closing brackets
         const openBraces = (fixed.match(/\{/g) || []).length;
         const closeBraces = (fixed.match(/\}/g) || []).length;
         const openBrackets = (fixed.match(/\[/g) || []).length;
@@ -296,7 +292,6 @@ function safeJsonParse(jsonString) {
             fixed += ']'.repeat(openBrackets - closeBrackets);
         }
         
-        // Fix 7: Remove trailing text after last JSON structure
         const lastBrace = fixed.lastIndexOf('}');
         const lastBracket = fixed.lastIndexOf(']');
         const lastEnd = Math.max(lastBrace, lastBracket);
@@ -307,11 +302,8 @@ function safeJsonParse(jsonString) {
             }
         }
         
-        // Fix 8: Clean up multiple closing braces
         fixed = fixed.replace(/\}\}\}/g, '}}');
         fixed = fixed.replace(/^\uFEFF/, '');
-        
-        // Fix 9: Missing commas between properties
         fixed = fixed.replace(/"\s*\n\s*"/g, '",\n"');
         fixed = fixed.replace(/}\s*\n\s*"/g, '},\n"');
         fixed = fixed.replace(/\]\s*\n\s*"/g, '],\n"');
@@ -327,7 +319,6 @@ function safeJsonParse(jsonString) {
             return { success: true, data };
         } catch (retryError) {
             console.error(`❌ [JSON] Auto-fix failed: ${retryError.message}`);
-            console.log(`⚠️ [JSON] Fixed snippet (last 200 chars): ...${fixed.slice(-200)}`);
             return { success: false, error: retryError };
         }
     }
@@ -384,7 +375,7 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
         : 'No additional signals found.';
 
     const formattingPrompt = `
-You are Agent 5, the final output formatter. Convert these qualified prospects into final lead objects using the COMPRESSED SCHEMA.
+You are Agent 5, the final output formatter. Convert these qualified prospects into final lead objects using the ORIGINAL SCHEMA.
 
 SENDER: ${senderName}
 VALUE: ${usp}
@@ -402,16 +393,20 @@ ${i+1}. ${p.name || 'Unknown'} | ${p.company || 'Unknown'} | ${p.role || 'Unknow
 
 ${searchSnippets ? `\nSIGNALS:\n${searchSnippets}` : ''}
 
-For each prospect, create a lead object with:
-1. Identity fields (name, company, domain, email)
-2. Email validation (set reasonable defaults based on qualification)
-3. Company details (size, model, industry, HQ)
-4. Scoring fields (leadScore, etc.)
-5. 3 SHORT outreach messages (initial, followup, breakup) - keep under 80 words each
+For each prospect, create a lead object with the ORIGINAL SCHEMA field names:
+- name, company, domain, email
+- emailConfidence, emailLabel, verificationGrade
+- emailValidation (with confidenceScore, verdict, smtpResult, reason, grade)
+- allEmailOptions (array)
+- role, linkedIn, companySize, companyModel, industry, hq, recentNews
+- leadScore, pageScore, mxValid, dataScore
+- hallucinationFlags (array), emailLanguage
+- _memoryStats (with totalCompanies, totalContacts, totalResearch, totalAnalytics)
+- messages (3 emails: initial, followup, breakup)
 
-Use the COMPRESSED SCHEMA field names (eConf, vGrade, eVal, emails, size, model, news, flags, lang, _mem).
+Keep emails SHORT (under 80 words each). Set unknown fields to null.
 
-Return ONLY a JSON array. No extra text. Use the compressed schema.`;
+Return ONLY a JSON array. Use the EXACT field names from the schema.`;
 
     // ─── Step 3: Try formatting with retries ───
     let lastError = null;
