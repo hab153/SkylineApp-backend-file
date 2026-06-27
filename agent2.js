@@ -1,18 +1,17 @@
 'use strict';
 
 /**
- * agent2.js – Prospecting / Discovery Agent
+ * agent2.js – Prospecting / Discovery Agent (Intelligent Search Planner)
  * 
  * The second layer in the B2B lead-generation system.
  * 
  * PRIMARY RESPONSIBILITIES:
  * 1. Read the Agent 1 intent object carefully.
- * 2. Search defined sources (Tavily) for matching prospects.
- * 3. Extract raw prospect records: name, company, domain, source, location, role, fit signals.
- * 4. Deduplicate results.
- * 5. Assign a preliminary fit score and confidence.
- * 6. Preserve all user constraints exactly.
- * 7. Return clean structured JSON only.
+ * 2. Plan and execute intelligent multi-round searches.
+ * 3. Evaluate coverage and decide whether to continue searching.
+ * 4. Extract raw prospect records with email candidates.
+ * 5. Deduplicate and score results.
+ * 6. Return clean structured JSON with search trace.
  * 
  * YOU MUST NOT:
  * - Write outreach.
@@ -30,11 +29,13 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 600;
+const MAX_OUTPUT_TOKENS = 500;
 const MAX_SEARCH_RESULTS = 5;
-const MAX_QUERIES = 3;
+const MAX_ROUNDS = 2;
+const MAX_QUERIES_PER_ROUND = 3;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
+const COVERAGE_THRESHOLD_STOP = 0.75;
 
 // ────────────────────────────────────────────────────────────────
 // 2. The Agent 2 System Prompt
@@ -108,13 +109,7 @@ Return valid JSON only using this schema:
     "returned": number,
     "deduped": number
   }
-}
-
-CONFIDENCE GUIDELINES
-- 0.90 to 1.00 = very clear, strong match.
-- 0.70 to 0.89 = mostly clear.
-- 0.50 to 0.69 = ambiguous, ask for clarification.
-- below 0.50 = stop and clarify.`;
+}`;
 
 // ────────────────────────────────────────────────────────────────
 // 3. Utility: Retry helper
@@ -180,45 +175,7 @@ async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 5. Build Search Queries from Intent (UPDATED: includes email)
-// ────────────────────────────────────────────────────────────────
-
-function buildSearchQueries(intent) {
-    const queries = [];
-    const industry = intent.industry || '';
-    const location = intent.location || '';
-    const role = intent.role || '';
-    const company = intent.company || '';
-
-    // Primary query: industry + location + role with email
-    if (industry && location && role) {
-        queries.push(`"${industry}" "${location}" "${role}" company contact email`);
-    } else if (industry && location) {
-        queries.push(`"${industry}" companies in "${location}" email contact`);
-    } else if (industry && role) {
-        queries.push(`"${industry}" "${role}" company email`);
-    } else if (industry) {
-        queries.push(`"${industry}" companies list contact email`);
-    } else if (company) {
-        queries.push(`"${company}" company contact email`);
-    }
-
-    // Add a query that specifically looks for email addresses
-    if (industry) {
-        queries.push(`"${industry}" "@" email contact`);
-    }
-
-    // Fallback query
-    if (queries.length === 0) {
-        queries.push('business contact email directory');
-    }
-
-    // Ensure we don't exceed MAX_QUERIES
-    return queries.slice(0, MAX_QUERIES);
-}
-
-// ────────────────────────────────────────────────────────────────
-// 6. FIX: Extract Emails with Regex
+// 5. Extract Emails with Regex
 // ────────────────────────────────────────────────────────────────
 
 function extractEmailsWithRegex(text) {
@@ -229,7 +186,7 @@ function extractEmailsWithRegex(text) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. FIX: Safe JSON Parsing with Auto-Fix
+// 6. Safe JSON Parsing with Auto-Fix
 // ────────────────────────────────────────────────────────────────
 
 function safeJsonParse(jsonString) {
@@ -240,7 +197,6 @@ function safeJsonParse(jsonString) {
         console.warn(`⚠️ [JSON] Attempting to auto-fix...`);
         
         let fixed = jsonString;
-        
         fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
         fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
         fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
@@ -256,7 +212,6 @@ function safeJsonParse(jsonString) {
         let result = '';
         let inString = false;
         let escapeNext = false;
-        
         for (let i = 0; i < fixed.length; i++) {
             const char = fixed[i];
             if (escapeNext) { escapeNext = false; result += char; continue; }
@@ -316,72 +271,135 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. FIX: Create Fallback Prospects from Regex Emails
+// 7. Build Search Queries for a Round
 // ────────────────────────────────────────────────────────────────
 
-function createFallbackProspects(searchResults, regexEmails, intent) {
-    console.log(`🔧 [AGENT2] Creating fallback prospects from ${searchResults.length} results`);
-    console.log(`📧 [AGENT2] Fallback emails: ${JSON.stringify(regexEmails)}`);
+function buildSearchQueries(intent, roundNumber, previousQueries = []) {
+    const industry = intent.industry || '';
+    const location = intent.location || '';
+    const role = intent.role || '';
+    const company = intent.company || '';
     
-    const prospects = [];
-    const domainRegex = /https?:\/\/(?:www\.)?([^\/]+)/;
-    const seenDomains = new Set();
+    const queries = [];
     
-    for (const result of searchResults) {
-        const domainMatch = result.url.match(domainRegex);
-        let domain = domainMatch ? domainMatch[1] : null;
-        if (domain) {
-            const parts = domain.split('.');
-            if (parts.length > 2) domain = parts.slice(-2).join('.');
+    // Round 1: Broad, targeted queries
+    if (roundNumber === 1) {
+        // Primary query: industry + location + role
+        if (industry && location && role) {
+            queries.push(`"${industry}" "${location}" "${role}" company contact`);
+            queries.push(`"${industry}" "${location}" "${role}" email`);
+        } else if (industry && location) {
+            queries.push(`"${industry}" companies "${location}" contact`);
+            queries.push(`"${industry}" "${location}" email`);
+        } else if (industry && role) {
+            queries.push(`"${industry}" "${role}" company contact`);
+            queries.push(`"${industry}" "${role}" email`);
+        } else if (industry) {
+            queries.push(`"${industry}" companies contact list`);
+            queries.push(`"${industry}" email contact`);
         }
         
-        if (!domain || seenDomains.has(domain)) continue;
-        seenDomains.add(domain);
-        
-        // Extract emails that might belong to this domain
-        const matchingEmails = regexEmails.filter(email => {
-            const emailDomain = email.split('@')[1] || '';
-            return emailDomain === domain || emailDomain.includes(domain.split('.')[0]);
-        });
-        
-        prospects.push({
-            name: result.title || domain,
-            company: result.title || domain,
-            domain: domain,
-            source: 'web_search',
-            source_url: result.url,
-            location: intent.location || null,
-            role: intent.role || null,
-            fit_score: matchingEmails.length > 0 ? 0.7 : 0.4,
-            email_candidates: matchingEmails.slice(0, 3),
-            notes: `Fallback extraction from search result`
-        });
-        
-        if (prospects.length >= (intent.lead_count || 5)) break;
+        // Add a query targeting about/team pages (more likely to have real people)
+        if (industry) {
+            queries.push(`"${industry}" "about us" team contact`);
+        }
     }
     
-    console.log(`🔧 [AGENT2] Fallback extracted ${prospects.length} prospects with ${regexEmails.length} emails`);
-    return { prospects, found: prospects.length };
+    // Round 2: Refined queries based on missing signals
+    if (roundNumber === 2) {
+        // More specific: target official websites and about pages
+        if (industry && location) {
+            queries.push(`site:*.${industry.toLowerCase().replace(/\s/g, '')} "${location}" about team`);
+            queries.push(`"${industry}" "${location}" "contact us" email`);
+        }
+        if (role) {
+            queries.push(`"${role}" "${industry}" "${location}" LinkedIn`);
+        }
+        // Generic fallback if previous queries were too broad
+        if (industry) {
+            queries.push(`"${industry}" directory list`);
+        }
+    }
+    
+    // Filter out queries already used in previous rounds
+    const usedQuerySet = new Set(previousQueries.map(q => q.toLowerCase().trim()));
+    const uniqueQueries = queries
+        .filter(q => q && q.length > 5)
+        .filter(q => !usedQuerySet.has(q.toLowerCase().trim()))
+        .slice(0, MAX_QUERIES_PER_ROUND);
+    
+    console.log(`🔍 [AGENT2] Round ${roundNumber} queries:`, uniqueQueries);
+    return uniqueQueries;
 }
 
 // ────────────────────────────────────────────────────────────────
-// 9. FIX: Extract Prospects with Retry, Email Extraction & Fallback
+// 8. Evaluate Coverage of Search Results
 // ────────────────────────────────────────────────────────────────
 
-async function extractProspectsFromResults(searchResults, intent, apiKey) {
+function evaluateCoverage(searchResults, prospects, intent) {
+    if (!searchResults || searchResults.length === 0) {
+        return { coverageScore: 0, needMoreSearch: true, reason: 'No search results' };
+    }
+    
+    if (!prospects || prospects.length === 0) {
+        return { coverageScore: 0.1, needMoreSearch: true, reason: 'No prospects extracted' };
+    }
+    
+    const targetCount = intent.lead_count || 5;
+    const foundCount = prospects.length;
+    
+    // How many have email candidates?
+    const withEmails = prospects.filter(p => p.email_candidates && p.email_candidates.length > 0).length;
+    const emailRatio = withEmails / foundCount;
+    
+    // Fit score quality
+    const avgFit = prospects.reduce((sum, p) => sum + (p.fit_score || 0), 0) / foundCount;
+    
+    // Location match
+    const hasLocation = intent.location && intent.location.trim().length > 0;
+    const locationMatchRatio = hasLocation 
+        ? prospects.filter(p => p.location && p.location.toLowerCase().includes(intent.location.toLowerCase())).length / foundCount
+        : 1;
+    
+    // Domain quality (presence of domain indicates real company)
+    const domainRatio = prospects.filter(p => p.domain && p.domain.length > 3).length / foundCount;
+    
+    // Calculate coverage score
+    const countScore = Math.min(foundCount / targetCount, 1);
+    const emailScore = Math.min(emailRatio * 1.5, 1);
+    const fitScore = Math.min(avgFit / 0.8, 1);
+    const locationScore = locationMatchRatio;
+    const domainScore = domainRatio;
+    
+    const coverageScore = (countScore * 0.3) + (emailScore * 0.25) + (fitScore * 0.2) + (locationScore * 0.15) + (domainScore * 0.1);
+    
+    // Decide if more search is needed
+    const needMoreSearch = coverageScore < COVERAGE_THRESHOLD_STOP || foundCount < Math.min(targetCount, 3);
+    const reason = needMoreSearch 
+        ? `Coverage ${coverageScore.toFixed(2)} below threshold ${COVERAGE_THRESHOLD_STOP} (found ${foundCount}/${targetCount})`
+        : `Good coverage (${coverageScore.toFixed(2)})`;
+    
+    console.log(`📊 [AGENT2] Coverage: ${coverageScore.toFixed(2)} | Need more: ${needMoreSearch} | ${reason}`);
+    console.log(`   - Count: ${countScore.toFixed(2)} | Email: ${emailScore.toFixed(2)} | Fit: ${fitScore.toFixed(2)}`);
+    
+    return { coverageScore, needMoreSearch, reason };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 9. Extract Prospects from Search Results
+// ────────────────────────────────────────────────────────────────
+
+async function extractProspectsFromResults(searchResults, intent, apiKey, roundNumber) {
     if (!searchResults || searchResults.length === 0) {
         return { prospects: [], found: 0 };
     }
 
-    // --- LOG: What we received ---
-    console.log(`📥 [AGENT2] Extracting from ${searchResults.length} search results`);
+    console.log(`📥 [AGENT2] Round ${roundNumber}: Extracting from ${searchResults.length} search results`);
 
-    // --- FIX: Extract emails using regex from ALL snippets ---
     const allText = searchResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
     const regexEmails = extractEmailsWithRegex(allText);
-    console.log(`📧 [AGENT2] Regex found ${regexEmails.length} email(s): ${JSON.stringify(regexEmails)}`);
+    console.log(`📧 [AGENT2] Round ${roundNumber}: Regex found ${regexEmails.length} email(s)`);
 
-    // Build a compact text from search results
     const snippets = searchResults.map((r, i) => 
         `[${i + 1}] TITLE: ${r.title}\nURL: ${r.url}\nSNIPPET: ${r.snippet}`
     ).join('\n\n---\n\n');
@@ -395,6 +413,7 @@ USER REQUEST:
 - Role: ${intent.role || 'Any'}
 - Company: ${intent.company || 'Any'}
 - Max leads: ${intent.lead_count || 5}
+- Round: ${roundNumber} of 2
 
 SEARCH RESULTS:
 ${snippets}
@@ -402,28 +421,30 @@ ${snippets}
 EXTRACTED EMAILS FROM SEARCH TEXT (USE THESE):
 ${JSON.stringify(regexEmails)}
 
+CRITICAL INSTRUCTION:
+Extract ONLY REAL COMPANIES that match the user's request.
+- If a result is a directory, list page, or blog post (not an actual company), skip it.
+- Prefer company websites, about pages, team pages, and contact pages.
+- For each company, extract the best email candidate.
+
 For each company, extract:
 - name: Company name exactly as written
 - company: Same as name
-- domain: The company's domain (e.g., example.com) if present in URL or text, otherwise null
+- domain: The company's domain (e.g., example.com) from URL
 - source: "web_search"
 - source_url: The URL where the company was found
-- location: City/Country if mentioned, otherwise null
-- role: CEO/Founder/Director if mentioned, otherwise null
-- fit_score: 0.0 to 1.0 based on how well it matches the user's request
-- email_candidates: MUST include any emails found for this company. Use the extracted emails above. Max 3.
-- notes: Brief note on why this company matches
-
-CRITICAL: For each prospect, extract ALL emails that belong to that company from the search results.
-If an email is found in the text, include it in email_candidates.
+- location: City/Country if mentioned
+- role: CEO/Founder/Director if mentioned
+- fit_score: 0.0 to 1.0 based on match quality
+- email_candidates: Emails found for this company (max 3)
+- notes: Why this company matches
 
 Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} items.
 `;
 
-    // Try extraction with retries
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-            console.log(`🧠 [AGENT2] GPT extraction attempt ${attempt}/3...`);
+            console.log(`🧠 [AGENT2] Round ${roundNumber}, GPT attempt ${attempt}/3...`);
             
             const response = await withRetry(() => axios.post(
                 'https://api.openai.com/v1/chat/completions',
@@ -448,10 +469,7 @@ Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} 
 
             if (!response) {
                 console.warn(`⚠️ [AGENT2] GPT extraction attempt ${attempt} returned null`);
-                if (attempt === 3) {
-                    console.log(`🔄 [AGENT2] Falling back to regex extraction...`);
-                    return createFallbackProspects(searchResults, regexEmails, intent);
-                }
+                if (attempt === 3) return { prospects: [], found: 0 };
                 continue;
             }
 
@@ -460,10 +478,7 @@ Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} 
             
             if (!parseResult.success) {
                 console.warn(`⚠️ [AGENT2] JSON parse failed on attempt ${attempt}`);
-                if (attempt === 3) {
-                    console.log(`🔄 [AGENT2] Falling back to regex extraction...`);
-                    return createFallbackProspects(searchResults, regexEmails, intent);
-                }
+                if (attempt === 3) return { prospects: [], found: 0 };
                 continue;
             }
 
@@ -483,54 +498,37 @@ Return ONLY valid JSON array of prospect objects. Max ${intent.lead_count || 5} 
                 }
             }
 
-            // --- FIX: Ensure email_candidates is populated ---
+            // Assign emails if missing
             prospects = prospects.map(p => {
-                // If GPT didn't extract emails but regex found some, try to assign them
                 if ((!p.email_candidates || p.email_candidates.length === 0) && regexEmails.length > 0) {
                     const companyDomain = p.domain || '';
-                    const companyName = (p.company || p.name || '').toLowerCase().replace(/\s/g, '');
                     const matchingEmails = regexEmails.filter(email => {
                         const emailDomain = email.split('@')[1] || '';
-                        // Match by domain
                         if (companyDomain && emailDomain === companyDomain) return true;
                         if (companyDomain && emailDomain.includes(companyDomain.split('.')[0])) return true;
-                        // Match by company name (fuzzy)
-                        const emailLocal = email.split('@')[0].toLowerCase();
-                        if (companyName && emailLocal.includes(companyName.substring(0, 5))) return true;
                         return false;
                     });
                     if (matchingEmails.length > 0) {
                         p.email_candidates = matchingEmails.slice(0, 3);
-                        console.log(`📧 [AGENT2] Assigned emails to ${p.company || p.name}: ${JSON.stringify(p.email_candidates)}`);
                     }
                 }
                 return p;
             });
 
-            // --- LOG: What we extracted ---
-            console.log(`✅ [AGENT2] Extracted ${prospects.length} prospects from search results (attempt ${attempt})`);
-            prospects.forEach((p, i) => {
-                console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}`);
-            });
-
+            console.log(`✅ [AGENT2] Round ${roundNumber}: Extracted ${prospects.length} prospects`);
             return { prospects, found: prospects.length };
 
         } catch (error) {
             console.error(`❌ [AGENT2] GPT extraction attempt ${attempt} failed:`, error.message);
-            if (attempt === 3) {
-                console.log(`🔄 [AGENT2] Falling back to regex extraction...`);
-                return createFallbackProspects(searchResults, regexEmails, intent);
-            }
+            if (attempt === 3) return { prospects: [], found: 0 };
         }
     }
 
-    // Final fallback
-    console.log(`🔄 [AGENT2] Using final fallback regex extraction...`);
-    return createFallbackProspects(searchResults, regexEmails, intent);
+    return { prospects: [], found: 0 };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 10. Deduplicate Prospects
+// 10. Deduplicate Prospects (Improved)
 // ────────────────────────────────────────────────────────────────
 
 function deduplicateProspects(prospects) {
@@ -540,18 +538,38 @@ function deduplicateProspects(prospects) {
     const deduped = [];
 
     for (const p of prospects) {
-        const key = (p.company || p.name || '').toLowerCase().trim();
-        if (!key) continue;
-        const firstWord = key.split(' ')[0];
+        // Use domain first, then company name
+        let key = '';
+        if (p.domain && p.domain.length > 3) {
+            key = p.domain.toLowerCase().trim();
+        } else if (p.company) {
+            key = p.company.toLowerCase().trim().replace(/\s+/g, '');
+        } else if (p.name) {
+            key = p.name.toLowerCase().trim().replace(/\s+/g, '');
+        } else {
+            continue;
+        }
+        
+        // Check if we've seen this before (exact or fuzzy)
         let isDuplicate = false;
         for (const s of seen) {
-            if (s.includes(firstWord) || firstWord.includes(s)) {
+            // Exact match
+            if (s === key) { isDuplicate = true; break; }
+            // Domain match
+            if (key.includes('@')) {
+                const domain = key.split('@')[1];
+                if (domain && s.includes(domain)) { isDuplicate = true; break; }
+            }
+            // Fuzzy match on first word for companies
+            const firstWord = key.split(/[.\s]/)[0];
+            if (firstWord && firstWord.length > 2 && s.includes(firstWord)) {
                 isDuplicate = true;
                 break;
             }
         }
+        
         if (!isDuplicate) {
-            seen.add(firstWord);
+            seen.add(key);
             deduped.push(p);
         }
     }
@@ -570,14 +588,71 @@ function sortProspectsByFit(prospects) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 12. Main Agent 2 Function
+// 12. Create Fallback Prospects
+// ────────────────────────────────────────────────────────────────
+
+function createFallbackProspects(searchResults, regexEmails, intent) {
+    console.log(`🔧 [AGENT2] Creating fallback prospects from ${searchResults.length} results`);
+    
+    const prospects = [];
+    const domainRegex = /https?:\/\/(?:www\.)?([^\/]+)/;
+    const seenDomains = new Set();
+    const targetCount = intent.lead_count || 5;
+    
+    for (const result of searchResults) {
+        const domainMatch = result.url.match(domainRegex);
+        let domain = domainMatch ? domainMatch[1] : null;
+        if (domain) {
+            const parts = domain.split('.');
+            if (parts.length > 2) domain = parts.slice(-2).join('.');
+        }
+        
+        if (!domain || seenDomains.has(domain)) continue;
+        seenDomains.add(domain);
+        
+        const matchingEmails = regexEmails.filter(email => {
+            const emailDomain = email.split('@')[1] || '';
+            return emailDomain === domain || emailDomain.includes(domain.split('.')[0]);
+        });
+        
+        // Skip if this looks like a directory site
+        const skipTerms = ['directory', 'list', 'blog', 'youtube', 'scribd', 'getprospect', 'influencers'];
+        const urlLower = result.url.toLowerCase();
+        if (skipTerms.some(term => urlLower.includes(term))) {
+            console.log(`⏭️ [AGENT2] Skipping directory: ${result.url}`);
+            continue;
+        }
+        
+        prospects.push({
+            name: result.title || domain,
+            company: result.title || domain,
+            domain: domain,
+            source: 'web_search',
+            source_url: result.url,
+            location: intent.location || null,
+            role: intent.role || null,
+            fit_score: matchingEmails.length > 0 ? 0.7 : 0.4,
+            email_candidates: matchingEmails.slice(0, 3),
+            notes: `Extracted from ${result.title}`
+        });
+        
+        if (prospects.length >= targetCount) break;
+    }
+    
+    console.log(`🔧 [AGENT2] Fallback extracted ${prospects.length} prospects`);
+    return { prospects, found: prospects.length };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 13. Main Agent 2 Function (Intelligent Search Planner)
 // ────────────────────────────────────────────────────────────────
 
 async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
-    console.log(`🔍 [AGENT2] Starting prospect discovery for user ${userId}...`);
-    console.log(`📋 [AGENT2] Intent received:`, JSON.stringify(intent, null, 2));
-    onProgress?.('🔎 Searching for matching prospects...');
+    console.log(`🔍 [AGENT2] Starting intelligent prospect discovery for user ${userId}...`);
+    console.log(`📋 [AGENT2] Intent:`, JSON.stringify(intent, null, 2));
+    onProgress?.('🔎 Planning search...');
 
+    // ─── Validate input ───
     if (!intent) {
         return {
             intent: 'lead_prospecting',
@@ -615,111 +690,142 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
         };
     }
 
-    // ─── Step 1: Build search queries ───
-    const queries = buildSearchQueries(intent);
-    console.log(`🔍 [AGENT2] Search queries:`, queries);
+    // ─── Initialize state ───
+    const state = {
+        target: {
+            industry: intent.industry || 'general',
+            location: intent.location || null,
+            role: intent.role || null,
+            company: intent.company || null,
+            lead_count: intent.lead_count || 5
+        },
+        searchBudget: {
+            maxRounds: MAX_ROUNDS,
+            maxQueriesPerRound: MAX_QUERIES_PER_ROUND,
+            maxResultsPerQuery: MAX_SEARCH_RESULTS
+        },
+        rounds: [],
+        sources: [],
+        allProspects: [],
+        coverageScore: 0,
+        confidence: 0,
+        needMoreSearch: false,
+        stopReason: null,
+        queryHistory: [],
+        roundNumber: 0
+    };
 
-    // ─── Step 2: Execute Tavily searches ───
     let allResults = [];
-    let searchCount = 0;
+    let totalQueriesUsed = 0;
+    let totalSourcesChecked = 0;
 
-    for (const query of queries) {
-        if (searchCount >= MAX_QUERIES) break;
-        searchCount++;
-        onProgress?.(`🔎 Searching: "${query}"...`);
-        
+    // ─── ROUND 1: Initial Search ───
+    console.log(`🔁 [AGENT2] === ROUND 1 ===`);
+    state.roundNumber = 1;
+    const round1Queries = buildSearchQueries(intent, 1, []);
+    state.queryHistory = [...state.queryHistory, ...round1Queries];
+    
+    let round1Results = [];
+    let round1Prospects = [];
+
+    for (const query of round1Queries) {
+        onProgress?.(`🔎 Round 1: "${query}"...`);
         const results = await searchTavily(query, tavilyKey, MAX_SEARCH_RESULTS);
         if (results && results.length > 0) {
-            allResults = allResults.concat(results);
-            console.log(`✅ [AGENT2] Found ${results.length} results for query: "${query}"`);
-            results.forEach((r, i) => {
-                console.log(`   ${i + 1}. ${r.title} → ${r.url}`);
-                // Log if email appears in snippet
-                const emailMatch = r.snippet.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-                if (emailMatch) {
-                    console.log(`   📧 Email found in snippet: ${emailMatch[0]}`);
-                }
-            });
-        } else {
-            console.log(`⚠️ [AGENT2] No results for query: "${query}"`);
+            round1Results = round1Results.concat(results);
+            totalQueriesUsed++;
+            totalSourcesChecked += results.length;
+            console.log(`✅ [AGENT2] Round 1: Found ${results.length} results for "${query}"`);
         }
     }
 
-    // ─── Step 3: If no results, try a broader fallback query ───
-    if (allResults.length === 0 && searchCount < MAX_QUERIES) {
-        const fallbackQuery = `${intent.industry || ''} companies contact`.trim();
-        onProgress?.(`🔄 Trying broader search: "${fallbackQuery}"...`);
-        const fallbackResults = await searchTavily(fallbackQuery, tavilyKey, MAX_SEARCH_RESULTS);
-        if (fallbackResults && fallbackResults.length > 0) {
-            allResults = allResults.concat(fallbackResults);
-            searchCount++;
+    if (round1Results.length > 0) {
+        const extraction1 = await extractProspectsFromResults(round1Results, intent, apiKey, 1);
+        round1Prospects = extraction1.prospects || [];
+        allResults = allResults.concat(round1Results);
+        state.allProspects = round1Prospects;
+        console.log(`📊 [AGENT2] Round 1: Extracted ${round1Prospects.length} prospects`);
+    }
+
+    // ─── Evaluate Round 1 ───
+    const eval1 = evaluateCoverage(allResults, state.allProspects, intent);
+    state.coverageScore = eval1.coverageScore;
+    state.needMoreSearch = eval1.needMoreSearch;
+
+    // ─── ROUND 2: Refined Search (if needed) ───
+    if (state.needMoreSearch && state.roundNumber < MAX_ROUNDS) {
+        console.log(`🔁 [AGENT2] === ROUND 2 (Refining) ===`);
+        state.roundNumber = 2;
+        
+        const round2Queries = buildSearchQueries(intent, 2, state.queryHistory);
+        state.queryHistory = [...state.queryHistory, ...round2Queries];
+        
+        let round2Results = [];
+        let round2Prospects = [];
+
+        for (const query of round2Queries) {
+            onProgress?.(`🔎 Round 2: "${query}"...`);
+            const results = await searchTavily(query, tavilyKey, MAX_SEARCH_RESULTS);
+            if (results && results.length > 0) {
+                round2Results = round2Results.concat(results);
+                totalQueriesUsed++;
+                totalSourcesChecked += results.length;
+                console.log(`✅ [AGENT2] Round 2: Found ${results.length} results for "${query}"`);
+            }
+        }
+
+        if (round2Results.length > 0) {
+            const extraction2 = await extractProspectsFromResults(round2Results, intent, apiKey, 2);
+            round2Prospects = extraction2.prospects || [];
+            allResults = allResults.concat(round2Results);
+            
+            // Merge prospects (avoid duplicates)
+            const mergedProspects = [...state.allProspects, ...round2Prospects];
+            const dedupResult = deduplicateProspects(mergedProspects);
+            state.allProspects = dedupResult.deduped;
+            console.log(`📊 [AGENT2] Round 2: Added ${round2Prospects.length} prospects, now ${state.allProspects.length} total`);
+        }
+
+        // Re-evaluate
+        const eval2 = evaluateCoverage(allResults, state.allProspects, intent);
+        state.coverageScore = eval2.coverageScore;
+        state.needMoreSearch = eval2.needMoreSearch;
+    }
+
+    // ─── If still no results or very low coverage, try fallback ───
+    if (state.allProspects.length < 2 && allResults.length > 0) {
+        console.log(`🔄 [AGENT2] Low coverage - trying fallback extraction...`);
+        const allText = allResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+        const fallbackEmails = extractEmailsWithRegex(allText);
+        const fallbackResult = createFallbackProspects(allResults, fallbackEmails, intent);
+        if (fallbackResult.prospects && fallbackResult.prospects.length > state.allProspects.length) {
+            state.allProspects = fallbackResult.prospects;
+            console.log(`📊 [AGENT2] Fallback: Now ${state.allProspects.length} prospects`);
         }
     }
 
-    // ─── Step 4: Extract prospects from search results ───
-    if (allResults.length === 0) {
-        return {
-            intent: 'lead_prospecting',
-            confidence: 0.5,
-            needs_clarification: true,
-            clarification_question: 'I couldn\'t find any matching prospects. Could you try a different industry, location, or be more specific?',
-            next_pipeline: null,
-            entities: intent.entities || {},
-            risk_level: 'low',
-            policy_flags: ['no_results'],
-            reason: `No search results found for: ${intent.industry || ''} ${intent.location || ''}`,
-            prospects: [],
-            stats: { searched: searchCount, found: 0, returned: 0, deduped: 0 }
-        };
-    }
+    // ─── Final deduplication and sorting ───
+    const finalDedup = deduplicateProspects(state.allProspects);
+    const sorted = sortProspectsByFit(finalDedup.deduped);
 
-    // ─── Step 5: Extract prospects using GPT ───
-    onProgress?.('🧠 Extracting companies and contacts...');
-    const { prospects, found } = await extractProspectsFromResults(allResults, intent, apiKey);
+    const targetCount = intent.lead_count || 5;
+    const returnedProspects = sorted.slice(0, targetCount);
 
-    // --- LOG: What we extracted ---
-    console.log(`📤 [AGENT2] Final extracted ${prospects.length} prospects`);
-    prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}`);
-    });
-
-    if (!prospects || prospects.length === 0) {
-        return {
-            intent: 'lead_prospecting',
-            confidence: 0.5,
-            needs_clarification: true,
-            clarification_question: 'I found search results but couldn\'t extract any matching companies. Could you try a different industry or location?',
-            next_pipeline: null,
-            entities: intent.entities || {},
-            risk_level: 'low',
-            policy_flags: ['extraction_failed'],
-            reason: 'No prospects could be extracted from search results.',
-            prospects: [],
-            stats: { searched: searchCount, found: 0, returned: 0, deduped: 0 }
-        };
-    }
-
-    // ─── Step 6: Deduplicate prospects ───
-    const { deduped, removed } = deduplicateProspects(prospects);
-
-    // ─── Step 7: Sort by fit score ───
-    const sortedProspects = sortProspectsByFit(deduped);
-
-    // ─── Step 8: Limit to requested count ───
-    const maxLeads = intent.lead_count || 5;
-    const returnedProspects = sortedProspects.slice(0, maxLeads);
-
-    // ─── Step 9: Build confidence score ───
-    let confidence = 0.85;
-    if (returnedProspects.length < 2) confidence = 0.70;
-    if (returnedProspects.length === 0) confidence = 0.40;
-    if (!intent.industry || intent.industry === 'general') confidence -= 0.10;
-    if (!intent.location) confidence -= 0.10;
-
+    // ─── Calculate final confidence ───
+    const withEmails = returnedProspects.filter(p => p.email_candidates && p.email_candidates.length > 0).length;
+    const avgFit = returnedProspects.reduce((sum, p) => sum + (p.fit_score || 0), 0) / (returnedProspects.length || 1);
+    const coverage = returnedProspects.length >= Math.min(targetCount, 3) ? 1 : returnedProspects.length / Math.min(targetCount, 3);
+    
+    let confidence = 0.5 + (coverage * 0.3) + (withEmails / (returnedProspects.length || 1) * 0.1) + (avgFit * 0.1);
+    confidence = Math.min(confidence, 0.98);
+    
     const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
 
-    // ─── Step 10: Build and return result ───
-    const result = {
+    console.log(`✅ [AGENT2] Discovery complete: ${returnedProspects.length} prospects returned`);
+    console.log(`📊 [AGENT2] Confidence: ${(confidence * 100).toFixed(1)}% | Coverage: ${state.coverageScore.toFixed(2)}`);
+    console.log(`📧 [AGENT2] ${withEmails}/${returnedProspects.length} have emails`);
+
+    return {
         intent: 'lead_prospecting',
         confidence: Math.round(confidence * 100) / 100,
         needs_clarification: needsClarification,
@@ -737,9 +843,16 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
             domain: null,
             source_type: 'web_search'
         },
-        risk_level: 'low',
-        policy_flags: [],
-        reason: `Found ${returnedProspects.length} candidate prospects that match the requested ICP and location.`,
+        risk_level: returnedProspects.length < 2 ? 'medium' : 'low',
+        policy_flags: returnedProspects.length === 0 ? ['no_prospects'] : [],
+        reason: `Found ${returnedProspects.length} candidate prospects. Rounds: ${state.roundNumber}. Coverage: ${(state.coverageScore * 100).toFixed(0)}%`,
+        search_plan: {
+            rounds_used: state.roundNumber,
+            queries_used: state.queryHistory.slice(0, totalQueriesUsed),
+            sources_checked: totalSourcesChecked,
+            coverage_score: state.coverageScore,
+            need_more_search: state.needMoreSearch
+        },
         prospects: returnedProspects.map(p => ({
             name: p.name || p.company || null,
             company: p.company || p.name || null,
@@ -748,29 +861,21 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
             source_url: p.source_url || null,
             location: p.location || intent.location || null,
             role: p.role || intent.role || null,
-            fit_score: p.fit_score || 0.7,
+            fit_score: p.fit_score || 0.5,
             email_candidates: p.email_candidates || [],
             notes: p.notes || null,
         })),
         stats: {
-            searched: searchCount,
-            found: found,
+            searched: totalQueriesUsed,
+            found: state.allProspects.length,
             returned: returnedProspects.length,
-            deduped: removed,
+            deduped: state.allProspects.length - returnedProspects.length
         }
     };
-
-    console.log(`✅ [AGENT2] Discovery complete: ${returnedProspects.length} prospects returned`);
-    console.log(`📤 [AGENT2] Returning prospects with emails:`);
-    result.prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}`);
-    });
-
-    return result;
 }
 
 // ────────────────────────────────────────────────────────────────
-// 13. Public Exports
+// 14. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -780,6 +885,7 @@ module.exports = {
     extractProspectsFromResults,
     deduplicateProspects,
     sortProspectsByFit,
+    evaluateCoverage,
     safeJsonParse,
     extractEmailsWithRegex,
     createFallbackProspects,
