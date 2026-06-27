@@ -28,19 +28,19 @@ const axios = require('axios');
 // ────────────────────────────────────────────────────────────────
 
 const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 1000;
+const MAX_OUTPUT_TOKENS = 1200;
 const MAX_SEARCH_RESULTS = 3;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 5 System Prompt
+// 2. The Agent 5 System Prompt (COMPRESSED SCHEMA)
 // ────────────────────────────────────────────────────────────────
 
 const AGENT5_SYSTEM_PROMPT = `You are Agent 5, the final Lead Output and Outreach Drafting layer in a B2B lead-generation system.
 
-Your job is to take qualified prospects from Agent 4 and return a clean JSON array of final lead objects. Each object should be ready for the user interface, export, or outbound workflow. You may use live search only when a fresh public fact materially improves the final result.
+Your job is to take qualified prospects from Agent 4 and return a clean JSON array of final lead objects. Each object should be ready for the user interface, export, or outbound workflow.
 
 PRIMARY RESPONSIBILITIES
 1. Read Agent 4 output carefully.
@@ -48,75 +48,67 @@ PRIMARY RESPONSIBILITIES
 3. Include contact, company, email, scoring, verification, and outreach fields.
 4. Write concise outreach drafts: initial, followup, breakup.
 5. Return JSON array only.
-6. Keep every field consistent and machine-readable.
 
 YOU MUST NOT
 - Return plain text.
 - Invent facts.
 - Over-search.
-- Lose important fields from the input.
 - Produce commentary outside the JSON array.
 
 OUTPUT RULES
 - Return only a JSON array.
 - One array item per final lead.
-- Each item must include the full schema.
 - If a field is unknown, set it to null or an empty array.
-- Keep messages short, direct, and professional.
+- Keep messages SHORT (under 80 words each).
 
-SCHEMA
+COMPRESSED SCHEMA (use these short field names):
 [
   {
     "name": string|null,
     "company": string|null,
     "domain": string|null,
     "email": string|null,
-    "emailConfidence": string|null,
-    "emailLabel": string|null,
-    "verificationGrade": string|null,
-    "emailValidation": {
-      "confidenceScore": number|null,
+    "eConf": string|null,
+    "eLabel": string|null,
+    "vGrade": string|null,
+    "eVal": {
+      "score": number|null,
       "verdict": string|null,
-      "smtpResult": string|null,
+      "smtp": string|null,
       "reason": string|null,
       "grade": string|null
     },
-    "allEmailOptions": string[],
+    "emails": string[],
     "role": string|null,
-    "linkedIn": string|null,
-    "companySize": string|null,
-    "companyModel": string|null,
+    "linkedin": string|null,
+    "size": string|null,
+    "model": string|null,
     "industry": string|null,
     "hq": string|null,
-    "recentNews": string|null,
+    "news": string|null,
     "leadScore": number|null,
     "pageScore": number|null,
     "mxValid": boolean|null,
     "dataScore": number|null,
-    "hallucinationFlags": string[],
-    "emailLanguage": string|null,
-    "_memoryStats": {
-      "totalCompanies": number|null,
-      "totalContacts": number|null,
-      "totalResearch": number|null,
-      "totalAnalytics": number|null
+    "flags": string[],
+    "lang": string|null,
+    "_mem": {
+      "companies": number|null,
+      "contacts": number|null,
+      "research": number|null,
+      "analytics": number|null
     },
     "messages": [
-      {
-        "type": "initial" | "followup" | "breakup",
-        "subject": string,
-        "body": string
-      }
+      { "type": "initial" | "followup" | "breakup", "subject": string, "body": string }
     ]
   }
 ]
 
 MESSAGE RULES
-- initial: first outreach message.
-- followup: short polite bump.
-- breakup: close the loop politely.
-- Keep each body concise and human.
-- No fluff.
+- initial: first outreach message (3-4 sentences max).
+- followup: short polite bump (2-3 sentences).
+- breakup: close the loop politely (2-3 sentences).
+- Keep each body SHORT and direct.
 - One clear CTA max.
 
 CONFIDENCE GUIDELINES
@@ -195,13 +187,11 @@ async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
 function buildFinalQueries(prospects) {
     const queries = [];
     
-    // Only search if we need a fresh signal for the first prospect
     const firstProspect = prospects[0];
-    if (firstProspect && !firstProspect.recentNews && firstProspect.company) {
+    if (firstProspect && !firstProspect.news && firstProspect.company) {
         queries.push(`"${firstProspect.company}" news recent`);
     }
 
-    // If the first prospect doesn't have a website, try to find it
     if (firstProspect && !firstProspect.website && firstProspect.company) {
         queries.push(`"${firstProspect.company}" official website`);
     }
@@ -210,11 +200,10 @@ function buildFinalQueries(prospects) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 6. FIX: Safe JSON Parsing with Auto-Fix (Enhanced)
+// 6. Enhanced Safe JSON Parsing with Auto-Fix
 // ────────────────────────────────────────────────────────────────
 
 function safeJsonParse(jsonString) {
-    // Try normal parse first
     try {
         return { success: true, data: JSON.parse(jsonString) };
     } catch (error) {
@@ -223,85 +212,78 @@ function safeJsonParse(jsonString) {
         
         let fixed = jsonString;
         
-        // Fix 1: Incomplete numbers (0. → 0.0, 1. → 1.0)
+        // Fix 1: Incomplete numbers
         fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
         fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
         fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
         
-        // Fix 2: Trailing commas before } or ]
+        // Fix 2: Trailing commas
         fixed = fixed.replace(/,\s*}/g, '}');
         fixed = fixed.replace(/,\s*\]/g, ']');
         
-        // Fix 3: Missing commas between array/object items
-        // Look for } followed by { without a comma
+        // Fix 3: Missing commas
         fixed = fixed.replace(/}\s*{/g, '},{');
-        // Look for ] followed by { without a comma
         fixed = fixed.replace(/\]\s*{/g, '],{');
-        // Look for } followed by " without a comma
         fixed = fixed.replace(/}\s*"/g, '},"');
-        // Look for ] followed by " without a comma
         fixed = fixed.replace(/\]\s*"/g, '],"');
+        fixed = fixed.replace(/"\s*"/g, '","');
         
-        // Fix 4: Unterminated strings - find strings that don't have closing quotes
-        // Look for a quote that starts a string but doesn't have a closing quote
-        const lines = fixed.split('\n');
-        let fixedLines = [];
+        // Fix 4: Remove control characters
+        fixed = fixed.replace(/[\u0000-\u001F\u007F-\u009F]/g, '');
+        
+        // Fix 5: Fix unterminated strings (character by character)
+        let result = '';
         let inString = false;
-        let stringStartLine = -1;
-        let currentLine = '';
+        let escapeNext = false;
         
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i];
+        for (let i = 0; i < fixed.length; i++) {
+            const char = fixed[i];
             
-            // Count quotes in this line (ignoring escaped quotes)
-            const quotes = (line.match(/"/g) || []).length;
-            const escapedQuotes = (line.match(/\\"/g) || []).length;
-            const effectiveQuotes = quotes - escapedQuotes;
-            
-            if (inString) {
-                // We're inside a string - check if this line closes it
-                if (effectiveQuotes % 2 === 1) {
-                    // Odd quotes means the string closes in this line
-                    inString = false;
-                    fixedLines.push(line);
-                } else {
-                    // String continues - add line as-is
-                    fixedLines.push(line);
-                }
-            } else {
-                // We're not in a string - check if this line starts one
-                if (effectiveQuotes % 2 === 1) {
-                    // Odd quotes means a string starts and ends in this line? Or just starts?
-                    // Check if the line ends with a quote that would close it
-                    const trimmedLine = line.trim();
-                    if (trimmedLine.endsWith('"') || trimmedLine.endsWith('",') || trimmedLine.endsWith('":')) {
-                        // Likely the string is closed in this line
-                        fixedLines.push(line);
-                    } else {
-                        // String starts in this line but doesn't close
-                        inString = true;
-                        stringStartLine = i;
-                        // Add a closing quote at the end of the line
-                        if (!line.endsWith('"') && !line.endsWith('",') && !line.endsWith('":')) {
-                            line = line + '"';
-                        }
-                        fixedLines.push(line);
-                    }
-                } else {
-                    fixedLines.push(line);
-                }
+            if (escapeNext) {
+                escapeNext = false;
+                result += char;
+                continue;
             }
+            
+            if (char === '\\') {
+                escapeNext = true;
+                result += char;
+                continue;
+            }
+            
+            if (char === '"') {
+                if (!inString) {
+                    inString = true;
+                    result += char;
+                } else {
+                    let nextChar = '';
+                    let j = i + 1;
+                    while (j < fixed.length && /\s/.test(fixed[j])) j++;
+                    if (j < fixed.length) {
+                        nextChar = fixed[j];
+                    }
+                    
+                    if (nextChar === ',' || nextChar === ']' || nextChar === '}' || nextChar === '' || nextChar === ' ' || nextChar === '\n') {
+                        inString = false;
+                        result += char;
+                    } else {
+                        result += char;
+                    }
+                }
+                continue;
+            }
+            
+            result += char;
         }
         
-        // If we finished the file and we're still in a string, add a closing quote
         if (inString) {
-            fixedLines[fixedLines.length - 1] = fixedLines[fixedLines.length - 1] + '"';
-            console.log(`🔧 [JSON] Added closing quote for unterminated string at line ${stringStartLine + 1}`);
+            result += '"';
+            console.log(`🔧 [JSON] Added closing quote for unterminated string`);
         }
         
-        fixed = fixedLines.join('\n');
+        fixed = result;
         
-        // Fix 5: Missing closing brackets (add if unbalanced)
+        // Fix 6: Missing closing brackets
         const openBraces = (fixed.match(/\{/g) || []).length;
         const closeBraces = (fixed.match(/\}/g) || []).length;
         const openBrackets = (fixed.match(/\[/g) || []).length;
@@ -314,7 +296,7 @@ function safeJsonParse(jsonString) {
             fixed += ']'.repeat(openBrackets - closeBrackets);
         }
         
-        // Fix 6: Remove anything after the last complete JSON structure
+        // Fix 7: Remove trailing text after last JSON structure
         const lastBrace = fixed.lastIndexOf('}');
         const lastBracket = fixed.lastIndexOf(']');
         const lastEnd = Math.max(lastBrace, lastBracket);
@@ -325,13 +307,19 @@ function safeJsonParse(jsonString) {
             }
         }
         
-        // Fix 7: Try to fix "Expected ',' or '}' after property value"
-        // Look for "value" followed by newline and then a property without a comma
+        // Fix 8: Clean up multiple closing braces
+        fixed = fixed.replace(/\}\}\}/g, '}}');
+        fixed = fixed.replace(/^\uFEFF/, '');
+        
+        // Fix 9: Missing commas between properties
         fixed = fixed.replace(/"\s*\n\s*"/g, '",\n"');
         fixed = fixed.replace(/}\s*\n\s*"/g, '},\n"');
         fixed = fixed.replace(/\]\s*\n\s*"/g, '],\n"');
         fixed = fixed.replace(/}\s*\n\s*{/g, '},\n{');
         fixed = fixed.replace(/\]\s*\n\s*{/g, '],\n{');
+        fixed = fixed.replace(/"\s+"([^"]+?)"\s*:/g, '", "$1":');
+        fixed = fixed.replace(/}\s+"([^"]+?)"\s*:/g, '}, "$1":');
+        fixed = fixed.replace(/\]\s+"([^"]+?)"\s*:/g, '], "$1":');
         
         try {
             const data = JSON.parse(fixed);
@@ -339,20 +327,20 @@ function safeJsonParse(jsonString) {
             return { success: true, data };
         } catch (retryError) {
             console.error(`❌ [JSON] Auto-fix failed: ${retryError.message}`);
+            console.log(`⚠️ [JSON] Fixed snippet (last 200 chars): ...${fixed.slice(-200)}`);
             return { success: false, error: retryError };
         }
     }
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. FIX: Main Agent 5 Function with Retry & Safe Parsing
+// 7. Main Agent 5 Function
 // ────────────────────────────────────────────────────────────────
 
 async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
     console.log(`📦 [AGENT5] Formatting final leads for user ${userId}...`);
     onProgress?.('📦 Packaging final leads...');
 
-    // Validate input
     if (!qualified_prospects || qualified_prospects.length === 0) {
         return {
             intent: 'lead_output',
@@ -396,48 +384,36 @@ async function formatFinalLeads({ qualified_prospects, intent, userProfile, apiK
         : 'No additional signals found.';
 
     const formattingPrompt = `
-You are Agent 5, the final output formatter. Convert these qualified prospects into final lead objects.
+You are Agent 5, the final output formatter. Convert these qualified prospects into final lead objects using the COMPRESSED SCHEMA.
 
-SENDER NAME: ${senderName}
-VALUE PROP: ${usp}
+SENDER: ${senderName}
+VALUE: ${usp}
 
-QUALIFIED PROSPECTS:
+PROSPECTS:
 ${qualified_prospects.map((p, i) => `
-PROSPECT ${i + 1}:
-- Name: ${p.name || 'Unknown'}
-- Company: ${p.company || 'Unknown'}
-- Domain: ${p.domain || 'Unknown'}
-- Website: ${p.website || 'Unknown'}
-- Location: ${p.location || 'Unknown'}
-- Role: ${p.role || 'Unknown'}
-- Industry: ${p.industry || 'Unknown'}
-- Fit Score: ${p.fit_score || 0}
-- Priority: ${p.priority || 'medium'}
-- Qualification Status: ${p.qualification_status || 'qualified'}
-- Personalization Angle: ${p.personalization_angle || null}
-- Notes: ${p.notes || null}
-`).join('\n---\n')}
+${i+1}. ${p.name || 'Unknown'} | ${p.company || 'Unknown'} | ${p.role || 'Unknown'}
+   Domain: ${p.domain || 'Unknown'}
+   Location: ${p.location || 'Unknown'}
+   Industry: ${p.industry || 'Unknown'}
+   Fit: ${p.fit_score || 0} | Priority: ${p.priority || 'medium'}
+   Angle: ${p.personalization_angle || 'growth'}
+   Notes: ${p.notes || 'N/A'}
+`).join('\n')}
 
-FRESH SEARCH SIGNALS:
-${searchSnippets}
+${searchSnippets ? `\nSIGNALS:\n${searchSnippets}` : ''}
 
-For each prospect, create a final lead object with:
-1. All identity fields (name, company, domain, email)
-2. Email validation fields (set reasonable defaults based on qualification status)
+For each prospect, create a lead object with:
+1. Identity fields (name, company, domain, email)
+2. Email validation (set reasonable defaults based on qualification)
 3. Company details (size, model, industry, HQ)
 4. Scoring fields (leadScore, etc.)
-5. 3 outreach messages: initial, followup, breakup
+5. 3 SHORT outreach messages (initial, followup, breakup) - keep under 80 words each
 
-OUTREACH MESSAGE GUIDELINES:
-- Use the personalization_angle if provided
-- Keep each message under 120 words
-- No fluff, no corporate speak
-- One clear CTA per message
-- Sign off with: Best,\n${senderName}
+Use the COMPRESSED SCHEMA field names (eConf, vGrade, eVal, emails, size, model, news, flags, lang, _mem).
 
-Return ONLY a JSON array of lead objects following the exact schema provided in the system prompt.`;
+Return ONLY a JSON array. No extra text. Use the compressed schema.`;
 
-    // ─── Step 3: Try formatting with retries and safe parsing ───
+    // ─── Step 3: Try formatting with retries ───
     let lastError = null;
     
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -473,7 +449,6 @@ Return ONLY a JSON array of lead objects following the exact schema provided in 
 
             const rawContent = response.data.choices[0].message.content.trim();
             
-            // ─── SAFE JSON PARSE with auto-fix ───
             const parseResult = safeJsonParse(rawContent);
             
             if (!parseResult.success) {
@@ -484,16 +459,15 @@ Return ONLY a JSON array of lead objects following the exact schema provided in 
 
             const parsed = parseResult.data;
 
-            // ─── Step 4: Extract leads from response ───
+            // ─── Step 4: Extract leads ───
             let leads = [];
             if (Array.isArray(parsed)) {
                 leads = parsed;
             } else if (parsed.leads && Array.isArray(parsed.leads)) {
                 leads = parsed.leads;
-            } else if (parsed.qualified_prospects && Array.isArray(parsed.qualified_prospects)) {
-                leads = parsed.qualified_prospects;
+            } else if (parsed.prospects && Array.isArray(parsed.prospects)) {
+                leads = parsed.prospects;
             } else {
-                // Try to find any array in the object
                 for (const key of Object.keys(parsed)) {
                     if (Array.isArray(parsed[key])) {
                         leads = parsed[key];
@@ -502,36 +476,33 @@ Return ONLY a JSON array of lead objects following the exact schema provided in 
                 }
             }
 
-            // ─── Step 5: Ensure each lead has messages ───
+            // ─── Step 5: Ensure messages exist ───
             leads = leads.map(lead => {
-                // Ensure messages exist
                 if (!lead.messages || lead.messages.length === 0) {
                     const name = lead.name || lead.company || 'there';
                     const company = lead.company || 'your company';
-                    const angle = lead.personalization_angle || 'growth and efficiency';
                     
                     lead.messages = [
                         {
                             type: 'initial',
                             subject: `One thought on ${company}`,
-                            body: `Hi ${name},\n\nRunning a ${lead.industry || 'business'} means most of your day goes to work that doesn't directly close deals.\n\n${usp}\n\nWorth 15 minutes this week?\n\nBest,\n${senderName}`
+                            body: `Hi ${name},\n\nRunning a business means most of your day goes to work that doesn't close deals. We build outreach pipelines that cut manual prospecting time.\n\nWorth 15 minutes?\n\nBest,\n${senderName}`
                         },
                         {
                             type: 'followup',
                             subject: `Re: One thought on ${company}`,
-                            body: `Hi ${name},\n\nFloating this back up — most ${lead.industry || 'business'} operators I speak to say the same thing: there aren't enough hours to prospect and deliver at the same time.\n\nStill worth a quick chat?\n\nBest,\n${senderName}`
+                            body: `Hi ${name},\n\nFloating this back up — most business owners say there aren't enough hours to prospect and deliver.\n\nStill worth a quick chat?\n\nBest,\n${senderName}`
                         },
                         {
                             type: 'breakup',
                             subject: `Closing my file on ${company}`,
-                            body: `Hi ${name},\n\nAssuming timing isn't right for ${company} right now — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
+                            body: `Hi ${name},\n\nAssuming timing isn't right — I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${senderName}`
                         }
                     ];
                 }
                 return lead;
             });
 
-            // ─── Step 6: Calculate confidence ───
             const confidence = leads.length > 0 ? Math.min(0.95, 0.7 + (leads.length / qualified_prospects.length) * 0.25) : 0.4;
             const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
 
@@ -574,7 +545,6 @@ Return ONLY a JSON array of lead objects following the exact schema provided in 
         }
     }
 
-    // ─── Step 7: All attempts failed – return a graceful error ───
     console.error(`❌ [AGENT5] All formatting attempts failed. Last error: ${lastError?.message || 'Unknown error'}`);
     
     return {
