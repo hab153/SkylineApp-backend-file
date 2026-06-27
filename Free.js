@@ -370,7 +370,7 @@ When answering:
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. LEAD GEN PIPELINE ORCHESTRATOR (UPDATED WITH AGENT 5)
+// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED DATABASE SAVING)
 // ────────────────────────────────────────────────────────────────
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, userId) {
@@ -406,10 +406,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
     // ─── Step 3: Handle lead_generation intent ───
     if (routerResult.intent === 'lead_generation') {
-        // Extract entities from the router result
         const entities = routerResult.entities || {};
         
-        // Build a clean intent object from the router's extracted entities
         const leadIntent = {
             industry: entities.industry || 'general',
             location: entities.location || null,
@@ -421,7 +419,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
 
         console.log(`🎯 [ORCHESTRATOR] Lead generation confirmed:`, leadIntent);
 
-        // ─── Step 4: Check cache for this specific request ───
+        // ─── Step 4: Check cache ───
         const queryParams = {
             industry: leadIntent.industry,
             location: leadIntent.location,
@@ -444,7 +442,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 5: Cache miss – call Agent 2 ───
+        // ─── Step 5: Call Agent 2 ───
         console.log(`🔁 [CACHE MISS] Calling agent2 for prospect discovery...`);
         onProgress?.('🔎 Searching for matching prospects...');
 
@@ -481,7 +479,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 6: Call Agent 3 for enrichment ───
+        // ─── Step 6: Call Agent 3 ───
         console.log(`🔁 [ORCHESTRATOR] Calling agent3 for enrichment...`);
         onProgress?.('🔬 Enriching and verifying prospects...');
 
@@ -518,7 +516,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 7: Call Agent 4 for qualification ───
+        // ─── Step 7: Call Agent 4 ───
         console.log(`🔁 [ORCHESTRATOR] Calling agent4 for qualification...`);
         onProgress?.('🏆 Evaluating and prioritizing leads...');
 
@@ -558,7 +556,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 8: Call Agent 5 for final formatting ───
+        // ─── Step 8: Call Agent 5 ───
         console.log(`🔁 [ORCHESTRATOR] Calling agent5 for final formatting...`);
         onProgress?.('📦 Packaging final leads...');
 
@@ -598,13 +596,39 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 9: Save leads to cache ───
+        // ─── Step 9: Save leads to cache (FIXED) ───
         if (finalLeads.length > 0) {
             const companyIds = [];
             for (const lead of finalLeads) {
                 if (!lead.domain) continue;
+                
                 let company = await Company.findOne({ domain: lead.domain });
                 if (!company) {
+                    // Build a clean research object with proper values
+                    const research = {
+                        recentNews: lead.recentNews || null,
+                        website: lead.website || null,
+                        linkedin_url: lead.linkedIn || null,
+                        verificationGrade: lead.verificationGrade || null,
+                        emailValidation: lead.emailValidation || null,
+                        messages: lead.messages || [],
+                        emailConfidence: lead.emailConfidence || null,
+                        emailLabel: lead.emailLabel || null,
+                        allEmailOptions: lead.allEmailOptions || [],
+                        role: lead.role || null,
+                        companySize: lead.companySize || null,
+                        companyModel: lead.companyModel || null,
+                        industry: lead.industry || null,
+                        hq: lead.hq || null,
+                        leadScore: lead.leadScore || 0,
+                        pageScore: lead.pageScore || 0,
+                        mxValid: lead.mxValid || false,
+                        dataScore: lead.dataScore || 0,
+                        hallucinationFlags: lead.hallucinationFlags || [],
+                        emailLanguage: lead.emailLanguage || 'en',
+                        _memoryStats: lead._memoryStats || {}
+                    };
+
                     company = await saveCompanyFromLead({
                         company: lead.company,
                         domain: lead.domain,
@@ -612,21 +636,17 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                         country: lead.hq || leadIntent.location,
                         companySize: lead.companySize || 'unknown',
                         emails: lead.email ? [lead.email] : [],
-                        research: { 
-                            recentNews: lead.recentNews,
-                            website: lead.website,
-                            linkedin_url: lead.linkedIn,
-                            verificationGrade: lead.verificationGrade,
-                            emailValidation: lead.emailValidation,
-                            messages: lead.messages,
-                        },
+                        research: research,
                         leadScore: lead.leadScore || 50,
                     });
                 }
                 if (company) companyIds.push(company._id);
             }
-            await saveSearchCache(queryHash, queryParams, companyIds, 30);
-            console.log(`💾 [ORCHESTRATOR] Saved ${companyIds.length} companies to cache`);
+            
+            if (companyIds.length > 0) {
+                await saveSearchCache(queryHash, queryParams, companyIds, 30);
+                console.log(`💾 [ORCHESTRATOR] Saved ${companyIds.length} companies to cache`);
+            }
         }
 
         // ─── Step 10: Return final leads to user ───
