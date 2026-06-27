@@ -370,7 +370,7 @@ When answering:
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED WITH STRING CONVERSION)
+// 8. LEAD GEN PIPELINE ORCHESTRATOR (FIXED - pass string directly)
 // ────────────────────────────────────────────────────────────────
 
 async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress, detectedLanguage, apiKey, userId) {
@@ -596,7 +596,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
             };
         }
 
-        // ─── Step 9: Save leads to cache (FIXED: Convert to string) ───
+        // ─── Step 9: Save leads to cache (FIXED - pass string directly) ───
         if (finalLeads.length > 0) {
             const companyIds = [];
             for (const lead of finalLeads) {
@@ -629,8 +629,8 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                         _memoryStats: lead._memoryStats || {}
                     };
 
-                    // IMPORTANT: Convert to string for researchSummary field
-                    const researchSummary = JSON.stringify(researchData);
+                    // IMPORTANT: Convert to string - pass directly as researchSummary
+                    const researchSummaryString = JSON.stringify(researchData);
 
                     company = await saveCompanyFromLead({
                         company: lead.company,
@@ -639,9 +639,7 @@ async function _runLeadGenPipeline(safeMessage, history, userProfile, onProgress
                         country: lead.hq || leadIntent.location,
                         companySize: lead.companySize || 'unknown',
                         emails: lead.email ? [lead.email] : [],
-                        research: {
-                            researchSummary: researchSummary  // This is a string
-                        },
+                        researchSummary: researchSummaryString,  // Pass string directly
                         leadScore: lead.leadScore || 50,
                     });
                 }
