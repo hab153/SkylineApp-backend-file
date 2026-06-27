@@ -40,7 +40,7 @@ async function saveCompanyFromLead(lead) {
     const domain = extractDomain(lead.email || lead.website || lead.domain);
     if (!domain) return null;
     
-    // Extract emails properly
+    // Extract emails from lead (support multiple formats)
     let emails = [];
     if (lead.email) {
         if (Array.isArray(lead.email)) {
@@ -56,7 +56,7 @@ async function saveCompanyFromLead(lead) {
         }
     }
     // Remove duplicates and invalid emails
-    emails = [...new Set(emails.filter(e => e && e.includes('@')))];
+    emails = [...new Set(emails.filter(e => e && e.includes('@') && e.length > 3))];
     
     // Get research summary
     let researchSummary = lead.researchSummary || '';
@@ -73,7 +73,7 @@ async function saveCompanyFromLead(lead) {
         industry: lead.industry || '',
         country: lead.country || '',
         employeeCount: lead.companySize || '',
-        emails: emails,  // Store emails properly
+        emails: emails,
         researchSummary: researchSummary,
         leadScore: lead.leadScore || 0,
         confidenceTier: lead.confidenceTier || getConfidenceTier(lead.leadScore || 0),
@@ -92,7 +92,7 @@ async function saveCompanyFromLead(lead) {
         { $set: companyData },
         { upsert: true, new: true }
     );
-    console.log(`💾 [COMPANY] Saved ${company.name} with emails: ${JSON.stringify(emails)}`);
+    console.log(`💾 [COMPANY] Saved ${company.name} with ${emails.length} email(s): ${JSON.stringify(emails)}`);
     return company;
 }
 
@@ -109,6 +109,10 @@ async function getCachedSearchResults(queryHash) {
         // NEW: If cache has complete leads stored directly, return them
         if (cached.leads && Array.isArray(cached.leads) && cached.leads.length > 0) {
             console.log(`💾 [CACHE] Found ${cached.leads.length} complete leads`);
+            // Log first lead's email for debugging
+            if (cached.leads[0] && cached.leads[0].email) {
+                console.log(`📧 [CACHE] First lead email: ${cached.leads[0].email}`);
+            }
             return cached.leads;
         }
         
@@ -117,6 +121,12 @@ async function getCachedSearchResults(queryHash) {
             console.log(`💾 [CACHE] Found ${cached.companyIds.length} company IDs (legacy format)`);
             const companies = await Company.find({ 
                 '_id': { $in: cached.companyIds } 
+            });
+            // Log emails found in companies
+            companies.forEach(c => {
+                if (c.emails && c.emails.length > 0) {
+                    console.log(`📧 [CACHE] Company ${c.name} has email: ${c.emails[0]}`);
+                }
             });
             return companies;
         }
@@ -141,13 +151,13 @@ async function saveSearchCache(queryHash, queryParams, data, ttlDays = 90) {
             queryParams,
             expiresAt,
             createdAt: new Date(),
-            _format: isCompleteLead ? 'leads' : 'companyIds',
         };
         
         if (isCompleteLead) {
             // NEW: Store complete leads
             updateData.leads = data;
             updateData.companyIds = [];
+            updateData._format = 'leads';
             console.log(`💾 [CACHE] Storing ${data.length} complete leads`);
             // Log first lead's email for debugging
             if (data[0] && data[0].email) {
@@ -157,6 +167,7 @@ async function saveSearchCache(queryHash, queryParams, data, ttlDays = 90) {
             // LEGACY: Store company IDs (fallback)
             updateData.companyIds = data;
             updateData.leads = [];
+            updateData._format = 'companyIds';
             console.log(`💾 [CACHE] Storing ${data.length} company IDs (legacy)`);
         }
         
