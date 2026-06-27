@@ -35,10 +35,37 @@ function getConfidenceTier(score) {
     return 'Low';
 }
 
-// Save or update a company from lead data
+// ─── FIXED: Save or update a company from lead data with email preservation ───
 async function saveCompanyFromLead(lead) {
     const domain = extractDomain(lead.email || lead.website || lead.domain);
     if (!domain) return null;
+    
+    // Extract emails properly
+    let emails = [];
+    if (lead.email) {
+        if (Array.isArray(lead.email)) {
+            emails = lead.email;
+        } else {
+            emails = [lead.email];
+        }
+    } else if (lead.emails) {
+        if (Array.isArray(lead.emails)) {
+            emails = lead.emails;
+        } else {
+            emails = [lead.emails];
+        }
+    }
+    // Remove duplicates and invalid emails
+    emails = [...new Set(emails.filter(e => e && e.includes('@')))];
+    
+    // Get research summary
+    let researchSummary = lead.researchSummary || '';
+    if (!researchSummary && lead.research) {
+        researchSummary = typeof lead.research === 'string' ? lead.research : JSON.stringify(lead.research);
+    }
+    if (!researchSummary && lead.messages && lead.messages.length > 0) {
+        researchSummary = lead.messages[0].body || '';
+    }
     
     const companyData = {
         domain,
@@ -46,20 +73,26 @@ async function saveCompanyFromLead(lead) {
         industry: lead.industry || '',
         country: lead.country || '',
         employeeCount: lead.companySize || '',
-        emails: lead.email ? [lead.email] : [],
-        researchSummary: lead.research || lead.messages?.[0]?.body || '',
+        emails: emails,  // Store emails properly
+        researchSummary: researchSummary,
+        leadScore: lead.leadScore || 0,
+        confidenceTier: lead.confidenceTier || getConfidenceTier(lead.leadScore || 0),
+        lastUpdated: new Date(),
     };
     
-    const score = calculateLeadScore(companyData);
-    companyData.leadScore = score;
-    companyData.confidenceTier = getConfidenceTier(score);
-    companyData.lastUpdated = new Date();
+    // Calculate score if not provided
+    if (!lead.leadScore) {
+        const score = calculateLeadScore(companyData);
+        companyData.leadScore = score;
+        companyData.confidenceTier = getConfidenceTier(score);
+    }
     
     const company = await Company.findOneAndUpdate(
         { domain },
         { $set: companyData },
         { upsert: true, new: true }
     );
+    console.log(`💾 [COMPANY] Saved ${company.name} with emails: ${JSON.stringify(emails)}`);
     return company;
 }
 
@@ -102,25 +135,28 @@ async function saveSearchCache(queryHash, queryParams, data, ttlDays = 90) {
         expiresAt.setDate(expiresAt.getDate() + ttlDays);
         
         // Detect if data is complete leads (has messages field) or company IDs
-        const isCompleteLead = data && data.length > 0 && data[0].messages && data[0].name;
+        const isCompleteLead = data && data.length > 0 && data[0] && data[0].messages && data[0].name;
         
         let updateData = {
             queryParams,
             expiresAt,
             createdAt: new Date(),
+            _format: isCompleteLead ? 'leads' : 'companyIds',
         };
         
         if (isCompleteLead) {
             // NEW: Store complete leads
             updateData.leads = data;
-            updateData.companyIds = []; // Clear old field
-            updateData._format = 'leads';
+            updateData.companyIds = [];
             console.log(`💾 [CACHE] Storing ${data.length} complete leads`);
+            // Log first lead's email for debugging
+            if (data[0] && data[0].email) {
+                console.log(`📧 [CACHE] First lead email: ${data[0].email}`);
+            }
         } else {
             // LEGACY: Store company IDs (fallback)
             updateData.companyIds = data;
             updateData.leads = [];
-            updateData._format = 'companyIds';
             console.log(`💾 [CACHE] Storing ${data.length} company IDs (legacy)`);
         }
         
