@@ -8,22 +8,24 @@
  * PRIMARY RESPONSIBILITIES:
  * 1. Read Agent 2 output carefully.
  * 2. For each prospect, find missing or stale public information.
- * 3. Enrich records with website, company details, identity clues, role, location, and public signals.
- * 4. Verify whether the record looks usable and coherent.
- * 5. Deduplicate or merge conflicting sources.
- * 6. Assign confidence and verification status.
- * 7. Return clean structured JSON only.
+ * 3. Enrich records with website, company details, identity clues, role, location, industry, and contact clues.
+ * 4. Search only when needed for live public facts.
+ * 5. Infer an email candidate only when supported by domain/name patterns or source clues.
+ * 6. Verify email candidates when possible.
+ * 7. Assign a verification status and confidence.
+ * 8. Return clean structured JSON only.
  * 
  * YOU MUST NOT:
  * - Write outreach.
  * - Send emails.
- * - Make final sales decisions.
- * - Pretend email deliverability is guaranteed.
+ * - Pretend guessed emails are verified.
  * - Return a paragraph.
  * - Invent facts not supported by sources.
+ * - Over-search when the input is already strong.
  */
 
 const axios = require('axios');
+const dns = require('dns').promises;
 
 // ────────────────────────────────────────────────────────────────
 // 1. Configuration
@@ -36,36 +38,58 @@ const MAX_QUERIES_PER_PROSPECT = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
 
+// Common email patterns for inference
+const COMMON_PATTERNS = [
+  '{first}@{domain}',
+  '{first}.{last}@{domain}',
+  '{first}{last}@{domain}',
+  '{first}_{last}@{domain}',
+  '{first}-{last}@{domain}',
+  '{last}@{domain}',
+  '{first}@mail.{domain}',
+  'info@{domain}',
+  'contact@{domain}',
+  'hello@{domain}',
+];
+
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 3 System Prompt (Updated to include email fields)
+// 2. The Agent 3 System Prompt (Updated with email rules)
 // ────────────────────────────────────────────────────────────────
 
 const AGENT3_SYSTEM_PROMPT = `You are Agent 3, the Enrichment / Verification layer in a B2B lead-generation system.
 
-Your job is to take the prospect records from Agent 2 and enrich them with reliable public information, then assess how trustworthy and complete each record is. You may use web search tools like Tavily when live public facts are needed. You must use GPT to merge, normalize, score, and format the final structured output.
+Your job is to take raw prospect records from Agent 2 and enrich them with reliable public information, especially contact data such as email candidates, then assess how trustworthy each record is.
 
 PRIMARY RESPONSIBILITIES
 1. Read Agent 2 output carefully.
 2. For each prospect, find missing or stale public information.
-3. Enrich records with website, company details, identity clues, role, location, and public signals.
-4. Verify whether the record looks usable and coherent.
-5. Deduplicate or merge conflicting sources.
-6. Assign confidence and verification status.
-7. Return clean structured JSON only.
+3. Enrich records with website, company details, identity clues, role, location, industry, and contact clues.
+4. Search only when needed for live public facts.
+5. Infer an email candidate only when supported by domain/name patterns or source clues.
+6. Verify email candidates when possible.
+7. Assign a verification status and confidence.
+8. Return clean structured JSON only.
 
 YOU MUST NOT
 - Write outreach.
 - Send emails.
-- Make final sales decisions.
-- Pretend email deliverability is guaranteed.
+- Pretend guessed emails are verified.
 - Return a paragraph.
 - Invent facts not supported by sources.
+- Over-search when the input is already strong.
+
+EMAIL RULES
+- If a real email is found, return it as "found".
+- If only a pattern is available, create an email candidate and label it as "inferred-pattern".
+- Verification status must be one of: verified, partial, unverified.
+- Never mark guessed email as verified unless validation supports it.
+- Use emailConfidence: "found" | "inferred-pattern" | "unknown"
 
 SEARCH RULES
-- Use search only when needed for live public facts.
-- Keep searches targeted and minimal.
-- Prefer official websites and reliable public sources.
-- If the record is already strong in the input, do not over-search it.
+- Use targeted searches only when needed.
+- Prefer official websites, about pages, team pages, and public profile pages.
+- Keep searches minimal and focused.
+- Do not search broadly if the record is already strong.
 
 OUTPUT FORMAT
 Return valid JSON only using this schema:
@@ -98,16 +122,22 @@ Return valid JSON only using this schema:
       "role": string|null,
       "industry": string|null,
       "linkedin_url": string|null,
+      "email": string|null,
+      "emailCandidate": string|null,
+      "emailConfidence": "found" | "inferred-pattern" | "unknown",
+      "emailLabel": string|null,
+      "verificationStatus": "verified" | "partial" | "unverified",
       "confidence": number|null,
-      "verification_status": "verified" | "partial" | "unverified",
-      "notes": string|null,
-      "email_candidates": string[],
-      "email": string|null
+      "mxValid": boolean|null,
+      "smtpResult": string|null,
+      "notes": string|null
     }
   ],
   "stats": {
     "checked": number,
     "enriched": number,
+    "emails_found": number,
+    "emails_inferred": number,
     "verified": number,
     "returned": number
   }
@@ -183,7 +213,60 @@ async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 5. Build Enrichment Queries for a Prospect
+// 5. Email Inference Functions
+// ────────────────────────────────────────────────────────────────
+
+function extractDomain(url) {
+    if (!url) return null;
+    try {
+        const domain = new URL(url).hostname.replace('www.', '');
+        return domain;
+    } catch {
+        return null;
+    }
+}
+
+function generateEmailPatterns(firstName, lastName, domain) {
+    if (!domain || !firstName) return [];
+    
+    const first = firstName.toLowerCase().trim();
+    const last = lastName ? lastName.toLowerCase().trim() : '';
+    const domainClean = domain.replace(/^www\./, '');
+    
+    const patterns = [];
+    
+    // Simple patterns
+    patterns.push(`${first}@${domainClean}`);
+    if (last) {
+        patterns.push(`${first}.${last}@${domainClean}`);
+        patterns.push(`${first}${last}@${domainClean}`);
+        patterns.push(`${first}_${last}@${domainClean}`);
+        patterns.push(`${first}-${last}@${domainClean}`);
+        patterns.push(`${last}@${domainClean}`);
+    }
+    
+    // Common role-based emails
+    patterns.push(`info@${domainClean}`);
+    patterns.push(`contact@${domainClean}`);
+    patterns.push(`hello@${domainClean}`);
+    patterns.push(`sales@${domainClean}`);
+    patterns.push(`team@${domainClean}`);
+    
+    return [...new Set(patterns)];
+}
+
+async function validateMX(domain) {
+    if (!domain) return false;
+    try {
+        const records = await dns.resolveMx(domain);
+        return records && records.length > 0;
+    } catch {
+        return false;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 6. Build Enrichment Queries for a Prospect
 // ────────────────────────────────────────────────────────────────
 
 function buildEnrichmentQueries(prospect) {
@@ -191,27 +274,29 @@ function buildEnrichmentQueries(prospect) {
     const company = prospect.company || prospect.name || '';
     const domain = prospect.domain || '';
 
-    if (company && domain) {
-        queries.push(`"${company}" site:${domain} about`);
-        queries.push(`"${company}" "${domain}" leadership team`);
-    } else if (company) {
-        queries.push(`"${company}" company website official`);
-        queries.push(`"${company}" CEO founder`);
-    } else if (domain) {
-        queries.push(`site:${domain} about team`);
-        queries.push(`site:${domain} contact`);
+    // If we have a domain, search the site directly
+    if (domain) {
+        queries.push(`site:${domain} about team contact`);
+        queries.push(`site:${domain} email "@${domain}"`);
     }
-
-    // If we have a name, try to find LinkedIn
+    
+    // Search for company info
+    if (company) {
+        queries.push(`"${company}" about team leadership contact`);
+        queries.push(`"${company}" email contact`);
+    }
+    
+    // If we have a name, search for them specifically
     if (prospect.name && company) {
-        queries.push(`"${prospect.name}" "${company}" LinkedIn`);
+        queries.push(`"${prospect.name}" "${company}" email`);
     }
 
+    // Limit queries
     return queries.slice(0, MAX_QUERIES_PER_PROSPECT);
 }
 
 // ────────────────────────────────────────────────────────────────
-// 6. Enrich a Single Prospect Using Search Results (FIXED: Preserves email)
+// 7. Enrich a Single Prospect (FIXED: Finds/Infers Emails)
 // ────────────────────────────────────────────────────────────────
 
 async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
@@ -219,35 +304,41 @@ async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
     console.log(`📧 [AGENT3] Input email_candidates: ${JSON.stringify(prospect.email_candidates || [])}`);
     console.log(`📧 [AGENT3] Input email: ${prospect.email || 'null'}`);
 
-    // If the prospect already has high confidence, skip heavy enrichment
-    if (prospect.fit_score >= 0.85 && prospect.domain && prospect.email_candidates?.length > 0) {
-        console.log(`⏭️ [AGENT3] Skipping enrichment - already high confidence`);
+    // Extract domain from prospect
+    let domain = prospect.domain || null;
+    if (!domain && prospect.source_url) {
+        domain = extractDomain(prospect.source_url);
+    }
+
+    // Check if we already have a high-confidence email
+    const hasEmail = prospect.email_candidates && prospect.email_candidates.length > 0;
+    const hasStrongEmail = hasEmail && prospect.fit_score >= 0.85;
+
+    if (hasStrongEmail && domain) {
+        console.log(`⏭️ [AGENT3] Skipping enrichment - already has email and domain`);
         return {
             ...prospect,
+            domain: domain || prospect.domain,
             confidence: prospect.fit_score || 0.7,
             verification_status: 'partial',
-            notes: prospect.notes || 'Already has strong signals.',
-            // --- PRESERVE EMAIL ---
+            email: prospect.email_candidates[0] || null,
+            emailCandidate: prospect.email_candidates[0] || null,
+            emailConfidence: 'found',
+            emailLabel: '✓ Email found from source',
+            mxValid: await validateMX(domain),
+            smtpResult: 'unknown',
+            notes: prospect.notes || 'Email already found from source.',
+            // Preserve all existing fields
             email_candidates: prospect.email_candidates || [],
-            email: prospect.email || null,
         };
     }
 
-    // Build search queries
+    // Build and execute search queries
     const queries = buildEnrichmentQueries(prospect);
     if (queries.length === 0) {
-        return {
-            ...prospect,
-            confidence: prospect.fit_score || 0.4,
-            verification_status: 'unverified',
-            notes: 'No search queries could be built.',
-            // --- PRESERVE EMAIL ---
-            email_candidates: prospect.email_candidates || [],
-            email: prospect.email || null,
-        };
+        return createFallbackEnrichment(prospect, domain);
     }
 
-    // Execute searches
     let allResults = [];
     for (const query of queries) {
         const results = await searchTavily(query, tavilyKey, 3);
@@ -256,35 +347,40 @@ async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
         }
     }
 
-    if (allResults.length === 0) {
-        return {
-            ...prospect,
-            confidence: prospect.fit_score || 0.4,
-            verification_status: 'unverified',
-            notes: 'No public information found to enrich this prospect.',
-            // --- PRESERVE EMAIL ---
-            email_candidates: prospect.email_candidates || [],
-            email: prospect.email || null,
-        };
-    }
+    // Build snippets for GPT
+    const snippets = allResults.length > 0 
+        ? allResults.map((r, i) => 
+            `[${i + 1}] TITLE: ${r.title}\nURL: ${r.url}\nSNIPPET: ${r.snippet}`
+          ).join('\n\n---\n\n')
+        : 'No search results found.';
 
-    // Use GPT to extract enriched data
-    const snippets = allResults.map((r, i) => 
-        `[${i + 1}] TITLE: ${r.title}\nURL: ${r.url}\nSNIPPET: ${r.snippet}`
-    ).join('\n\n---\n\n');
+    // Extract emails from snippets using regex
+    const allText = allResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
+    const regexEmails = extractEmailsWithRegex(allText);
+    console.log(`📧 [AGENT3] Regex found emails: ${JSON.stringify(regexEmails)}`);
 
+    // Build the enrichment prompt with email focus
     const enrichmentPrompt = `
-You are an enrichment specialist. Enrich this prospect with public information from the search results.
+You are an enrichment and email discovery specialist. Enrich this prospect with public information from the search results.
 
 PROSPECT TO ENRICH:
 - Name: ${prospect.name || 'Unknown'}
 - Company: ${prospect.company || 'Unknown'}
-- Domain: ${prospect.domain || 'Unknown'}
+- Domain: ${domain || 'Unknown'}
 - Location: ${prospect.location || 'Unknown'}
 - Role: ${prospect.role || 'Unknown'}
 
 SEARCH RESULTS:
 ${snippets}
+
+EXTRACTED EMAILS FROM SOURCES (USE THESE IF VALID):
+${JSON.stringify(regexEmails)}
+
+EMAIL DISCOVERY RULES:
+1. If an email is found in the search results, use it and set emailConfidence to "found".
+2. If no email is found, infer a likely email pattern using the domain and name.
+3. For inferred emails, set emailConfidence to "inferred-pattern" and label it clearly.
+4. Common patterns: first@domain, first.last@domain, firstlast@domain, info@domain, contact@domain
 
 Extract and return ONLY valid JSON with these fields:
 {
@@ -296,13 +392,16 @@ Extract and return ONLY valid JSON with these fields:
   "role": "Role/title if found, otherwise keep original",
   "industry": "Industry if found, otherwise null",
   "linkedin_url": "LinkedIn URL if found, otherwise null",
-  "confidence": 0.0 to 1.0 based on how well the public sources support this record,
-  "verification_status": "verified" | "partial" | "unverified",
+  "email": "Best email candidate (found or inferred), null if none",
+  "emailCandidate": "The email candidate (same as email or inferred)",
+  "emailConfidence": "found" | "inferred-pattern" | "unknown",
+  "emailLabel": "Description of email source (e.g., 'Found in source', 'Inferred from domain pattern')",
+  "verificationStatus": "verified" | "partial" | "unverified",
+  "confidence": 0.0 to 1.0,
   "notes": "Brief notes on what was found and any discrepancies"
 }
 
-Be conservative. Only update fields when you have clear evidence from the search results.
-`;
+Be conservative. Only mark as verified if you have clear evidence.`;
 
     try {
         const response = await withRetry(() => axios.post(
@@ -313,7 +412,7 @@ Be conservative. Only update fields when you have clear evidence from the search
                     { role: 'system', content: 'You extract structured enrichment data from search results. Return only valid JSON.' },
                     { role: 'user', content: enrichmentPrompt }
                 ],
-                max_tokens: 300,
+                max_tokens: 400,
                 temperature: 0.0,
                 response_format: { type: 'json_object' }
             },
@@ -327,80 +426,140 @@ Be conservative. Only update fields when you have clear evidence from the search
         ), 'GPT:enrichProspect');
 
         if (!response) {
-            return {
-                ...prospect,
-                confidence: prospect.fit_score || 0.4,
-                verification_status: 'unverified',
-                notes: 'GPT enrichment failed.',
-                // --- PRESERVE EMAIL ---
-                email_candidates: prospect.email_candidates || [],
-                email: prospect.email || null,
-            };
+            return createFallbackEnrichment(prospect, domain);
         }
 
         const rawContent = response.data.choices[0].message.content.trim();
         const enriched = JSON.parse(rawContent);
 
-        // Merge enriched data with original - PRESERVING EMAIL
+        // Determine final domain
+        const finalDomain = enriched.domain || domain || prospect.domain || null;
+        
+        // Determine email
+        let email = enriched.email || null;
+        let emailCandidate = enriched.emailCandidate || null;
+        let emailConfidence = enriched.emailConfidence || 'unknown';
+        let emailLabel = enriched.emailLabel || null;
+
+        // If GPT didn't find an email but we have regex emails, use the first one
+        if (!email && regexEmails.length > 0) {
+            email = regexEmails[0];
+            emailCandidate = regexEmails[0];
+            emailConfidence = 'found';
+            emailLabel = '📧 Found in search results';
+            console.log(`📧 [AGENT3] Using regex email: ${email}`);
+        }
+
+        // If still no email, try to infer one
+        if (!email && finalDomain && prospect.name) {
+            const nameParts = prospect.name.split(' ');
+            const firstName = nameParts[0] || '';
+            const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+            const inferredPatterns = generateEmailPatterns(firstName, lastName, finalDomain);
+            if (inferredPatterns.length > 0) {
+                email = inferredPatterns[0];
+                emailCandidate = inferredPatterns[0];
+                emailConfidence = 'inferred-pattern';
+                emailLabel = `⚠ Inferred from domain pattern (${firstName}@${finalDomain})`;
+                console.log(`📧 [AGENT3] Inferred email: ${email}`);
+            }
+        }
+
+        // Validate MX if we have a domain
+        const mxValid = finalDomain ? await validateMX(finalDomain) : false;
+
         const merged = {
             ...prospect,
             name: enriched.name || prospect.name,
             company: enriched.company || prospect.company,
-            domain: enriched.domain || prospect.domain,
+            domain: finalDomain,
             website: enriched.website || null,
             location: enriched.location || prospect.location,
             role: enriched.role || prospect.role,
             industry: enriched.industry || null,
             linkedin_url: enriched.linkedin_url || null,
+            email: email,
+            emailCandidate: emailCandidate,
+            emailConfidence: emailConfidence,
+            emailLabel: emailLabel,
             confidence: enriched.confidence || prospect.fit_score || 0.5,
-            verification_status: enriched.verification_status || 'partial',
-            notes: enriched.notes || 'Enriched from public sources.',
-            // --- CRITICAL: PRESERVE EMAIL FROM AGENT 2 ---
-            email_candidates: prospect.email_candidates || [],
-            email: prospect.email || null,
+            verificationStatus: enriched.verificationStatus || (email ? 'partial' : 'unverified'),
+            mxValid: mxValid,
+            smtpResult: 'unknown',
+            notes: enriched.notes || (email ? `Email ${emailConfidence}.` : 'No email found.'),
+            // Preserve original email_candidates
+            email_candidates: regexEmails.length > 0 ? regexEmails : (prospect.email_candidates || []),
         };
 
         console.log(`✅ [AGENT3] Enriched: ${merged.company} → confidence: ${merged.confidence}`);
+        console.log(`📧 [AGENT3] Email: ${merged.email || 'null'} (${merged.emailConfidence})`);
         console.log(`📧 [AGENT3] Output email_candidates: ${JSON.stringify(merged.email_candidates || [])}`);
-        console.log(`📧 [AGENT3] Output email: ${merged.email || 'null'}`);
+        
         return merged;
 
     } catch (error) {
         console.error(`❌ [AGENT3] Enrichment failed:`, error.message);
-        return {
-            ...prospect,
-            confidence: prospect.fit_score || 0.4,
-            verification_status: 'unverified',
-            notes: 'Enrichment failed due to an error.',
-            // --- PRESERVE EMAIL ---
-            email_candidates: prospect.email_candidates || [],
-            email: prospect.email || null,
-        };
+        return createFallbackEnrichment(prospect, domain);
     }
 }
 
 // ────────────────────────────────────────────────────────────────
-// 7. Main Agent 3 Function
+// 8. Helper: Extract Emails with Regex
 // ────────────────────────────────────────────────────────────────
 
-/**
- * Enriches and verifies prospects from Agent 2.
- * 
- * @param {Object} params
- * @param {Array}  params.prospects - The prospects from Agent 2.
- * @param {Object} params.intent - The original intent from Agent 1.
- * @param {string} params.apiKey - OpenAI API key.
- * @param {string} params.tavilyKey - Tavily API key.
- * @param {string} params.userId - User identifier for logging.
- * @param {Function} params.onProgress - Optional progress callback.
- * 
- * @returns {Object} Structured enrichment result.
- */
+function extractEmailsWithRegex(text) {
+    if (!text) return [];
+    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const matches = text.match(emailRegex) || [];
+    return [...new Set(matches)];
+}
+
+// ────────────────────────────────────────────────────────────────
+// 9. Helper: Create Fallback Enrichment
+// ────────────────────────────────────────────────────────────────
+
+function createFallbackEnrichment(prospect, domain) {
+    // Try to infer email from domain and name
+    let email = null;
+    let emailConfidence = 'unknown';
+    let emailLabel = null;
+    
+    if (domain && prospect.name) {
+        const nameParts = prospect.name.split(' ');
+        const firstName = nameParts[0] || '';
+        const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
+        const patterns = generateEmailPatterns(firstName, lastName, domain);
+        if (patterns.length > 0) {
+            email = patterns[0];
+            emailConfidence = 'inferred-pattern';
+            emailLabel = `⚠ Inferred from domain pattern`;
+        }
+    }
+
+    return {
+        ...prospect,
+        domain: domain || prospect.domain || null,
+        email: email,
+        emailCandidate: email,
+        emailConfidence: emailConfidence,
+        emailLabel: emailLabel,
+        confidence: prospect.fit_score || 0.4,
+        verificationStatus: 'unverified',
+        mxValid: false,
+        smtpResult: 'unknown',
+        notes: email ? `Email inferred from domain pattern.` : 'No email could be found or inferred.',
+        email_candidates: prospect.email_candidates || [],
+    };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 10. Main Agent 3 Function
+// ────────────────────────────────────────────────────────────────
+
 async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
     console.log(`🔍 [AGENT3] Starting enrichment for user ${userId}...`);
     onProgress?.('🔬 Enriching and verifying prospects...');
 
-    // Validate input
     if (!prospects || prospects.length === 0) {
         return {
             intent: 'lead_enrichment',
@@ -413,20 +572,20 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
             policy_flags: ['no_prospects'],
             reason: 'No prospects provided to Agent 3.',
             enriched_prospects: [],
-            stats: { checked: 0, enriched: 0, verified: 0, returned: 0 }
+            stats: { checked: 0, enriched: 0, emails_found: 0, emails_inferred: 0, verified: 0, returned: 0 }
         };
     }
 
-    // ─── LOG: What Agent 3 received from Agent 2 ───
     console.log(`📥 [AGENT3] RECEIVED ${prospects.length} prospects from Agent 2`);
     prospects.forEach((p, i) => {
         console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
     });
 
-    // ─── Step 1: Enrich each prospect ───
     const enriched = [];
     let enrichedCount = 0;
     let verifiedCount = 0;
+    let emailsFound = 0;
+    let emailsInferred = 0;
 
     for (let i = 0; i < prospects.length; i++) {
         const prospect = prospects[i];
@@ -435,22 +594,20 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
         const enrichedProspect = await enrichSingleProspect(prospect, tavilyKey, apiKey);
         enriched.push(enrichedProspect);
 
-        if (enrichedProspect.verification_status === 'verified') verifiedCount++;
+        if (enrichedProspect.verificationStatus === 'verified') verifiedCount++;
         if (enrichedProspect.confidence >= 0.5) enrichedCount++;
+        if (enrichedProspect.emailConfidence === 'found') emailsFound++;
+        if (enrichedProspect.emailConfidence === 'inferred-pattern') emailsInferred++;
     }
 
-    // ─── Step 2: Calculate overall confidence ───
     const avgConfidence = enriched.reduce((sum, p) => sum + (p.confidence || 0), 0) / enriched.length;
     const verifiedRatio = verifiedCount / enriched.length;
-
     let confidence = 0.7 + (verifiedRatio * 0.2);
     if (avgConfidence > 0.7) confidence += 0.1;
     confidence = Math.min(confidence, 0.98);
 
-    // ─── Step 3: Determine if clarification is needed ───
     const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY || verifiedCount === 0;
 
-    // ─── Step 4: Build and return result ───
     const result = {
         intent: 'lead_enrichment',
         confidence: Math.round(confidence * 100) / 100,
@@ -471,7 +628,7 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
         },
         risk_level: verifiedCount / enriched.length < 0.5 ? 'medium' : 'low',
         policy_flags: verifiedCount / enriched.length < 0.3 ? ['low_verification_rate'] : [],
-        reason: `Enriched ${enriched.length} prospects. ${verifiedCount} verified, ${enrichedCount} partially verified.`,
+        reason: `Enriched ${enriched.length} prospects. ${verifiedCount} verified, ${enrichedCount} partially verified. Found ${emailsFound} emails, inferred ${emailsInferred}.`,
         enriched_prospects: enriched.map(p => ({
             name: p.name || null,
             company: p.company || null,
@@ -481,33 +638,39 @@ async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 
             role: p.role || null,
             industry: p.industry || null,
             linkedin_url: p.linkedin_url || null,
-            confidence: p.confidence || 0.5,
-            verification_status: p.verification_status || 'unverified',
-            notes: p.notes || null,
-            // --- PRESERVE EMAIL IN OUTPUT ---
-            email_candidates: p.email_candidates || [],
             email: p.email || null,
+            emailCandidate: p.emailCandidate || null,
+            emailConfidence: p.emailConfidence || 'unknown',
+            emailLabel: p.emailLabel || null,
+            verificationStatus: p.verificationStatus || 'unverified',
+            confidence: p.confidence || 0.5,
+            mxValid: p.mxValid || false,
+            smtpResult: p.smtpResult || 'unknown',
+            notes: p.notes || null,
+            email_candidates: p.email_candidates || [],
         })),
         stats: {
             checked: prospects.length,
             enriched: enrichedCount,
+            emails_found: emailsFound,
+            emails_inferred: emailsInferred,
             verified: verifiedCount,
             returned: enriched.length,
         }
     };
 
-    // ─── LOG: What Agent 3 is returning ───
     console.log(`📤 [AGENT3] Returning ${result.enriched_prospects.length} enriched prospects`);
     result.enriched_prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email: ${p.email || 'null'} (${p.emailConfidence})`);
     });
 
     console.log(`✅ [AGENT3] Enrichment complete: ${verifiedCount} verified, ${enrichedCount} enriched`);
+    console.log(`📧 [AGENT3] Emails: ${emailsFound} found, ${emailsInferred} inferred`);
     return result;
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. Public Exports
+// 11. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -515,6 +678,9 @@ module.exports = {
     enrichSingleProspect,
     buildEnrichmentQueries,
     searchTavily,
+    generateEmailPatterns,
+    validateMX,
+    extractEmailsWithRegex,
     CONFIDENCE_THRESHOLD_ROUTE,
     CONFIDENCE_THRESHOLD_CLARIFY,
 };
