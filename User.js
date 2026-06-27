@@ -71,11 +71,14 @@ const UserSchema = new mongoose.Schema({
         lastFileUploadDate: { type: Date, default: null },
         dailySentCount: { type: Number, default: 0 },
         lastSentDate: { type: Date, default: null },
-        // NEW: follow-up limits
+        // Follow-up limits
         dailySuggestFollowUpCount: { type: Number, default: 0 },
         lastSuggestFollowUpDate: { type: Date, default: null },
         dailyAutoFollowUpCount: { type: Number, default: 0 },
-        lastAutoFollowUpDate: { type: Date, default: null }
+        lastAutoFollowUpDate: { type: Date, default: null },
+        // NEW: Assistant limits (Free:20, Go:70, Pro:200)
+        assistantCount: { type: Number, default: 0 },
+        assistantLastDate: { type: Date, default: null }
     },
 
     // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
