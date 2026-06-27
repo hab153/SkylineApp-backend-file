@@ -7,13 +7,10 @@ const SearchCache = require('./SearchCache');
 function extractDomain(input) {
     if (!input) return null;
     let str = input.toLowerCase().trim();
-    // If it's an email, take part after @
     if (str.includes('@')) {
         str = str.split('@')[1];
     }
-    // Remove http://, https://, www.
     str = str.replace(/^(https?:\/\/)?(www\.)?/, '');
-    // Remove path and query parameters
     const slashIndex = str.indexOf('/');
     if (slashIndex !== -1) str = str.substring(0, slashIndex);
     return str;
@@ -27,7 +24,6 @@ function calculateLeadScore(companyData) {
     if (companyData.employeeCount && companyData.employeeCount !== 'Unknown') score += 15;
     if (companyData.industry && companyData.industry !== 'Unknown') score += 15;
     if (companyData.country && companyData.country !== 'Unknown') score += 10;
-    // Extra 10 points for confidence if all fields are filled
     if (companyData.emails && companyData.emails.length > 0 && companyData.researchSummary && companyData.employeeCount) score += 10;
     return Math.min(score, 100);
 }
@@ -54,7 +50,6 @@ async function saveCompanyFromLead(lead) {
         researchSummary: lead.research || lead.messages?.[0]?.body || '',
     };
     
-    // Calculate score and tier
     const score = calculateLeadScore(companyData);
     companyData.leadScore = score;
     companyData.confidenceTier = getConfidenceTier(score);
@@ -68,31 +63,78 @@ async function saveCompanyFromLead(lead) {
     return company;
 }
 
-// Get companies from cache by query hash
+// ─── FIXED: Get cached results – returns complete leads if available ───
 async function getCachedSearchResults(queryHash) {
-    const cached = await SearchCache.findOne({ 
-        queryHash, 
-        expiresAt: { $gt: new Date() } 
-    }).populate('companyIds');
-    if (!cached) return null;
-    return cached.companyIds;
+    try {
+        const cached = await SearchCache.findOne({ 
+            queryHash, 
+            expiresAt: { $gt: new Date() } 
+        });
+        
+        if (!cached) return null;
+        
+        // NEW: If cache has complete leads stored directly, return them
+        if (cached.leads && Array.isArray(cached.leads) && cached.leads.length > 0) {
+            console.log(`💾 [CACHE] Found ${cached.leads.length} complete leads`);
+            return cached.leads;
+        }
+        
+        // LEGACY: If cache has company IDs (old format), populate and return
+        if (cached.companyIds && cached.companyIds.length > 0) {
+            console.log(`💾 [CACHE] Found ${cached.companyIds.length} company IDs (legacy format)`);
+            const companies = await Company.find({ 
+                '_id': { $in: cached.companyIds } 
+            });
+            return companies;
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('❌ [CACHE] Error getting cached results:', error);
+        return null;
+    }
 }
 
-// Save search cache – TTL now 90 days (changed from 30)
-async function saveSearchCache(queryHash, queryParams, companyIds, ttlDays = 90) {
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + ttlDays);
-    
-    await SearchCache.findOneAndUpdate(
-        { queryHash },
-        { 
-            queryParams, 
-            companyIds, 
+// ─── FIXED: Save search cache – stores complete leads ───
+async function saveSearchCache(queryHash, queryParams, data, ttlDays = 90) {
+    try {
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + ttlDays);
+        
+        // Detect if data is complete leads (has messages field) or company IDs
+        const isCompleteLead = data && data.length > 0 && data[0].messages && data[0].name;
+        
+        let updateData = {
+            queryParams,
             expiresAt,
-            createdAt: new Date()
-        },
-        { upsert: true }
-    );
+            createdAt: new Date(),
+        };
+        
+        if (isCompleteLead) {
+            // NEW: Store complete leads
+            updateData.leads = data;
+            updateData.companyIds = []; // Clear old field
+            updateData._format = 'leads';
+            console.log(`💾 [CACHE] Storing ${data.length} complete leads`);
+        } else {
+            // LEGACY: Store company IDs (fallback)
+            updateData.companyIds = data;
+            updateData.leads = [];
+            updateData._format = 'companyIds';
+            console.log(`💾 [CACHE] Storing ${data.length} company IDs (legacy)`);
+        }
+        
+        await SearchCache.findOneAndUpdate(
+            { queryHash },
+            updateData,
+            { upsert: true, new: true }
+        );
+        
+        return true;
+    } catch (error) {
+        console.error('❌ [CACHE] Error saving cache:', error);
+        return false;
+    }
 }
 
 // Generate consistent hash from search parameters
