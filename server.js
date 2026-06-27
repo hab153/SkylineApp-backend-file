@@ -43,6 +43,7 @@ const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
 const authRoutes = require('./authRoutes');
+const assistantRoutes = require('./assistantRoutes'); // <-- NEW: Assistant routes
 // const Message = require('./Message');  // REMOVED – no longer used
 const User = require('./User');
 const Report = require('./Report');
@@ -93,7 +94,15 @@ mongoose.connect(process.env.MONGODB_URI, {
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
+// ════════════════════════════════════════════
+//  AUTH ROUTES
+// ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
+
+// ════════════════════════════════════════════
+//  ASSISTANT ROUTES (NEW)
+// ════════════════════════════════════════════
+app.use('/api', assistantRoutes);
 
 // ════════════════════════════════════════════
 //  PAYMENT ROUTE
