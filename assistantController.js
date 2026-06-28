@@ -19,7 +19,6 @@ async function assistantChat(req, res) {
             return res.status(400).json({ error: 'Message is required and cannot be empty.' });
         }
 
-        // Get user and remaining count from middleware
         const user = req.userDoc;
         const remaining = req.assistantRemaining || 0;
 
@@ -29,12 +28,11 @@ async function assistantChat(req, res) {
 
         console.log('[Assistant] Generating response for user:', userId);
 
-        // Generate AI response
         const response = await generateAssistantResponse(userId, message);
 
         console.log('[Assistant] Response generated, saving to history...');
 
-        // Save to chat history
+        // SAVE TO CHAT HISTORY - FIXED: role MUST be 'user' or 'ai'
         await ChatMessage.create({
             userId: userId,
             sessionId: 'assistant',
@@ -45,7 +43,7 @@ async function assistantChat(req, res) {
         await ChatMessage.create({
             userId: userId,
             sessionId: 'assistant',
-            role: 'assistant',
+            role: 'ai',          // <-- FIXED: changed from 'assistant' to 'ai'
             content: response,
             createdAt: new Date()
         });
