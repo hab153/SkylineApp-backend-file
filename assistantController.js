@@ -1,6 +1,7 @@
 const { generateAssistantResponse } = require('./assist');
 const ChatMessage = require('./ChatMessage');
 const User = require('./User');
+const Session = require('./Session'); // <-- NEW
 
 /**
  * Handle POST /api/assistant requests
@@ -32,7 +33,24 @@ async function assistantChat(req, res) {
 
         console.log('[Assistant] Response generated, saving to history...');
 
-        // SAVE TO CHAT HISTORY - FIXED: role MUST be 'user' or 'ai'
+        // --- NEW: Ensure Assistant Session exists ---
+        const existingSession = await Session.findOne({ userId, sessionId: 'assistant' });
+        if (!existingSession) {
+            await Session.create({
+                userId,
+                sessionId: 'assistant',
+                type: 'assistant',
+                name: 'Assistant Chat',
+                updatedAt: new Date()
+            });
+        } else {
+            await Session.findOneAndUpdate(
+                { userId, sessionId: 'assistant' },
+                { updatedAt: new Date() }
+            );
+        }
+
+        // Save to chat history
         await ChatMessage.create({
             userId: userId,
             sessionId: 'assistant',
@@ -43,7 +61,7 @@ async function assistantChat(req, res) {
         await ChatMessage.create({
             userId: userId,
             sessionId: 'assistant',
-            role: 'ai',          // <-- FIXED: changed from 'assistant' to 'ai'
+            role: 'ai',
             content: response,
             createdAt: new Date()
         });
