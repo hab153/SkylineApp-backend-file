@@ -1,7 +1,8 @@
+const { v4: uuidv4 } = require('uuid');
 const { generateAssistantResponse } = require('./assist');
 const ChatMessage = require('./ChatMessage');
 const User = require('./User');
-const Session = require('./Session'); // <-- NEW
+const Session = require('./Session');
 
 /**
  * Handle POST /api/assistant requests
@@ -15,7 +16,7 @@ async function assistantChat(req, res) {
             return res.status(401).json({ error: 'Unauthorized. Please log in again.' });
         }
 
-        const { message } = req.body;
+        const { message, sessionId } = req.body; // <-- accept sessionId from frontend
         if (!message || typeof message !== 'string' || message.trim().length === 0) {
             return res.status(400).json({ error: 'Message is required and cannot be empty.' });
         }
@@ -27,40 +28,46 @@ async function assistantChat(req, res) {
             return res.status(401).json({ error: 'User not found. Please log in again.' });
         }
 
-        console.log('[Assistant] Generating response for user:', userId);
+        // Use provided sessionId or generate a new one
+        const currentSessionId = sessionId || uuidv4();
+
+        console.log('[Assistant] Generating response for user:', userId, 'session:', currentSessionId);
 
         const response = await generateAssistantResponse(userId, message);
 
         console.log('[Assistant] Response generated, saving to history...');
 
-        // --- NEW: Ensure Assistant Session exists ---
-        const existingSession = await Session.findOne({ userId, sessionId: 'assistant' });
+        // Ensure Session record exists for this assistant conversation
+        const existingSession = await Session.findOne({ userId, sessionId: currentSessionId });
         if (!existingSession) {
+            // If this is the first message, create the session with a title from the user's message
+            const title = message.substring(0, 50) || 'Assistant Chat';
             await Session.create({
                 userId,
-                sessionId: 'assistant',
+                sessionId: currentSessionId,
                 type: 'assistant',
-                name: 'Assistant Chat',
+                name: title,
                 updatedAt: new Date()
             });
         } else {
+            // Update the updatedAt timestamp
             await Session.findOneAndUpdate(
-                { userId, sessionId: 'assistant' },
+                { userId, sessionId: currentSessionId },
                 { updatedAt: new Date() }
             );
         }
 
-        // Save to chat history
+        // Save user message and AI response with the sessionId
         await ChatMessage.create({
             userId: userId,
-            sessionId: 'assistant',
+            sessionId: currentSessionId,
             role: 'user',
             content: message,
             createdAt: new Date()
         });
         await ChatMessage.create({
             userId: userId,
-            sessionId: 'assistant',
+            sessionId: currentSessionId,
             role: 'ai',
             content: response,
             createdAt: new Date()
@@ -75,7 +82,8 @@ async function assistantChat(req, res) {
 
         return res.json({
             response: response,
-            remaining: remaining - 1
+            remaining: remaining - 1,
+            sessionId: currentSessionId // return the sessionId to the frontend
         });
 
     } catch (error) {
