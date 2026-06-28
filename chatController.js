@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
-const ChatMessage = require('./ChatMessage');   // NEW
+const ChatMessage = require('./ChatMessage');
+const Session = require('./Session'); // <-- NEW
 const User = require('./User');
 const freeAI = require('./Free');
 const goAI = require('./Go');
@@ -26,7 +27,9 @@ const sendMessage = async (req, res) => {
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
+
     try {
+        // Save user message
         await ChatMessage.create({
             userId,
             sessionId: currentSessionId,
@@ -34,6 +37,26 @@ const sendMessage = async (req, res) => {
             content: message,
             title: message.substring(0, 30) + '...'
         });
+
+        // --- NEW: Create/Update Session metadata ---
+        // Check if session already exists
+        const existingSession = await Session.findOne({ userId, sessionId: currentSessionId });
+        if (!existingSession) {
+            // Create new session with type 'lead'
+            await Session.create({
+                userId,
+                sessionId: currentSessionId,
+                type: 'lead',
+                name: message.substring(0, 50) || 'Lead Search',
+                updatedAt: new Date()
+            });
+        } else {
+            // Update updatedAt
+            await Session.findOneAndUpdate(
+                { userId, sessionId: currentSessionId },
+                { updatedAt: new Date() }
+            );
+        }
 
         let aiReply, updatedHistory;
         if (plan === 'free') {
@@ -62,7 +85,6 @@ const sendMessage = async (req, res) => {
         await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply });
         res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
     } catch (error) {
-        // Check if error is from queue (has friendly message)
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
             return handleQueueError(error, res);
         }
@@ -87,18 +109,33 @@ const submitFeedback = async (req, res) => {
     }
 };
 
-// GET /api/sessions
+// GET /api/sessions - UPDATED to use Session model
 const getSessions = async (req, res) => {
     try {
-        const mongoose = require('mongoose');
-        const sessions = await ChatMessage.aggregate([
-            { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
-            { $sort: { createdAt: -1 } },
-            { $group: { _id: '$sessionId', title: { $first: '$title' }, lastUpdated: { $first: '$createdAt' } } },
-            { $sort: { lastUpdated: -1 } }
-        ]);
-        res.json(sessions);
+        const userId = req.userId;
+        const sessions = await Session.find({ userId })
+            .sort({ pinned: -1, updatedAt: -1 })
+            .lean();
+
+        // Get message count for each session
+        const sessionsWithCounts = await Promise.all(sessions.map(async (session) => {
+            const count = await ChatMessage.countDocuments({
+                userId,
+                sessionId: session.sessionId
+            });
+            return {
+                _id: session.sessionId,
+                title: session.name,
+                lastUpdated: session.updatedAt,
+                messageCount: count,
+                type: session.type,
+                pinned: session.pinned
+            };
+        }));
+
+        res.json(sessionsWithCounts);
     } catch (error) {
+        console.error('[getSessions] Error:', error);
         res.status(500).json({ message: 'Server Error fetching sessions' });
     }
 };
