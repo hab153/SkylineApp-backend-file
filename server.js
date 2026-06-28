@@ -29,7 +29,7 @@ const notificationController = require('./notificationController');
 const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
 const followUpController = require('./followUpController');
-const revenueController = require('./revenueController'); // if this file exists, keep it; otherwise remove the line
+const revenueController = require('./revenueController');
 
 // AI SERVICES
 const freeAI = require('./Free');
@@ -43,8 +43,9 @@ const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
 const authRoutes = require('./authRoutes');
-const assistantRoutes = require('./assistantRoutes'); // <-- NEW: Assistant routes
-// const Message = require('./Message');  // REMOVED – no longer used
+const assistantRoutes = require('./assistantRoutes');
+const sessionRoutes = require('./sessionRoutes'); // <-- NEW: Session routes
+// const Message = require('./Message');  // REMOVED
 const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
@@ -100,9 +101,14 @@ mongoose.connect(process.env.MONGODB_URI, {
 app.use('/api/auth', authRoutes);
 
 // ════════════════════════════════════════════
-//  ASSISTANT ROUTES (NEW)
+//  ASSISTANT ROUTES
 // ════════════════════════════════════════════
 app.use('/api', assistantRoutes);
+
+// ════════════════════════════════════════════
+//  SESSION ROUTES (NEW)
+// ════════════════════════════════════════════
+app.use('/api', sessionRoutes);
 
 // ════════════════════════════════════════════
 //  PAYMENT ROUTE
