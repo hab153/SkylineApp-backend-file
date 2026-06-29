@@ -3,6 +3,7 @@ const ChatMessage = require('./ChatMessage');
 const Notification = require('./Notification');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto'); // ✅ NEW: for reset token generation
 const Report = require('./Report');
 
 // Helper to get JWT secret with error handling
@@ -146,7 +147,7 @@ const login = async (req, res) => {
     }
 };
 
-// ✅ NEW: Logout – revokes all tokens
+// Logout – revokes all tokens
 const logout = async (req, res) => {
     try {
         const user = await User.findById(req.userId);
@@ -154,7 +155,6 @@ const logout = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // Increment token version to invalidate all existing tokens
         await user.revokeTokens();
 
         res.json({
@@ -166,7 +166,7 @@ const logout = async (req, res) => {
     }
 };
 
-// ✅ NEW: Revoke all tokens (for password change, security reasons)
+// Revoke all tokens (for password change, security reasons)
 const revokeAllTokens = async (req, res) => {
     try {
         const user = await User.findById(req.userId);
@@ -181,6 +181,108 @@ const revokeAllTokens = async (req, res) => {
         });
     } catch (err) {
         console.error('Revoke Tokens Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// ✅ NEW: Forgot Password – Generate reset token and send email
+const forgotPassword = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        if (!user) {
+            // For security, don't reveal if email exists
+            return res.json({ 
+                message: 'If an account exists with this email, a reset link has been sent.' 
+            });
+        }
+
+        // Generate reset token
+        const plainToken = await user.generateResetToken();
+
+        // Build reset URL
+        const frontendUrl = process.env.FRONTEND_URL || 'https://skylineapp-backend-file.onrender.com';
+        const resetUrl = `${frontendUrl}/reset-password.html?token=${plainToken}`;
+
+        // Send email
+        try {
+            // Try to use Nylas if user has connected email
+            if (user.nylasIntegration && user.nylasIntegration.isConnected) {
+                const { sendEmail } = require('./nylasService');
+                await sendEmail({
+                    to: user.email,
+                    subject: 'Password Reset Request - Skyline AA-1',
+                    body: `You requested a password reset. Click the link below to reset your password:\n\n${resetUrl}\n\nThis link expires in 1 hour.\n\nIf you did not request this, please ignore this email.`,
+                    userId: user._id
+                });
+                console.log(`📧 [PASSWORD RESET] Email sent to ${user.email}`);
+            } else {
+                // Fallback: Log the reset link (for development)
+                console.log(`📧 [PASSWORD RESET] Reset link for ${user.email}: ${resetUrl}`);
+                console.log(`📧 [PASSWORD RESET] User does not have Nylas connected. Please set up Nylas for production.`);
+            }
+        } catch (emailErr) {
+            console.error('❌ [PASSWORD RESET] Email send error:', emailErr.message);
+            // Still return success to user (security: don't reveal internal errors)
+        }
+
+        res.json({ 
+            message: 'If an account exists with this email, a reset link has been sent.' 
+        });
+
+    } catch (err) {
+        console.error('❌ [PASSWORD RESET] Forgot Password Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// ✅ NEW: Reset Password – Verify token and update password
+const resetPassword = async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || !newPassword) {
+            return res.status(400).json({ message: 'Token and new password are required' });
+        }
+
+        if (newPassword.length < 8) {
+            return res.status(400).json({ message: 'Password must be at least 8 characters' });
+        }
+
+        // Hash the token to compare with stored hash
+        const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+        // Find user with valid reset token
+        const user = await User.findOne({
+            resetToken: hashedToken,
+            resetTokenExpiry: { $gt: new Date() }
+        });
+
+        if (!user) {
+            return res.status(400).json({ message: 'Invalid or expired reset token' });
+        }
+
+        // Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        // Update password and clear reset token
+        user.password = hashedPassword;
+        user.resetToken = null;
+        user.resetTokenExpiry = null;
+
+        // Increment token version to revoke all existing sessions
+        await user.revokeTokens();
+
+        await user.save();
+
+        res.json({ message: 'Password reset successfully. Please log in with your new password.' });
+
+    } catch (err) {
+        console.error('❌ [PASSWORD RESET] Reset Password Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -342,8 +444,10 @@ const deleteAccount = async (req, res) => {
 module.exports = {
     register,
     login,
-    logout,                    // ✅ NEW
-    revokeAllTokens,           // ✅ NEW
+    logout,
+    revokeAllTokens,
+    forgotPassword,    // ✅ NEW
+    resetPassword,     // ✅ NEW
     verifyAge,
     changeEmail,
     verifyLayer2,
