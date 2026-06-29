@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Report = require('./Report');
 
-// Helper to get JWT secret with error handling
+// ✅ NEW: Helper to get JWT secret (no fallback)
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -38,7 +38,7 @@ const register = async (req, res) => {
 
         const payload = { user: { id: user.id } };
         
-        // ✅ JWT expires in 30 days - using env secret (no fallback)
+        // ✅ FIXED: No fallback secret
         const secret = getJwtSecret();
         jwt.sign(
             payload, 
@@ -81,7 +81,6 @@ const login = async (req, res) => {
             return res.status(400).json({ message: 'Invalid Credentials' });
         }
 
-        // Check for Age Suspension
         if (user.isSuspended) {
             const now = new Date();
             const suspensionEnd = new Date(user.suspensionEnds);
@@ -99,6 +98,7 @@ const login = async (req, res) => {
             }
         }
 
+        // ✅ FIXED: No fallback secret
         const secret = getJwtSecret();
 
         // --- ADMIN LAYER 1 CHECK ---
@@ -150,6 +150,7 @@ const verifyLayer2 = async (req, res) => {
         const d4 = await bcrypt.compare(dm.toLowerCase(), user.adminAns_dm);
 
         if (d1 && d2 && d3 && d4) {
+            // ✅ FIXED: No fallback secret
             const secret = getJwtSecret();
             const layerToken = jwt.sign(
                 { user: { id: user.id }, step: 'layer3' }, 
@@ -178,6 +179,7 @@ const verifyLayer3 = async (req, res) => {
         const d4 = await bcrypt.compare(app.toLowerCase(), user.adminAns_app);
 
         if (d1 && d2 && d3 && d4) {
+            // ✅ FIXED: No fallback secret
             const secret = getJwtSecret();
             const payload = { user: { id: user.id }, isAdmin: true };
             const token = jwt.sign(payload, secret, { expiresIn: '7d' });
@@ -263,7 +265,7 @@ const changeEmail = async (req, res) => {
     }
 };
 
-// Delete Account – removes ChatMessage, Notification, and Report
+// Delete Account
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
 
