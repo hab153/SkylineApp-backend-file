@@ -59,6 +59,12 @@ const UserSchema = new mongoose.Schema({
     adminAns_enemy:  { type: String, default: null },
     adminAns_app:    { type: String, default: null },
 
+    // ✅ NEW: Token version for revocation
+    tokenVersion: {
+        type: Number,
+        default: 0
+    },
+
     // --- USAGE LIMITING FIELDS ---
     usage: {
         dailyCallCount: { type: Number, default: 0 },
@@ -71,12 +77,10 @@ const UserSchema = new mongoose.Schema({
         lastFileUploadDate: { type: Date, default: null },
         dailySentCount: { type: Number, default: 0 },
         lastSentDate: { type: Date, default: null },
-        // Follow-up limits
         dailySuggestFollowUpCount: { type: Number, default: 0 },
         lastSuggestFollowUpDate: { type: Date, default: null },
         dailyAutoFollowUpCount: { type: Number, default: 0 },
         lastAutoFollowUpDate: { type: Date, default: null },
-        // NEW: Assistant limits (Free:20, Go:70, Pro:200)
         assistantCount: { type: Number, default: 0 },
         assistantLastDate: { type: Date, default: null }
     },
@@ -175,6 +179,13 @@ UserSchema.methods.addPaymentRecord = async function(txRef, amount, currency = '
         subscriptionEndDate: this.subscriptionEndDate
     });
     await this.save();
+};
+
+// ✅ NEW: Method to revoke all tokens for a user
+UserSchema.methods.revokeTokens = async function() {
+    this.tokenVersion += 1;
+    await this.save();
+    return this.tokenVersion;
 };
 
 // Static method to find user by txRef
