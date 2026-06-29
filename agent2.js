@@ -1,6 +1,5 @@
 'use strict';
 
-
 /**
  * agent2.js – Prospecting / Discovery Agent (Intelligent Search Planner)
  * 
@@ -423,9 +422,8 @@ EXTRACTED EMAILS FROM SEARCH TEXT (USE THESE):
 ${JSON.stringify(regexEmails)}
 
 CRITICAL INSTRUCTION:
-Extract ONLY REAL COMPANIES that match the user's request.
-- If a result is a directory, list page, or blog post (not an actual company), skip it.
-- Prefer company websites, about pages, team pages, and contact pages.
+Extract REAL COMPANIES that match the user's request.
+- Try to extract actual companies, not just directories.
 - For each company, extract the best email candidate.
 
 For each company, extract:
@@ -589,7 +587,7 @@ function sortProspectsByFit(prospects) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 12. Create Fallback Prospects
+// 12. Create Fallback Prospects (IMPROVED)
 // ────────────────────────────────────────────────────────────────
 
 function createFallbackProspects(searchResults, regexEmails, intent) {
@@ -598,9 +596,23 @@ function createFallbackProspects(searchResults, regexEmails, intent) {
     const prospects = [];
     const domainRegex = /https?:\/\/(?:www\.)?([^\/]+)/;
     const seenDomains = new Set();
-    const targetCount = intent.lead_count || 5;
+    const targetCount = Math.max(intent.lead_count || 5, 3);
     
-    for (const result of searchResults) {
+    // First try to extract from results that look like actual company pages
+    const realPages = searchResults.filter(r => {
+        const url = r.url.toLowerCase();
+        return !url.includes('youtube') && 
+               !url.includes('scribd') && 
+               !url.includes('getprospect') &&
+               !url.includes('influencers.club') &&
+               !url.includes('directory') &&
+               !url.includes('list') &&
+               !url.includes('blog');
+    });
+    
+    const sourcesToUse = realPages.length > 0 ? realPages : searchResults;
+    
+    for (const result of sourcesToUse) {
         const domainMatch = result.url.match(domainRegex);
         let domain = domainMatch ? domainMatch[1] : null;
         if (domain) {
@@ -616,31 +628,39 @@ function createFallbackProspects(searchResults, regexEmails, intent) {
             return emailDomain === domain || emailDomain.includes(domain.split('.')[0]);
         });
         
-        // Skip if this looks like a directory site
-        const skipTerms = ['directory', 'list', 'blog', 'youtube', 'scribd', 'getprospect', 'influencers'];
-        const urlLower = result.url.toLowerCase();
-        if (skipTerms.some(term => urlLower.includes(term))) {
-            console.log(`⏭️ [AGENT2] Skipping directory: ${result.url}`);
-            continue;
-        }
+        // Extract location from title or snippet
+        let location = intent.location || null;
+        const locationMatch = result.snippet.match(/(?:in|based in|located in|from)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
+        if (locationMatch) location = locationMatch[1];
+        
+        // Extract role from title or snippet
+        let role = intent.role || null;
+        const roleMatch = result.snippet.match(/\b(CEO|Founder|Co-Founder|Owner|Director|VP|Head|Manager)\b/i);
+        if (roleMatch) role = roleMatch[1];
+        
+        const title = result.title || domain;
+        const companyName = title
+            .replace(/\b(Ltd|LLC|Inc|Limited|PLC|Corp|Corporation)\b/gi, '')
+            .replace(/\s*[|\-–].*$/, '')
+            .trim();
         
         prospects.push({
-            name: result.title || domain,
-            company: result.title || domain,
+            name: role ? `${role} at ${companyName}` : companyName,
+            company: companyName || domain,
             domain: domain,
             source: 'web_search',
             source_url: result.url,
-            location: intent.location || null,
-            role: intent.role || null,
-            fit_score: matchingEmails.length > 0 ? 0.7 : 0.4,
+            location: location,
+            role: role || intent.role || null,
+            fit_score: matchingEmails.length > 0 ? 0.7 : 0.5,
             email_candidates: matchingEmails.slice(0, 3),
-            notes: `Extracted from ${result.title}`
+            notes: `Extracted from: ${result.title || 'web search'}`
         });
         
         if (prospects.length >= targetCount) break;
     }
     
-    console.log(`🔧 [AGENT2] Fallback extracted ${prospects.length} prospects`);
+    console.log(`🔧 [AGENT2] Fallback extracted ${prospects.length} prospects with emails`);
     return { prospects, found: prospects.length };
 }
 
@@ -793,9 +813,9 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
         state.needMoreSearch = eval2.needMoreSearch;
     }
 
-    // ─── If still no results or very low coverage, try fallback ───
+    // ─── If still no results or very low coverage, try improved fallback ───
     if (state.allProspects.length < 2 && allResults.length > 0) {
-        console.log(`🔄 [AGENT2] Low coverage - trying fallback extraction...`);
+        console.log(`🔄 [AGENT2] Low coverage - trying improved fallback extraction...`);
         const allText = allResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
         const fallbackEmails = extractEmailsWithRegex(allText);
         const fallbackResult = createFallbackProspects(allResults, fallbackEmails, intent);
@@ -805,12 +825,59 @@ async function discoverProspects({ intent, apiKey, tavilyKey, userId = 'anonymou
         }
     }
 
+    // ─── FORCE: Ensure we have at least 2 prospects ───
+    if (state.allProspects.length < 2 && allResults.length > 0) {
+        console.log(`🔄 [AGENT2] Forcing at least 2 prospects from search results...`);
+        const forcedProspects = [];
+        const seenNames = new Set();
+        
+        for (const result of allResults) {
+            const domainMatch = result.url.match(/https?:\/\/(?:www\.)?([^\/]+)/);
+            let domain = domainMatch ? domainMatch[1] : null;
+            if (domain) {
+                const parts = domain.split('.');
+                if (parts.length > 2) domain = parts.slice(-2).join('.');
+            }
+            if (!domain || seenNames.has(domain)) continue;
+            seenNames.add(domain);
+            
+            const title = result.title || domain;
+            const companyName = title.replace(/\s*[|\-–].*$/, '').trim();
+            
+            forcedProspects.push({
+                name: companyName || domain,
+                company: companyName || domain,
+                domain: domain,
+                source: 'web_search',
+                source_url: result.url,
+                location: intent.location || null,
+                role: intent.role || null,
+                fit_score: 0.5,
+                email_candidates: [],
+                notes: `Forced fallback from: ${result.title}`
+            });
+            
+            if (forcedProspects.length >= 2) break;
+        }
+        
+        if (forcedProspects.length > state.allProspects.length) {
+            state.allProspects = forcedProspects;
+            console.log(`📊 [AGENT2] Forced: Now ${state.allProspects.length} prospects`);
+        }
+    }
+
     // ─── Final deduplication and sorting ───
     const finalDedup = deduplicateProspects(state.allProspects);
     const sorted = sortProspectsByFit(finalDedup.deduped);
 
-    const targetCount = intent.lead_count || 5;
-    const returnedProspects = sorted.slice(0, targetCount);
+    const targetCount = Math.max(intent.lead_count || 5, 3);
+    let returnedProspects = sorted.slice(0, targetCount);
+    
+    // ─── FORCE: Ensure we return at least 2 prospects ───
+    if (returnedProspects.length < 2 && sorted.length >= 2) {
+        returnedProspects = sorted.slice(0, 2);
+        console.log(`📊 [AGENT2] Forced return of ${returnedProspects.length} prospects`);
+    }
 
     // ─── Calculate final confidence ───
     const withEmails = returnedProspects.filter(p => p.email_candidates && p.email_candidates.length > 0).length;
