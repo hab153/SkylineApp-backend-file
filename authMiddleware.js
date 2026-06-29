@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
+const User = require('./User');
 
-// ✅ NEW: Helper to get JWT secret (no fallback)
+// Helper to get JWT secret
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -10,7 +11,7 @@ const getJwtSecret = () => {
     return secret;
 };
 
-const verifyToken = (req, res, next) => {
+const verifyToken = async (req, res, next) => {
     const authHeader = req.headers['authorization'];
     console.log('🔐 [AUTH] Authorization header:', authHeader ? 'present' : 'missing');
     
@@ -21,11 +22,29 @@ const verifyToken = (req, res, next) => {
     }
     
     try {
-        // ✅ FIXED: No fallback secret
         const secret = getJwtSecret();
         const decoded = jwt.verify(token, secret);
-        req.userId = decoded.user.id;
-        console.log('✅ [AUTH] Token verified, userId =', req.userId);
+        
+        const userId = decoded.user.id;
+        const tokenVersion = decoded.user.tokenVersion;
+        
+        // ✅ NEW: Verify token version matches user's current version
+        const user = await User.findById(userId).select('tokenVersion');
+        if (!user) {
+            console.error('❌ [AUTH] User not found');
+            return res.status(401).json({ message: 'User not found' });
+        }
+        
+        // If tokenVersion in token doesn't match user's current tokenVersion, token is revoked
+        if (tokenVersion !== user.tokenVersion) {
+            console.error('❌ [AUTH] Token revoked - version mismatch',
+                'token:', tokenVersion,
+                'user:', user.tokenVersion);
+            return res.status(401).json({ message: 'Token revoked. Please log in again.' });
+        }
+        
+        req.userId = userId;
+        console.log('✅ [AUTH] Token verified, userId =', userId);
         next();
     } catch (err) {
         console.error('❌ [AUTH] Invalid token:', err.message);
