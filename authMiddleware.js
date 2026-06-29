@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-// Helper to get JWT secret with error handling
+// ✅ NEW: Helper to get JWT secret (no fallback)
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -21,6 +21,7 @@ const verifyToken = (req, res, next) => {
     }
     
     try {
+        // ✅ FIXED: No fallback secret
         const secret = getJwtSecret();
         const decoded = jwt.verify(token, secret);
         req.userId = decoded.user.id;
