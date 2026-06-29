@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const UserSchema = new mongoose.Schema({
     username: {
@@ -59,10 +60,21 @@ const UserSchema = new mongoose.Schema({
     adminAns_enemy:  { type: String, default: null },
     adminAns_app:    { type: String, default: null },
 
-    // ✅ NEW: Token version for revocation
+    // Token version for revocation
     tokenVersion: {
         type: Number,
         default: 0
+    },
+
+    // ✅ NEW: Password reset fields
+    resetToken: {
+        type: String,
+        default: null,
+        index: true
+    },
+    resetTokenExpiry: {
+        type: Date,
+        default: null
     },
 
     // --- USAGE LIMITING FIELDS ---
@@ -85,7 +97,7 @@ const UserSchema = new mongoose.Schema({
         assistantLastDate: { type: Date, default: null }
     },
 
-    // --- SUBSCRIPTION FIELDS (UPGRADED FOR 3 TIERS) ---
+    // --- SUBSCRIPTION FIELDS ---
     subscriptionTier: {
         type: String,
         enum: ['free', 'go', 'pro'],
@@ -112,7 +124,7 @@ const UserSchema = new mongoose.Schema({
         subscriptionEndDate: { type: Date }
     }],
 
-    // --- NYLAS EMAIL INTEGRATION (Month 2) ---
+    // --- NYLAS EMAIL INTEGRATION ---
     nylasIntegration: {
         accessToken: { type: String, default: null },
         emailAddress: { type: String, default: null },
@@ -181,11 +193,35 @@ UserSchema.methods.addPaymentRecord = async function(txRef, amount, currency = '
     await this.save();
 };
 
-// ✅ NEW: Method to revoke all tokens for a user
+// Method to revoke all tokens for a user
 UserSchema.methods.revokeTokens = async function() {
     this.tokenVersion += 1;
     await this.save();
     return this.tokenVersion;
+};
+
+// ✅ NEW: Generate password reset token
+UserSchema.methods.generateResetToken = async function() {
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    this.resetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+    this.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    await this.save();
+    return resetToken; // Return plain token for email
+};
+
+// ✅ NEW: Verify reset token
+UserSchema.methods.verifyResetToken = function(token) {
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    if (this.resetToken !== hashedToken) return false;
+    if (this.resetTokenExpiry < new Date()) return false;
+    return true;
+};
+
+// ✅ NEW: Clear reset token after use
+UserSchema.methods.clearResetToken = async function() {
+    this.resetToken = null;
+    this.resetTokenExpiry = null;
+    await this.save();
 };
 
 // Static method to find user by txRef
