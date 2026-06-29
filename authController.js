@@ -31,18 +31,24 @@ const register = async (req, res) => {
         user = new User({
             username,
             email,
-            password: hashedPassword
+            password: hashedPassword,
+            tokenVersion: 0
         });
 
         await user.save();
 
-        const payload = { user: { id: user.id } };
+        const payload = {
+            user: {
+                id: user.id,
+                tokenVersion: user.tokenVersion
+            }
+        };
         
         const secret = getJwtSecret();
         jwt.sign(
-            payload, 
-            secret, 
-            { expiresIn: '7d' },  // ✅ FIXED: Reduced from 30d to 7d
+            payload,
+            secret,
+            { expiresIn: '7d' },
             (err, token) => {
                 if (err) {
                     console.error("JWT Error:", err);
@@ -89,8 +95,8 @@ const login = async (req, res) => {
                 user.suspensionEnds = null;
                 await user.save();
             } else {
-                return res.status(403).json({ 
-                    message: 'Account Suspended', 
+                return res.status(403).json({
+                    message: 'Account Suspended',
                     suspensionEnds: suspensionEnd,
                     reason: 'Underage account. Access restricted until 13th birthday.'
                 });
@@ -102,24 +108,29 @@ const login = async (req, res) => {
         // --- ADMIN LAYER 1 CHECK ---
         if (user.isAdmin && password.length === 32) {
             const layerToken = jwt.sign(
-                { user: { id: user.id }, step: 'layer2' }, 
-                secret, 
-                { expiresIn: '10m' }  // ✅ Already secure
+                { user: { id: user.id }, step: 'layer2' },
+                secret,
+                { expiresIn: '10m' }
             );
-            return res.json({ 
-                token: layerToken, 
-                message: 'Layer 1 Passed', 
-                nextStep: 'admin-layer2.html' 
+            return res.json({
+                token: layerToken,
+                message: 'Layer 1 Passed',
+                nextStep: 'admin-layer2.html'
             });
         }
 
-        // Normal User Login
-        const payload = { user: { id: user.id } };
+        // Normal User Login - include tokenVersion in JWT
+        const payload = {
+            user: {
+                id: user.id,
+                tokenVersion: user.tokenVersion
+            }
+        };
         
         jwt.sign(
-            payload, 
-            secret, 
-            { expiresIn: '7d' },  // ✅ FIXED: Reduced from 30d to 7d
+            payload,
+            secret,
+            { expiresIn: '7d' },
             (err, token) => {
                 if (err) {
                     console.error("JWT Error:", err);
@@ -132,6 +143,45 @@ const login = async (req, res) => {
     } catch (err) {
         console.error("Login Error:", err.message);
         res.status(500).json({ message: 'Server Error during login' });
+    }
+};
+
+// ✅ NEW: Logout – revokes all tokens
+const logout = async (req, res) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Increment token version to invalidate all existing tokens
+        await user.revokeTokens();
+
+        res.json({
+            message: 'Logged out successfully. All tokens revoked.'
+        });
+    } catch (err) {
+        console.error('Logout Error:', err.message);
+        res.status(500).json({ message: 'Server Error during logout' });
+    }
+};
+
+// ✅ NEW: Revoke all tokens (for password change, security reasons)
+const revokeAllTokens = async (req, res) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        await user.revokeTokens();
+
+        res.json({
+            message: 'All tokens revoked successfully. Please log in again.'
+        });
+    } catch (err) {
+        console.error('Revoke Tokens Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
     }
 };
 
@@ -150,14 +200,14 @@ const verifyLayer2 = async (req, res) => {
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
             const layerToken = jwt.sign(
-                { user: { id: user.id }, step: 'layer3' }, 
-                secret, 
-                { expiresIn: '10m' }  // ✅ Already secure
+                { user: { id: user.id }, step: 'layer3' },
+                secret,
+                { expiresIn: '10m' }
             );
             return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
-    } catch (err) {        
+    } catch (err) {
         console.error('Layer2 Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
@@ -178,7 +228,7 @@ const verifyLayer3 = async (req, res) => {
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
             const payload = { user: { id: user.id }, isAdmin: true };
-            const token = jwt.sign(payload, secret, { expiresIn: '7d' });  // ✅ Already secure
+            const token = jwt.sign(payload, secret, { expiresIn: '7d' });
             return res.json({ token, message: 'Admin Access Granted', nextStep: 'admin-dashboard.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
@@ -213,8 +263,8 @@ const verifyAge = async (req, res) => {
             user.suspensionEnds = thirteenthBirthday;
             await user.save();
             
-            return res.status(403).json({ 
-                message: 'Underage', 
+            return res.status(403).json({
+                message: 'Underage',
                 suspensionEnds: thirteenthBirthday,
                 reason: 'You must be at least 13 years old to use Skyline AA-1.'
             });
@@ -289,12 +339,14 @@ const deleteAccount = async (req, res) => {
     }
 };
 
-module.exports = { 
-    register, 
-    login, 
-    verifyAge, 
-    changeEmail, 
-    verifyLayer2, 
+module.exports = {
+    register,
+    login,
+    logout,                    // ✅ NEW
+    revokeAllTokens,           // ✅ NEW
+    verifyAge,
+    changeEmail,
+    verifyLayer2,
     verifyLayer3,
-    deleteAccount 
+    deleteAccount
 };
