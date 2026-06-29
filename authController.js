@@ -1,9 +1,19 @@
 const User = require('./User');
-const ChatMessage = require('./ChatMessage'); // NEW: for chat history
-const Notification = require('./Notification'); // NEW: for notifications
+const ChatMessage = require('./ChatMessage');
+const Notification = require('./Notification');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Report = require('./Report');
+
+// Helper to get JWT secret with error handling
+const getJwtSecret = () => {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+        console.error('❌ CRITICAL: JWT_SECRET is not defined in environment variables');
+        throw new Error('JWT_SECRET is not configured');
+    }
+    return secret;
+};
 
 // Register a new user
 const register = async (req, res) => {
@@ -28,10 +38,11 @@ const register = async (req, res) => {
 
         const payload = { user: { id: user.id } };
         
-        // ✅ JWT expires in 30 days
+        // ✅ JWT expires in 30 days - using env secret (no fallback)
+        const secret = getJwtSecret();
         jwt.sign(
             payload, 
-            process.env.JWT_SECRET || 'secretkey', 
+            secret, 
             { expiresIn: '30d' }, 
             (err, token) => {
                 if (err) {
@@ -75,13 +86,11 @@ const login = async (req, res) => {
             const now = new Date();
             const suspensionEnd = new Date(user.suspensionEnds);
             
-            // If suspension period is over, auto-unlock
             if (now >= suspensionEnd) {
                 user.isSuspended = false;
                 user.suspensionEnds = null;
                 await user.save();
             } else {
-                // Still suspended
                 return res.status(403).json({ 
                     message: 'Account Suspended', 
                     suspensionEnds: suspensionEnd,
@@ -90,14 +99,14 @@ const login = async (req, res) => {
             }
         }
 
+        const secret = getJwtSecret();
+
         // --- ADMIN LAYER 1 CHECK ---
-        // If user is Admin AND password is exactly 32 chars, trigger Layer 2
         if (user.isAdmin && password.length === 32) {
-            // Create a temporary token just for Layer 2 verification
             const layerToken = jwt.sign(
                 { user: { id: user.id }, step: 'layer2' }, 
-                process.env.JWT_SECRET || 'secretkey', 
-                { expiresIn: '10m' } // Short expiry for security
+                secret, 
+                { expiresIn: '10m' }
             );
             return res.json({ 
                 token: layerToken, 
@@ -109,10 +118,9 @@ const login = async (req, res) => {
         // Normal User Login
         const payload = { user: { id: user.id } };
         
-        // ✅ JWT expires in 30 days
         jwt.sign(
             payload, 
-            process.env.JWT_SECRET || 'secretkey', 
+            secret, 
             { expiresIn: '30d' }, 
             (err, token) => {
                 if (err) {
@@ -136,23 +144,23 @@ const verifyLayer2 = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        // Compare answers (case-insensitive)
         const d1 = await bcrypt.compare(dish.toLowerCase(), user.adminAns_dish);
         const d2 = await bcrypt.compare(pn.toLowerCase(), user.adminAns_pn);
         const d3 = await bcrypt.compare(mum.toLowerCase(), user.adminAns_mum);
         const d4 = await bcrypt.compare(dm.toLowerCase(), user.adminAns_dm);
 
         if (d1 && d2 && d3 && d4) {
-            // Pass to Layer 3
+            const secret = getJwtSecret();
             const layerToken = jwt.sign(
                 { user: { id: user.id }, step: 'layer3' }, 
-                process.env.JWT_SECRET || 'secretkey', 
+                secret, 
                 { expiresIn: '10m' }
             );
             return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
     } catch (err) {        
+        console.error('Layer2 Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -170,14 +178,14 @@ const verifyLayer3 = async (req, res) => {
         const d4 = await bcrypt.compare(app.toLowerCase(), user.adminAns_app);
 
         if (d1 && d2 && d3 && d4) {
-            // Final Admin Token
+            const secret = getJwtSecret();
             const payload = { user: { id: user.id }, isAdmin: true };
-            // Admin token lasts 7 days
-            const token = jwt.sign(payload, process.env.JWT_SECRET || 'secretkey', { expiresIn: '7d' });
+            const token = jwt.sign(payload, secret, { expiresIn: '7d' });
             return res.json({ token, message: 'Admin Access Granted', nextStep: 'admin-dashboard.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
     } catch (err) {
+        console.error('Layer3 Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -192,7 +200,6 @@ const verifyAge = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // Calculate Age
         const birthDate = new Date(year, month - 1, day);
         const today = new Date();
         let age = today.getFullYear() - birthDate.getFullYear();
@@ -202,7 +209,6 @@ const verifyAge = async (req, res) => {
         }
         user.dateOfBirth = birthDate;
         if (age < 13) {
-            // Suspend Account until 13th birthday
             user.isSuspended = true;
             const thirteenthBirthday = new Date(birthDate);
             thirteenthBirthday.setFullYear(birthDate.getFullYear() + 13);
@@ -215,7 +221,6 @@ const verifyAge = async (req, res) => {
                 reason: 'You must be at least 13 years old to use Skyline AA-1.'
             });
         } else {
-            // Allow Access
             user.isSuspended = false;
             user.suspensionEnds = null;
             await user.save();
@@ -223,7 +228,7 @@ const verifyAge = async (req, res) => {
         }
 
     } catch (err) {
-        console.error(err.message);
+        console.error('Age verification error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -253,12 +258,12 @@ const changeEmail = async (req, res) => {
         res.json({ message: 'Email updated successfully' });
 
     } catch (err) {
-        console.error(err.message);
+        console.error('Change email error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// Delete Account – now removes ChatMessage and Notification instead of old Message model
+// Delete Account – removes ChatMessage, Notification, and Report
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
 
@@ -273,26 +278,18 @@ const deleteAccount = async (req, res) => {
             return res.status(400).json({ message: 'Incorrect password. Account not deleted.' });
         }
 
-        // Delete all chat messages for this user
         await ChatMessage.deleteMany({ userId: req.userId });
-        
-        // Delete all notifications for this user
         await Notification.deleteMany({ userId: req.userId });
-        
-        // Delete all reports for this user
         await Report.deleteMany({ userId: req.userId });
-
-        // Delete the user
         await User.findByIdAndDelete(req.userId);
 
         res.json({ message: 'Account permanently deleted.' });
 
     } catch (err) {
-        console.error(err.message);
+        console.error('Delete account error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
-
 
 module.exports = { 
     register, 
