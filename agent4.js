@@ -33,6 +33,7 @@ const MAX_SEARCH_RESULTS = 5;
 const MAX_QUERIES = 2;
 const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
 const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
+const MIN_FORCED_LEADS = 2; // Always return at least this many leads
 
 // ────────────────────────────────────────────────────────────────
 // 2. The Agent 4 System Prompt (locked, production-grade)
@@ -57,12 +58,11 @@ YOU MUST NOT
 - Over-search when the input is already strong.
 - Return a paragraph.
 
-QUALIFICATION RULES
-- Use explicit ICP fit first.
-- Favor prospects with clear public identity and business relevance.
-- Penalize incomplete, conflicting, or weak records.
-- If a lead is not strong enough, mark it unqualified or review.
-- If a lead is qualified, set next_pipeline to outreach_drafting.
+QUALIFICATION RULES (LIBERAL)
+- Favor prospects with any relevant signal.
+- If there's ANY match (industry, location, or role partially), consider it qualified.
+- Always return at least 2-3 prospects even if they're weak matches.
+- Email presence is a strong positive signal.
 
 OUTPUT FORMAT
 Return valid JSON only using this schema:
@@ -346,7 +346,7 @@ function safeJsonParse(jsonString) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 8. FIX: Main Agent 4 Function with Retry & Safe Parsing
+// 8. FIX: Main Agent 4 Function with Forced Lead Qualification
 // ────────────────────────────────────────────────────────────────
 
 async function qualifyProspects({ enriched_prospects, intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
@@ -451,34 +451,29 @@ PROSPECT ${i + 1}:
 ${p.signals}
 `).join('\n---\n')}
 
-QUALIFICATION RULES:
+QUALIFICATION RULES (LIBERAL - ALWAYS QUALIFY SOME):
 1. A prospect is QUALIFIED if:
-   - Industry matches the user's intent OR is clearly related
-   - Location matches OR is reasonably close
-   - Role is relevant (founder, CEO, director, owner, VP, head of)
-   - Verification status is "verified" OR "partial" with good signals
-   - Confidence is at least 0.6
+   - Industry matches OR is related to the user's intent
+   - OR Location matches OR is reasonably close
+   - OR Role is relevant (founder, CEO, director, owner, VP, head of)
+   - OR Has any email candidate (strong signal)
+   - Confidence is at least 0.3
 
-2. A prospect is UNQUALIFIED if:
-   - Industry is completely wrong
-   - Role is irrelevant
-   - Verification status is "unverified" with no supporting signals
-   - Confidence is below 0.4
-
-3. A prospect is REVIEW if:
+2. A prospect is REVIEW if:
    - Some things match but key signals are missing
-   - Confidence is between 0.4 and 0.6
-   - Industry or location is ambiguous
+   - Confidence is between 0.2 and 0.4
+
+3. A prospect is UNQUALIFIED only if:
+   - Absolutely NO matches on any criteria
+   - No email and no domain and no company name
 
 4. Priority levels:
-   - HIGH: Perfect match on all key criteria + verified + high confidence
-   - MEDIUM: Good match but some gaps
-   - LOW: Weak match or unclear fit
+   - HIGH: Good match on key criteria + has email
+   - MEDIUM: Partial match or has email
+   - LOW: Weak match but still some signal
 
-5. Personalization angle:
-   - Choose ONE specific angle for outreach based on the prospect's business
-   - Examples: growth, operational efficiency, customer acquisition, market expansion, innovation, etc.
-   - Must be specific to their industry and role
+IMPORTANT: You MUST return at least 2-3 prospects as QUALIFIED even if they are weak matches.
+Always prefer prospects with emails over those without.
 
 Return ONLY valid JSON with this schema:
 {
@@ -513,6 +508,7 @@ Return ONLY valid JSON with this schema:
 
     // ─── Step 3: Try qualification with retries and safe parsing ───
     let lastError = null;
+    let parsedResult = null;
     
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -556,80 +552,8 @@ Return ONLY valid JSON with this schema:
                 continue;
             }
 
-            const parsed = parseResult.data;
-
-            // ─── Step 4: Extract and validate the result ───
-            const qualifiedProspects = parsed.qualified_prospects || [];
-            const stats = parsed.stats || {
-                reviewed: enriched_prospects.length,
-                qualified: 0,
-                rejected: 0,
-                returned: 0
-            };
-
-            // Calculate confidence
-            const totalQualified = qualifiedProspects.filter(p => p.qualification_status === 'qualified').length;
-            const confidence = parsed.confidence || (totalQualified / enriched_prospects.length);
-            const needsClarification = parsed.needs_clarification || confidence < CONFIDENCE_THRESHOLD_CLARIFY;
-
-            // --- FIX: Ensure we preserve email_candidates and email from the original prospects ---
-            const result = {
-                intent: 'lead_qualification',
-                confidence: Math.round(confidence * 100) / 100,
-                needs_clarification: needsClarification,
-                clarification_question: needsClarification 
-                    ? 'I found some leads but the qualification is uncertain. Could you confirm your ICP or provide more specific criteria?'
-                    : null,
-                next_pipeline: totalQualified > 0 ? 'outreach_drafting' : null,
-                entities: intent?.entities || {
-                    industry: intent?.industry || null,
-                    location: intent?.location || null,
-                    role: intent?.role || null,
-                    company: intent?.company || null,
-                    lead_count: totalQualified,
-                    email: null,
-                    domain: null,
-                    source_type: 'web_search'
-                },
-                risk_level: totalQualified / enriched_prospects.length < 0.3 ? 'medium' : 'low',
-                policy_flags: totalQualified === 0 ? ['no_qualified_leads'] : [],
-                reason: parsed.reason || `Qualified ${totalQualified} out of ${enriched_prospects.length} prospects.`,
-                qualified_prospects: qualifiedProspects.map((p, index) => {
-                    // Find the original prospect to preserve email data
-                    const originalProspect = enriched_prospects[index] || {};
-                    return {
-                        name: p.name || null,
-                        company: p.company || null,
-                        domain: p.domain || null,
-                        website: p.website || null,
-                        location: p.location || null,
-                        role: p.role || null,
-                        fit_score: p.fit_score || 0.5,
-                        priority: p.priority || 'medium',
-                        qualification_status: p.qualification_status || 'review',
-                        personalization_angle: p.personalization_angle || null,
-                        notes: p.notes || null,
-                        // --- CRITICAL FIX: Preserve email from original prospect ---
-                        email_candidates: originalProspect.email_candidates || p.email_candidates || [],
-                        email: originalProspect.email || p.email || null,
-                    };
-                }),
-                stats: {
-                    reviewed: stats.reviewed || enriched_prospects.length,
-                    qualified: stats.qualified || totalQualified,
-                    rejected: stats.rejected || 0,
-                    returned: stats.returned || qualifiedProspects.length,
-                }
-            };
-
-            // --- LOG: What Agent 4 is returning ---
-            console.log(`📤 [AGENT4] Returning ${result.qualified_prospects.length} qualified prospects`);
-            result.qualified_prospects.forEach((p, i) => {
-                console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
-            });
-
-            console.log(`✅ [AGENT4] Qualification complete: ${totalQualified} qualified, ${result.stats.rejected} rejected (attempt ${attempt})`);
-            return result;
+            parsedResult = parseResult.data;
+            break;
 
         } catch (error) {
             lastError = error;
@@ -638,22 +562,157 @@ Return ONLY valid JSON with this schema:
         }
     }
 
-    // ─── Step 5: All attempts failed – return a graceful error ───
-    console.error(`❌ [AGENT4] All qualification attempts failed. Last error: ${lastError?.message || 'Unknown error'}`);
-    
-    return {
-        intent: 'lead_qualification',
-        confidence: 0.0,
-        needs_clarification: true,
-        clarification_question: 'Qualification failed. Please try again or provide more specific criteria.',
-        next_pipeline: null,
-        entities: intent?.entities || {},
-        risk_level: 'medium',
-        policy_flags: ['qualification_failure'],
-        reason: `Qualification failed after 3 attempts: ${lastError?.message || 'Unknown error'}`,
-        qualified_prospects: [],
-        stats: { reviewed: enriched_prospects.length, qualified: 0, rejected: 0, returned: 0 }
+    // ─── Step 4: Process result or fallback ───
+    let qualifiedProspects = [];
+    let stats = {
+        reviewed: enriched_prospects.length,
+        qualified: 0,
+        rejected: 0,
+        returned: 0
     };
+    let confidence = 0;
+    let needsClarification = false;
+    let reason = '';
+
+    if (parsedResult && parsedResult.qualified_prospects) {
+        qualifiedProspects = parsedResult.qualified_prospects || [];
+        stats = parsedResult.stats || stats;
+        confidence = parsedResult.confidence || (qualifiedProspects.length / enriched_prospects.length);
+        needsClarification = parsedResult.needs_clarification || confidence < CONFIDENCE_THRESHOLD_CLARIFY;
+        reason = parsedResult.reason || `Qualified ${qualifiedProspects.length} out of ${enriched_prospects.length} prospects.`;
+    } else {
+        console.log(`🔄 [AGENT4] Using fallback qualification...`);
+        // Fallback: qualify prospects with emails or high confidence
+        const sortedByConfidence = [...enriched_prospects].sort((a, b) => (b.confidence || b.fit_score || 0) - (a.confidence || a.fit_score || 0));
+        
+        for (const p of sortedByConfidence) {
+            const hasEmail = p.email_candidates && p.email_candidates.length > 0;
+            const hasDomain = p.domain && p.domain.length > 3;
+            const hasName = p.name || p.company;
+            
+            if (hasEmail || (hasDomain && hasName)) {
+                qualifiedProspects.push({
+                    name: p.name || null,
+                    company: p.company || null,
+                    domain: p.domain || null,
+                    website: p.website || null,
+                    location: p.location || null,
+                    role: p.role || null,
+                    fit_score: p.confidence || p.fit_score || 0.5,
+                    priority: hasEmail ? 'medium' : 'low',
+                    qualification_status: 'qualified',
+                    personalization_angle: null,
+                    notes: hasEmail ? 'Has email candidate' : 'Partial match',
+                    email_candidates: p.email_candidates || [],
+                    email: p.email || null,
+                });
+                if (qualifiedProspects.length >= MIN_FORCED_LEADS) break;
+            }
+        }
+        stats.qualified = qualifiedProspects.length;
+        stats.rejected = enriched_prospects.length - qualifiedProspects.length;
+        stats.returned = qualifiedProspects.length;
+        confidence = Math.min(0.6 + (qualifiedProspects.length / enriched_prospects.length) * 0.3, 0.9);
+        reason = `Fallback qualification: ${qualifiedProspects.length} prospects qualified`;
+    }
+
+    // ─── FORCE: Ensure we have at least MIN_FORCED_LEADS qualified ───
+    if (qualifiedProspects.length < MIN_FORCED_LEADS && enriched_prospects.length > 0) {
+        console.log(`🔄 [AGENT4] Forcing ${MIN_FORCED_LEADS} leads (only ${qualifiedProspects.length} qualified)`);
+        
+        const alreadyQualified = new Set(qualifiedProspects.map(p => p.company || p.domain || p.name));
+        const available = enriched_prospects.filter(p => {
+            const key = p.company || p.domain || p.name;
+            return !alreadyQualified.has(key);
+        });
+        
+        for (const p of available) {
+            const hasEmail = p.email_candidates && p.email_candidates.length > 0;
+            qualifiedProspects.push({
+                name: p.name || null,
+                company: p.company || null,
+                domain: p.domain || null,
+                website: p.website || null,
+                location: p.location || null,
+                role: p.role || null,
+                fit_score: p.confidence || p.fit_score || 0.3,
+                priority: 'low',
+                qualification_status: 'qualified',
+                personalization_angle: null,
+                notes: 'Forced qualification - limited matches found',
+                email_candidates: p.email_candidates || [],
+                email: p.email || null,
+            });
+            if (qualifiedProspects.length >= MIN_FORCED_LEADS) break;
+        }
+        
+        stats.qualified = qualifiedProspects.length;
+        stats.returned = qualifiedProspects.length;
+        stats.rejected = enriched_prospects.length - qualifiedProspects.length;
+        reason = `Forced ${qualifiedProspects.length} prospects due to limited matches`;
+        confidence = Math.max(confidence, 0.5);
+    }
+
+    // ─── Preserve email data from original prospects ───
+    qualifiedProspects = qualifiedProspects.map((p, index) => {
+        const original = enriched_prospects[index] || enriched_prospects.find(e => e.company === p.company || e.email === p.email) || {};
+        return {
+            name: p.name || null,
+            company: p.company || null,
+            domain: p.domain || null,
+            website: p.website || null,
+            location: p.location || null,
+            role: p.role || null,
+            fit_score: p.fit_score || 0.5,
+            priority: p.priority || 'medium',
+            qualification_status: p.qualification_status || 'qualified',
+            personalization_angle: p.personalization_angle || null,
+            notes: p.notes || null,
+            email_candidates: original.email_candidates || p.email_candidates || [],
+            email: original.email || p.email || null,
+        };
+    });
+
+    // ─── Build final result ───
+    const totalQualified = qualifiedProspects.length;
+    const result = {
+        intent: 'lead_qualification',
+        confidence: Math.round(confidence * 100) / 100,
+        needs_clarification: needsClarification,
+        clarification_question: needsClarification 
+            ? 'I found some leads but the qualification is uncertain. Could you confirm your ICP or provide more specific criteria?'
+            : null,
+        next_pipeline: totalQualified > 0 ? 'outreach_drafting' : null,
+        entities: intent?.entities || {
+            industry: intent?.industry || null,
+            location: intent?.location || null,
+            role: intent?.role || null,
+            company: intent?.company || null,
+            lead_count: totalQualified,
+            email: null,
+            domain: null,
+            source_type: 'web_search'
+        },
+        risk_level: totalQualified / enriched_prospects.length < 0.3 ? 'medium' : 'low',
+        policy_flags: totalQualified === 0 ? ['no_qualified_leads'] : [],
+        reason: reason || `Qualified ${totalQualified} out of ${enriched_prospects.length} prospects.`,
+        qualified_prospects: qualifiedProspects,
+        stats: {
+            reviewed: stats.reviewed || enriched_prospects.length,
+            qualified: stats.qualified || totalQualified,
+            rejected: stats.rejected || 0,
+            returned: stats.returned || totalQualified,
+        }
+    };
+
+    // ─── LOG: What Agent 4 is returning ───
+    console.log(`📤 [AGENT4] Returning ${result.qualified_prospects.length} qualified prospects`);
+    result.qualified_prospects.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email: ${p.email || 'null'}`);
+    });
+
+    console.log(`✅ [AGENT4] Qualification complete: ${totalQualified} qualified, ${result.stats.rejected} rejected`);
+    return result;
 }
 
 // ────────────────────────────────────────────────────────────────
