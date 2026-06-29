@@ -5,43 +5,25 @@ const ChatMessage = require('./ChatMessage');
 const Notification = require('./Notification');
 const Company = require('./Company');
 
-// Initialize OpenAI with API key
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/**
- * Generate a personal assistant response for a user
- * @param {string} userId - The user's MongoDB ID
- * @param {string} userMessage - The user's question/message
- * @returns {Promise<string>} - The AI response
- */
 async function generateAssistantResponse(userId, userMessage) {
     console.log('[assist.js] Starting for user:', userId);
 
     try {
-        // 1. Fetch user
         const user = await User.findById(userId).lean();
-        if (!user) {
-            throw new Error('User not found');
-        }
+        if (!user) throw new Error('User not found');
 
-        // 2. Fetch leads (limit 50, sorted newest first)
         const leads = await Lead.find({ userId }).sort({ createdAt: -1 }).limit(50).lean();
-
-        // 3. Fetch chat history (last 50 messages)
         const chatHistory = await ChatMessage.find({ userId }).sort({ createdAt: -1 }).limit(50).lean();
-
-        // 4. Fetch unread notifications
         const notifications = await Notification.find({ userId, isRead: false }).lean();
-
-        // 5. Fetch companies (top 20 by score)
         const companies = await Company.find({}).sort({ leadScore: -1 }).limit(20).lean();
 
-        // 6. Build context with enhanced business insights
+        // Calculate business stats
         const totalLeads = leads.length;
         const leadsWithReplies = leads.filter(l => l.replies && l.replies.length > 0).length;
         const replyRate = totalLeads > 0 ? Math.round((leadsWithReplies / totalLeads) * 100) : 0;
 
-        // Count industries from companies
         const industryCounts = {};
         companies.forEach(c => {
             const ind = c.industry || 'Unknown';
@@ -53,7 +35,6 @@ async function generateAssistantResponse(userId, userMessage) {
             .map(([ind, count]) => `${ind} (${count})`)
             .join(', ');
 
-        // Average lead score from companies
         const avgScore = companies.length > 0
             ? Math.round(companies.reduce((sum, c) => sum + (c.leadScore || 0), 0) / companies.length)
             : 0;
@@ -88,7 +69,6 @@ async function generateAssistantResponse(userId, userMessage) {
                 industry: c.industry || 'Unknown',
                 leadScore: c.leadScore || 0
             })),
-            // Business intelligence stats
             stats: {
                 totalLeads,
                 leadsWithReplies,
@@ -98,20 +78,14 @@ async function generateAssistantResponse(userId, userMessage) {
             }
         };
 
-        // 7. Build a powerful business‑consultant system prompt
-        const systemPrompt = `You are Skyline, a senior business consultant with 20 years of experience in B2B sales, marketing, and operations.
+        // Updated system prompt: friendly, smart, and natural
+        const systemPrompt = `You are Skyline, a friendly and smart business assistant.
 
-Your mission: Help the user grow their business by providing actionable, data‑driven advice based on their Skyline data.
+You help users understand their business data and make better decisions. You have access to their leads, companies, chat history, and usage stats.
 
-Always structure your response like this:
-1. **Diagnosis** – What is the core issue or opportunity?
-2. **Strategic Options** – What are 2–3 possible approaches?
-3. **Recommended Action** – Which option do you recommend and why?
-4. **Expected Outcomes** – What results can the user expect?
+Your style: warm, clear, and practical. Give useful insights without being overly formal. Use bullet points only when they help clarity. If you notice something interesting in their data, point it out. If they ask for advice, give concrete suggestions based on what you see.
 
-Be direct, pragmatic, and use the user's actual data (leads, companies, chats) to personalise your answer. If you lack specific data, ask clarifying questions to help the user refine their question.
-
-Use bullet points and clear headings. Avoid vague advice – be specific and concrete.
+Important: always base your answers on the data provided below. If you don't know something, say so and offer to help them find it.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 USER PROFILE
@@ -123,14 +97,14 @@ Nylas Connected: ${context.user.nylasConnected ? '✅ Yes' : '❌ No'}
 Account Created: ${new Date(context.user.createdAt).toLocaleDateString()}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DAILY USAGE (limits based on plan)
+DAILY USAGE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Chat messages: ${context.user.usage?.dailyCallCount || 0}
 Hints used: ${context.user.usage?.dailyHintCount || 0}
 Emails sent: ${context.user.usage?.dailySentCount || 0}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BUSINESS INTELLIGENCE (from your data)
+BUSINESS SNAPSHOT (from your data)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Total leads: ${context.stats.totalLeads}
 Leads with replies: ${context.stats.leadsWithReplies} (${context.stats.replyRate}% reply rate)
@@ -165,22 +139,21 @@ ${context.recentCompanies.length > 0 ? context.recentCompanies.map((c, i) =>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INSTRUCTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Always follow the Diagnosis → Options → Recommendation → Outcomes structure.
-2. Use the user's actual data to back your advice. If a lead or company is mentioned, refer to it by name.
-3. If the user asks about improving their outreach, suggest specific tactics based on their lead quality and reply rates.
-4. If they ask about their plan or limits, reference the usage data and offer upgrade suggestions if appropriate.
-5. If you need more context, ask a clarifying question before giving advice.
-6. Maintain a professional, direct, and helpful tone. Avoid fluff – be concise and actionable.
-7. If asked something completely outside your data, say: "I don't have enough information to answer that, but I can help you with your business data."`;
+- Be warm, helpful, and practical.
+- Use the data to answer questions and give advice.
+- If the user asks about leads, summarise them and highlight interesting ones.
+- If they ask about their plan or limits, tell them clearly.
+- If they ask for recommendations, base them on their actual data.
+- If you need more info, ask a friendly follow‑up question.
+- Keep answers concise but thorough – no fluff, just useful insight.`;
 
-        // 8. Call OpenAI with a higher token limit for thoughtful reasoning
         const response = await openai.chat.completions.create({
-            model: 'gpt-4o-mini', // you can switch to 'gpt-4o' if you need deeper reasoning
+            model: 'gpt-4o-mini',
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userMessage }
             ],
-            max_tokens: 1200,       // increased to allow longer structured responses
+            max_tokens: 900,
             temperature: 0.7
         });
 
