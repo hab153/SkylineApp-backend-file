@@ -6,8 +6,11 @@ const {
     login,
     logout,
     revokeAllTokens,
-    forgotPassword,    // ✅ NEW
-    resetPassword,     // ✅ NEW
+    verifyEmail,                  // ✅ NEW
+    verifyUsername,               // ✅ NEW
+    resetPasswordEmailUsername,   // ✅ NEW
+    forgotPassword,
+    resetPassword,
     verifyAge,
     changeEmail,
     verifyLayer2,
@@ -15,15 +18,27 @@ const {
     deleteAccount
 } = require('./authController');
 
-// Public routes
+// ──────────────────────────────
+// PUBLIC ROUTES
+// ──────────────────────────────
 router.post('/register', register);
 router.post('/login', login);
 
-// ✅ NEW: Password reset routes
+// ──────────────────────────────
+// PASSWORD RESET ROUTES
+// ──────────────────────────────
+// ✅ NEW: Email + Username verification (no email required)
+router.post('/verify-email', verifyEmail);
+router.post('/verify-username', verifyUsername);
+router.post('/reset-password-email-username', resetPasswordEmailUsername);
+
+// Kept for backward compatibility (email-based reset)
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPassword);
 
-// Protected routes (require authentication)
+// ──────────────────────────────
+// PROTECTED ROUTES (require authentication)
+// ──────────────────────────────
 router.post('/logout', verifyToken, logout);
 router.post('/revoke-tokens', verifyToken, revokeAllTokens);
 router.put('/change-email', verifyToken, changeEmail);
