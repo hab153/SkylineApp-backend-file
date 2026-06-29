@@ -44,14 +44,24 @@ const EmailAccount = require('./EmailAccount');
 const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
 const authRoutes = require('./authRoutes');
 const assistantRoutes = require('./assistantRoutes');
-const sessionRoutes = require('./sessionRoutes'); // <-- NEW: Session routes
-// const Message = require('./Message');  // REMOVED
+const sessionRoutes = require('./sessionRoutes');
 const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
 
 dotenv.config();
 const app = express();
+
+// ════════════════════════════════════════════
+//  CRITICAL STARTUP CHECKS
+// ════════════════════════════════════════════
+// Verify JWT_SECRET is set before starting
+if (!process.env.JWT_SECRET) {
+    console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
+    console.error('❌ Please set JWT_SECRET in your .env file and restart the server.');
+    process.exit(1);
+}
+console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
 
 // ════════════════════════════════════════════
 //  SECURITY MIDDLEWARE
@@ -96,28 +106,15 @@ mongoose.connect(process.env.MONGODB_URI, {
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
 // ════════════════════════════════════════════
-//  AUTH ROUTES
+//  ROUTES
 // ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
-
-// ════════════════════════════════════════════
-//  ASSISTANT ROUTES
-// ════════════════════════════════════════════
 app.use('/api', assistantRoutes);
-
-// ════════════════════════════════════════════
-//  SESSION ROUTES (NEW)
-// ════════════════════════════════════════════
 app.use('/api', sessionRoutes);
 
-// ════════════════════════════════════════════
-//  PAYMENT ROUTE
-// ════════════════════════════════════════════
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
-// ════════════════════════════════════════════
-//  LEAD / CONVERSATION ROUTES
-// ════════════════════════════════════════════
+// LEAD / CONVERSATION ROUTES
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
 app.put('/api/leads/:leadId/rename', verifyToken, leadController.renameLead);
@@ -126,36 +123,26 @@ app.post('/api/leads/batch-send', verifyToken, leadController.batchSend);
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
-// ════════════════════════════════════════════
-//  FOLLOW-UP ROUTES (with limit middleware)
-// ════════════════════════════════════════════
+// FOLLOW-UP ROUTES
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, followUpController.toggleAutoFollowUp);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 
-// ════════════════════════════════════════════
-//  REVENUE TRACKING ROUTE (if revenueController exists)
-// ════════════════════════════════════════════
+// REVENUE TRACKING
 if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
     app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
 }
 
-// ════════════════════════════════════════════
-//  NOTIFICATIONS
-// ════════════════════════════════════════════
+// NOTIFICATIONS
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
 
-// ════════════════════════════════════════════
-//  NYLAS AUTH
-// ════════════════════════════════════════════
+// NYLAS AUTH
 app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
-// ════════════════════════════════════════════
-//  CHAT & DREAMS ROUTES
-// ════════════════════════════════════════════
+// CHAT & DREAMS ROUTES
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.sendMessage);
 app.post('/api/feedback', verifyToken, chatController.submitFeedback);
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, chatController.getSessions);
@@ -163,9 +150,7 @@ app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatCon
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.analyzeDream);
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
 
-// ════════════════════════════════════════════
-//  AI SUGGESTION ROUTE
-// ════════════════════════════════════════════
+// AI SUGGESTION ROUTE
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
         const { messages } = req.body;
@@ -184,9 +169,7 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     }
 });
 
-// ════════════════════════════════════════════
-//  USER PROFILE ROUTES
-// ════════════════════════════════════════════
+// USER PROFILE ROUTES
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
@@ -194,9 +177,7 @@ app.put('/api/auth/change-email', verifyToken, userController.changeEmail);
 app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 
-// ════════════════════════════════════════════
-//  ADMIN ROUTES
-// ════════════════════════════════════════════
+// ADMIN ROUTES
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
 app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
@@ -207,9 +188,7 @@ app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserCh
 app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMessage);
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
-// ════════════════════════════════════════════
-//  REPORTS
-// ════════════════════════════════════════════
+// REPORTS
 app.post('/api/reports', verifyToken, reportController.submitReport);
 
 // ════════════════════════════════════════════
