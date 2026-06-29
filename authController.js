@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Report = require('./Report');
 
-// ✅ NEW: Helper to get JWT secret (no fallback)
+// Helper to get JWT secret with error handling
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
@@ -38,12 +38,11 @@ const register = async (req, res) => {
 
         const payload = { user: { id: user.id } };
         
-        // ✅ FIXED: No fallback secret
         const secret = getJwtSecret();
         jwt.sign(
             payload, 
             secret, 
-            { expiresIn: '30d' }, 
+            { expiresIn: '7d' },  // ✅ FIXED: Reduced from 30d to 7d
             (err, token) => {
                 if (err) {
                     console.error("JWT Error:", err);
@@ -62,7 +61,7 @@ const register = async (req, res) => {
     }
 };
 
-// Login user (Upgraded for Admin Detection)
+// Login user
 const login = async (req, res) => {
     const { identifier, password } = req.body;
 
@@ -98,7 +97,6 @@ const login = async (req, res) => {
             }
         }
 
-        // ✅ FIXED: No fallback secret
         const secret = getJwtSecret();
 
         // --- ADMIN LAYER 1 CHECK ---
@@ -106,7 +104,7 @@ const login = async (req, res) => {
             const layerToken = jwt.sign(
                 { user: { id: user.id }, step: 'layer2' }, 
                 secret, 
-                { expiresIn: '10m' }
+                { expiresIn: '10m' }  // ✅ Already secure
             );
             return res.json({ 
                 token: layerToken, 
@@ -121,7 +119,7 @@ const login = async (req, res) => {
         jwt.sign(
             payload, 
             secret, 
-            { expiresIn: '30d' }, 
+            { expiresIn: '7d' },  // ✅ FIXED: Reduced from 30d to 7d
             (err, token) => {
                 if (err) {
                     console.error("JWT Error:", err);
@@ -150,12 +148,11 @@ const verifyLayer2 = async (req, res) => {
         const d4 = await bcrypt.compare(dm.toLowerCase(), user.adminAns_dm);
 
         if (d1 && d2 && d3 && d4) {
-            // ✅ FIXED: No fallback secret
             const secret = getJwtSecret();
             const layerToken = jwt.sign(
                 { user: { id: user.id }, step: 'layer3' }, 
                 secret, 
-                { expiresIn: '10m' }
+                { expiresIn: '10m' }  // ✅ Already secure
             );
             return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
         }
@@ -179,10 +176,9 @@ const verifyLayer3 = async (req, res) => {
         const d4 = await bcrypt.compare(app.toLowerCase(), user.adminAns_app);
 
         if (d1 && d2 && d3 && d4) {
-            // ✅ FIXED: No fallback secret
             const secret = getJwtSecret();
             const payload = { user: { id: user.id }, isAdmin: true };
-            const token = jwt.sign(payload, secret, { expiresIn: '7d' });
+            const token = jwt.sign(payload, secret, { expiresIn: '7d' });  // ✅ Already secure
             return res.json({ token, message: 'Admin Access Granted', nextStep: 'admin-dashboard.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
