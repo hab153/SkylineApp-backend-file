@@ -24,19 +24,40 @@ async function generateAssistantResponse(userId, userMessage) {
             throw new Error('User not found');
         }
 
-        // 2. Fetch leads
+        // 2. Fetch leads (limit 50, sorted newest first)
         const leads = await Lead.find({ userId }).sort({ createdAt: -1 }).limit(50).lean();
 
-        // 3. Fetch chat history
+        // 3. Fetch chat history (last 50 messages)
         const chatHistory = await ChatMessage.find({ userId }).sort({ createdAt: -1 }).limit(50).lean();
 
-        // 4. Fetch notifications
+        // 4. Fetch unread notifications
         const notifications = await Notification.find({ userId, isRead: false }).lean();
 
-        // 5. Fetch companies
+        // 5. Fetch companies (top 20 by score)
         const companies = await Company.find({}).sort({ leadScore: -1 }).limit(20).lean();
 
-        // 6. Build context
+        // 6. Build context with enhanced business insights
+        const totalLeads = leads.length;
+        const leadsWithReplies = leads.filter(l => l.replies && l.replies.length > 0).length;
+        const replyRate = totalLeads > 0 ? Math.round((leadsWithReplies / totalLeads) * 100) : 0;
+
+        // Count industries from companies
+        const industryCounts = {};
+        companies.forEach(c => {
+            const ind = c.industry || 'Unknown';
+            industryCounts[ind] = (industryCounts[ind] || 0) + 1;
+        });
+        const topIndustries = Object.entries(industryCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([ind, count]) => `${ind} (${count})`)
+            .join(', ');
+
+        // Average lead score from companies
+        const avgScore = companies.length > 0
+            ? Math.round(companies.reduce((sum, c) => sum + (c.leadScore || 0), 0) / companies.length)
+            : 0;
+
         const context = {
             user: {
                 name: user.name || user.email || 'User',
@@ -66,13 +87,31 @@ async function generateAssistantResponse(userId, userMessage) {
                 domain: c.domain || 'No domain',
                 industry: c.industry || 'Unknown',
                 leadScore: c.leadScore || 0
-            }))
+            })),
+            // Business intelligence stats
+            stats: {
+                totalLeads,
+                leadsWithReplies,
+                replyRate,
+                topIndustries: topIndustries || 'None detected',
+                avgCompanyScore: avgScore
+            }
         };
 
-        // 7. Build system prompt
-        const systemPrompt = `You are Skyline, a personal business assistant for a lead generation platform user.
-You have COMPLETE access to the user's data. Answer questions based ONLY on the provided context below.
-If asked something outside your knowledge, say "I don't have that information in your profile."
+        // 7. Build a powerful business‑consultant system prompt
+        const systemPrompt = `You are Skyline, a senior business consultant with 20 years of experience in B2B sales, marketing, and operations.
+
+Your mission: Help the user grow their business by providing actionable, data‑driven advice based on their Skyline data.
+
+Always structure your response like this:
+1. **Diagnosis** – What is the core issue or opportunity?
+2. **Strategic Options** – What are 2–3 possible approaches?
+3. **Recommended Action** – Which option do you recommend and why?
+4. **Expected Outcomes** – What results can the user expect?
+
+Be direct, pragmatic, and use the user's actual data (leads, companies, chats) to personalise your answer. If you lack specific data, ask clarifying questions to help the user refine their question.
+
+Use bullet points and clear headings. Avoid vague advice – be specific and concrete.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 USER PROFILE
@@ -84,21 +123,29 @@ Nylas Connected: ${context.user.nylasConnected ? '✅ Yes' : '❌ No'}
 Account Created: ${new Date(context.user.createdAt).toLocaleDateString()}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DAILY USAGE
+DAILY USAGE (limits based on plan)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Chat messages: ${context.user.usage?.dailyCallCount || 0}
 Hints used: ${context.user.usage?.dailyHintCount || 0}
 Emails sent: ${context.user.usage?.dailySentCount || 0}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECENT LEADS (${context.recentLeads.length} total)
+BUSINESS INTELLIGENCE (from your data)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total leads: ${context.stats.totalLeads}
+Leads with replies: ${context.stats.leadsWithReplies} (${context.stats.replyRate}% reply rate)
+Top industries: ${context.stats.topIndustries}
+Average company score: ${context.stats.avgCompanyScore}/100
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RECENT LEADS (${context.recentLeads.length} shown)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${context.recentLeads.length > 0 ? context.recentLeads.map((l, i) => 
-    `${i+1}. ${l.name} (${l.company}) - ${l.email}\n   Status: ${l.status} | Replies: ${l.replies}`
+    `${i+1}. ${l.name} (${l.company}) – ${l.email}\n   Status: ${l.status} | Replies: ${l.replies}`
 ).join('\n') : 'No leads found yet.'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECENT CHATS (${context.recentChats.length} total)
+RECENT CHATS (${context.recentChats.length} shown)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${context.recentChats.length > 0 ? context.recentChats.map((c, i) => 
     `${i+1}. ${c.role.toUpperCase()}: ${c.content}`
@@ -109,30 +156,31 @@ UNREAD NOTIFICATIONS: ${context.unreadNotifications}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RECENT COMPANIES (${context.recentCompanies.length} total)
+RECENT COMPANIES (${context.recentCompanies.length} shown)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ${context.recentCompanies.length > 0 ? context.recentCompanies.map((c, i) => 
-    `${i+1}. ${c.name} (${c.domain}) - ${c.industry} - Score: ${c.leadScore}`
+    `${i+1}. ${c.name} (${c.domain}) – ${c.industry} – Score: ${c.leadScore}`
 ).join('\n') : 'No companies discovered yet.'}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 INSTRUCTIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Be concise and helpful. Use bullet points when listing multiple items.
-2. If asked about leads, summarize from the recent leads list above.
-3. If asked about plan/limits, use the usage data above.
-4. If asked about notifications, tell them how many unread they have.
-5. Always maintain a professional, friendly, and helpful tone.
-6. If asked something you cannot answer from the data, say: "I don't have that information in your profile."`;
+1. Always follow the Diagnosis → Options → Recommendation → Outcomes structure.
+2. Use the user's actual data to back your advice. If a lead or company is mentioned, refer to it by name.
+3. If the user asks about improving their outreach, suggest specific tactics based on their lead quality and reply rates.
+4. If they ask about their plan or limits, reference the usage data and offer upgrade suggestions if appropriate.
+5. If you need more context, ask a clarifying question before giving advice.
+6. Maintain a professional, direct, and helpful tone. Avoid fluff – be concise and actionable.
+7. If asked something completely outside your data, say: "I don't have enough information to answer that, but I can help you with your business data."`;
 
-        // 8. Call OpenAI
+        // 8. Call OpenAI with a higher token limit for thoughtful reasoning
         const response = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
+            model: 'gpt-4o-mini', // you can switch to 'gpt-4o' if you need deeper reasoning
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userMessage }
             ],
-            max_tokens: 800,
+            max_tokens: 1200,       // increased to allow longer structured responses
             temperature: 0.7
         });
 
@@ -145,5 +193,4 @@ INSTRUCTIONS
     }
 }
 
-// EXPORT - MAKE SURE THIS IS CORRECT
 module.exports = { generateAssistantResponse };
