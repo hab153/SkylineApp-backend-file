@@ -49,6 +49,9 @@ const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
 
+// Import auth controller functions for logout and revoke
+const { logout, revokeAllTokens } = require('./authController');
+
 dotenv.config();
 const app = express();
 
@@ -109,6 +112,11 @@ mongoose.connect(process.env.MONGODB_URI, {
 //  ROUTES
 // ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
+
+// ✅ NEW: Logout & Revoke routes
+app.post('/api/auth/logout', verifyToken, logout);
+app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
+
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
