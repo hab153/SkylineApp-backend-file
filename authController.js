@@ -3,7 +3,7 @@ const ChatMessage = require('./ChatMessage');
 const Notification = require('./Notification');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto'); // ✅ NEW: for reset token generation
+const crypto = require('crypto');
 const Report = require('./Report');
 
 // Helper to get JWT secret with error handling
@@ -185,7 +185,86 @@ const revokeAllTokens = async (req, res) => {
     }
 };
 
-// ✅ NEW: Forgot Password – Generate reset token and send email
+// ✅ NEW: Verify email exists
+const verifyEmail = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        if (!user) {
+            return res.status(404).json({ message: 'Email not found. Please try again.' });
+        }
+
+        res.json({ success: true, message: 'Email verified' });
+    } catch (err) {
+        console.error('❌ [VERIFY EMAIL] Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// ✅ NEW: Verify username matches email
+const verifyUsername = async (req, res) => {
+    try {
+        const { email, username } = req.body;
+        if (!email || !username) {
+            return res.status(400).json({ message: 'Email and username are required' });
+        }
+
+        const user = await User.findOne({ 
+            email: email.toLowerCase().trim(),
+            username: username.trim()
+        });
+
+        if (!user) {
+            return res.status(400).json({ message: 'Username does not match. Please try again.' });
+        }
+
+        res.json({ success: true, message: 'Username verified' });
+    } catch (err) {
+        console.error('❌ [VERIFY USERNAME] Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// ✅ NEW: Reset password using email + username (no email sending)
+const resetPasswordEmailUsername = async (req, res) => {
+    try {
+        const { email, username, newPassword } = req.body;
+        if (!email || !username || !newPassword) {
+            return res.status(400).json({ message: 'Email, username, and new password are required' });
+        }
+
+        if (newPassword.length < 8) {
+            return res.status(400).json({ message: 'Password must be at least 8 characters' });
+        }
+
+        const user = await User.findOne({ 
+            email: email.toLowerCase().trim(),
+            username: username.trim()
+        });
+
+        if (!user) {
+            return res.status(400).json({ message: 'Invalid email or username' });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        user.password = hashedPassword;
+        await user.revokeTokens(); // Revoke all existing sessions
+        await user.save();
+
+        res.json({ message: 'Password reset successfully. Please log in with your new password.' });
+    } catch (err) {
+        console.error('❌ [RESET PASSWORD] Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// Forgot Password (kept for backward compatibility / email flow)
 const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
@@ -195,22 +274,16 @@ const forgotPassword = async (req, res) => {
 
         const user = await User.findOne({ email: email.toLowerCase().trim() });
         if (!user) {
-            // For security, don't reveal if email exists
             return res.json({ 
                 message: 'If an account exists with this email, a reset link has been sent.' 
             });
         }
 
-        // Generate reset token
         const plainToken = await user.generateResetToken();
-
-        // Build reset URL
         const frontendUrl = process.env.FRONTEND_URL || 'https://skylineapp-backend-file.onrender.com';
         const resetUrl = `${frontendUrl}/reset-password.html?token=${plainToken}`;
 
-        // Send email
         try {
-            // Try to use Nylas if user has connected email
             if (user.nylasIntegration && user.nylasIntegration.isConnected) {
                 const { sendEmail } = require('./nylasService');
                 await sendEmail({
@@ -221,13 +294,10 @@ const forgotPassword = async (req, res) => {
                 });
                 console.log(`📧 [PASSWORD RESET] Email sent to ${user.email}`);
             } else {
-                // Fallback: Log the reset link (for development)
                 console.log(`📧 [PASSWORD RESET] Reset link for ${user.email}: ${resetUrl}`);
-                console.log(`📧 [PASSWORD RESET] User does not have Nylas connected. Please set up Nylas for production.`);
             }
         } catch (emailErr) {
             console.error('❌ [PASSWORD RESET] Email send error:', emailErr.message);
-            // Still return success to user (security: don't reveal internal errors)
         }
 
         res.json({ 
@@ -240,7 +310,7 @@ const forgotPassword = async (req, res) => {
     }
 };
 
-// ✅ NEW: Reset Password – Verify token and update password
+// Reset Password with token (kept for backward compatibility)
 const resetPassword = async (req, res) => {
     try {
         const { token, newPassword } = req.body;
@@ -252,10 +322,8 @@ const resetPassword = async (req, res) => {
             return res.status(400).json({ message: 'Password must be at least 8 characters' });
         }
 
-        // Hash the token to compare with stored hash
         const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
 
-        // Find user with valid reset token
         const user = await User.findOne({
             resetToken: hashedToken,
             resetTokenExpiry: { $gt: new Date() }
@@ -265,18 +333,13 @@ const resetPassword = async (req, res) => {
             return res.status(400).json({ message: 'Invalid or expired reset token' });
         }
 
-        // Hash new password
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(newPassword, salt);
 
-        // Update password and clear reset token
         user.password = hashedPassword;
         user.resetToken = null;
         user.resetTokenExpiry = null;
-
-        // Increment token version to revoke all existing sessions
         await user.revokeTokens();
-
         await user.save();
 
         res.json({ message: 'Password reset successfully. Please log in with your new password.' });
@@ -446,8 +509,11 @@ module.exports = {
     login,
     logout,
     revokeAllTokens,
-    forgotPassword,    // ✅ NEW
-    resetPassword,     // ✅ NEW
+    verifyEmail,                  // ✅ NEW
+    verifyUsername,               // ✅ NEW
+    resetPasswordEmailUsername,   // ✅ NEW
+    forgotPassword,
+    resetPassword,
     verifyAge,
     changeEmail,
     verifyLayer2,
