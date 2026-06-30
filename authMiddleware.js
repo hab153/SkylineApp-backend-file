@@ -27,14 +27,19 @@ const verifyToken = async (req, res, next) => {
         
         const userId = decoded.user.id;
         
-        // ✅ Check if this is a layer token (admin verification steps)
+        // ✅ Check if this is a special token (layer token or admin token)
         const isLayerToken = decoded.step && ['layer2', 'layer3'].includes(decoded.step);
+        const isAdminToken = decoded.isAdmin === true;
         
-        if (isLayerToken) {
-            // Layer tokens: skip tokenVersion check
-            console.log('🔑 [AUTH] Layer token verified (step:', decoded.step, ')');
+        if (isLayerToken || isAdminToken) {
+            // Special tokens: skip tokenVersion check
+            if (isLayerToken) {
+                console.log('🔑 [AUTH] Layer token verified (step:', decoded.step, ')');
+                req.layerStep = decoded.step;
+            } else {
+                console.log('🔑 [AUTH] Admin token verified (isAdmin: true)');
+            }
             req.userId = userId;
-            req.layerStep = decoded.step;
             return next();
         }
         
