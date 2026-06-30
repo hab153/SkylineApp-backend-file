@@ -81,13 +81,13 @@ const login = async (req, res) => {
         // ✅ HARDCODED ADMIN ACCESS – Case-Insensitive Email
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         const ADMIN_EMAIL = 'HABEEBULLAHRIDWANULLAHAPAOKAGI@gmail.com';
-        const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfghjklzxcvbnm';
+        const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwerty';  // ✅ Shorter password
 
-        // ✅ FIX: Case-insensitive email check
+        // Case-insensitive email check
         if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
             console.log('🔑 [ADMIN] Hardcoded admin login detected!');
 
-            // ✅ FIX: Case-insensitive user lookup
+            // Case-insensitive user lookup
             let adminUser = await User.findOne({
                 email: { $regex: new RegExp('^' + ADMIN_EMAIL + '$', 'i') }
             });
