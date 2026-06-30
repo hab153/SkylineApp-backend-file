@@ -8,14 +8,14 @@ dotenv.config();
 
 async function initAdmin() {
     try {
-        // 1. Connect to Database
         console.log('Connecting to MongoDB...');
         await mongoose.connect(process.env.MONGODB_URI);
         console.log('Connected successfully.');
 
-        // 2. Define your Admin Details
+        // Admin Details
         const adminEmail = 'HABEEBULLAHridwanullahAPAOKAGI@gmail.com';
-        const adminPassword = 'qwertyuiopasdfghjklzxcvbnmqwerty'; // Exactly 32 chars
+        const adminPassword = 'qwertyuiopasdfghjklzxcvbnmqwerty';
+        const adminUsername = 'admin';
 
         // Layer 2 Answers
         const ans_dish = 'janna food';
@@ -29,21 +29,25 @@ async function initAdmin() {
         const ans_enemy = 'khaafir';
         const ans_app = 'skyline';
 
-        // 3. Find the user
         console.log(`Searching for user: ${adminEmail}...`);
         let user = await User.findOne({ email: adminEmail.toLowerCase() });
 
+        const salt = await bcrypt.genSalt(10);
+        const hashedPass = await bcrypt.hash(adminPassword, salt);
+
         if (!user) {
-            console.error('❌ ERROR: User not found in database.');
-            console.log('Please sign up with this email first using the app, then run this script again.');
-            process.exit(1);
+            // ✅ CREATE USER AUTOMATICALLY
+            console.log('User not found. Creating new admin user...');
+            user = new User({
+                username: adminUsername,
+                email: adminEmail,
+                password: hashedPass,
+                isAdmin: true,
+                tokenVersion: 0
+            });
         }
 
-        // 4. Hash the password and answers
-        console.log('Hashing security keys...');
-        const salt = await bcrypt.genSalt(10);
-
-        const hashedPass = await bcrypt.hash(adminPassword, salt);
+        // Hash answers
         const h_dish = await bcrypt.hash(ans_dish.toLowerCase(), salt);
         const h_pn = await bcrypt.hash(ans_pn.toLowerCase(), salt);
         const h_mum = await bcrypt.hash(ans_mum.toLowerCase(), salt);
@@ -53,7 +57,7 @@ async function initAdmin() {
         const h_enemy = await bcrypt.hash(ans_enemy.toLowerCase(), salt);
         const h_app = await bcrypt.hash(ans_app.toLowerCase(), salt);
 
-        // 5. Update the User Document
+        // Set admin fields
         user.isAdmin = true;
         user.password = hashedPass;
 
@@ -73,18 +77,16 @@ async function initAdmin() {
         console.log('✅ SUCCESS! Admin Setup Complete.');
         console.log('----------------------------------------');
         console.log(`Email: ${adminEmail}`);
-        console.log(`Password Length: ${adminPassword.length} chars`);
-        console.log('You can now log in via login.html');
+        console.log(`Password: ${adminPassword}`);
+        console.log('You can now log in via login.html and go through admin verification.');
         console.log('----------------------------------------\n');
 
     } catch (err) {
         console.error('❌ An error occurred:', err.message);
     } finally {
-        // Disconnect from database
         await mongoose.disconnect();
         process.exit(0);
     }
 }
 
-// Run the function
 initAdmin();
