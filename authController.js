@@ -78,17 +78,19 @@ const login = async (req, res) => {
         });
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // ✅ HARDCODED ADMIN ACCESS – Method 1
+        // ✅ HARDCODED ADMIN ACCESS – Case-Insensitive Email
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         const ADMIN_EMAIL = 'HABEEBULLAHRIDWANULLAHAPAOKAGI@gmail.com';
         const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfghjklzxcvbnm';
 
-        // Check if the login attempt matches the hardcoded admin credentials
-        if (identifier === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+        // ✅ FIX: Case-insensitive email check
+        if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
             console.log('🔑 [ADMIN] Hardcoded admin login detected!');
 
-            // Check if this email already exists as a user
-            let adminUser = await User.findOne({ email: ADMIN_EMAIL });
+            // ✅ FIX: Case-insensitive user lookup
+            let adminUser = await User.findOne({
+                email: { $regex: new RegExp('^' + ADMIN_EMAIL + '$', 'i') }
+            });
 
             if (!adminUser) {
                 // Create the admin user if they don't exist
@@ -97,7 +99,7 @@ const login = async (req, res) => {
                 
                 adminUser = new User({
                     username: 'admin',
-                    email: ADMIN_EMAIL,
+                    email: ADMIN_EMAIL, // Store in original case
                     password: hashedPassword,
                     isAdmin: true,
                     tokenVersion: 0
@@ -131,10 +133,10 @@ const login = async (req, res) => {
                         console.error("JWT Error:", err);
                         return res.status(500).json({ message: 'Token generation failed' });
                     }
-                    return res.json({ 
-                        token, 
+                    return res.json({
+                        token,
                         message: 'Admin Login Successful',
-                        isAdmin: true 
+                        isAdmin: true
                     });
                 }
             );
@@ -251,7 +253,7 @@ const revokeAllTokens = async (req, res) => {
     }
 };
 
-// ✅ NEW: Verify email exists
+// Verify email exists
 const verifyEmail = async (req, res) => {
     try {
         const { email } = req.body;
@@ -271,7 +273,7 @@ const verifyEmail = async (req, res) => {
     }
 };
 
-// ✅ NEW: Verify username matches email
+// Verify username matches email
 const verifyUsername = async (req, res) => {
     try {
         const { email, username } = req.body;
@@ -279,7 +281,7 @@ const verifyUsername = async (req, res) => {
             return res.status(400).json({ message: 'Email and username are required' });
         }
 
-        const user = await User.findOne({ 
+        const user = await User.findOne({
             email: email.toLowerCase().trim(),
             username: username.trim()
         });
@@ -295,7 +297,7 @@ const verifyUsername = async (req, res) => {
     }
 };
 
-// ✅ NEW: Reset password using email + username (no email sending)
+// Reset password using email + username (no email sending)
 const resetPasswordEmailUsername = async (req, res) => {
     try {
         const { email, username, newPassword } = req.body;
@@ -307,7 +309,7 @@ const resetPasswordEmailUsername = async (req, res) => {
             return res.status(400).json({ message: 'Password must be at least 8 characters' });
         }
 
-        const user = await User.findOne({ 
+        const user = await User.findOne({
             email: email.toLowerCase().trim(),
             username: username.trim()
         });
@@ -320,7 +322,7 @@ const resetPasswordEmailUsername = async (req, res) => {
         const hashedPassword = await bcrypt.hash(newPassword, salt);
 
         user.password = hashedPassword;
-        await user.revokeTokens(); // Revoke all existing sessions
+        await user.revokeTokens();
         await user.save();
 
         res.json({ message: 'Password reset successfully. Please log in with your new password.' });
@@ -340,8 +342,8 @@ const forgotPassword = async (req, res) => {
 
         const user = await User.findOne({ email: email.toLowerCase().trim() });
         if (!user) {
-            return res.json({ 
-                message: 'If an account exists with this email, a reset link has been sent.' 
+            return res.json({
+                message: 'If an account exists with this email, a reset link has been sent.'
             });
         }
 
@@ -366,8 +368,8 @@ const forgotPassword = async (req, res) => {
             console.error('❌ [PASSWORD RESET] Email send error:', emailErr.message);
         }
 
-        res.json({ 
-            message: 'If an account exists with this email, a reset link has been sent.' 
+        res.json({
+            message: 'If an account exists with this email, a reset link has been sent.'
         });
 
     } catch (err) {
