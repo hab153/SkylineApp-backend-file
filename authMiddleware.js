@@ -26,16 +26,27 @@ const verifyToken = async (req, res, next) => {
         const decoded = jwt.verify(token, secret);
         
         const userId = decoded.user.id;
-        const tokenVersion = decoded.user.tokenVersion;
         
-        // ✅ NEW: Verify token version matches user's current version
+        // ✅ Check if this is a layer token (admin verification steps)
+        const isLayerToken = decoded.step && ['layer2', 'layer3'].includes(decoded.step);
+        
+        if (isLayerToken) {
+            // Layer tokens: skip tokenVersion check
+            console.log('🔑 [AUTH] Layer token verified (step:', decoded.step, ')');
+            req.userId = userId;
+            req.layerStep = decoded.step;
+            return next();
+        }
+        
+        // Normal token: verify tokenVersion matches user's current version
         const user = await User.findById(userId).select('tokenVersion');
         if (!user) {
             console.error('❌ [AUTH] User not found');
             return res.status(401).json({ message: 'User not found' });
         }
         
-        // If tokenVersion in token doesn't match user's current tokenVersion, token is revoked
+        const tokenVersion = decoded.user.tokenVersion;
+        
         if (tokenVersion !== user.tokenVersion) {
             console.error('❌ [AUTH] Token revoked - version mismatch',
                 'token:', tokenVersion,
