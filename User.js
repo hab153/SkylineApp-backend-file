@@ -66,7 +66,7 @@ const UserSchema = new mongoose.Schema({
         default: 0
     },
 
-    // ✅ NEW: Password reset fields
+    // Password reset fields
     resetToken: {
         type: String,
         default: null,
@@ -141,10 +141,13 @@ const UserSchema = new mongoose.Schema({
     }
 });
 
-// Update the updatedAt field on save
+// ✅ FIXED: Pre-save hook with proper `next` parameter
 UserSchema.pre('save', function(next) {
     this.updatedAt = Date.now();
-    next();
+    // Call next to continue the save operation
+    if (typeof next === 'function') {
+        next();
+    }
 });
 
 // Method to check if user has active pro subscription
@@ -200,7 +203,7 @@ UserSchema.methods.revokeTokens = async function() {
     return this.tokenVersion;
 };
 
-// ✅ NEW: Generate password reset token
+// Generate password reset token
 UserSchema.methods.generateResetToken = async function() {
     const resetToken = crypto.randomBytes(32).toString('hex');
     this.resetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
@@ -209,7 +212,7 @@ UserSchema.methods.generateResetToken = async function() {
     return resetToken; // Return plain token for email
 };
 
-// ✅ NEW: Verify reset token
+// Verify reset token
 UserSchema.methods.verifyResetToken = function(token) {
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
     if (this.resetToken !== hashedToken) return false;
@@ -217,7 +220,7 @@ UserSchema.methods.verifyResetToken = function(token) {
     return true;
 };
 
-// ✅ NEW: Clear reset token after use
+// Clear reset token after use
 UserSchema.methods.clearResetToken = async function() {
     this.resetToken = null;
     this.resetTokenExpiry = null;
