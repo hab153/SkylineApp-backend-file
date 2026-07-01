@@ -1,11 +1,12 @@
 const { v4: uuidv4 } = require('uuid');
 const ChatMessage = require('./ChatMessage');
-const Session = require('./Session'); // <-- NEW
+const Session = require('./Session');
 const User = require('./User');
 const freeAI = require('./Free');
 const goAI = require('./Go');
 const { generateBusinessResponse } = require('./businessAI');
 const { freeQueue, goQueue, proQueue } = require('./requestQueue');
+const { isValidObjectId, sanitizeQuery, sanitizeString, sanitizeObject } = require('./sanitize');
 
 // Helper to handle queue errors and send friendly messages
 const handleQueueError = (error, res) => {
@@ -21,9 +22,19 @@ const handleQueueError = (error, res) => {
 
 // POST /api/chat
 const sendMessage = async (req, res) => {
-    const { message, history, sessionId } = req.body;
+    let { message, history, sessionId } = req.body;
     const userId = req.userId;
     if (!message) return res.status(400).json({ message: 'Message is required' });
+    
+    // Sanitize user message
+    message = sanitizeString(message);
+    if (history && Array.isArray(history)) {
+        history = history.map(h => ({
+            role: h.role,
+            content: sanitizeString(h.content)
+        }));
+    }
+    
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
@@ -38,11 +49,9 @@ const sendMessage = async (req, res) => {
             title: message.substring(0, 30) + '...'
         });
 
-        // --- NEW: Create/Update Session metadata ---
-        // Check if session already exists
+        // --- Create/Update Session metadata ---
         const existingSession = await Session.findOne({ userId, sessionId: currentSessionId });
         if (!existingSession) {
-            // Create new session with type 'lead'
             await Session.create({
                 userId,
                 sessionId: currentSessionId,
@@ -51,7 +60,6 @@ const sendMessage = async (req, res) => {
                 updatedAt: new Date()
             });
         } else {
-            // Update updatedAt
             await Session.findOneAndUpdate(
                 { userId, sessionId: currentSessionId },
                 { updatedAt: new Date() }
@@ -98,6 +106,9 @@ const submitFeedback = async (req, res) => {
     try {
         const { messageId, type } = req.body;
         if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });
+        if (!isValidObjectId(messageId)) {
+            return res.status(400).json({ message: 'Invalid message ID' });
+        }
         const message = await ChatMessage.findById(messageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
         if (message.userId.toString() !== req.userId) return res.status(403).json({ message: 'Unauthorized' });
@@ -105,6 +116,7 @@ const submitFeedback = async (req, res) => {
         await message.save();
         res.json({ success: true, feedback: message.feedback });
     } catch (err) {
+        console.error('Submit feedback error:', err);
         res.status(500).json({ message: 'Server Error saving feedback' });
     }
 };
@@ -113,11 +125,14 @@ const submitFeedback = async (req, res) => {
 const getSessions = async (req, res) => {
     try {
         const userId = req.userId;
-        const sessions = await Session.find({ userId })
+        if (!isValidObjectId(userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        const query = sanitizeQuery({ userId });
+        const sessions = await Session.find(query)
             .sort({ pinned: -1, updatedAt: -1 })
             .lean();
 
-        // Get message count for each session
         const sessionsWithCounts = await Promise.all(sessions.map(async (session) => {
             const count = await ChatMessage.countDocuments({
                 userId,
@@ -143,18 +158,31 @@ const getSessions = async (req, res) => {
 // GET /api/history/:sessionId
 const getHistory = async (req, res) => {
     try {
-        const messages = await ChatMessage.find({ userId: req.userId, sessionId: req.params.sessionId }).sort({ createdAt: 1 });
+        const { sessionId } = req.params;
+        if (!sessionId || typeof sessionId !== 'string') {
+            return res.status(400).json({ message: 'Invalid session ID' });
+        }
+        const userId = req.userId;
+        if (!isValidObjectId(userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        // Sanitize sessionId string
+        const sanitizedSessionId = sanitizeString(sessionId);
+        const query = sanitizeQuery({ userId, sessionId: sanitizedSessionId });
+        const messages = await ChatMessage.find(query).sort({ createdAt: 1 });
         res.json(messages);
     } catch (error) {
+        console.error('Get history error:', error);
         res.status(500).json({ message: 'Server Error fetching history' });
     }
 };
 
 // POST /api/dreams/analyze (pro feature)
 const analyzeDream = async (req, res) => {
-    const { dream, sessionId } = req.body;
+    let { dream, sessionId } = req.body;
     const userId = req.userId;
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
+    dream = sanitizeString(dream);
     const currentSessionId = sessionId || uuidv4();
     try {
         await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' });
@@ -182,9 +210,11 @@ const analyzeDream = async (req, res) => {
 
 // POST /api/dreams/refine (pro feature)
 const refineDream = async (req, res) => {
-    const { followUpAnswer, dreamDescription, sessionId } = req.body;
+    let { followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
     if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
+    followUpAnswer = sanitizeString(followUpAnswer);
+    dreamDescription = sanitizeString(dreamDescription);
     const currentSessionId = sessionId || uuidv4();
     try {
         await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer });
