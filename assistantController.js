@@ -3,6 +3,7 @@ const { generateAssistantResponse } = require('./assist');
 const ChatMessage = require('./ChatMessage');
 const User = require('./User');
 const Session = require('./Session');
+const { sanitizeString, isValidObjectId } = require('./sanitize');
 
 /**
  * Handle POST /api/assistant requests
@@ -12,14 +13,15 @@ async function assistantChat(req, res) {
         console.log('[Assistant] Request received from user:', req.userId);
 
         const userId = req.userId;
-        if (!userId) {
+        if (!userId || !isValidObjectId(userId)) {
             return res.status(401).json({ error: 'Unauthorized. Please log in again.' });
         }
 
-        const { message, sessionId } = req.body; // <-- accept sessionId from frontend
+        let { message, sessionId } = req.body;
         if (!message || typeof message !== 'string' || message.trim().length === 0) {
             return res.status(400).json({ error: 'Message is required and cannot be empty.' });
         }
+        message = sanitizeString(message);
 
         const user = req.userDoc;
         const remaining = req.assistantRemaining || 0;
@@ -40,7 +42,6 @@ async function assistantChat(req, res) {
         // Ensure Session record exists for this assistant conversation
         const existingSession = await Session.findOne({ userId, sessionId: currentSessionId });
         if (!existingSession) {
-            // If this is the first message, create the session with a title from the user's message
             const title = message.substring(0, 50) || 'Assistant Chat';
             await Session.create({
                 userId,
@@ -50,7 +51,6 @@ async function assistantChat(req, res) {
                 updatedAt: new Date()
             });
         } else {
-            // Update the updatedAt timestamp
             await Session.findOneAndUpdate(
                 { userId, sessionId: currentSessionId },
                 { updatedAt: new Date() }
@@ -83,7 +83,7 @@ async function assistantChat(req, res) {
         return res.json({
             response: response,
             remaining: remaining - 1,
-            sessionId: currentSessionId // return the sessionId to the frontend
+            sessionId: currentSessionId
         });
 
     } catch (error) {
