@@ -1,10 +1,14 @@
 const bcrypt = require('bcryptjs');
 const User = require('./User');
 const { changeEmail, verifyAge, deleteAccount } = require('./authController');
+const { isValidObjectId, sanitizeObject } = require('./sanitize');
 
 // GET /api/users/me
 const getUserProfile = async (req, res) => {
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         const user = await User.findById(req.userId).select('-password');
         if (!user) return res.status(404).json({ message: 'User not found' });
         res.json(user);
@@ -16,7 +20,12 @@ const getUserProfile = async (req, res) => {
 // PUT /api/users/me
 const updateUserProfile = async (req, res) => {
     try {
-        const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = req.body;
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        // Sanitize the update data
+        const sanitizedBody = sanitizeObject(req.body);
+        const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = sanitizedBody;
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         if (fullName) user.fullName = fullName;
@@ -37,6 +46,9 @@ const updateUserProfile = async (req, res) => {
 const changePassword = async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const isMatch = await bcrypt.compare(currentPassword, user.password);
