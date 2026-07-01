@@ -1,34 +1,42 @@
 // followUpController.js
 const Lead = require('./Lead');
 const { generateFollowUpSuggestion } = require('./followUpAI');
+const { isValidObjectId, sanitizeObject } = require('./sanitize');
 
 // POST /api/leads/:leadId/auto-follow-up (toggle auto follow-up on/off)
 const toggleAutoFollowUp = async (req, res) => {
     try {
         const { leadId } = req.params;
-        const { enabled, delayDays } = req.body;
+        let { enabled, delayDays } = req.body;
+        
+        if (!isValidObjectId(leadId)) {
+            return res.status(400).json({ message: 'Invalid lead ID' });
+        }
+        if (typeof enabled !== 'boolean') {
+            return res.status(400).json({ message: 'Enabled must be a boolean' });
+        }
+        
+        // Sanitize delayDays
+        delayDays = delayDays && typeof delayDays === 'number' && delayDays > 0 ? Math.floor(delayDays) : 3;
+        if (delayDays > 30) delayDays = 30; // cap at 30 days
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
         if (enabled === true) {
-            // Use user object attached by middleware (checkAutoFollowUpLimit)
             const user = req.userWithAutoLimit;
             if (!user) {
-                // Fallback – should not happen because middleware already ran
                 return res.status(500).json({ message: 'User not found in request' });
             }
 
-            const days = (delayDays && typeof delayDays === 'number' && delayDays > 0) ? delayDays : 3;
             const scheduledDate = new Date();
-            scheduledDate.setDate(scheduledDate.getDate() + days);
+            scheduledDate.setDate(scheduledDate.getDate() + delayDays);
             
             lead.autoFollowUpEnabled = true;
             lead.followUpScheduledDate = scheduledDate;
             lead.followUpCount = 0;
             await lead.save();
 
-            // Increment daily auto follow-up counter
             if (!user.usage) user.usage = {};
             user.usage.dailyAutoFollowUpCount = (user.usage.dailyAutoFollowUpCount || 0) + 1;
             await user.save();
@@ -37,10 +45,9 @@ const toggleAutoFollowUp = async (req, res) => {
                 success: true, 
                 autoFollowUpEnabled: true, 
                 followUpScheduledDate: scheduledDate,
-                message: `Auto follow-up enabled. First follow-up scheduled in ${days} day(s).`
+                message: `Auto follow-up enabled. First follow-up scheduled in ${delayDays} day(s).`
             });
         } else {
-            // Disable
             lead.autoFollowUpEnabled = false;
             lead.followUpScheduledDate = null;
             await lead.save();
@@ -60,6 +67,9 @@ const toggleAutoFollowUp = async (req, res) => {
 const suggestFollowUp = async (req, res) => {
     try {
         const { leadId } = req.params;
+        if (!isValidObjectId(leadId)) {
+            return res.status(400).json({ message: 'Invalid lead ID' });
+        }
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
@@ -71,19 +81,19 @@ const suggestFollowUp = async (req, res) => {
             });
         }
 
+        // Sanitize messages (already stored, but we can ensure)
         const formattedMessages = messages.slice(-3).map(msg => ({
             from: msg.from,
-            content: msg.content,
+            content: msg.content ? msg.content.replace(/<[^>]*>?/gm, '').substring(0, 500) : '',
             date: msg.date
         }));
 
         const suggestion = await generateFollowUpSuggestion(
             formattedMessages,
-            lead.name,
+            lead.name || 'the prospect',
             lead.company || 'the team'
         );
 
-        // Increment daily suggest follow-up counter
         const user = req.userWithSuggestLimit;
         if (user) {
             if (!user.usage) user.usage = {};
@@ -107,6 +117,9 @@ const suggestFollowUp = async (req, res) => {
 const getFollowUpStatus = async (req, res) => {
     try {
         const { leadId } = req.params;
+        if (!isValidObjectId(leadId)) {
+            return res.status(400).json({ message: 'Invalid lead ID' });
+        }
 
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
