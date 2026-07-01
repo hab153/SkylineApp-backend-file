@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Report = require('./Report');
+const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername } = require('./sanitize');
 
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
@@ -13,9 +14,14 @@ const getJwtSecret = () => {
 };
 
 const register = async (req, res) => {
-    const { username, email, password } = req.body;
+    // Input is already validated by Joi, but we sanitize the username/email anyway
+    let { username, email, password } = req.body;
+    username = sanitizeUsername(username);
+    email = sanitizeEmail(email);
     try {
-        let user = await User.findOne({ $or: [{ email }, { username }] });
+        // Sanitize the query
+        const query = sanitizeQuery({ $or: [{ email }, { username }] });
+        let user = await User.findOne(query);
         if (user) { return res.status(400).json({ message: 'User with this email or username already exists' }); }
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
@@ -35,11 +41,10 @@ const register = async (req, res) => {
 };
 
 const login = async (req, res) => {
-    const { identifier, password } = req.body;
+    let { identifier, password } = req.body;
+    identifier = identifier ? identifier.trim() : '';
     try {
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // ✅ HARDCODED ADMIN ACCESS – Case-Insensitive Email
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Hardcoded admin access (keep as is)
         const ADMIN_EMAIL = 'HABEEBULLAHRIDWANULLAHAPAOKAGI@gmail.com';
         const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwerty';
         if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
@@ -62,8 +67,15 @@ const login = async (req, res) => {
             });
             return;
         }
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        let user = await User.findOne({ $or: [{ email: identifier }, { username: identifier }] });
+
+        // Sanitize query
+        const query = sanitizeQuery({
+            $or: [
+                { email: identifier },
+                { username: identifier }
+            ]
+        });
+        let user = await User.findOne(query);
         if (!user) { return res.status(400).json({ message: 'Invalid Credentials' }); }
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) { return res.status(400).json({ message: 'Invalid Credentials' }); }
@@ -88,6 +100,9 @@ const login = async (req, res) => {
 
 const logout = async (req, res) => {
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         const user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
@@ -97,6 +112,9 @@ const logout = async (req, res) => {
 
 const revokeAllTokens = async (req, res) => {
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         const user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
@@ -108,7 +126,8 @@ const verifyEmail = async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) { return res.status(400).json({ message: 'Email is required' }); }
-        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        const sanitizedEmail = sanitizeEmail(email);
+        const user = await User.findOne({ email: sanitizedEmail });
         if (!user) { return res.status(404).json({ message: 'Email not found. Please try again.' }); }
         res.json({ success: true, message: 'Email verified' });
     } catch (err) { console.error('❌ [VERIFY EMAIL] Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
@@ -118,7 +137,9 @@ const verifyUsername = async (req, res) => {
     try {
         const { email, username } = req.body;
         if (!email || !username) { return res.status(400).json({ message: 'Email and username are required' }); }
-        const user = await User.findOne({ email: email.toLowerCase().trim(), username: username.trim() });
+        const sanitizedEmail = sanitizeEmail(email);
+        const sanitizedUsername = sanitizeUsername(username);
+        const user = await User.findOne({ email: sanitizedEmail, username: sanitizedUsername });
         if (!user) { return res.status(400).json({ message: 'Username does not match. Please try again.' }); }
         res.json({ success: true, message: 'Username verified' });
     } catch (err) { console.error('❌ [VERIFY USERNAME] Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
@@ -129,7 +150,10 @@ const resetPasswordEmailUsername = async (req, res) => {
         const { email, username, newPassword } = req.body;
         if (!email || !username || !newPassword) { return res.status(400).json({ message: 'Email, username, and new password are required' }); }
         if (newPassword.length < 8) { return res.status(400).json({ message: 'Password must be at least 8 characters' }); }
-        const user = await User.findOne({ email: email.toLowerCase().trim(), username: username.trim() });
+        const sanitizedEmail = sanitizeEmail(email);
+        const sanitizedUsername = sanitizeUsername(username);
+        const query = sanitizeQuery({ email: sanitizedEmail, username: sanitizedUsername });
+        const user = await User.findOne(query);
         if (!user) { return res.status(400).json({ message: 'Invalid email or username' }); }
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(newPassword, salt);
@@ -144,7 +168,8 @@ const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) { return res.status(400).json({ message: 'Email is required' }); }
-        const user = await User.findOne({ email: email.toLowerCase().trim() });
+        const sanitizedEmail = sanitizeEmail(email);
+        const user = await User.findOne({ email: sanitizedEmail });
         if (!user) { return res.json({ message: 'If an account exists with this email, a reset link has been sent.' }); }
         const plainToken = await user.generateResetToken();
         const frontendUrl = process.env.FRONTEND_URL || 'https://skylineapp-backend-file.onrender.com';
@@ -166,7 +191,8 @@ const resetPassword = async (req, res) => {
         if (!token || !newPassword) { return res.status(400).json({ message: 'Token and new password are required' }); }
         if (newPassword.length < 8) { return res.status(400).json({ message: 'Password must be at least 8 characters' }); }
         const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
-        const user = await User.findOne({ resetToken: hashedToken, resetTokenExpiry: { $gt: new Date() } });
+        const query = sanitizeQuery({ resetToken: hashedToken, resetTokenExpiry: { $gt: new Date() } });
+        const user = await User.findOne(query);
         if (!user) { return res.status(400).json({ message: 'Invalid or expired reset token' }); }
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(newPassword, salt);
@@ -182,6 +208,9 @@ const resetPassword = async (req, res) => {
 const verifyLayer2 = async (req, res) => {
     const { dish, pn, mum, dm } = req.body;
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const d1 = await bcrypt.compare(dish.toLowerCase(), user.adminAns_dish);
@@ -200,6 +229,9 @@ const verifyLayer2 = async (req, res) => {
 const verifyLayer3 = async (req, res) => {
     const { dad, friend, enemy, app } = req.body;
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const d1 = await bcrypt.compare(dad.toLowerCase(), user.adminAns_dad);
@@ -219,6 +251,9 @@ const verifyLayer3 = async (req, res) => {
 const verifyAge = async (req, res) => {
     const { day, month, year } = req.body;
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         const birthDate = new Date(year, month - 1, day);
@@ -246,13 +281,17 @@ const verifyAge = async (req, res) => {
 const changeEmail = async (req, res) => {
     const { currentPassword, newEmail } = req.body;
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) { return res.status(400).json({ message: 'Current password is incorrect' }); }
-        const existingUser = await User.findOne({ email: newEmail });
+        const sanitizedNewEmail = sanitizeEmail(newEmail);
+        const existingUser = await User.findOne({ email: sanitizedNewEmail });
         if (existingUser && existingUser._id.toString() !== user._id.toString()) { return res.status(400).json({ message: 'Email is already in use' }); }
-        user.email = newEmail.toLowerCase().trim();
+        user.email = sanitizedNewEmail;
         await user.save();
         res.json({ message: 'Email updated successfully' });
     } catch (err) { console.error('Change email error:', err.message); res.status(500).json({ message: 'Server Error' }); }
@@ -261,6 +300,9 @@ const changeEmail = async (req, res) => {
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
     try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         const isMatch = await bcrypt.compare(password, user.password);
