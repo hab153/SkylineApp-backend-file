@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Report = require('./Report');
 const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername } = require('./sanitize');
+const { generateCsrfToken, deleteCsrfToken } = require('./csrf');
 
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
@@ -14,12 +15,10 @@ const getJwtSecret = () => {
 };
 
 const register = async (req, res) => {
-    // Input is already validated by Joi, but we sanitize the username/email anyway
     let { username, email, password } = req.body;
     username = sanitizeUsername(username);
     email = sanitizeEmail(email);
     try {
-        // Sanitize the query
         const query = sanitizeQuery({ $or: [{ email }, { username }] });
         let user = await User.findOne(query);
         if (user) { return res.status(400).json({ message: 'User with this email or username already exists' }); }
@@ -29,9 +28,11 @@ const register = async (req, res) => {
         await user.save();
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         const secret = getJwtSecret();
-        jwt.sign(payload, secret, { expiresIn: '7d' }, (err, token) => {
+        jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
             if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
-            res.json({ token, message: 'Registration successful' });
+            // ✅ Generate CSRF token
+            const csrfToken = await generateCsrfToken(user.id);
+            res.json({ token, csrfToken, message: 'Registration successful' });
         });
     } catch (err) {
         console.error("Registration Error:", err.message);
@@ -44,7 +45,6 @@ const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
-        // Hardcoded admin access (keep as is)
         const ADMIN_EMAIL = 'HABEEBULLAHRIDWANULLAHAPAOKAGI@gmail.com';
         const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwerty';
         if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
@@ -61,14 +61,14 @@ const login = async (req, res) => {
             }
             const secret = getJwtSecret();
             const payload = { user: { id: adminUser.id, tokenVersion: adminUser.tokenVersion } };
-            jwt.sign(payload, secret, { expiresIn: '7d' }, (err, token) => {
+            jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
                 if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
-                return res.json({ token, message: 'Admin Login Successful', isAdmin: true });
+                const csrfToken = await generateCsrfToken(adminUser.id);
+                return res.json({ token, csrfToken, message: 'Admin Login Successful', isAdmin: true });
             });
             return;
         }
 
-        // Sanitize query
         const query = sanitizeQuery({
             $or: [
                 { email: identifier },
@@ -91,9 +91,11 @@ const login = async (req, res) => {
             return res.json({ token: layerToken, message: 'Layer 1 Passed', nextStep: 'admin-layer2.html' });
         }
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
-        jwt.sign(payload, secret, { expiresIn: '7d' }, (err, token) => {
+        jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
             if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
-            res.json({ token, message: 'Login successful' });
+            // ✅ Generate CSRF token
+            const csrfToken = await generateCsrfToken(user.id);
+            res.json({ token, csrfToken, message: 'Login successful' });
         });
     } catch (err) { console.error("Login Error:", err.message); res.status(500).json({ message: 'Server Error during login' }); }
 };
@@ -106,6 +108,8 @@ const logout = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
+        // ✅ Delete CSRF token
+        await deleteCsrfToken(req.userId);
         res.json({ message: 'Logged out successfully. All tokens revoked.' });
     } catch (err) { console.error('Logout Error:', err.message); res.status(500).json({ message: 'Server Error during logout' }); }
 };
@@ -118,9 +122,13 @@ const revokeAllTokens = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
+        // ✅ Delete CSRF token
+        await deleteCsrfToken(req.userId);
         res.json({ message: 'All tokens revoked successfully. Please log in again.' });
     } catch (err) { console.error('Revoke Tokens Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
 };
+
+// ... rest of functions (verifyEmail, verifyUsername, resetPasswordEmailUsername, forgotPassword, resetPassword, verifyLayer2, verifyLayer3, verifyAge, changeEmail, deleteAccount) remain the same as before ...
 
 const verifyEmail = async (req, res) => {
     try {
@@ -208,9 +216,7 @@ const resetPassword = async (req, res) => {
 const verifyLayer2 = async (req, res) => {
     const { dish, pn, mum, dm } = req.body;
     try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
-        }
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const d1 = await bcrypt.compare(dish.toLowerCase(), user.adminAns_dish);
@@ -229,9 +235,7 @@ const verifyLayer2 = async (req, res) => {
 const verifyLayer3 = async (req, res) => {
     const { dad, friend, enemy, app } = req.body;
     try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
-        }
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         const d1 = await bcrypt.compare(dad.toLowerCase(), user.adminAns_dad);
@@ -251,9 +255,7 @@ const verifyLayer3 = async (req, res) => {
 const verifyAge = async (req, res) => {
     const { day, month, year } = req.body;
     try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
-        }
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         const birthDate = new Date(year, month - 1, day);
@@ -281,9 +283,7 @@ const verifyAge = async (req, res) => {
 const changeEmail = async (req, res) => {
     const { currentPassword, newEmail } = req.body;
     try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
-        }
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         const isMatch = await bcrypt.compare(currentPassword, user.password);
@@ -300,9 +300,7 @@ const changeEmail = async (req, res) => {
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
     try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
-        }
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         const isMatch = await bcrypt.compare(password, user.password);
