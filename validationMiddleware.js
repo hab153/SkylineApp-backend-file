@@ -1,6 +1,5 @@
-// validationMiddleware.js
 const Joi = require('joi');
-const { sanitizeObject } = require('./sanitize');
+const { sanitizeObject, hasNoSQLInjection, isValidObjectId } = require('./sanitize');
 
 /**
  * Global validation middleware
@@ -11,41 +10,29 @@ const { sanitizeObject } = require('./sanitize');
  */
 function validate(schema, source = 'body', exclude = []) {
     return (req, res, next) => {
-        // Get data from the specified source
         let data = req[source];
-        
         if (!data) {
             return res.status(400).json({
                 error: 'Missing request data',
                 message: `No data found in ${source}`
             });
         }
-        
-        // Sanitize input (exclude sensitive fields like password)
         const sanitizedData = sanitizeObject(data, ['password', 'currentPassword', 'newPassword', 'token']);
-        
-        // Replace req[source] with sanitized data
         req[source] = sanitizedData;
-        
-        // Validate against schema
         const { error, value } = schema.validate(sanitizedData, {
             abortEarly: false,
             stripUnknown: true
         });
-        
         if (error) {
             const errors = error.details.map(detail => ({
                 field: detail.path.join('.'),
                 message: detail.message
             }));
-            
             return res.status(400).json({
                 error: 'Validation failed',
                 errors
             });
         }
-        
-        // Replace with validated (and possibly transformed) value
         req[source] = value;
         next();
     };
@@ -55,49 +42,26 @@ function validate(schema, source = 'body', exclude = []) {
  * Simplified validation for common endpoint patterns
  */
 const validators = {
-    /**
-     * Validate registration request
-     */
     register: (req, res, next) => {
         const { registerSchema } = require('./validationSchemas');
         return validate(registerSchema)(req, res, next);
     },
-
-    /**
-     * Validate login request
-     */
     login: (req, res, next) => {
         const { loginSchema } = require('./validationSchemas');
         return validate(loginSchema)(req, res, next);
     },
-
-    /**
-     * Validate chat message
-     */
     chat: (req, res, next) => {
         const { chatSchema } = require('./validationSchemas');
         return validate(chatSchema)(req, res, next);
     },
-
-    /**
-     * Validate batch send
-     */
     batchSend: (req, res, next) => {
         const { batchSendSchema } = require('./validationSchemas');
         return validate(batchSendSchema)(req, res, next);
     },
-
-    /**
-     * Validate report submission
-     */
     report: (req, res, next) => {
         const { reportSchema } = require('./validationSchemas');
         return validate(reportSchema)(req, res, next);
     },
-
-    /**
-     * Validate admin message
-     */
     adminMessage: (req, res, next) => {
         const { adminMessageSchema } = require('./validationSchemas');
         return validate(adminMessageSchema)(req, res, next);
@@ -106,8 +70,6 @@ const validators = {
 
 /**
  * Middleware to validate that a field exists and is not empty
- * @param {string} field - Field name
- * @param {string} source - 'body', 'query', or 'params'
  */
 function requireField(field, source = 'body') {
     return (req, res, next) => {
@@ -133,7 +95,6 @@ function validateIdParam(req, res, next) {
             message: 'ID parameter is required'
         });
     }
-    // Check if it's a valid MongoDB ObjectId (24 hex chars)
     if (!/^[a-fA-F0-9]{24}$/.test(id) && id !== 'assistant') {
         return res.status(400).json({
             error: 'Invalid ID',
@@ -163,8 +124,8 @@ function validateEmailFormat(req, res, next) {
 function validatePasswordStrength(req, res, next) {
     const password = req.body.password || req.body.newPassword;
     if (password) {
-        const { sanitize } = require('./sanitize');
-        const result = sanitize.validatePasswordStrength(password);
+        const { validatePasswordStrength } = require('./sanitize');
+        const result = validatePasswordStrength(password);
         if (!result.valid) {
             return res.status(400).json({
                 error: 'Weak password',
@@ -180,7 +141,6 @@ function validatePasswordStrength(req, res, next) {
  */
 function sanitizeBody(req, res, next) {
     if (req.body && typeof req.body === 'object') {
-        // Don't sanitize passwords (leave them untouched)
         const sanitized = sanitizeObject(req.body, ['password', 'currentPassword', 'newPassword']);
         req.body = sanitized;
     }
@@ -203,6 +163,65 @@ function requireContentType(contentType = 'application/json') {
     };
 }
 
+// ============================================================
+// NEW: NoSQL injection detection middleware
+// ============================================================
+
+/**
+ * Middleware to detect NoSQL injection attempts in request body/params/query
+ */
+function detectNoSQLInjection(req, res, next) {
+    if (req.body && typeof req.body === 'object') {
+        const bodyStr = JSON.stringify(req.body);
+        if (hasNoSQLInjection(bodyStr)) {
+            return res.status(400).json({
+                error: 'Invalid request',
+                message: 'Request contains invalid characters'
+            });
+        }
+    }
+
+    // Check params
+    for (const key of Object.keys(req.params)) {
+        if (hasNoSQLInjection(req.params[key])) {
+            return res.status(400).json({
+                error: 'Invalid parameter',
+                message: 'Parameter contains invalid characters'
+            });
+        }
+    }
+
+    // Check query
+    for (const key of Object.keys(req.query)) {
+        if (hasNoSQLInjection(req.query[key])) {
+            return res.status(400).json({
+                error: 'Invalid query parameter',
+                message: 'Query contains invalid characters'
+            });
+        }
+    }
+
+    next();
+}
+
+/**
+ * Middleware to validate MongoDB ObjectId parameters
+ */
+function validateObjectId(req, res, next) {
+    const idParams = ['id', 'leadId', 'userId', 'sessionId', 'messageId'];
+    for (const param of idParams) {
+        if (req.params[param]) {
+            if (!isValidObjectId(req.params[param])) {
+                return res.status(400).json({
+                    error: 'Invalid ID format',
+                    message: `${param} must be a valid MongoDB ObjectId`
+                });
+            }
+        }
+    }
+    next();
+}
+
 module.exports = {
     validate,
     validators,
@@ -211,5 +230,8 @@ module.exports = {
     validateEmailFormat,
     validatePasswordStrength,
     sanitizeBody,
-    requireContentType
+    requireContentType,
+    // NEW exports
+    detectNoSQLInjection,
+    validateObjectId
 };
