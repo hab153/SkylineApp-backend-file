@@ -1,5 +1,6 @@
 // Lead.js
 const mongoose = require('mongoose');
+const { encrypt, decrypt } = require('./encryption');
 
 const LeadSchema = new mongoose.Schema({
     userId: { 
@@ -10,7 +11,20 @@ const LeadSchema = new mongoose.Schema({
     },
     // Contact Information
     name: { type: String, required: true },
-    email: { type: String, required: true, index: true },
+    email: { 
+        type: String, 
+        required: true, 
+        index: true,
+        // ✅ Encrypt when saving, decrypt when reading
+        get: function(value) {
+            if (!value) return null;
+            try { return decrypt(value); } catch { return value; }
+        },
+        set: function(value) {
+            if (!value) return null;
+            try { return encrypt(value); } catch { return value; }
+        }
+    },
     linkedinUrl: { type: String, default: '' },
     company: { type: String, default: '' },
     jobTitle: { type: String, default: '' },
@@ -54,7 +68,7 @@ const LeadSchema = new mongoose.Schema({
         default: ''
     },
 
-    // ─── FOLLOW-UP SYSTEM FIELDS (NEW) ──────────────────────────────
+    // FOLLOW-UP SYSTEM FIELDS
     autoFollowUpEnabled: {
         type: Boolean,
         default: false
@@ -72,7 +86,7 @@ const LeadSchema = new mongoose.Schema({
         default: 0
     },
 
-    // ─── CONFIDENCE SCORING FIELDS ──────────────────────────────
+    // CONFIDENCE SCORING FIELDS
     confidenceScore: {
         type: Number,
         default: 0,
@@ -90,10 +104,13 @@ const LeadSchema = new mongoose.Schema({
     },
 
     createdAt: { type: Date, default: Date.now }
+}, {
+    // Enable getters
+    toJSON: { getters: true },
+    toObject: { getters: true }
 });
 
 LeadSchema.index({ nextActionDate: 1, status: 1 });
-// Index for follow-up job queries
 LeadSchema.index({ autoFollowUpEnabled: 1, followUpScheduledDate: 1 });
 
 module.exports = mongoose.model('Lead', LeadSchema);
