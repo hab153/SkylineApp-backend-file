@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const User = require('./User');
 const EmailAccount = require('./EmailAccount');
 const { getAuthUrl, exchangeCodeForToken, getUserEmail } = require('./nylasService');
+const { isValidObjectId } = require('./sanitize');
 
 // In-memory store for OAuth state (cleaned up after 10 minutes)
 const stateStore = {};
@@ -18,6 +19,9 @@ function getMaxConnections(tier) {
 const getAuthUrlHandler = async (req, res) => {
     const userId = req.userId;
     try {
+        if (!isValidObjectId(userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         const user = await User.findById(userId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
