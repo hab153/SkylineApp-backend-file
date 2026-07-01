@@ -2,6 +2,7 @@ const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
 const { refreshNylasToken } = require('./nylasTokenRefresh');
 const { sendEmail } = require('./nylasService');
+const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
 // GET /api/conversations
 const getConversations = async (req, res) => {
@@ -10,8 +11,12 @@ const getConversations = async (req, res) => {
             console.error('❌ [getConversations] No userId in request');
             return res.status(401).json({ message: 'Unauthorized: No user ID' });
         }
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
-        const leads = await Lead.find({ userId: req.userId }).sort({ lastContactDate: -1 }).limit(50);
+        const query = sanitizeQuery({ userId: req.userId });
+        const leads = await Lead.find(query).sort({ lastContactDate: -1 }).limit(50);
         console.log(`✅ [getConversations] Found ${leads.length} leads`);
         const conversations = leads.map(lead => {
             const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
@@ -44,8 +49,16 @@ const getConversationById = async (req, res) => {
             console.error('❌ [getConversationById] No userId');
             return res.status(401).json({ message: 'Unauthorized' });
         }
-        console.log(`📡 [getConversationById] Fetching lead ${req.params.leadId} for user ${req.userId}`);
-        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        const { leadId } = req.params;
+        if (!isValidObjectId(leadId)) {
+            return res.status(400).json({ message: 'Invalid lead ID' });
+        }
+        console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
+        const query = sanitizeQuery({ _id: leadId, userId: req.userId });
+        const lead = await Lead.findOne(query);
         if (!lead) {
             console.warn(`⚠️ [getConversationById] Lead not found`);
             return res.status(404).json({ message: 'Conversation not found' });
@@ -76,9 +89,18 @@ const getConversationById = async (req, res) => {
 const renameLead = async (req, res) => {
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
+            return res.status(400).json({ message: 'Invalid ID' });
+        }
+        const { newName } = req.body;
+        if (!newName || typeof newName !== 'string' || newName.trim() === '') {
+            return res.status(400).json({ message: 'New name is required' });
+        }
+        const sanitizedNewName = newName.trim().slice(0, 100);
+        const query = sanitizeQuery({ _id: req.params.leadId, userId: req.userId });
+        const lead = await Lead.findOne(query);
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
-        lead.name = req.body.newName;
+        lead.name = sanitizedNewName;
         await lead.save();
         console.log(`✏️ [renameLead] Lead ${lead._id} renamed to ${lead.name}`);
         res.json({ success: true, newName: lead.name });
@@ -92,11 +114,19 @@ const renameLead = async (req, res) => {
 const updateAutoReply = async (req, res) => {
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
+        if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
+            return res.status(400).json({ message: 'Invalid ID' });
+        }
         const { enabled, instructions } = req.body;
-        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        if (typeof enabled !== 'boolean') {
+            return res.status(400).json({ message: 'Enabled must be a boolean' });
+        }
+        const sanitizedInstructions = instructions ? instructions.trim().slice(0, 2000) : '';
+        const query = sanitizeQuery({ _id: req.params.leadId, userId: req.userId });
+        const lead = await Lead.findOne(query);
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.autoReplyEnabled = enabled;
-        if (instructions !== undefined) lead.autoReplyInstructions = instructions;
+        if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
         await lead.save();
         console.log(`🤖 [updateAutoReply] Lead ${lead._id} auto-reply enabled=${enabled}`);
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
@@ -110,8 +140,26 @@ const updateAutoReply = async (req, res) => {
 const batchSend = async (req, res) => {
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
+        // Sanitize the leads array
         const { leads } = req.body;
+        if (!Array.isArray(leads) || leads.length === 0) {
+            return res.status(400).json({ message: 'Leads array is required' });
+        }
+        // Sanitize each lead
+        const sanitizedLeads = leads.map(lead => ({
+            name: lead.name ? lead.name.trim().slice(0, 100) : '',
+            email: sanitizeEmail(lead.email),
+            company: lead.company ? lead.company.trim().slice(0, 100) : '',
+            messages: (lead.messages || []).map(msg => ({
+                subject: msg.subject ? msg.subject.trim().slice(0, 200) : '',
+                body: msg.body ? msg.body.trim().slice(0, 10000) : ''
+            }))
+        }));
+
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) {
             return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'No connection found.' });
@@ -132,15 +180,20 @@ const batchSend = async (req, res) => {
         let errors = [];
         const now = new Date();
 
-        for (const leadData of leads) {
+        for (const leadData of sanitizedLeads) {
             try {
+                // Validate email
+                if (!leadData.email) {
+                    errors.push({ email: 'missing', error: 'Email is required' });
+                    continue;
+                }
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 if (!lead) {
                     lead = new Lead({
                         userId: req.userId,
-                        name: leadData.name,
+                        name: leadData.name || 'Unknown',
                         email: leadData.email,
-                        company: leadData.company,
+                        company: leadData.company || '',
                         status: 'Contacted',
                         lastContactDate: now,
                         followUpCount: 0
@@ -194,6 +247,9 @@ const batchSend = async (req, res) => {
 const reconnectAndSend = async (req, res) => {
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         console.log(`🔄 [reconnectAndSend] For user ${req.userId}`);
         const emailAccount = await EmailAccount.findOne({ userId: req.userId });
         if (!emailAccount) return res.status(400).json({ message: 'Nylas not connected' });
@@ -230,7 +286,11 @@ const reconnectAndSend = async (req, res) => {
 const getAllLeads = async (req, res) => {
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        const leads = await Lead.find({ userId: req.userId }).sort({ createdAt: -1 });
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        const query = sanitizeQuery({ userId: req.userId });
+        const leads = await Lead.find(query).sort({ createdAt: -1 });
         res.json(leads);
     } catch (err) {
         console.error('❌ [getAllLeads] Error:', err);
