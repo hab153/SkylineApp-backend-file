@@ -1,5 +1,6 @@
 // Company.js
 const mongoose = require('mongoose');
+const { encrypt, decrypt } = require('./encryption');
 
 const CompanySchema = new mongoose.Schema({
     domain: { 
@@ -13,8 +14,19 @@ const CompanySchema = new mongoose.Schema({
     name: { type: String, required: true },
     industry: { type: String, default: '' },
     country: { type: String, default: '' },
-    employeeCount: { type: String, default: '' }, // e.g., "11-50"
-    emails: [{ type: String }],
+    employeeCount: { type: String, default: '' },
+    emails: [{
+        type: String,
+        // ✅ Encrypt each email when saving, decrypt when reading
+        get: function(value) {
+            if (!value) return null;
+            try { return decrypt(value); } catch { return value; }
+        },
+        set: function(value) {
+            if (!value) return null;
+            try { return encrypt(value); } catch { return value; }
+        }
+    }],
     researchSummary: { type: String, default: '' },
     leadScore: { type: Number, default: 0, min: 0, max: 100 },
     confidenceTier: { 
@@ -24,9 +36,13 @@ const CompanySchema = new mongoose.Schema({
     },
     lastUpdated: { type: Date, default: Date.now },
     createdAt: { type: Date, default: Date.now }
+}, {
+    // Enable getters
+    toJSON: { getters: true },
+    toObject: { getters: true }
 });
 
-// Index for faster lookups
+// Indexes
 CompanySchema.index({ domain: 1 });
 CompanySchema.index({ leadScore: -1 });
 
