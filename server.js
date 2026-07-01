@@ -13,7 +13,7 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware'); // ✅ ADDED checkAssistantLimit
+const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
 const { startExpiryJob } = require('./expiryJob');
@@ -49,10 +49,10 @@ const User = require('./User');
 const Report = require('./Report');
 const requestQueue = require('./requestQueue');
 
-// Import auth controller functions for logout and revoke
+// Import auth controller functions
 const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login } = require('./authController');
 
-// ✅ NEW: Validation imports
+// Validation imports
 const { validate } = require('./validationMiddleware');
 const {
     registerSchema,
@@ -75,8 +75,11 @@ const {
     dreamRefineSchema
 } = require('./validationSchemas');
 
-// ✅ NEW: Import backup job
+// Backup job
 const { startBackupJob } = require('./backupJob');
+
+// ✅ NEW: CSRF protection
+const { csrfProtection, setCsrfToken } = require('./csrf');
 
 dotenv.config();
 const app = express();
@@ -138,7 +141,7 @@ app.use(globalLimiter);
 app.use(cors());
 
 // ════════════════════════════════════════════
-//  WEBHOOKS
+//  WEBHOOKS (EXEMPT FROM CSRF)
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
@@ -158,8 +161,6 @@ mongoose.connect(process.env.MONGODB_URI, {
         startTokenRefreshJob();
         startExpiryJob();
         startFollowUpJob();
-        
-        // ✅ NEW: Start automatic backup job (every 30 minutes)
         if (process.env.NODE_ENV !== 'test') {
             startBackupJob();
         }
@@ -171,9 +172,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
 
-// Logout & Revoke routes
-app.post('/api/auth/logout', verifyToken, logout);
-app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
+// Logout & Revoke routes (with CSRF protection)
+app.post('/api/auth/logout', verifyToken, csrfProtection, logout);
+app.post('/api/auth/revoke-tokens', verifyToken, csrfProtection, revokeAllTokens);
 
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
@@ -181,42 +182,42 @@ app.use('/api', sessionRoutes);
 // ──────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
 // ──────────────────────────────────────────────────────────────
-app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
+app.post('/api/create-flutterwave-payment', verifyToken, csrfProtection, createFlutterwavePayment);
 
 // ──────────────────────────────────────────────────────────────
-//  AUTH ROUTES (with validation)
+//  AUTH ROUTES (with CSRF token generation on login/register)
 // ──────────────────────────────────────────────────────────────
-app.post('/api/auth/register', validate(registerSchema), register);
-app.post('/api/auth/login', validate(loginSchema), login);
-app.put('/api/auth/change-email', verifyToken, validate(changeEmailSchema), userController.changeEmail);
+app.post('/api/auth/register', validate(registerSchema), setCsrfToken, register);
+app.post('/api/auth/login', validate(loginSchema), setCsrfToken, login);
+app.put('/api/auth/change-email', verifyToken, csrfProtection, validate(changeEmailSchema), userController.changeEmail);
 app.post('/api/auth/forgot-password', validate(forgotPasswordSchema), forgotPassword);
 app.post('/api/auth/reset-password', validate(resetPasswordSchema), resetPassword);
-app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
+app.put('/api/users/verify-age', verifyToken, csrfProtection, validate(verifyAgeSchema), userController.verifyAge);
 
 // ──────────────────────────────────────────────────────────────
 //  USER PROFILE ROUTES
 // ──────────────────────────────────────────────────────────────
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
-app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
-app.put('/api/auth/change-password', verifyToken, userController.changePassword);
-app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
+app.put('/api/users/me', verifyToken, csrfProtection, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
+app.put('/api/auth/change-password', verifyToken, csrfProtection, userController.changePassword);
+app.delete('/api/users/me', verifyToken, csrfProtection, userController.deleteUserAccount);
 
 // ──────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
 // ──────────────────────────────────────────────────────────────
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
-app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
-app.put('/api/leads/:leadId/auto-reply', verifyToken, validate(updateAutoReplySchema), leadController.updateAutoReply);
-app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
-app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
+app.put('/api/leads/:leadId/rename', verifyToken, csrfProtection, validate(renameLeadSchema), leadController.renameLead);
+app.put('/api/leads/:leadId/auto-reply', verifyToken, csrfProtection, validate(updateAutoReplySchema), leadController.updateAutoReply);
+app.post('/api/leads/batch-send', verifyToken, csrfProtection, validate(batchSendSchema), leadController.batchSend);
+app.post('/api/reconnect-and-send', verifyToken, csrfProtection, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
 // ──────────────────────────────────────────────────────────────
 //  FOLLOW-UP ROUTES
 // ──────────────────────────────────────────────────────────────
-app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
-app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
+app.post('/api/leads/:leadId/auto-follow-up', verifyToken, csrfProtection, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
+app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, csrfProtection, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 
 // ──────────────────────────────────────────────────────────────
@@ -240,19 +241,19 @@ app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
 // ──────────────────────────────────────────────────────────────
-//  CHAT & DREAMS ROUTES (with validation)
+//  CHAT & DREAMS ROUTES
 // ──────────────────────────────────────────────────────────────
-app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
-app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
+app.post('/api/chat', verifyToken, csrfProtection, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
+app.post('/api/feedback', verifyToken, csrfProtection, validate(feedbackSchema), chatController.submitFeedback);
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, chatController.getSessions);
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
-app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
+app.post('/api/dreams/analyze', verifyToken, csrfProtection, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
+app.post('/api/dreams/refine', verifyToken, csrfProtection, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 
 // ──────────────────────────────────────────────────────────────
 //  AI SUGGESTION ROUTE
 // ──────────────────────────────────────────────────────────────
-app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
+app.post('/api/ai/suggest', verifyToken, csrfProtection, checkHintLimit, async (req, res) => {
     try {
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
@@ -271,27 +272,27 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────
-//  ASSISTANT ROUTE (with validation)
+//  ASSISTANT ROUTE
 // ──────────────────────────────────────────────────────────────
-app.post('/api/assistant', verifyToken, checkAssistantLimit, validate(assistantSchema), require('./assistantController').assistantChat);
+app.post('/api/assistant', verifyToken, csrfProtection, checkAssistantLimit, validate(assistantSchema), require('./assistantController').assistantChat);
 
 // ──────────────────────────────────────────────────────────────
 //  ADMIN ROUTES
 // ──────────────────────────────────────────────────────────────
-app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
+app.post('/api/admin/verify-layer-2', verifyToken, csrfProtection, adminController.adminVerifyLayer2);
+app.post('/api/admin/verify-layer-3', verifyToken, csrfProtection, adminController.adminVerifyLayer3);
 app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
-app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
-app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
+app.put('/api/admin/users/:id/suspend', verifyToken, csrfProtection, adminController.suspendUser);
+app.delete('/api/admin/users/:id', verifyToken, csrfProtection, adminController.deleteUser);
 app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
 app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserChatView);
-app.post('/api/admin/users/:id/message', verifyToken, validate(adminMessageSchema), adminController.sendUserMessage);
+app.post('/api/admin/users/:id/message', verifyToken, csrfProtection, validate(adminMessageSchema), adminController.sendUserMessage);
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
 // ──────────────────────────────────────────────────────────────
 //  REPORTS
 // ──────────────────────────────────────────────────────────────
-app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
+app.post('/api/reports', verifyToken, csrfProtection, validate(reportSchema), reportController.submitReport);
 
 // ════════════════════════════════════════════
 //  START SERVER
