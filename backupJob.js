@@ -5,11 +5,10 @@ const path = require('path');
 
 // Configuration
 const BACKUP_DIR = process.env.BACKUP_DIR || './backups';
-const BACKUP_SCHEDULE = process.env.BACKUP_SCHEDULE || '*/30 * * * *'; // Every 30 minutes
-const MAX_BACKUP_SIZE_GB = parseFloat(process.env.BACKUP_MAX_SIZE_GB) || 10;
-const MAX_BACKUPS = 50; // Maximum number of backups to keep
+const BACKUP_SCHEDULE = process.env.BACKUP_SCHEDULE || '*/30 * * * *';
+const MAX_BACKUPS = 50;
 
-// Track if backup is currently running (prevent overlaps)
+// Track if backup is currently running
 let isBackupRunning = false;
 let lastBackupTime = null;
 let backupCount = 0;
@@ -24,7 +23,7 @@ function startBackupJob() {
     setTimeout(() => {
         console.log('🔄 [BACKUP JOB] Running initial backup on startup...');
         runBackupSafely();
-    }, 5000); // Wait 5 seconds for server to fully start
+    }, 5000);
 
     // Schedule recurring backups
     cron.schedule(BACKUP_SCHEDULE, async () => {
@@ -34,26 +33,12 @@ function startBackupJob() {
 }
 
 /**
- * Run backup safely (prevent overlapping)
+ * Run backup safely (prevent overlaps)
  */
 async function runBackupSafely() {
-    // Prevent overlapping backups
     if (isBackupRunning) {
         console.log('⚠️ [BACKUP JOB] Backup already running, skipping this cycle');
         return;
-    }
-
-    // Check if backup directory is too large
-    if (await isBackupDirectoryTooLarge()) {
-        console.log('⚠️ [BACKUP JOB] Backup directory too large, cleaning up...');
-        await cleanupOldBackups();
-    }
-
-    // Check if we have too many backups
-    const backupCount = await countBackupFiles();
-    if (backupCount >= MAX_BACKUPS) {
-        console.log(`⚠️ [BACKUP JOB] Too many backups (${backupCount}), cleaning up...`);
-        await cleanupOldBackups();
     }
 
     try {
@@ -61,8 +46,6 @@ async function runBackupSafely() {
         const startTime = Date.now();
         
         console.log(`📦 [BACKUP JOB] Starting backup at ${new Date().toISOString()}`);
-        
-        // Run the backup
         const result = await performBackup();
         
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -71,7 +54,6 @@ async function runBackupSafely() {
         lastBackupTime = new Date();
         backupCount++;
         
-        // Update status file
         await updateBackupStatus({
             lastBackup: lastBackupTime.toISOString(),
             backupCount: backupCount,
@@ -81,93 +63,14 @@ async function runBackupSafely() {
         
     } catch (error) {
         console.error('❌ [BACKUP JOB] Backup failed:', error.message);
-        
-        // Log error to status file
         await updateBackupStatus({
             lastBackup: lastBackupTime ? lastBackupTime.toISOString() : 'never',
             backupCount: backupCount,
             lastError: error.message,
             errorTime: new Date().toISOString()
         });
-        
     } finally {
         isBackupRunning = false;
-    }
-}
-
-/**
- * Check if backup directory is too large
- */
-async function isBackupDirectoryTooLarge() {
-    try {
-        if (!fs.existsSync(BACKUP_DIR)) return false;
-        
-        const files = fs.readdirSync(BACKUP_DIR);
-        let totalSize = 0;
-        
-        for (const file of files) {
-            const filePath = path.join(BACKUP_DIR, file);
-            try {
-                const stats = fs.statSync(filePath);
-                if (stats.isFile()) {
-                    totalSize += stats.size;
-                }
-            } catch (err) {
-                // Skip files we can't read
-            }
-        }
-        
-        const maxSizeBytes = MAX_BACKUP_SIZE_GB * 1024 * 1024 * 1024;
-        return totalSize > maxSizeBytes;
-        
-    } catch (error) {
-        console.error('❌ [BACKUP JOB] Error checking directory size:', error.message);
-        return false;
-    }
-}
-
-/**
- * Count backup files
- */
-async function countBackupFiles() {
-    try {
-        if (!fs.existsSync(BACKUP_DIR)) return 0;
-        return fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.zip')).length;
-    } catch {
-        return 0;
-    }
-}
-
-/**
- * Clean up old backups (keep only 10 most recent)
- */
-async function cleanupOldBackups() {
-    try {
-        if (!fs.existsSync(BACKUP_DIR)) return;
-        
-        const files = fs.readdirSync(BACKUP_DIR)
-            .filter(f => f.endsWith('.zip'))
-            .map(f => ({
-                name: f,
-                path: path.join(BACKUP_DIR, f),
-                mtime: fs.statSync(path.join(BACKUP_DIR, f)).mtime
-            }))
-            .sort((a, b) => b.mtime - a.mtime);
-        
-        // Keep only 10 most recent
-        const toDelete = files.slice(10);
-        
-        for (const file of toDelete) {
-            fs.removeSync(file.path);
-            console.log(`🗑️ [BACKUP JOB] Deleted old backup: ${file.name}`);
-        }
-        
-        if (toDelete.length > 0) {
-            console.log(`✅ [BACKUP JOB] Cleaned up ${toDelete.length} old backups`);
-        }
-        
-    } catch (error) {
-        console.error('❌ [BACKUP JOB] Error cleaning up:', error.message);
     }
 }
 
@@ -178,14 +81,12 @@ async function updateBackupStatus(data) {
     try {
         const statusFile = path.join(BACKUP_DIR, 'status.json');
         let existing = {};
-        
         try {
             if (fs.existsSync(statusFile)) {
                 existing = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
             }
         } catch (parseError) {
-            // If file is corrupted, start fresh
-            console.log('⚠️ [BACKUP JOB] Status file corrupted, creating new one');
+            // File corrupted, start fresh
         }
         
         const status = {
@@ -195,10 +96,8 @@ async function updateBackupStatus(data) {
         };
         
         fs.writeFileSync(statusFile, JSON.stringify(status, null, 2));
-        
     } catch (error) {
         // Don't fail if status update fails
-        console.error('⚠️ [BACKUP JOB] Could not update status:', error.message);
     }
 }
 
@@ -235,16 +134,6 @@ if (command === 'force') {
     console.log('\n📊 [BACKUP JOB] Status:');
     console.log(JSON.stringify(getBackupStatus(), null, 2));
     console.log('');
-} else {
-    console.log(`
-Skyline AA-1 Automatic Backup Job
-
-Commands:
-  node backupJob.js force    - Force an immediate backup
-  node backupJob.js status   - Show backup status
-
-This job runs automatically every 30 minutes.
-`);
 }
 
 module.exports = { 
