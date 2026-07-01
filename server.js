@@ -52,6 +52,9 @@ const requestQueue = require('./requestQueue');
 // Import auth controller functions for logout and revoke
 const { logout, revokeAllTokens } = require('./authController');
 
+// ✅ NEW: Import backup job
+const { startBackupJob } = require('./backupJob');
+
 dotenv.config();
 const app = express();
 
@@ -65,6 +68,34 @@ if (!process.env.JWT_SECRET) {
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
+
+// ════════════════════════════════════════════
+//  BACKUP CHECK
+// ════════════════════════════════════════════
+const fs = require('fs-extra');
+const backupDir = process.env.BACKUP_DIR || './backups';
+
+try {
+    if (fs.existsSync(backupDir)) {
+        const backups = fs.readdirSync(backupDir).filter(f => f.endsWith('.zip'));
+        if (backups.length === 0) {
+            console.warn('⚠️ [BACKUP] No backups found. Run "npm run backup" to create one.');
+        } else {
+            const latest = backups.sort().pop();
+            const stats = fs.statSync(path.join(backupDir, latest));
+            const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
+            if (days > 7) {
+                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+            } else {
+                console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
+            }
+        }
+    } else {
+        console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
+    }
+} catch (err) {
+    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
+}
 
 // ════════════════════════════════════════════
 //  SECURITY MIDDLEWARE
@@ -105,6 +136,11 @@ mongoose.connect(process.env.MONGODB_URI, {
         startTokenRefreshJob();
         startExpiryJob();
         startFollowUpJob();
+        
+        // ✅ NEW: Start automatic backup job (every 30 minutes)
+        if (process.env.NODE_ENV !== 'test') {
+            startBackupJob();
+        }
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
@@ -113,7 +149,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
 
-// ✅ NEW: Logout & Revoke routes
+// Logout & Revoke routes
 app.post('/api/auth/logout', verifyToken, logout);
 app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 
