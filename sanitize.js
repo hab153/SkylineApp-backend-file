@@ -165,6 +165,87 @@ function isValidEmail(email) {
     return emailRegex.test(email);
 }
 
+// ============================================================
+// NOSQL INJECTION PROTECTION (NEW)
+// ============================================================
+
+/**
+ * Check if input string contains NoSQL injection operators
+ * @param {any} input - The value to check
+ * @returns {boolean} - True if dangerous patterns found
+ */
+function hasNoSQLInjection(input) {
+    if (!input || typeof input !== 'string') return false;
+
+    const operators = [
+        '$eq', '$ne', '$gt', '$gte', '$lt', '$lte',
+        '$in', '$nin', '$or', '$and', '$not', '$nor',
+        '$exists', '$type', '$regex', '$where',
+        '$all', '$elemMatch', '$size', '$slice'
+    ];
+
+    for (const op of operators) {
+        if (input.includes(op)) return true;
+    }
+
+    // Check for JSON-like injection patterns
+    if (/{"\$[a-z]+":/i.test(input)) return true;
+    if (/{\s*"\$[a-z]+"\s*:/i.test(input)) return true;
+
+    return false;
+}
+
+/**
+ * Sanitize a query object (remove any keys with $)
+ * @param {object} query - The query object to sanitize
+ * @returns {object} - Sanitized query
+ */
+function sanitizeQuery(query) {
+    if (!query || typeof query !== 'object') return query;
+
+    const sanitized = {};
+    for (const [key, value] of Object.entries(query)) {
+        // Skip any key starting with '$'
+        if (key.startsWith('$')) continue;
+
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            // Check if value contains operator keys
+            const hasOperator = Object.keys(value).some(k => k.startsWith('$'));
+            if (hasOperator) continue; // strip operator objects
+            sanitized[key] = sanitizeQuery(value);
+        } else if (typeof value === 'string') {
+            if (!hasNoSQLInjection(value)) {
+                sanitized[key] = value;
+            }
+            // if injection detected, skip this field
+        } else {
+            sanitized[key] = value;
+        }
+    }
+    return sanitized;
+}
+
+/**
+ * Validate MongoDB ObjectId
+ * @param {string} id - The ID to validate
+ * @returns {boolean} - True if valid
+ */
+function isValidObjectId(id) {
+    if (!id || typeof id !== 'string') return false;
+    return /^[a-fA-F0-9]{24}$/.test(id) || id === 'assistant';
+}
+
+/**
+ * Sanitize a string ID (remove special characters)
+ * @param {string} id - The ID string
+ * @returns {string|null} - Sanitized ID or null
+ */
+function sanitizeId(id) {
+    if (!id || typeof id !== 'string') return null;
+    const cleaned = id.replace(/[^a-zA-Z0-9-]/g, '');
+    return cleaned || null;
+}
+
 module.exports = {
     sanitizeString,
     sanitizeEmail,
@@ -172,5 +253,10 @@ module.exports = {
     sanitizeObject,
     isSafeString,
     validatePasswordStrength,
-    isValidEmail
+    isValidEmail,
+    // NEW exports
+    hasNoSQLInjection,
+    sanitizeQuery,
+    isValidObjectId,
+    sanitizeId
 };
