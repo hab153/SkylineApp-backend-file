@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const { encrypt, decrypt } = require('./encryption');
 
 const UserSchema = new mongoose.Schema({
     username: {
@@ -126,7 +127,19 @@ const UserSchema = new mongoose.Schema({
 
     // --- NYLAS EMAIL INTEGRATION ---
     nylasIntegration: {
-        accessToken: { type: String, default: null },
+        accessToken: { 
+            type: String, 
+            default: null,
+            // ✅ Encrypt when saving, decrypt when reading
+            get: function(value) {
+                if (!value) return null;
+                try { return decrypt(value); } catch { return value; }
+            },
+            set: function(value) {
+                if (!value) return null;
+                try { return encrypt(value); } catch { return value; }
+            }
+        },
         emailAddress: { type: String, default: null },
         isConnected: { type: Boolean, default: false }
     },
@@ -139,15 +152,16 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: Date.now
     }
+}, {
+    // Enable getters to automatically decrypt when reading
+    toJSON: { getters: true },
+    toObject: { getters: true }
 });
 
-// ✅ FIXED: Pre-save hook with proper `next` parameter
+// Pre-save hook
 UserSchema.pre('save', function(next) {
     this.updatedAt = Date.now();
-    // Call next to continue the save operation
-    if (typeof next === 'function') {
-        next();
-    }
+    next();
 });
 
 // Method to check if user has active pro subscription
@@ -196,7 +210,7 @@ UserSchema.methods.addPaymentRecord = async function(txRef, amount, currency = '
     await this.save();
 };
 
-// Method to revoke all tokens for a user
+// Method to revoke all tokens
 UserSchema.methods.revokeTokens = async function() {
     this.tokenVersion += 1;
     await this.save();
@@ -207,9 +221,9 @@ UserSchema.methods.revokeTokens = async function() {
 UserSchema.methods.generateResetToken = async function() {
     const resetToken = crypto.randomBytes(32).toString('hex');
     this.resetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-    this.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    this.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
     await this.save();
-    return resetToken; // Return plain token for email
+    return resetToken;
 };
 
 // Verify reset token
@@ -220,19 +234,18 @@ UserSchema.methods.verifyResetToken = function(token) {
     return true;
 };
 
-// Clear reset token after use
+// Clear reset token
 UserSchema.methods.clearResetToken = async function() {
     this.resetToken = null;
     this.resetTokenExpiry = null;
     await this.save();
 };
 
-// Static method to find user by txRef
+// Static methods
 UserSchema.statics.findByTxRef = function(txRef) {
     return this.findOne({ lastTxRef: txRef });
 };
 
-// Static method to find expired pro users
 UserSchema.statics.findExpiredProUsers = function() {
     const now = new Date();
     return this.find({
@@ -241,7 +254,7 @@ UserSchema.statics.findExpiredProUsers = function() {
     });
 };
 
-// Index for faster subscription expiry queries
+// Indexes
 UserSchema.index({ subscriptionTier: 1, subscriptionEndDate: 1 });
 
 module.exports = mongoose.model('User', UserSchema);
