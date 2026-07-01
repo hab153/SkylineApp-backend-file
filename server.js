@@ -50,7 +50,30 @@ const Report = require('./Report');
 const requestQueue = require('./requestQueue');
 
 // Import auth controller functions for logout and revoke
-const { logout, revokeAllTokens } = require('./authController');
+const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login } = require('./authController');
+
+// ✅ NEW: Validation imports
+const { validate } = require('./validationMiddleware');
+const {
+    registerSchema,
+    loginSchema,
+    changeEmailSchema,
+    resetPasswordSchema,
+    forgotPasswordSchema,
+    verifyAgeSchema,
+    updateProfileSchema,
+    batchSendSchema,
+    renameLeadSchema,
+    updateAutoReplySchema,
+    chatSchema,
+    feedbackSchema,
+    adminMessageSchema,
+    reportSchema,
+    autoFollowUpSchema,
+    assistantSchema,
+    dreamSchema,
+    dreamRefineSchema
+} = require('./validationSchemas');
 
 // ✅ NEW: Import backup job
 const { startBackupJob } = require('./backupJob');
@@ -61,7 +84,6 @@ const app = express();
 // ════════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
 // ════════════════════════════════════════════
-// Verify JWT_SECRET is set before starting
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
     console.error('❌ Please set JWT_SECRET in your .env file and restart the server.');
@@ -156,45 +178,80 @@ app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
+// ──────────────────────────────────────────────────────────────
+//  PAYMENT ROUTE
+// ──────────────────────────────────────────────────────────────
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 
-// LEAD / CONVERSATION ROUTES
+// ──────────────────────────────────────────────────────────────
+//  AUTH ROUTES (with validation)
+// ──────────────────────────────────────────────────────────────
+app.post('/api/auth/register', validate(registerSchema), register);
+app.post('/api/auth/login', validate(loginSchema), login);
+app.put('/api/auth/change-email', verifyToken, validate(changeEmailSchema), userController.changeEmail);
+app.post('/api/auth/forgot-password', validate(forgotPasswordSchema), forgotPassword);
+app.post('/api/auth/reset-password', validate(resetPasswordSchema), resetPassword);
+app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
+
+// ──────────────────────────────────────────────────────────────
+//  USER PROFILE ROUTES
+// ──────────────────────────────────────────────────────────────
+app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
+app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
+app.put('/api/auth/change-password', verifyToken, userController.changePassword);
+app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
+
+// ──────────────────────────────────────────────────────────────
+//  LEAD / CONVERSATION ROUTES
+// ──────────────────────────────────────────────────────────────
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
-app.put('/api/leads/:leadId/rename', verifyToken, leadController.renameLead);
-app.put('/api/leads/:leadId/auto-reply', verifyToken, leadController.updateAutoReply);
-app.post('/api/leads/batch-send', verifyToken, leadController.batchSend);
+app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
+app.put('/api/leads/:leadId/auto-reply', verifyToken, validate(updateAutoReplySchema), leadController.updateAutoReply);
+app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
-// FOLLOW-UP ROUTES
-app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, followUpController.toggleAutoFollowUp);
+// ──────────────────────────────────────────────────────────────
+//  FOLLOW-UP ROUTES
+// ──────────────────────────────────────────────────────────────
+app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 
-// REVENUE TRACKING
+// ──────────────────────────────────────────────────────────────
+//  REVENUE TRACKING
+// ──────────────────────────────────────────────────────────────
 if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
     app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
 }
 
-// NOTIFICATIONS
+// ──────────────────────────────────────────────────────────────
+//  NOTIFICATIONS
+// ──────────────────────────────────────────────────────────────
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
 
-// NYLAS AUTH
+// ──────────────────────────────────────────────────────────────
+//  NYLAS AUTH
+// ──────────────────────────────────────────────────────────────
 app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
-// CHAT & DREAMS ROUTES
-app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.sendMessage);
-app.post('/api/feedback', verifyToken, chatController.submitFeedback);
+// ──────────────────────────────────────────────────────────────
+//  CHAT & DREAMS ROUTES (with validation)
+// ──────────────────────────────────────────────────────────────
+app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
+app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, chatController.getSessions);
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.analyzeDream);
-app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, chatController.refineDream);
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
+app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 
-// AI SUGGESTION ROUTE
+// ──────────────────────────────────────────────────────────────
+//  AI SUGGESTION ROUTE
+// ──────────────────────────────────────────────────────────────
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     try {
         const { messages } = req.body;
@@ -213,15 +270,14 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     }
 });
 
-// USER PROFILE ROUTES
-app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
-app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.updateUserProfile);
-app.put('/api/auth/change-password', verifyToken, userController.changePassword);
-app.put('/api/auth/change-email', verifyToken, userController.changeEmail);
-app.put('/api/users/verify-age', verifyToken, userController.verifyAge);
-app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
+// ──────────────────────────────────────────────────────────────
+//  ASSISTANT ROUTE (with validation)
+// ──────────────────────────────────────────────────────────────
+app.post('/api/assistant', verifyToken, checkAssistantLimit, validate(assistantSchema), require('./assistantController').assistantChat);
 
-// ADMIN ROUTES
+// ──────────────────────────────────────────────────────────────
+//  ADMIN ROUTES
+// ──────────────────────────────────────────────────────────────
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
 app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
@@ -229,11 +285,13 @@ app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser
 app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
 app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
 app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserChatView);
-app.post('/api/admin/users/:id/message', verifyToken, adminController.sendUserMessage);
+app.post('/api/admin/users/:id/message', verifyToken, validate(adminMessageSchema), adminController.sendUserMessage);
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 
-// REPORTS
-app.post('/api/reports', verifyToken, reportController.submitReport);
+// ──────────────────────────────────────────────────────────────
+//  REPORTS
+// ──────────────────────────────────────────────────────────────
+app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
 
 // ════════════════════════════════════════════
 //  START SERVER
