@@ -78,8 +78,11 @@ const {
 // Backup job
 const { startBackupJob } = require('./backupJob');
 
-// ✅ NEW: CSRF protection
+// CSRF protection
 const { csrfProtection, setCsrfToken } = require('./csrf');
+
+// XSS protection
+const { xssProtection, xssOutputProtection } = require('./xssMiddleware');
 
 dotenv.config();
 const app = express();
@@ -141,13 +144,22 @@ app.use(globalLimiter);
 app.use(cors());
 
 // ════════════════════════════════════════════
-//  WEBHOOKS (EXEMPT FROM CSRF)
+//  WEBHOOKS (EXEMPT FROM CSRF & XSS)
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
 
+// ════════════════════════════════════════════
+//  JSON PARSER & STATIC FILES
+// ════════════════════════════════════════════
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
+
+// ════════════════════════════════════════════
+//  XSS PROTECTION MIDDLEWARE
+// ════════════════════════════════════════════
+app.use(xssProtection);
+app.use(xssOutputProtection);
 
 // ════════════════════════════════════════════
 //  MONGODB CONNECTION
@@ -200,7 +212,14 @@ app.put('/api/users/verify-age', verifyToken, csrfProtection, validate(verifyAge
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, csrfProtection, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, csrfProtection, userController.changePassword);
+
+// ──────────────────────────────────────────────────────────────
+//  ACCOUNT DELETION ROUTES (Right to Be Forgotten – GDPR)
+// ──────────────────────────────────────────────────────────────
 app.delete('/api/users/me', verifyToken, csrfProtection, userController.deleteUserAccount);
+app.post('/api/users/me/deactivate', verifyToken, csrfProtection, userController.deactivateUserAccount);
+app.post('/api/users/me/restore', verifyToken, csrfProtection, userController.restoreUserAccount);
+app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletionStatus);
 
 // ──────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
