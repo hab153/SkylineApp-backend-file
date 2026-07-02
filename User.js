@@ -47,6 +47,21 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    
+    // ============================================================
+    // ACCOUNT DELETION (Right to Be Forgotten - GDPR)
+    // ============================================================
+    deletedAt: {
+        type: Date,
+        default: null,
+        index: true
+    },
+    deletionReason: {
+        type: String,
+        default: null
+    },
+    // ============================================================
+
     // --- ADMIN SECURITY FIELDS ---            
     isAdmin: {
         type: Boolean,
@@ -130,7 +145,6 @@ const UserSchema = new mongoose.Schema({
         accessToken: { 
             type: String, 
             default: null,
-            // ✅ Encrypt when saving, decrypt when reading
             get: function(value) {
                 if (!value) return null;
                 try { return decrypt(value); } catch { return value; }
@@ -153,7 +167,6 @@ const UserSchema = new mongoose.Schema({
         default: Date.now
     }
 }, {
-    // Enable getters to automatically decrypt when reading
     toJSON: { getters: true },
     toObject: { getters: true }
 });
@@ -256,5 +269,6 @@ UserSchema.statics.findExpiredProUsers = function() {
 
 // Indexes
 UserSchema.index({ subscriptionTier: 1, subscriptionEndDate: 1 });
+UserSchema.index({ deletedAt: 1 });
 
 module.exports = mongoose.model('User', UserSchema);
