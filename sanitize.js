@@ -166,7 +166,49 @@ function isValidEmail(email) {
 }
 
 // ============================================================
-// NOSQL INJECTION PROTECTION (NEW)
+// XSS PROTECTION FUNCTIONS (NEW)
+// ============================================================
+
+/**
+ * Escape HTML special characters to prevent XSS attacks
+ * @param {string} str - The string to escape
+ * @returns {string} - Escaped string safe for HTML output
+ */
+function escapeHtml(str) {
+    if (!str || typeof str !== 'string') return str;
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+/**
+ * Sanitize output for JSON responses (HTML-safe)
+ * @param {any} data - The data to sanitize
+ * @returns {any} - Sanitized data
+ */
+function sanitizeOutput(data) {
+    if (!data) return data;
+    if (typeof data === 'string') {
+        return escapeHtml(data);
+    }
+    if (Array.isArray(data)) {
+        return data.map(item => sanitizeOutput(item));
+    }
+    if (typeof data === 'object' && data !== null) {
+        const result = {};
+        for (const [key, value] of Object.entries(data)) {
+            result[key] = sanitizeOutput(value);
+        }
+        return result;
+    }
+    return data;
+}
+
+// ============================================================
+// NOSQL INJECTION PROTECTION
 // ============================================================
 
 /**
@@ -247,6 +289,7 @@ function sanitizeId(id) {
 }
 
 module.exports = {
+    // Existing exports
     sanitizeString,
     sanitizeEmail,
     sanitizeUsername,
@@ -254,7 +297,10 @@ module.exports = {
     isSafeString,
     validatePasswordStrength,
     isValidEmail,
-    // NEW exports
+    // XSS exports (NEW)
+    escapeHtml,
+    sanitizeOutput,
+    // NoSQL exports
     hasNoSQLInjection,
     sanitizeQuery,
     isValidObjectId,
