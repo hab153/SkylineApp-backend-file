@@ -40,6 +40,8 @@ const getAuthUrlHandler = async (req, res) => {
         const randomState = uuidv4();
         stateStore[randomState] = userId;
         setTimeout(() => { delete stateStore[randomState]; }, 10 * 60 * 1000);
+        
+        // ✅ getAuthUrl now includes response_type=code
         res.json({ url: getAuthUrl(randomState) });
     } catch (err) {
         console.error('Error in /url:', err);
