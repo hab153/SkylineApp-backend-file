@@ -1,3 +1,7 @@
+Update
+
+server.js
+
 const express = require('express');
 const mongoose = require('mongoose');
 const dotenv = require('dotenv');
@@ -78,16 +82,16 @@ const {
 // Backup job
 const { startBackupJob } = require('./backupJob');
 
-// ✅ CSRF protection
-const { csrfProtection, setCsrfToken, refreshCsrfToken } = require('./csrf');
+// CSRF protection
+const { csrfProtection, setCsrfToken } = require('./csrf');
 
 // XSS protection
 const { xssProtection, xssOutputProtection } = require('./xssMiddleware');
 
-// ✅ Data Export Routes
+// ✅ NEW: Data Export Routes
 const dataExportRoutes = require('./dataExportRoutes');
 
-// ✅ Data Export Cleanup Job
+// ✅ NEW: Data Export Cleanup Job
 const { startDataExportCleanupJob } = require('./dataExportJob');
 
 dotenv.config();
@@ -191,11 +195,6 @@ mongoose.connect(process.env.MONGODB_URI, {
 //  ROUTES
 // ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
-
-// ──────────────────────────────────────────────────────────────
-//  CSRF TOKEN REFRESH ROUTE (MUST BE BEFORE PROTECTED ROUTES)
-// ──────────────────────────────────────────────────────────────
-app.get('/api/auth/csrf-token', verifyToken, refreshCsrfToken);
 
 // Logout & Revoke routes (with CSRF protection)
 app.post('/api/auth/logout', verifyToken, csrfProtection, logout);
