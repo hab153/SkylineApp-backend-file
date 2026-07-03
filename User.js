@@ -158,6 +158,25 @@ const UserSchema = new mongoose.Schema({
         isConnected: { type: Boolean, default: false }
     },
 
+    // ============================================================
+    // DATA EXPORT HISTORY (Right to Data Portability - GDPR)
+    // ============================================================
+    dataExports: [{
+        exportId: { type: String, required: true },
+        format: { type: String, enum: ['json', 'csv'], required: true },
+        status: { type: String, enum: ['pending', 'processing', 'completed', 'failed', 'expired'], default: 'pending' },
+        fileName: { type: String },
+        fileSize: { type: Number, default: 0 },
+        progress: { type: Number, default: 0, min: 0, max: 100 },
+        error: { type: String, default: null },
+        createdAt: { type: Date, default: Date.now },
+        expiresAt: { type: Date, default: null },
+        downloadedAt: { type: Date, default: null },
+        ip: { type: String, default: null },
+        userAgent: { type: String, default: null }
+    }],
+    // ============================================================
+
     createdAt: {
         type: Date,
         default: Date.now
@@ -270,5 +289,7 @@ UserSchema.statics.findExpiredProUsers = function() {
 // Indexes
 UserSchema.index({ subscriptionTier: 1, subscriptionEndDate: 1 });
 UserSchema.index({ deletedAt: 1 });
+UserSchema.index({ 'dataExports.createdAt': 1 });
+UserSchema.index({ 'dataExports.expiresAt': 1 });
 
 module.exports = mongoose.model('User', UserSchema);
