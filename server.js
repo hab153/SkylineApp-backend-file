@@ -84,6 +84,12 @@ const { csrfProtection, setCsrfToken } = require('./csrf');
 // XSS protection
 const { xssProtection, xssOutputProtection } = require('./xssMiddleware');
 
+// ✅ NEW: Data Export Routes
+const dataExportRoutes = require('./dataExportRoutes');
+
+// ✅ NEW: Data Export Cleanup Job
+const { startDataExportCleanupJob } = require('./dataExportJob');
+
 dotenv.config();
 const app = express();
 
@@ -176,6 +182,8 @@ mongoose.connect(process.env.MONGODB_URI, {
         if (process.env.NODE_ENV !== 'test') {
             startBackupJob();
         }
+        // ✅ Start data export cleanup job
+        startDataExportCleanupJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
@@ -220,6 +228,11 @@ app.delete('/api/users/me', verifyToken, csrfProtection, userController.deleteUs
 app.post('/api/users/me/deactivate', verifyToken, csrfProtection, userController.deactivateUserAccount);
 app.post('/api/users/me/restore', verifyToken, csrfProtection, userController.restoreUserAccount);
 app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletionStatus);
+
+// ──────────────────────────────────────────────────────────────
+//  DATA EXPORT ROUTES (Right to Data Portability – GDPR)
+// ──────────────────────────────────────────────────────────────
+app.use('/api/data', dataExportRoutes);
 
 // ──────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
