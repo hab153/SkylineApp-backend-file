@@ -9,17 +9,22 @@ const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/au
 
 /**
  * Generates the Nylas OAuth URL for the user to connect their email.
- * FIX: response_type must be the FIRST parameter
  * @param {string} state - A unique random UUID to prevent CSRF attacks
  */
 function getAuthUrl(state) {
     const clientId = process.env.NYLAS_CLIENT_ID;
 
+    console.log('🔧 [NYLAS DEBUG] getAuthUrl called with state:', state);
+    console.log('🔧 [NYLAS DEBUG] NYLAS_CLIENT_ID:', clientId ? '✅ Present' : '❌ MISSING');
+    console.log('🔧 [NYLAS DEBUG] NYLAS_API_BASE:', NYLAS_API_BASE);
+    console.log('🔧 [NYLAS DEBUG] RENDER_CALLBACK_URL:', RENDER_CALLBACK_URL);
+
     if (!clientId) {
+        console.error('❌ [NYLAS DEBUG] NYLAS_CLIENT_ID is not set!');
         throw new Error('NYLAS_CLIENT_ID is not set in environment variables');
     }
 
-    // ✅ Build URL manually with response_type FIRST
+    // Build URL manually with response_type FIRST
     const baseUrl = `${NYLAS_API_BASE}/v3/connect/auth`;
     
     // response_type MUST be first
@@ -31,7 +36,9 @@ function getAuthUrl(state) {
     url += `&scope=${encodeURIComponent('openid email email.read_only email.send email.modify')}`;
     url += `&state=${encodeURIComponent(state)}`;
 
-    console.log('🔗 [NYLAS] Generated auth URL:', url);
+    console.log('🔗 [NYLAS DEBUG] Generated full auth URL:', url);
+    console.log('🔧 [NYLAS DEBUG] URL contains response_type=code:', url.includes('response_type=code') ? '✅ Yes' : '❌ No');
+    console.log('🔧 [NYLAS DEBUG] URL contains access_type=offline:', url.includes('access_type=offline') ? '✅ Yes' : '❌ No');
     
     return url;
 }
@@ -40,25 +47,44 @@ function getAuthUrl(state) {
  * Exchanges the authorization code for an access token.
  */
 async function exchangeCodeForToken(code) {
+    console.log('🔧 [NYLAS DEBUG] exchangeCodeForToken called with code:', code ? '✅ Present' : '❌ MISSING');
+    console.log('🔧 [NYLAS DEBUG] NYLAS_CLIENT_ID:', process.env.NYLAS_CLIENT_ID ? '✅ Present' : '❌ MISSING');
+    console.log('🔧 [NYLAS DEBUG] NYLAS_CLIENT_SECRET:', process.env.NYLAS_CLIENT_SECRET ? '✅ Present' : '❌ MISSING');
+
     try {
+        const requestBody = {
+            client_id:     process.env.NYLAS_CLIENT_ID,
+            client_secret: process.env.NYLAS_CLIENT_SECRET,
+            grant_type:    'authorization_code',
+            code:          code,
+            redirect_uri:  RENDER_CALLBACK_URL,
+        };
+
+        console.log('🔧 [NYLAS DEBUG] Request body for token exchange:', JSON.stringify(requestBody, null, 2));
+
         const response = await axios.post(
             `${NYLAS_API_BASE}/v3/connect/token`,
-            {
-                client_id:     process.env.NYLAS_CLIENT_ID,
-                client_secret: process.env.NYLAS_CLIENT_SECRET,
-                grant_type:    'authorization_code',
-                code:          code,
-                redirect_uri:  RENDER_CALLBACK_URL,
-            },
+            requestBody,
             {
                 headers: { 'Content-Type': 'application/json' },
                 timeout: 15000,
             }
         );
         console.log('✅ [NYLAS] Token exchange successful.');
+        console.log('🔧 [NYLAS DEBUG] Token response keys:', Object.keys(response.data));
+        console.log('🔧 [NYLAS DEBUG] Has access_token:', !!response.data.access_token);
+        console.log('🔧 [NYLAS DEBUG] Has refresh_token:', !!response.data.refresh_token);
+        console.log('🔧 [NYLAS DEBUG] Has grant_id:', !!response.data.grant_id);
         return response.data;
     } catch (error) {
-        console.error('❌ [NYLAS] Token Exchange Error:', error.response ? error.response.data : error.message);
+        console.error('❌ [NYLAS] Token Exchange Error:');
+        if (error.response) {
+            console.error('🔧 [NYLAS DEBUG] Status:', error.response.status);
+            console.error('🔧 [NYLAS DEBUG] Headers:', error.response.headers);
+            console.error('🔧 [NYLAS DEBUG] Data:', JSON.stringify(error.response.data, null, 2));
+        } else {
+            console.error('🔧 [NYLAS DEBUG] Error message:', error.message);
+        }
         throw error;
     }
 }
@@ -67,8 +93,14 @@ async function exchangeCodeForToken(code) {
  * Gets the user's email address from Nylas after token exchange.
  */
 async function getUserEmail(accessToken) {
+    console.log('🔧 [NYLAS DEBUG] getUserEmail called');
+    console.log('🔧 [NYLAS DEBUG] Access token present:', !!accessToken);
+    console.log('🔧 [NYLAS DEBUG] Access token length:', accessToken ? accessToken.length : 0);
+
     try {
         const decryptedToken = decrypt(accessToken) || accessToken;
+        console.log('🔧 [NYLAS DEBUG] Decrypted token present:', !!decryptedToken);
+        
         const response = await axios.get(
             `${NYLAS_API_BASE}/v3/grants/me`,
             {
@@ -80,10 +112,17 @@ async function getUserEmail(accessToken) {
             }
         );
         const email = response.data?.data?.email || response.data?.email;
+        console.log('🔧 [NYLAS DEBUG] Email found:', email || '❌ No email');
         if (!email) throw new Error('Email field not found in grant response');
         return email;
     } catch (error) {
-        console.error('❌ [NYLAS] Get User Email Error:', error.response ? error.response.data : error.message);
+        console.error('❌ [NYLAS] Get User Email Error:');
+        if (error.response) {
+            console.error('🔧 [NYLAS DEBUG] Status:', error.response.status);
+            console.error('🔧 [NYLAS DEBUG] Data:', JSON.stringify(error.response.data, null, 2));
+        } else {
+            console.error('🔧 [NYLAS DEBUG] Error message:', error.message);
+        }
         throw error;
     }
 }
@@ -92,6 +131,9 @@ async function getUserEmail(accessToken) {
  * Sends an email on behalf of the connected user via their grant.
  */
 async function sendEmail(accessToken, to, subject, body) {
+    console.log('🔧 [NYLAS DEBUG] sendEmail called to:', to);
+    console.log('🔧 [NYLAS DEBUG] Access token present:', !!accessToken);
+
     try {
         const decryptedToken = decrypt(accessToken) || accessToken;
         const response = await axios.post(
@@ -117,6 +159,10 @@ async function sendEmail(accessToken, to, subject, body) {
     } catch (error) {
         const errDetail = error.response ? JSON.stringify(error.response.data) : error.message;
         console.error(`❌ [NYLAS] Send Email Error to ${to}: ${errDetail}`);
+        if (error.response) {
+            console.error('🔧 [NYLAS DEBUG] Status:', error.response.status);
+            console.error('🔧 [NYLAS DEBUG] Data:', JSON.stringify(error.response.data, null, 2));
+        }
         return {
             success: false,
             error:   errDetail,
