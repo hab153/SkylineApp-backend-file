@@ -48,10 +48,15 @@ async function validateCsrfToken(userId, token) {
     if (!record) return false;
     
     // Constant-time comparison to prevent timing attacks
-    return crypto.timingSafeEqual(
-        Buffer.from(record.token),
-        Buffer.from(token)
-    );
+    try {
+        return crypto.timingSafeEqual(
+            Buffer.from(record.token),
+            Buffer.from(token)
+        );
+    } catch (err) {
+        // If buffers are different lengths, timingSafeEqual throws
+        return false;
+    }
 }
 
 /**
@@ -59,6 +64,43 @@ async function validateCsrfToken(userId, token) {
  */
 async function deleteCsrfToken(userId) {
     await CsrfToken.findOneAndDelete({ userId });
+}
+
+/**
+ * Get CSRF token for a user (without generating new one)
+ */
+async function getCsrfToken(userId) {
+    const record = await CsrfToken.findOne({ userId });
+    return record ? record.token : null;
+}
+
+/**
+ * Refresh CSRF token endpoint handler
+ * GET /api/auth/csrf-token
+ */
+async function refreshCsrfToken(req, res) {
+    try {
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({
+                error: 'Unauthorized',
+                message: 'User not authenticated'
+            });
+        }
+
+        const token = await generateCsrfToken(userId);
+        
+        res.json({
+            csrfToken: token,
+            message: 'CSRF token refreshed successfully'
+        });
+    } catch (err) {
+        console.error('Error refreshing CSRF token:', err);
+        res.status(500).json({
+            error: 'Server error',
+            message: 'Failed to refresh CSRF token'
+        });
+    }
 }
 
 /**
@@ -76,7 +118,7 @@ function csrfProtection(req, res, next) {
         return next();
     }
 
-    const token = req.headers['x-csrf-token'] || req.body._csrf;
+    const token = req.headers['x-csrf-token'] || req.headers['x-csrf-token'] || req.body._csrf;
     if (!token) {
         return res.status(403).json({
             error: 'CSRF token missing',
@@ -97,7 +139,7 @@ function csrfProtection(req, res, next) {
             if (!isValid) {
                 return res.status(403).json({
                     error: 'Invalid CSRF token',
-                    message: 'The CSRF token is invalid or expired'
+                    message: 'The CSRF token is invalid or expired. Please refresh and try again.'
                 });
             }
             next();
@@ -122,7 +164,7 @@ async function setCsrfToken(req, res, next) {
         // Also include in response body if it's a JSON response
         const originalJson = res.json;
         res.json = function(data) {
-            if (data && typeof data === 'object') {
+            if (data && typeof data === 'object' && !data.csrfToken) {
                 data.csrfToken = token;
             }
             originalJson.call(this, data);
@@ -138,6 +180,8 @@ module.exports = {
     generateCsrfToken,
     validateCsrfToken,
     deleteCsrfToken,
+    getCsrfToken,
+    refreshCsrfToken,
     csrfProtection,
     setCsrfToken,
     CsrfToken
