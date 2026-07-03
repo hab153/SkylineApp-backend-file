@@ -15,15 +15,22 @@ function getAuthUrl(state) {
     if (!clientId) {
         throw new Error('NYLAS_CLIENT_ID is not set in environment variables');
     }
-    const params = new URLSearchParams({
-        client_id:     clientId,
-        redirect_uri:  RENDER_CALLBACK_URL,
-        response_type: 'code',
-        access_type:   'offline',
-        scope:         'openid email email.read_only email.send email.modify',
-        state:         state,
-    });
-    return `${NYLAS_API_BASE}/v3/connect/auth?${params.toString()}`;
+
+    // Manual URL construction – ensures parameters are correctly formatted
+    const baseUrl = `${NYLAS_API_BASE}/v3/connect/auth`;
+    const params = [
+        `client_id=${encodeURIComponent(clientId)}`,
+        `redirect_uri=${encodeURIComponent(RENDER_CALLBACK_URL)}`,
+        `response_type=code`,
+        `access_type=offline`,
+        `scope=${encodeURIComponent('openid email email.read_only email.send email.modify')}`,
+        `state=${encodeURIComponent(state)}`
+    ].join('&');
+    
+    const url = `${baseUrl}?${params}`;
+    console.log('🔗 [NYLAS] Generated auth URL:', url);
+    
+    return url;
 }
 
 /**
@@ -58,7 +65,6 @@ async function exchangeCodeForToken(code) {
  */
 async function getUserEmail(accessToken) {
     try {
-        // ✅ Decrypt token if it was encrypted
         const decryptedToken = decrypt(accessToken) || accessToken;
         const response = await axios.get(
             `${NYLAS_API_BASE}/v3/grants/me`,
@@ -84,7 +90,6 @@ async function getUserEmail(accessToken) {
  */
 async function sendEmail(accessToken, to, subject, body) {
     try {
-        // ✅ Decrypt token if it was encrypted
         const decryptedToken = decrypt(accessToken) || accessToken;
         const response = await axios.post(
             `${NYLAS_API_BASE}/v3/grants/me/messages/send`,
@@ -121,7 +126,6 @@ async function sendEmail(accessToken, to, subject, body) {
  */
 async function getRecentEmails(accessToken, limit = 10) {
     try {
-        // ✅ Decrypt token if it was encrypted
         const decryptedToken = decrypt(accessToken) || accessToken;
         const response = await axios.get(
             `${NYLAS_API_BASE}/v3/grants/me/messages`,
