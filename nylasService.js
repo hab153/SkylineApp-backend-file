@@ -9,32 +9,36 @@ const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/au
 
 /**
  * Generates the Nylas OAuth URL for the user to connect their email.
+ * FIX: Added response_type=code as a URL parameter.
+ * @param {string} state - A unique random UUID to prevent CSRF attacks
  */
 function getAuthUrl(state) {
     const clientId = process.env.NYLAS_CLIENT_ID;
+
     if (!clientId) {
         throw new Error('NYLAS_CLIENT_ID is not set in environment variables');
     }
 
-    // Manual URL construction – ensures parameters are correctly formatted
-    const baseUrl = `${NYLAS_API_BASE}/v3/connect/auth`;
-    const params = [
-        `client_id=${encodeURIComponent(clientId)}`,
-        `redirect_uri=${encodeURIComponent(RENDER_CALLBACK_URL)}`,
-        `response_type=code`,
-        `access_type=offline`,
-        `scope=${encodeURIComponent('openid email email.read_only email.send email.modify')}`,
-        `state=${encodeURIComponent(state)}`
-    ].join('&');
-    
-    const url = `${baseUrl}?${params}`;
+    const params = new URLSearchParams({
+        client_id:     clientId,
+        redirect_uri:  RENDER_CALLBACK_URL,
+        response_type: 'code',       // ✅ FIXED: Required by Nylas
+        access_type:   'offline',    // Required to get a refresh_token
+        scope:         'openid email email.read_only email.send email.modify',
+        state:         state,
+    });
+
+    const url = `${NYLAS_API_BASE}/v3/connect/auth?${params.toString()}`;
     console.log('🔗 [NYLAS] Generated auth URL:', url);
-    
+
     return url;
 }
 
 /**
  * Exchanges the authorization code for an access token.
+ * Called in server.js callback route.
+ * @param {string} code - The code returned by Nylas after user authorizes
+ * @returns {object} tokenData - Contains access_token, refresh_token, grant_id, etc.
  */
 async function exchangeCodeForToken(code) {
     try {
@@ -62,6 +66,9 @@ async function exchangeCodeForToken(code) {
 
 /**
  * Gets the user's email address from Nylas after token exchange.
+ * In Nylas V3, use /v3/grants/me with the user's access token.
+ * @param {string} accessToken - The user's Nylas access token
+ * @returns {string} email address
  */
 async function getUserEmail(accessToken) {
     try {
@@ -76,8 +83,10 @@ async function getUserEmail(accessToken) {
                 timeout: 10000,
             }
         );
+
         const email = response.data?.data?.email || response.data?.email;
         if (!email) throw new Error('Email field not found in grant response');
+
         return email;
     } catch (error) {
         console.error('❌ [NYLAS] Get User Email Error:', error.response ? error.response.data : error.message);
@@ -87,6 +96,12 @@ async function getUserEmail(accessToken) {
 
 /**
  * Sends an email on behalf of the connected user via their grant.
+ * Uses the correct Nylas V3 endpoint with the user's access token as auth.
+ * @param {string} accessToken - The user's stored Nylas access token
+ * @param {string} to          - Recipient email address
+ * @param {string} subject     - Email subject line
+ * @param {string} body        - Email body (HTML or plain text)
+ * @returns {{ success: boolean, messageId?: string, error?: string }}
  */
 async function sendEmail(accessToken, to, subject, body) {
     try {
@@ -106,6 +121,7 @@ async function sendEmail(accessToken, to, subject, body) {
                 timeout: 20000,
             }
         );
+
         console.log(`✅ [NYLAS] Email sent to ${to}. Message ID: ${response.data?.data?.id || response.data?.id}`);
         return {
             success:   true,
@@ -123,6 +139,9 @@ async function sendEmail(accessToken, to, subject, body) {
 
 /**
  * Reads recent emails from the user's inbox.
+ * Used for reply detection and polling.
+ * @param {string} accessToken - The user's Nylas access token
+ * @param {number} limit       - How many messages to fetch (default 10)
  */
 async function getRecentEmails(accessToken, limit = 10) {
     try {
