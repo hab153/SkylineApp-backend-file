@@ -24,33 +24,31 @@ function getAuthUrl(state) {
         throw new Error('NYLAS_CLIENT_ID is not set in environment variables');
     }
 
-    // Build URL manually with response_type FIRST
-    const baseUrl = `${NYLAS_API_BASE}/v3/connect/auth`;
-    
-    // response_type MUST be first
-    let url = baseUrl + '?';
-    url += `response_type=code`;
-    url += `&client_id=${encodeURIComponent(clientId)}`;
-    url += `&redirect_uri=${encodeURIComponent(RENDER_CALLBACK_URL)}`;
-    url += `&access_type=offline`;
-    // ✅ FIX: Add provider parameter - REQUIRED by Nylas
-    url += `&provider=gmail`;  // This tells Nylas to use Google OAuth
-    url += `&scope=${encodeURIComponent('openid email email.read_only email.send email.modify')}`;
-    url += `&state=${encodeURIComponent(state)}`;
+    // ✅ FIX: Use URLSearchParams for safe, standard-compliant encoding
+    // This resolves the "invalid request 'response_type'" error from Nylas logs
+    const params = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: RENDER_CALLBACK_URL,
+        response_type: 'code',
+        access_type: 'offline',
+        scope: 'openid email email.read_only email.send email.modify',
+        state: state
+    });
 
-    console.log('🔗 [NYLAS DEBUG] Generated full auth URL:', url);
-    console.log('🔧 [NYLAS DEBUG] URL contains response_type=code:', url.includes('response_type=code') ? '✅ Yes' : '❌ No');
-    console.log('🔧 [NYLAS DEBUG] URL contains access_type=offline:', url.includes('access_type=offline') ? '✅ Yes' : '❌ No');
-    console.log('🔧 [NYLAS DEBUG] URL contains provider=gmail:', url.includes('provider=gmail') ? '✅ Yes' : '❌ No');
+    const authUrl = `${NYLAS_API_BASE}/v3/connect/auth?${params.toString()}`;
+
+    console.log('🔗 [NYLAS DEBUG] Generated full auth URL:', authUrl);
+    console.log('🔧 [NYLAS DEBUG] URL contains response_type=code:', authUrl.includes('response_type=code') ? '✅ Yes' : '❌ No');
+    console.log('🔧 [NYLAS DEBUG] URL contains access_type=offline:', authUrl.includes('access_type=offline') ? '✅ Yes' : '❌ No');
     
-    return url;
+    return authUrl;
 }
 
 /**
  * Exchanges the authorization code for an access token.
  */
 async function exchangeCodeForToken(code) {
-    console.log('🔧 [NYLAS DEBUG] exchangeCodeForToken called with code:', code ? '✅ Present' : '❌ MISSING');
+    console.log(' [NYLAS DEBUG] exchangeCodeForToken called with code:', code ? '✅ Present' : '❌ MISSING');
     console.log('🔧 [NYLAS DEBUG] NYLAS_CLIENT_ID:', process.env.NYLAS_CLIENT_ID ? '✅ Present' : '❌ MISSING');
     console.log('🔧 [NYLAS DEBUG] NYLAS_CLIENT_SECRET:', process.env.NYLAS_CLIENT_SECRET ? '✅ Present' : '❌ MISSING');
 
@@ -84,7 +82,7 @@ async function exchangeCodeForToken(code) {
         if (error.response) {
             console.error('🔧 [NYLAS DEBUG] Status:', error.response.status);
             console.error('🔧 [NYLAS DEBUG] Headers:', error.response.headers);
-            console.error('🔧 [NYLAS DEBUG] Data:', JSON.stringify(error.response.data, null, 2));
+            console.error(' [NYLAS DEBUG] Data:', JSON.stringify(error.response.data, null, 2));
         } else {
             console.error('🔧 [NYLAS DEBUG] Error message:', error.message);
         }
@@ -98,7 +96,7 @@ async function exchangeCodeForToken(code) {
 async function getUserEmail(accessToken) {
     console.log('🔧 [NYLAS DEBUG] getUserEmail called');
     console.log('🔧 [NYLAS DEBUG] Access token present:', !!accessToken);
-    console.log('🔧 [NYLAS DEBUG] Access token length:', accessToken ? accessToken.length : 0);
+    console.log(' [NYLAS DEBUG] Access token length:', accessToken ? accessToken.length : 0);
 
     try {
         const decryptedToken = decrypt(accessToken) || accessToken;
