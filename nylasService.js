@@ -33,12 +33,15 @@ function getAuthUrl(state) {
     url += `&client_id=${encodeURIComponent(clientId)}`;
     url += `&redirect_uri=${encodeURIComponent(RENDER_CALLBACK_URL)}`;
     url += `&access_type=offline`;
+    // ✅ FIX: Add provider parameter - REQUIRED by Nylas
+    url += `&provider=gmail`;  // This tells Nylas to use Google OAuth
     url += `&scope=${encodeURIComponent('openid email email.read_only email.send email.modify')}`;
     url += `&state=${encodeURIComponent(state)}`;
 
     console.log('🔗 [NYLAS DEBUG] Generated full auth URL:', url);
     console.log('🔧 [NYLAS DEBUG] URL contains response_type=code:', url.includes('response_type=code') ? '✅ Yes' : '❌ No');
     console.log('🔧 [NYLAS DEBUG] URL contains access_type=offline:', url.includes('access_type=offline') ? '✅ Yes' : '❌ No');
+    console.log('🔧 [NYLAS DEBUG] URL contains provider=gmail:', url.includes('provider=gmail') ? '✅ Yes' : '❌ No');
     
     return url;
 }
