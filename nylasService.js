@@ -1,11 +1,42 @@
 // nylasService.js
 const axios = require('axios');
 
+// ✅ HARDCODED CALLBACK URI - Prevents env var issues on Render free tier
+const RENDER_CALLBACK_URL = 'https://skylineapp-backend-file.onrender.com/api/auth/nylas/callback';
+const NYLAS_API_BASE = process.env.NYLAS_API_URI || 'https://api.us.nylas.com';
+
 // ─── GET AUTH URL ──────────────────────────────────────────────────────────────
 function getAuthUrl(state) {
     const clientId = process.env.NYLAS_CLIENT_ID;
-    const redirectUri = process.env.NYLAS_REDIRECT_URI || 'https://skylineapp-backend-file.onrender.com/api/auth/nylas/callback';
-    const authUrl = `https://api.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&state=${state}`;
+
+    if (!clientId) {
+        throw new Error('NYLAS_CLIENT_ID is not set in environment variables');
+    }
+
+    // ✅ Use URLSearchParams for RFC-compliant encoding
+    // Includes ALL required Nylas V3 OAuth parameters
+    const params = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: RENDER_CALLBACK_URL,
+        response_type: 'code',
+        access_type: 'offline',          // REQUIRED for refresh tokens
+        scope: 'openid email email.read_only email.send email.modify',
+        state: state
+    });
+
+    const authUrl = `${NYLAS_API_BASE}/v3/connect/auth?${params.toString()}`;
+
+    // ✅ Validate URL before returning to catch missing params early
+    const urlObj = new URL(authUrl);
+    const requiredParams = ['client_id', 'redirect_uri', 'response_type', 'access_type', 'scope', 'state'];
+    const missing = requiredParams.filter(p => !urlObj.searchParams.has(p));
+
+    if (missing.length > 0) {
+        console.error('❌ [NYLAS] Auth URL missing parameters:', missing);
+        throw new Error(`CRITICAL: Auth URL missing required params: ${missing.join(', ')}`);
+    }
+
+    console.log('🔗 [NYLAS] Generated auth URL:', authUrl);
     return authUrl;
 }
 
@@ -13,17 +44,24 @@ function getAuthUrl(state) {
 async function exchangeCodeForToken(code) {
     const clientId = process.env.NYLAS_CLIENT_ID;
     const clientSecret = process.env.NYLAS_CLIENT_SECRET;
-    const redirectUri = process.env.NYLAS_REDIRECT_URI || 'https://skylineapp-backend-file.onrender.com/api/auth/nylas/callback';
+
+    if (!clientId || !clientSecret) {
+        throw new Error('NYLAS_CLIENT_ID or NYLAS_CLIENT_SECRET is not set');
+    }
 
     try {
         const response = await axios.post(
-            `${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/connect/token`,
+            `${NYLAS_API_BASE}/v3/connect/token`,
             {
                 client_id: clientId,
                 client_secret: clientSecret,
                 grant_type: 'authorization_code',
                 code: code,
-                redirect_uri: redirectUri
+                redirect_uri: RENDER_CALLBACK_URL
+            },
+            {
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 15000
             }
         );
 
@@ -34,20 +72,25 @@ async function exchangeCodeForToken(code) {
         };
     } catch (error) {
         console.error('❌ [NYLAS] Token exchange failed:', error.response?.data || error.message);
-        throw new Error('Failed to exchange code for token');
+        throw new Error(error.response?.data?.error_description || 'Failed to exchange code for token');
     }
 }
 
 // ─── GET USER EMAIL ────────────────────────────────────────────────────────────
 async function getUserEmail(accessToken) {
+    if (!accessToken) {
+        throw new Error('Access token is required');
+    }
+
     try {
         const response = await axios.get(
-            `${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/grants/me`,
+            `${NYLAS_API_BASE}/v3/grants/me`,
             {
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 10000
             }
         );
         return response.data?.email || 'unknown@nylas.com';
@@ -57,11 +100,15 @@ async function getUserEmail(accessToken) {
     }
 }
 
-// ─── SEND EMAIL ────────────────────────────────────────────────────────────────
+// ─── SEND EMAIL ───────────────────────────────────────────────────────────────
 async function sendEmail(accessToken, toEmail, subject, body) {
+    if (!accessToken || !toEmail) {
+        throw new Error('Access token and recipient email are required');
+    }
+
     try {
         const response = await axios.post(
-            `${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/grants/me/messages/send`,
+            `${NYLAS_API_BASE}/v3/grants/me/messages/send`,
             {
                 to: [{ email: toEmail }],
                 subject: subject,
@@ -71,7 +118,8 @@ async function sendEmail(accessToken, toEmail, subject, body) {
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 20000
             }
         );
 
@@ -82,8 +130,12 @@ async function sendEmail(accessToken, toEmail, subject, body) {
     }
 }
 
-// ─── SEND EMAIL WITH ATTACHMENTS (if needed) ──────────────────────────────────
+// ─── SEND EMAIL WITH ATTACHMENTS ──────────────────────────────────────────────
 async function sendEmailWithAttachments(accessToken, toEmail, subject, body, attachments = []) {
+    if (!accessToken || !toEmail) {
+        throw new Error('Access token and recipient email are required');
+    }
+
     try {
         const payload = {
             to: [{ email: toEmail }],
@@ -100,13 +152,14 @@ async function sendEmailWithAttachments(accessToken, toEmail, subject, body, att
         }
 
         const response = await axios.post(
-            `${process.env.NYLAS_API_URI || 'https://api.us.nylas.com'}/v3/grants/me/messages/send`,
+            `${NYLAS_API_BASE}/v3/grants/me/messages/send`,
             payload,
             {
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type': 'application/json'
-                }
+                },
+                timeout: 30000
             }
         );
 
