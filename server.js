@@ -15,18 +15,29 @@ const crypto = require('crypto');
 const { verifyToken } = require('./authMiddleware');
 const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
-const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
+
+// ❌ REMOVED: Nylas imports
+// const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
+// const nylasAuthController = require('./nylasAuthController');
+
+// ✅ NEW: Gmail imports
+const { startGmailTokenRefreshJob } = require('./gmailTokenRefresh');
+const gmailRoutes = require('./gmailRoutes');
+const { handleGmailWebhook } = require('./gmailInboundWebhook');
+
 const { startExpiryJob } = require('./expiryJob');
 const { startFollowUpJob } = require('./followUpJob');
 const flutterwaveWebhook = require('./flutterwaveWebhook');
-const nylasInboundWebhook = require('./nylasInboundWebhook');
+
+// ❌ REMOVED: Nylas webhook
+// const nylasInboundWebhook = require('./nylasInboundWebhook');
+
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
 const leadController = require('./leadController');
 const chatController = require('./chatController');
 const userController = require('./userController');
 const adminController = require('./adminController');
 const notificationController = require('./notificationController');
-const nylasAuthController = require('./nylasAuthController');
 const reportController = require('./reportController');
 const followUpController = require('./followUpController');
 const revenueController = require('./revenueController');
@@ -41,7 +52,10 @@ const { generateSuggestion } = require('./aiSuggestion');
 // MODELS & SERVICES
 const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
-const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
+
+// ❌ REMOVED: Nylas service
+// const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
+
 const authRoutes = require('./authRoutes');
 const assistantRoutes = require('./assistantRoutes');
 const sessionRoutes = require('./sessionRoutes');
@@ -84,10 +98,10 @@ const { csrfProtection, setCsrfToken } = require('./csrf');
 // XSS protection
 const { xssProtection, xssOutputProtection } = require('./xssMiddleware');
 
-// ✅ NEW: Data Export Routes
+// Data Export Routes
 const dataExportRoutes = require('./dataExportRoutes');
 
-// ✅ NEW: Data Export Cleanup Job
+// Data Export Cleanup Job
 const { startDataExportCleanupJob } = require('./dataExportJob');
 
 dotenv.config();
@@ -153,7 +167,12 @@ app.use(cors());
 //  WEBHOOKS (EXEMPT FROM CSRF & XSS)
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
-app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
+
+// ❌ REMOVED: Nylas inbound webhook
+// app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
+
+// ✅ NEW: Gmail inbound webhook (for push notifications)
+app.post('/api/webhooks/gmail', express.raw({ type: 'application/json' }), handleGmailWebhook);
 
 // ════════════════════════════════════════════
 //  JSON PARSER & STATIC FILES
@@ -176,13 +195,18 @@ mongoose.connect(process.env.MONGODB_URI, {
 })
     .then(() => {
         console.log('✅ MongoDB Connected');
-        startTokenRefreshJob();
+        
+        // ❌ REMOVED: Nylas token refresh job
+        // startTokenRefreshJob();
+        
+        // ✅ NEW: Gmail token refresh job
+        startGmailTokenRefreshJob();
+        
         startExpiryJob();
         startFollowUpJob();
         if (process.env.NODE_ENV !== 'test') {
             startBackupJob();
         }
-        // ✅ Start data export cleanup job
         startDataExportCleanupJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
@@ -198,6 +222,9 @@ app.post('/api/auth/revoke-tokens', verifyToken, csrfProtection, revokeAllTokens
 
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
+
+// ✅ NEW: Gmail routes
+app.use('/api', gmailRoutes);
 
 // ──────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
@@ -266,11 +293,9 @@ app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifi
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
 
-// ──────────────────────────────────────────────────────────────
-//  NYLAS AUTH
-// ──────────────────────────────────────────────────────────────
-app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
-app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
+// ❌ REMOVED: Nylas auth routes
+// app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
+// app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
 // ──────────────────────────────────────────────────────────────
 //  CHAT & DREAMS ROUTES
