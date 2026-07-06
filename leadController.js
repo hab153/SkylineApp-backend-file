@@ -1,7 +1,5 @@
 const Lead = require('./Lead');
-const EmailAccount = require('./EmailAccount');
-const { refreshNylasToken } = require('./nylasTokenRefresh');
-const { sendEmail } = require('./nylasService');
+const { sendGmailEmail, getGmailClient, isGmailConnected } = require('./gmailService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
 // GET /api/conversations
@@ -144,11 +142,22 @@ const batchSend = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
-        // Sanitize the leads array
+
         const { leads } = req.body;
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
+
+        // Check Gmail connection
+        const isConnected = await isGmailConnected(req.userId);
+        if (!isConnected) {
+            return res.status(401).json({
+                success: false,
+                error: 'GMAIL_DISCONNECTED',
+                message: 'Please connect your Gmail account first.'
+            });
+        }
+
         // Sanitize each lead
         const sanitizedLeads = leads.map(lead => ({
             name: lead.name ? lead.name.trim().slice(0, 100) : '',
@@ -160,33 +169,17 @@ const batchSend = async (req, res) => {
             }))
         }));
 
-        const emailAccount = await EmailAccount.findOne({ userId: req.userId });
-        if (!emailAccount) {
-            return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'No connection found.' });
-        }
-
-        const isExpired = !emailAccount.tokenExpiry ||
-            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 15 * 60 * 1000);
-        let currentAccessToken = emailAccount.accessToken;
-
-        if (isExpired) {
-            try {
-                currentAccessToken = await refreshNylasToken(emailAccount);
-            } catch (refreshErr) {
-                return res.status(401).json({ success: false, error: 'NYLAS_DISCONNECTED', message: 'Session expired. Please reconnect.' });
-            }
-        }
         let sentCount = 0;
         let errors = [];
         const now = new Date();
 
         for (const leadData of sanitizedLeads) {
             try {
-                // Validate email
                 if (!leadData.email) {
                     errors.push({ email: 'missing', error: 'Email is required' });
                     continue;
                 }
+
                 let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                 if (!lead) {
                     lead = new Lead({
@@ -217,25 +210,33 @@ const batchSend = async (req, res) => {
                 await lead.save();
 
                 if (leadData.messages?.length > 0) {
-                    const result = await sendEmail(
-                        currentAccessToken,
+                    const result = await sendGmailEmail(
+                        req.userId,
                         leadData.email,
                         leadData.messages[0].subject,
                         leadData.messages[0].body
                     );
-                    if (result.success) {
+                    if (result) {
                         sentCount++;
                         console.log(`✅ [batchSend] Email sent to ${leadData.email}`);
-                    } else {
-                        lead.status = 'Failed';
-                        await lead.save();
-                        errors.push({ email: leadData.email, error: result.error });
                     }
                 }
             } catch (err) {
+                console.error(`❌ [batchSend] Error sending to ${leadData.email}:`, err.message);
                 errors.push({ email: leadData.email, error: err.message });
+                // Update lead status to failed
+                try {
+                    const lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
+                    if (lead) {
+                        lead.status = 'Failed';
+                        await lead.save();
+                    }
+                } catch (saveErr) {
+                    // Ignore
+                }
             }
         }
+
         res.json({ success: true, message: `Sent ${sentCount} emails.`, errors });
     } catch (err) {
         console.error('❌ [batchSend] Error:', err);
@@ -251,27 +252,34 @@ const reconnectAndSend = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         console.log(`🔄 [reconnectAndSend] For user ${req.userId}`);
-        const emailAccount = await EmailAccount.findOne({ userId: req.userId });
-        if (!emailAccount) return res.status(400).json({ message: 'Nylas not connected' });
 
-        let currentAccessToken = emailAccount.accessToken;
-        const isExpired = !emailAccount.tokenExpiry ||
-            new Date() > new Date(emailAccount.tokenExpiry.getTime() - 15 * 60 * 1000);
-        if (isExpired) currentAccessToken = await refreshNylasToken(emailAccount);
+        const isConnected = await isGmailConnected(req.userId);
+        if (!isConnected) {
+            return res.status(401).json({
+                success: false,
+                error: 'GMAIL_DISCONNECTED',
+                message: 'Please connect your Gmail account first.'
+            });
+        }
 
         const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
         let sentCount = 0;
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
             for (const msg of pendingMessages) {
-                const result = await sendEmail(
-                    currentAccessToken,
-                    lead.email,
-                    msg.subject || 'Re: Conversation',
-                    msg.content
-                );
-                msg.status = result.success ? 'sent' : 'failed';
-                if (result.success) sentCount++;
+                try {
+                    await sendGmailEmail(
+                        req.userId,
+                        lead.email,
+                        msg.subject || 'Re: Conversation',
+                        msg.content
+                    );
+                    msg.status = 'sent';
+                    sentCount++;
+                } catch (err) {
+                    console.error(`❌ [reconnectAndSend] Failed for ${lead.email}:`, err.message);
+                    msg.status = 'failed';
+                }
             }
             await lead.save();
         }
