@@ -1,14 +1,13 @@
 const User = require('./User');
 const { google } = require('googleapis');
 const {
-    getAuthUrl,
     exchangeCodeForTokens,
     getGmailProfile,
     getOAuth2Client
 } = require('./gmailService');
 
 /**
- * Get Gmail OAuth URL
+ * Get Gmail OAuth URL - MANUALLY BUILT to ensure response_type=code
  * User must be authenticated to initiate connection
  */
 async function getGmailAuthUrl(req, res) {
@@ -18,9 +17,28 @@ async function getGmailAuthUrl(req, res) {
             return res.status(401).json({ error: 'Unauthorized. Please log in again.' });
         }
 
-        // Pass userId as state so we know who to connect
-        const authUrl = getAuthUrl(userId.toString());
+        const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+        const REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI;
+
+        // ✅ MANUALLY BUILD THE URL TO ENSURE response_type=code
+        const authUrl =
+            'https://accounts.google.com/o/oauth2/v2/auth?' +
+            'client_id=' + encodeURIComponent(CLIENT_ID) +
+            '&redirect_uri=' + encodeURIComponent(REDIRECT_URI) +
+            '&response_type=code' +                    // ✅ REQUIRED PARAMETER
+            '&access_type=offline' +
+            '&prompt=consent' +
+            '&state=' + encodeURIComponent(userId.toString()) +
+            '&scope=' + encodeURIComponent(
+                'https://www.googleapis.com/auth/gmail.send ' +
+                'https://www.googleapis.com/auth/gmail.readonly ' +
+                'https://www.googleapis.com/auth/gmail.modify'
+            );
+
+        console.log('🔗 [GMAIL AUTH] Generated auth URL with response_type=code');
+        console.log('🔗 [GMAIL AUTH] Redirect URI:', REDIRECT_URI);
         res.json({ url: authUrl });
+
     } catch (error) {
         console.error('❌ [GMAIL AUTH] getAuthUrl error:', error.message);
         res.status(500).json({ error: 'Failed to generate Gmail connection URL. Please try again.' });
