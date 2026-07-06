@@ -46,7 +46,6 @@ async function getGmailClient(userId) {
                 const { credentials } = await oauth2Client.refreshAccessToken();
                 oauth2Client.setCredentials(credentials);
 
-                // Update user with new tokens
                 user.gmailIntegration.accessToken = credentials.access_token;
                 if (credentials.refresh_token) {
                     user.gmailIntegration.refreshToken = credentials.refresh_token;
@@ -57,7 +56,6 @@ async function getGmailClient(userId) {
                 console.log(`✅ [GMAIL] Token refreshed for user ${userId}`);
             } catch (refreshErr) {
                 console.error(`❌ [GMAIL] Token refresh failed for user ${userId}:`, refreshErr.message);
-                // If refresh fails, user needs to reconnect
                 user.gmailIntegration.isConnected = false;
                 await user.save();
                 throw new Error('Gmail connection expired. Please reconnect your Gmail account.');
@@ -79,7 +77,6 @@ async function sendGmailEmail(userId, to, subject, body, html = null) {
     try {
         const gmail = await getGmailClient(userId);
 
-        // Build email message
         const emailContent = html || body;
         const messageParts = [
             `To: ${to}`,
@@ -114,7 +111,7 @@ async function sendGmailEmail(userId, to, subject, body, html = null) {
 }
 
 /**
- * Get user's Gmail profile (email address, etc.)
+ * Get user's Gmail profile
  */
 async function getGmailProfile(userId) {
     try {
@@ -136,7 +133,6 @@ function getOAuth2Client() {
 
 /**
  * Generate auth URL for Gmail OAuth
- * @param {string} state - User ID or other state to pass through
  */
 function getAuthUrl(state = '') {
     return oauth2Client.generateAuthUrl({
@@ -146,7 +142,8 @@ function getAuthUrl(state = '') {
             'https://www.googleapis.com/auth/gmail.readonly',
             'https://www.googleapis.com/auth/gmail.modify'
         ],
-        prompt: 'consent', // Force to get refresh token
+        response_type: 'code',  // ✅ FIXED: Added required parameter
+        prompt: 'consent',
         state: state
     });
 }
@@ -171,7 +168,7 @@ async function exchangeCodeForTokens(code) {
 }
 
 /**
- * Refresh access token for a user (manual)
+ * Refresh access token for a user
  */
 async function refreshAccessToken(userId) {
     try {
@@ -186,7 +183,6 @@ async function refreshAccessToken(userId) {
 
         const { credentials } = await oauth2Client.refreshAccessToken();
 
-        // Update user
         user.gmailIntegration.accessToken = credentials.access_token;
         if (credentials.refresh_token) {
             user.gmailIntegration.refreshToken = credentials.refresh_token;
