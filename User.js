@@ -24,16 +24,16 @@ const UserSchema = new mongoose.Schema({
     // Profile Fields
     fullName: { type: String, default: '' },
     primaryGoal: { type: String, default: '' },
-    skillLevel: { 
-        type: String, 
-        enum: ['Beginner', 'Intermediate', 'Advanced', 'Expert'], 
-        default: 'Beginner' 
+    skillLevel: {
+        type: String,
+        enum: ['Beginner', 'Intermediate', 'Advanced', 'Expert'],
+        default: 'Beginner'
     },
     interests: { type: String, default: '' },
     country: { type: String, default: '' },
     bio: { type: String, default: '' },
     profilePicture: { type: String, default: '' },
-    
+
     // Age Verification & Suspension Fields
     dateOfBirth: {
         type: Date,
@@ -47,7 +47,7 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    
+
     // ============================================================
     // ACCOUNT DELETION (Right to Be Forgotten - GDPR)
     // ============================================================
@@ -62,7 +62,7 @@ const UserSchema = new mongoose.Schema({
     },
     // ============================================================
 
-    // --- ADMIN SECURITY FIELDS ---            
+    // --- ADMIN SECURITY FIELDS ---
     isAdmin: {
         type: Boolean,
         default: false
@@ -123,14 +123,14 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    
+
     // --- PAYMENT FIELDS ---
     lastTxRef: {
         type: String,
         default: null,
         index: true
     },
-    
+
     paymentHistory: [{
         txRef: { type: String, required: true },
         amount: { type: Number, required: true },
@@ -140,10 +140,22 @@ const UserSchema = new mongoose.Schema({
         subscriptionEndDate: { type: Date }
     }],
 
-    // --- NYLAS EMAIL INTEGRATION ---
-    nylasIntegration: {
-        accessToken: { 
-            type: String, 
+    // ✅ REPLACED: Gmail Integration (instead of Nylas)
+    gmailIntegration: {
+        accessToken: {
+            type: String,
+            default: null,
+            get: function(value) {
+                if (!value) return null;
+                try { return decrypt(value); } catch { return value; }
+            },
+            set: function(value) {
+                if (!value) return null;
+                try { return encrypt(value); } catch { return value; }
+            }
+        },
+        refreshToken: {
+            type: String,
             default: null,
             get: function(value) {
                 if (!value) return null;
@@ -155,7 +167,10 @@ const UserSchema = new mongoose.Schema({
             }
         },
         emailAddress: { type: String, default: null },
-        isConnected: { type: Boolean, default: false }
+        isConnected: { type: Boolean, default: false },
+        expiresAt: { type: Date, default: null },
+        watchExpiration: { type: Date, default: null },
+        historyId: { type: String, default: null }
     },
 
     // ============================================================
@@ -222,10 +237,10 @@ UserSchema.methods.downgradeIfExpired = async function() {
 };
 
 // Method to upgrade to pro
-UserSchema.methods.upgradeToPro = async function(days = 30) {    
+UserSchema.methods.upgradeToPro = async function(days = 30) {
     this.subscriptionTier = 'pro';
-    this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);    
-    await this.save();    
+    this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    await this.save();
     return this;
 };
 
@@ -273,6 +288,51 @@ UserSchema.methods.clearResetToken = async function() {
     await this.save();
 };
 
+// ✅ NEW: Gmail helper methods
+UserSchema.methods.isGmailConnected = function() {
+    return !!(this.gmailIntegration && this.gmailIntegration.isConnected);
+};
+
+UserSchema.methods.getGmailTokens = function() {
+    if (!this.isGmailConnected()) return null;
+    return {
+        accessToken: this.gmailIntegration.accessToken,
+        refreshToken: this.gmailIntegration.refreshToken,
+        emailAddress: this.gmailIntegration.emailAddress,
+        expiresAt: this.gmailIntegration.expiresAt
+    };
+};
+
+UserSchema.methods.updateGmailTokens = async function(tokens) {
+    this.gmailIntegration.accessToken = tokens.accessToken;
+    if (tokens.refreshToken) {
+        this.gmailIntegration.refreshToken = tokens.refreshToken;
+    }
+    if (tokens.emailAddress) {
+        this.gmailIntegration.emailAddress = tokens.emailAddress;
+    }
+    if (tokens.expiresAt) {
+        this.gmailIntegration.expiresAt = tokens.expiresAt;
+    }
+    this.gmailIntegration.isConnected = true;
+    await this.save();
+    return this;
+};
+
+UserSchema.methods.disconnectGmail = async function() {
+    this.gmailIntegration = {
+        accessToken: null,
+        refreshToken: null,
+        emailAddress: null,
+        isConnected: false,
+        expiresAt: null,
+        watchExpiration: null,
+        historyId: null
+    };
+    await this.save();
+    return this;
+};
+
 // Static methods
 UserSchema.statics.findByTxRef = function(txRef) {
     return this.findOne({ lastTxRef: txRef });
@@ -291,5 +351,6 @@ UserSchema.index({ subscriptionTier: 1, subscriptionEndDate: 1 });
 UserSchema.index({ deletedAt: 1 });
 UserSchema.index({ 'dataExports.createdAt': 1 });
 UserSchema.index({ 'dataExports.expiresAt': 1 });
+UserSchema.index({ 'gmailIntegration.isConnected': 1 });
 
 module.exports = mongoose.model('User', UserSchema);
