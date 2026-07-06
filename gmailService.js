@@ -29,14 +29,12 @@ async function getGmailClient(userId) {
             throw new Error('Invalid Gmail tokens. Please reconnect your Gmail account.');
         }
 
-        // Set credentials
         oauth2Client.setCredentials({
             access_token: accessToken,
             refresh_token: refreshToken,
             expiry_date: expiresAt ? new Date(expiresAt).getTime() : null
         });
 
-        // Check if token is expired or about to expire (within 5 minutes)
         const now = Date.now();
         const expiryTime = expiresAt ? new Date(expiresAt).getTime() : null;
 
@@ -132,7 +130,7 @@ function getOAuth2Client() {
 }
 
 /**
- * Generate auth URL for Gmail OAuth
+ * ✅ FIXED: Generate auth URL for Gmail OAuth with response_type
  */
 function getAuthUrl(state = '') {
     return oauth2Client.generateAuthUrl({
@@ -142,7 +140,7 @@ function getAuthUrl(state = '') {
             'https://www.googleapis.com/auth/gmail.readonly',
             'https://www.googleapis.com/auth/gmail.modify'
         ],
-        response_type: 'code',  // ✅ FIXED: Added required parameter
+        response_type: 'code',  // ✅ FIXED: Required parameter
         prompt: 'consent',
         state: state
     });
