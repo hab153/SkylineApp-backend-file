@@ -1,276 +1,151 @@
-const axios = require('axios');
 const User = require('./User');
-
-// Configuration
-const CLIENT_ID = process.env.NYLAS_CLIENT_ID;
-const CLIENT_SECRET = process.env.NYLAS_CLIENT_SECRET;
-const API_URI = process.env.NYLAS_API_URI || 'https://api.us.nylas.com/v3';
-const REDIRECT_URI = process.env.NYLAS_REDIRECT_URI;
-
-if (!CLIENT_ID || !CLIENT_SECRET) {
-    console.error('❌ [NYLAS] Missing Nylas credentials in .env');
-}
+const { 
+    generateNylasAuthUrl,   // ✅ UPDATED IMPORT
+    exchangeCodeForTokens, 
+    getNylasProfile,
+    refreshNylasToken 
+} = require('./nylasService');
 
 /**
- * Get Nylas API headers with user's access token
+ * Get Nylas OAuth URL
+ * User must be authenticated to initiate connection
  */
-function getHeaders(accessToken) {
-    return {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    };
-}
-
-/**
- * Get Nylas client with user's tokens (auto-refreshes if expired)
- */
-async function getNylasClient(userId) {
+async function getNylasAuthUrl(req, res) {
     try {
-        const user = await User.findById(userId);
-        if (!user || !user.nylasIntegration || !user.nylasIntegration.isConnected) {
-            throw new Error('Nylas not connected. Please connect your email account.');
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in again.' });
         }
 
-        const { accessToken, grantId, tokenExpiry } = user.nylasIntegration;
+        const authUrl = generateNylasAuthUrl();   // ✅ UPDATED CALL
+        console.log('🔗 [NYLAS AUTH] Generated auth URL');
+        res.json({ url: authUrl });
+    } catch (error) {
+        console.error('❌ [NYLAS AUTH] getAuthUrl error:', error.message);
+        res.status(500).json({ error: 'Failed to generate Nylas connection URL. Please try again.' });
+    }
+}
 
-        if (!accessToken || !grantId) {
-            throw new Error('Invalid Nylas tokens. Please reconnect your email account.');
+/**
+ * Handle Nylas OAuth callback
+ */
+async function handleNylasCallback(req, res) {
+    try {
+        const { code, error } = req.query;
+
+        if (error) {
+            console.log(`❌ [NYLAS AUTH] Error from Nylas: ${error}`);
+            return res.redirect(`${process.env.FRONTEND_URL || 'https://skylineai-app.vercel.app'}/dashboard.html?connected=false&error=${error}`);
         }
 
-        // Check if token is expired or about to expire (within 5 minutes)
-        if (tokenExpiry && new Date(tokenExpiry) < new Date(Date.now() + 5 * 60 * 1000)) {
-            console.log(`🔄 [NYLAS] Token expiring soon, refreshing for user ${userId}...`);
-            try {
-                const newTokens = await refreshNylasToken(userId);
-                return {
-                    accessToken: newTokens.accessToken,
-                    grantId: user.nylasIntegration.grantId || newTokens.grantId
-                };
-            } catch (refreshErr) {
-                console.error(`❌ [NYLAS] Token refresh failed for user ${userId}:`, refreshErr.message);
-                user.nylasIntegration.isConnected = false;
-                await user.save();
-                throw new Error('Nylas connection expired. Please reconnect your email account.');
-            }
+        if (!code) {
+            console.error('❌ [NYLAS AUTH] No authorization code provided');
+            return res.redirect(`${process.env.FRONTEND_URL || 'https://skylineai-app.vercel.app'}/dashboard.html?connected=false&error=no_code`);
         }
 
-        return {
-            accessToken: accessToken,
-            grantId: grantId
+        console.log('📩 [NYLAS AUTH] Received authorization code, exchanging for tokens...');
+
+        // Exchange code for tokens
+        const tokens = await exchangeCodeForTokens(code);
+
+        console.log(`📧 [NYLAS AUTH] Connected account: ${tokens.emailAddress}`);
+
+        // Find user by email
+        const user = await User.findOne({ email: tokens.emailAddress });
+        if (!user) {
+            console.error(`❌ [NYLAS AUTH] No user found for email: ${tokens.emailAddress}`);
+            return res.redirect(`${process.env.FRONTEND_URL || 'https://skylineai-app.vercel.app'}/dashboard.html?connected=false&error=user_not_found`);
+        }
+
+        // Update user with Nylas tokens
+        user.nylasIntegration = {
+            accessToken: tokens.accessToken,
+            grantId: tokens.grantId,
+            emailAddress: tokens.emailAddress,
+            isConnected: true,
+            tokenExpiry: tokens.expiresIn ? new Date(Date.now() + tokens.expiresIn * 1000) : null
         };
-    } catch (error) {
-        console.error('❌ [NYLAS] getNylasClient error:', error.message);
-        throw error;
-    }
-}
-
-/**
- * Send email via Nylas API (V3)
- */
-async function sendNylasEmail(userId, to, subject, body, html = null) {
-    try {
-        const { accessToken, grantId } = await getNylasClient(userId);
-
-        const payload = {
-            to: [{ email: to }],
-            subject: subject,
-            body: html || body,
-            grant_id: grantId
-        };
-
-        const response = await axios.post(
-            `${API_URI}/grants/${grantId}/messages/send`,
-            payload,
-            { headers: getHeaders(accessToken) }
-        );
-
-        console.log(`📧 [NYLAS] Email sent to ${to} (messageId: ${response.data.id})`);
-        return response.data;
-
-    } catch (error) {
-        console.error('❌ [NYLAS] Send email error:');
-        if (error.response) {
-            console.error('  Status:', error.response.status);
-            console.error('  Data:', error.response.data);
-        } else {
-            console.error('  Message:', error.message);
-        }
-        throw error;
-    }
-}
-
-/**
- * Get user's Nylas profile (email address, etc.)
- */
-async function getNylasProfile(userId) {
-    try {
-        const { accessToken, grantId } = await getNylasClient(userId);
-        
-        const response = await axios.get(
-            `${API_URI}/grants/${grantId}/profile`,
-            { headers: getHeaders(accessToken) }
-        );
-        return response.data;
-    } catch (error) {
-        console.error('❌ [NYLAS] Get profile error:', error.response?.data || error.message);
-        throw error;
-    }
-}
-
-/**
- * ✅ RENAMED: Generate Nylas auth URL for OAuth flow (V3)
- * (No conflict with controller function)
- */
-function generateNylasAuthUrl() {
-    const params = new URLSearchParams({
-        client_id: CLIENT_ID,
-        redirect_uri: REDIRECT_URI,
-        response_type: 'code',
-        access_type: 'offline',
-        scope: 'email,mail.send,mail.read'
-    });
-    
-    return `https://api.nylas.com/v3/connect/auth?${params.toString()}`;
-}
-
-/**
- * Exchange authorization code for tokens (V3)
- */
-async function exchangeCodeForTokens(code) {
-    try {
-        const response = await axios.post(
-            `${API_URI}/connect/token`,
-            {
-                client_id: CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-                redirect_uri: REDIRECT_URI,
-                code: code,
-                grant_type: 'authorization_code'
-            },
-            { headers: { 'Content-Type': 'application/json' } }
-        );
-
-        const data = response.data;
-        
-        return {
-            accessToken: data.access_token,
-            grantId: data.grant_id,
-            emailAddress: data.email,
-            expiresIn: data.expires_in || 3600
-        };
-    } catch (error) {
-        console.error('❌ [NYLAS] Token exchange error:');
-        if (error.response) {
-            console.error('  Status:', error.response.status);
-            console.error('  Data:', error.response.data);
-        } else {
-            console.error('  Message:', error.message);
-        }
-        throw new Error('Failed to exchange authorization code: ' + (error.response?.data?.error || error.message));
-    }
-}
-
-/**
- * Refresh Nylas access token (V3)
- */
-async function refreshNylasToken(userId) {
-    try {
-        const user = await User.findById(userId);
-        if (!user || !user.nylasIntegration?.grantId) {
-            throw new Error('No grant_id available. Please reconnect Nylas.');
-        }
-
-        const response = await axios.post(
-            `${API_URI}/connect/token`,
-            {
-                client_id: CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-                grant_id: user.nylasIntegration.grantId,
-                grant_type: 'refresh_token'
-            },
-            { headers: { 'Content-Type': 'application/json' } }
-        );
-
-        const tokenData = response.data;
-        
-        user.nylasIntegration.accessToken = tokenData.access_token;
-        if (tokenData.grant_id) {
-            user.nylasIntegration.grantId = tokenData.grant_id;
-        }
-        if (tokenData.email) {
-            user.nylasIntegration.emailAddress = tokenData.email;
-        }
-        if (tokenData.expires_in) {
-            user.nylasIntegration.tokenExpiry = new Date(Date.now() + tokenData.expires_in * 1000);
-        }
-        user.nylasIntegration.isConnected = true;
         await user.save();
 
-        console.log(`✅ [NYLAS] Token refreshed for user ${userId}`);
-        return {
-            accessToken: tokenData.access_token,
-            grantId: tokenData.grant_id || user.nylasIntegration.grantId,
-            expiresIn: tokenData.expires_in
-        };
+        console.log(`✅ [NYLAS AUTH] Nylas connected for user ${user.email}`);
+
+        // Redirect to dashboard with success
+        const frontendUrl = process.env.FRONTEND_URL || 'https://skylineai-app.vercel.app';
+        res.redirect(`${frontendUrl}/dashboard.html?connected=true&email=${encodeURIComponent(tokens.emailAddress)}`);
 
     } catch (error) {
-        console.error('❌ [NYLAS] Token refresh error:');
-        if (error.response) {
-            console.error('  Status:', error.response.status);
-            console.error('  Data:', error.response.data);
-        } else {
-            console.error('  Message:', error.message);
-        }
-        // If refresh fails, mark as disconnected
-        try {
-            const user = await User.findById(userId);
-            if (user) {
-                user.nylasIntegration.isConnected = false;
-                await user.save();
-            }
-        } catch (saveErr) {
-            // Ignore
-        }
-        throw error;
+        console.error('❌ [NYLAS AUTH] Callback error:', error.message);
+        const frontendUrl = process.env.FRONTEND_URL || 'https://skylineai-app.vercel.app';
+        res.redirect(`${frontendUrl}/dashboard.html?connected=false&error=${encodeURIComponent(error.message)}`);
     }
 }
 
 /**
- * Check if Nylas is connected for a user
+ * Check Nylas connection status
  */
-async function isNylasConnected(userId) {
+async function checkNylasStatus(req, res) {
     try {
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in again.' });
+        }
+
         const user = await User.findById(userId);
-        if (!user) return false;
-        return !!(user.nylasIntegration && user.nylasIntegration.isConnected);
-    } catch {
-        return false;
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const isConnected = !!(user.nylasIntegration && user.nylasIntegration.isConnected);
+        const emailAddress = user.nylasIntegration?.emailAddress || null;
+        const tokenExpiry = user.nylasIntegration?.tokenExpiry || null;
+
+        res.json({
+            isConnected,
+            emailAddress,
+            tokenExpiry,
+            isExpired: tokenExpiry ? new Date() >= new Date(tokenExpiry) : true
+        });
+    } catch (error) {
+        console.error('❌ [NYLAS AUTH] Status error:', error.message);
+        res.status(500).json({ error: 'Failed to check Nylas connection status.' });
     }
 }
 
 /**
- * Get user's Nylas email address if connected
+ * Disconnect Nylas
  */
-async function getNylasEmail(userId) {
+async function disconnectNylas(req, res) {
     try {
-        const user = await User.findById(userId);
-        if (!user || !user.nylasIntegration || !user.nylasIntegration.isConnected) {
-            return null;
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({ error: 'Unauthorized. Please log in again.' });
         }
-        return user.nylasIntegration.emailAddress || null;
-    } catch {
-        return null;
+
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        user.nylasIntegration = {
+            accessToken: null,
+            grantId: null,
+            emailAddress: null,
+            isConnected: false,
+            tokenExpiry: null
+        };
+        await user.save();
+
+        console.log(`🔌 [NYLAS AUTH] Nylas disconnected for user ${user.email}`);
+        res.json({ message: 'Nylas disconnected successfully' });
+    } catch (error) {
+        console.error('❌ [NYLAS AUTH] Disconnect error:', error.message);
+        res.status(500).json({ error: 'Failed to disconnect Nylas. Please try again.' });
     }
 }
 
 module.exports = {
-    getNylasClient,
-    sendNylasEmail,
-    getNylasProfile,
-    generateNylasAuthUrl,   // ✅ RENAMED
-    exchangeCodeForTokens,
-    refreshNylasToken,
-    isNylasConnected,
-    getNylasEmail
+    getNylasAuthUrl,
+    handleNylasCallback,
+    checkNylasStatus,
+    disconnectNylas
 };
