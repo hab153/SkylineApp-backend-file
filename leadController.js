@@ -1,5 +1,5 @@
 const Lead = require('./Lead');
-const { sendGmailEmail, getGmailClient, isGmailConnected } = require('./gmailService');
+const { sendNylasEmail, isNylasConnected } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
 // GET /api/conversations
@@ -148,13 +148,13 @@ const batchSend = async (req, res) => {
             return res.status(400).json({ message: 'Leads array is required' });
         }
 
-        // Check Gmail connection
-        const isConnected = await isGmailConnected(req.userId);
+        // Check Nylas connection
+        const isConnected = await isNylasConnected(req.userId);
         if (!isConnected) {
             return res.status(401).json({
                 success: false,
-                error: 'GMAIL_DISCONNECTED',
-                message: 'Please connect your Gmail account first.'
+                error: 'NYLAS_DISCONNECTED',
+                message: 'Please connect your email account first.'
             });
         }
 
@@ -210,16 +210,14 @@ const batchSend = async (req, res) => {
                 await lead.save();
 
                 if (leadData.messages?.length > 0) {
-                    const result = await sendGmailEmail(
+                    await sendNylasEmail(
                         req.userId,
                         leadData.email,
                         leadData.messages[0].subject,
                         leadData.messages[0].body
                     );
-                    if (result) {
-                        sentCount++;
-                        console.log(`✅ [batchSend] Email sent to ${leadData.email}`);
-                    }
+                    sentCount++;
+                    console.log(`✅ [batchSend] Email sent to ${leadData.email}`);
                 }
             } catch (err) {
                 console.error(`❌ [batchSend] Error sending to ${leadData.email}:`, err.message);
@@ -253,12 +251,12 @@ const reconnectAndSend = async (req, res) => {
         }
         console.log(`🔄 [reconnectAndSend] For user ${req.userId}`);
 
-        const isConnected = await isGmailConnected(req.userId);
+        const isConnected = await isNylasConnected(req.userId);
         if (!isConnected) {
             return res.status(401).json({
                 success: false,
-                error: 'GMAIL_DISCONNECTED',
-                message: 'Please connect your Gmail account first.'
+                error: 'NYLAS_DISCONNECTED',
+                message: 'Please connect your email account first.'
             });
         }
 
@@ -268,7 +266,7 @@ const reconnectAndSend = async (req, res) => {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
             for (const msg of pendingMessages) {
                 try {
-                    await sendGmailEmail(
+                    await sendNylasEmail(
                         req.userId,
                         lead.email,
                         msg.subject || 'Re: Conversation',
