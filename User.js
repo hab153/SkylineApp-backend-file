@@ -140,8 +140,8 @@ const UserSchema = new mongoose.Schema({
         subscriptionEndDate: { type: Date }
     }],
 
-    // ✅ REPLACED: Gmail Integration (instead of Nylas)
-    gmailIntegration: {
+    // ✅ REPLACED: Nylas Integration (instead of Gmail)
+    nylasIntegration: {
         accessToken: {
             type: String,
             default: null,
@@ -154,7 +154,7 @@ const UserSchema = new mongoose.Schema({
                 try { return encrypt(value); } catch { return value; }
             }
         },
-        refreshToken: {
+        grantId: {
             type: String,
             default: null,
             get: function(value) {
@@ -168,9 +168,7 @@ const UserSchema = new mongoose.Schema({
         },
         emailAddress: { type: String, default: null },
         isConnected: { type: Boolean, default: false },
-        expiresAt: { type: Date, default: null },
-        watchExpiration: { type: Date, default: null },
-        historyId: { type: String, default: null }
+        tokenExpiry: { type: Date, default: null }
     },
 
     // ============================================================
@@ -288,46 +286,44 @@ UserSchema.methods.clearResetToken = async function() {
     await this.save();
 };
 
-// ✅ NEW: Gmail helper methods
-UserSchema.methods.isGmailConnected = function() {
-    return !!(this.gmailIntegration && this.gmailIntegration.isConnected);
+// ✅ Nylas helper methods
+UserSchema.methods.isNylasConnected = function() {
+    return !!(this.nylasIntegration && this.nylasIntegration.isConnected);
 };
 
-UserSchema.methods.getGmailTokens = function() {
-    if (!this.isGmailConnected()) return null;
+UserSchema.methods.getNylasTokens = function() {
+    if (!this.isNylasConnected()) return null;
     return {
-        accessToken: this.gmailIntegration.accessToken,
-        refreshToken: this.gmailIntegration.refreshToken,
-        emailAddress: this.gmailIntegration.emailAddress,
-        expiresAt: this.gmailIntegration.expiresAt
+        accessToken: this.nylasIntegration.accessToken,
+        grantId: this.nylasIntegration.grantId,
+        emailAddress: this.nylasIntegration.emailAddress,
+        tokenExpiry: this.nylasIntegration.tokenExpiry
     };
 };
 
-UserSchema.methods.updateGmailTokens = async function(tokens) {
-    this.gmailIntegration.accessToken = tokens.accessToken;
-    if (tokens.refreshToken) {
-        this.gmailIntegration.refreshToken = tokens.refreshToken;
+UserSchema.methods.updateNylasTokens = async function(tokens) {
+    this.nylasIntegration.accessToken = tokens.accessToken;
+    if (tokens.grantId) {
+        this.nylasIntegration.grantId = tokens.grantId;
     }
     if (tokens.emailAddress) {
-        this.gmailIntegration.emailAddress = tokens.emailAddress;
+        this.nylasIntegration.emailAddress = tokens.emailAddress;
     }
-    if (tokens.expiresAt) {
-        this.gmailIntegration.expiresAt = tokens.expiresAt;
+    if (tokens.tokenExpiry) {
+        this.nylasIntegration.tokenExpiry = tokens.tokenExpiry;
     }
-    this.gmailIntegration.isConnected = true;
+    this.nylasIntegration.isConnected = true;
     await this.save();
     return this;
 };
 
-UserSchema.methods.disconnectGmail = async function() {
-    this.gmailIntegration = {
+UserSchema.methods.disconnectNylas = async function() {
+    this.nylasIntegration = {
         accessToken: null,
-        refreshToken: null,
+        grantId: null,
         emailAddress: null,
         isConnected: false,
-        expiresAt: null,
-        watchExpiration: null,
-        historyId: null
+        tokenExpiry: null
     };
     await this.save();
     return this;
@@ -351,6 +347,6 @@ UserSchema.index({ subscriptionTier: 1, subscriptionEndDate: 1 });
 UserSchema.index({ deletedAt: 1 });
 UserSchema.index({ 'dataExports.createdAt': 1 });
 UserSchema.index({ 'dataExports.expiresAt': 1 });
-UserSchema.index({ 'gmailIntegration.isConnected': 1 });
+UserSchema.index({ 'nylasIntegration.isConnected': 1 });
 
 module.exports = mongoose.model('User', UserSchema);
