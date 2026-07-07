@@ -16,21 +16,14 @@ const { verifyToken } = require('./authMiddleware');
 const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 
-// ❌ REMOVED: Nylas imports
-// const { refreshNylasToken, startTokenRefreshJob } = require('./nylasTokenRefresh');
-// const nylasAuthController = require('./nylasAuthController');
-
-// ✅ NEW: Gmail imports
-const { startGmailTokenRefreshJob } = require('./gmailTokenRefresh');
-const gmailRoutes = require('./gmailRoutes');
-const { handleGmailWebhook } = require('./gmailInboundWebhook');
+// ✅ NEW: Nylas imports
+const { startNylasTokenRefreshJob } = require('./nylasTokenRefresh');
+const nylasRoutes = require('./nylasRoutes');
+const { handleNylasWebhook } = require('./nylasInboundWebhook');
 
 const { startExpiryJob } = require('./expiryJob');
 const { startFollowUpJob } = require('./followUpJob');
 const flutterwaveWebhook = require('./flutterwaveWebhook');
-
-// ❌ REMOVED: Nylas webhook
-// const nylasInboundWebhook = require('./nylasInboundWebhook');
 
 const { createFlutterwavePayment } = require('./Flutterwavepayment');
 const leadController = require('./leadController');
@@ -51,11 +44,6 @@ const { generateSuggestion } = require('./aiSuggestion');
 
 // MODELS & SERVICES
 const Lead = require('./Lead');
-const EmailAccount = require('./EmailAccount');
-
-// ❌ REMOVED: Nylas service
-// const { getAuthUrl, exchangeCodeForToken, getUserEmail, sendEmail } = require('./nylasService');
-
 const authRoutes = require('./authRoutes');
 const assistantRoutes = require('./assistantRoutes');
 const sessionRoutes = require('./sessionRoutes');
@@ -168,11 +156,8 @@ app.use(cors());
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 
-// ❌ REMOVED: Nylas inbound webhook
-// app.all('/api/webhooks/inbound-email', express.raw({ type: 'application/json' }), nylasInboundWebhook);
-
-// ✅ NEW: Gmail inbound webhook (for push notifications)
-app.post('/api/webhooks/gmail', express.raw({ type: 'application/json' }), handleGmailWebhook);
+// ✅ NEW: Nylas inbound webhook
+app.post('/api/webhooks/nylas', express.raw({ type: 'application/json' }), handleNylasWebhook);
 
 // ════════════════════════════════════════════
 //  JSON PARSER & STATIC FILES
@@ -196,11 +181,8 @@ mongoose.connect(process.env.MONGODB_URI, {
     .then(() => {
         console.log('✅ MongoDB Connected');
         
-        // ❌ REMOVED: Nylas token refresh job
-        // startTokenRefreshJob();
-        
-        // ✅ NEW: Gmail token refresh job
-        startGmailTokenRefreshJob();
+        // ✅ NEW: Nylas token refresh job
+        startNylasTokenRefreshJob();
         
         startExpiryJob();
         startFollowUpJob();
@@ -223,8 +205,8 @@ app.post('/api/auth/revoke-tokens', verifyToken, csrfProtection, revokeAllTokens
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ✅ NEW: Gmail routes
-app.use('/api', gmailRoutes);
+// ✅ NEW: Nylas routes
+app.use('/api', nylasRoutes);
 
 // ──────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
@@ -292,10 +274,6 @@ if (typeof revenueController !== 'undefined' && revenueController.getRevenueTrac
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
-
-// ❌ REMOVED: Nylas auth routes
-// app.get('/api/auth/nylas/url', verifyToken, nylasAuthController.getAuthUrl);
-// app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
 // ──────────────────────────────────────────────────────────────
 //  CHAT & DREAMS ROUTES
