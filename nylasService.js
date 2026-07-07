@@ -119,9 +119,10 @@ async function getNylasProfile(userId) {
 }
 
 /**
- * Get Nylas auth URL for OAuth flow (V3)
+ * ✅ RENAMED: Generate Nylas auth URL for OAuth flow (V3)
+ * (No conflict with controller function)
  */
-function getNylasAuthUrl() {
+function generateNylasAuthUrl() {
     const params = new URLSearchParams({
         client_id: CLIENT_ID,
         redirect_uri: REDIRECT_URI,
@@ -267,7 +268,7 @@ module.exports = {
     getNylasClient,
     sendNylasEmail,
     getNylasProfile,
-    getNylasAuthUrl,
+    generateNylasAuthUrl,   // ✅ RENAMED
     exchangeCodeForTokens,
     refreshNylasToken,
     isNylasConnected,
