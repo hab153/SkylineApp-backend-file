@@ -1,7 +1,7 @@
 // followUpJob.js
 const cron = require('node-cron');
 const Lead = require('./Lead');
-const { sendGmailEmail, isGmailConnected } = require('./gmailService');
+const { sendNylasEmail, isNylasConnected } = require('./nylasService');
 const { generateFollowUpSuggestion } = require('./followUpAI');
 
 /**
@@ -11,15 +11,15 @@ async function processFollowUp(lead, userId) {
     try {
         console.log(`📧 [FOLLOW-UP] Processing follow-up for lead: ${lead.email}`);
 
-        // Check if Gmail is still connected
-        const isConnected = await isGmailConnected(userId);
+        // Check if Nylas is still connected
+        const isConnected = await isNylasConnected(userId);
         if (!isConnected) {
-            console.error(`❌ [FOLLOW-UP] Gmail not connected for user ${userId}`);
+            console.error(`❌ [FOLLOW-UP] Nylas not connected for user ${userId}`);
             // Disable auto follow-up for this lead
             lead.autoFollowUpEnabled = false;
             lead.followUpScheduledDate = null;
             await lead.save();
-            return { success: false, error: 'Gmail not connected' };
+            return { success: false, error: 'Nylas not connected' };
         }
 
         // Get last 2 messages for context
@@ -36,49 +36,45 @@ async function processFollowUp(lead, userId) {
             lead.company || 'the team'
         );
 
-        // Send the email using Gmail API
+        // Send the email using Nylas API
         const subject = `Following up | ${lead.company || 'our conversation'}`;
-        const result = await sendGmailEmail(
+        await sendNylasEmail(
             userId,
             lead.email,
             subject,
             followUpMessage
         );
 
-        if (result) {
-            // Update lead record
-            lead.lastFollowUpSent = new Date();
-            lead.followUpCount = (lead.followUpCount || 0) + 1;
+        // Update lead record
+        lead.lastFollowUpSent = new Date();
+        lead.followUpCount = (lead.followUpCount || 0) + 1;
 
-            // Schedule next follow-up (3 days later) if still enabled
-            if (lead.autoFollowUpEnabled && lead.followUpCount < 5) {
-                const nextDate = new Date();
-                nextDate.setDate(nextDate.getDate() + 3);
-                lead.followUpScheduledDate = nextDate;
-            } else {
-                // Disable auto follow-up after 5 attempts or if manually disabled
-                lead.autoFollowUpEnabled = false;
-                lead.followUpScheduledDate = null;
-                console.log(`✅ [FOLLOW-UP] Auto follow-up completed (${lead.followUpCount} attempts) for ${lead.email}`);
-            }
-
-            // Save the sent message to conversation history
-            lead.replies = lead.replies || [];
-            lead.replies.push({
-                date: new Date(),
-                content: followUpMessage,
-                subject: subject,
-                from: 'ai',
-                status: 'sent'
-            });
-
-            await lead.save();
-            console.log(`✅ [FOLLOW-UP] Sent to ${lead.email} (attempt ${lead.followUpCount}/5)`);
-            return { success: true, lead };
+        // Schedule next follow-up (3 days later) if still enabled
+        if (lead.autoFollowUpEnabled && lead.followUpCount < 5) {
+            const nextDate = new Date();
+            nextDate.setDate(nextDate.getDate() + 3);
+            lead.followUpScheduledDate = nextDate;
         } else {
-            console.error(`❌ [FOLLOW-UP] Send failed for ${lead.email}`);
-            return { success: false, error: 'Send failed' };
+            // Disable auto follow-up after 5 attempts
+            lead.autoFollowUpEnabled = false;
+            lead.followUpScheduledDate = null;
+            console.log(`✅ [FOLLOW-UP] Auto follow-up completed (${lead.followUpCount} attempts) for ${lead.email}`);
         }
+
+        // Save the sent message to conversation history
+        lead.replies = lead.replies || [];
+        lead.replies.push({
+            date: new Date(),
+            content: followUpMessage,
+            subject: subject,
+            from: 'ai',
+            status: 'sent'
+        });
+
+        await lead.save();
+        console.log(`✅ [FOLLOW-UP] Sent to ${lead.email} (attempt ${lead.followUpCount}/5)`);
+        return { success: true, lead };
+
     } catch (err) {
         console.error(`❌ [FOLLOW-UP] Error processing ${lead.email}:`, err.message);
         return { success: false, error: err.message };
@@ -120,10 +116,10 @@ async function processPendingFollowUps() {
         for (const [userId, leads] of Object.entries(leadsByUser)) {
             console.log(`📋 [FOLLOW-UP JOB] Processing ${leads.length} leads for user ${userId}`);
 
-            // Check if user has Gmail connected
-            const isConnected = await isGmailConnected(userId);
+            // Check if user has Nylas connected
+            const isConnected = await isNylasConnected(userId);
             if (!isConnected) {
-                console.error(`❌ [FOLLOW-UP JOB] Gmail not connected for user ${userId}, skipping ${leads.length} leads`);
+                console.error(`❌ [FOLLOW-UP JOB] Nylas not connected for user ${userId}, skipping ${leads.length} leads`);
                 // Disable auto follow-up for all leads of this user
                 for (const lead of leads) {
                     lead.autoFollowUpEnabled = false;
