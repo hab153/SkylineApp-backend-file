@@ -5,7 +5,7 @@ exports.getAuthUrl = async (req, res) => {
   try {
     const redirectUri = process.env.NYLAS_REDIRECT_URI;
     
-    // Generate the OAuth URL using the v3 SDK
+    // Generate the OAuth URL using the v6 SDK
     const authUrl = nylas.auth.urlForOAuth2({
       clientId: process.env.NYLAS_CLIENT_ID,
       redirectUri: redirectUri,
@@ -26,10 +26,10 @@ exports.handleCallback = async (req, res) => {
 
     if (!code) return res.status(400).json({ message: 'Authorization code missing.' });
 
-    // Exchange code for tokens using v3 SDK
+    // Exchange code for tokens using v6 SDK
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_CLIENT_SECRET, // You may need to add this to .env if required by your provider setup
+      clientSecret: process.env.NYLAS_CLIENT_SECRET, 
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
