@@ -12,7 +12,7 @@ exports.sendEmail = async (userId, to, subject, body) => {
       body: body,
     };
 
-    // Send using the v3 SDK
+    // Send using the v6 SDK
     const sentMessage = await nylas.messages.send({
       identifier: account.nylasGrantId,
       requestBody: message,
