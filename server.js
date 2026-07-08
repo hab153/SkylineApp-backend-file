@@ -156,8 +156,8 @@ app.use(cors());
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 
-// ✅ NEW: Nylas inbound webhook
-app.post('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+// ✅ NEW: Nylas inbound webhook (Handles both GET for challenge and POST for events)
+app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
 // ════════════════════════════════════════════
 //  JSON PARSER & STATIC FILES
