@@ -10,20 +10,15 @@ exports.getAuthUrl = async (req, res) => {
       throw new Error('Missing NYLAS_CLIENT_ID or NYLAS_REDIRECT_URI.');
     }
 
-    // Use URLSearchParams for perfect encoding
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      response_type: 'code',
-      access_type: 'offline',
-      provider: 'google', // Explicitly set to google to bypass the selection screen
-      scope: 'https://api.nylas.com/send https://api.nylas.com/read'
+    // Use the v8 SDK helper which now knows the correct apiUri
+    const authUrl = nylas.auth.urlForOAuth2({
+      clientId: clientId,
+      redirectUri: redirectUri,
+      provider: 'google', // Explicitly set provider
+      scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
     });
 
-    // Use the US-specific endpoint as per your dashboard
-    const authUrl = `https://api.us.nylas.com/v3/connect/auth?${params.toString()}`;
-
-    console.log('✅ [Nylas Auth] URL generated:', authUrl);
+    console.log('✅ [Nylas Auth] URL generated via SDK:', authUrl);
     res.json({ url: authUrl });
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error);
@@ -40,9 +35,10 @@ exports.handleCallback = async (req, res) => {
 
     console.log('🔍 [Nylas Callback] Exchanging code...');
 
+    // Exchange code for tokens using v8 SDK
+    // NOTE: No clientSecret needed here as the API Key is already in the client instance
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_CLIENT_SECRET, 
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
