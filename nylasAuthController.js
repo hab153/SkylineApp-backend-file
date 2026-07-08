@@ -36,7 +36,6 @@ exports.handleCallback = async (req, res) => {
     console.log('🔍 [Nylas Callback] Exchanging code...');
 
     // Exchange code for tokens using v8 SDK
-    // NOTE: No clientSecret needed here as the API Key is already in the client instance
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
       redirectUri: process.env.NYLAS_REDIRECT_URI,
@@ -45,6 +44,7 @@ exports.handleCallback = async (req, res) => {
     
     console.log('✅ [Nylas Callback] Success. Grant ID:', response.grant_id);
 
+    // Save or Update the EmailAccount in MongoDB
     await EmailAccount.findOneAndUpdate(
       { userId },
       {
