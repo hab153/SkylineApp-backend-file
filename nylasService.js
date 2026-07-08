@@ -1,4 +1,4 @@
-const Nylas = require('./nylasClient');
+const nylas = require('./nylasClient');
 const EmailAccount = require('./models/EmailAccount');
 
 exports.sendEmail = async (userId, to, subject, body) => {
@@ -12,8 +12,8 @@ exports.sendEmail = async (userId, to, subject, body) => {
       body: body,
     };
 
-    // Send using the stored grant ID
-    const sentMessage = await Nylas.messages.send({
+    // Send using the v3 SDK
+    const sentMessage = await nylas.messages.send({
       identifier: account.nylasGrantId,
       requestBody: message,
     });
@@ -30,7 +30,7 @@ exports.getThreads = async (userId, limit = 10) => {
     const account = await EmailAccount.findOne({ userId, isConnected: true });
     if (!account) throw new Error('No connected email account found.');
 
-    const threads = await Nylas.threads.list({
+    const threads = await nylas.threads.list({
       identifier: account.nylasGrantId,
       queryParams: { limit: limit },
     });
