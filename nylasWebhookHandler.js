@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const Lead = require('./models/Lead');
+const Lead = require('./Lead');
 
 exports.handleWebhook = async (req, res) => {
   const signature = req.headers['x-nylas-signature'];
