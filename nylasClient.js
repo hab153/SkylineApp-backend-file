@@ -1,7 +1,7 @@
-const { Nylas } = require('nylas');
+const Nylas = require('nylas');
 require('dotenv').config();
 
-// Initialize Nylas v3 Client
+// Initialize Nylas v6 Client
 const nylas = new Nylas({
   apiKey: process.env.NYLAS_API_KEY,
 });
