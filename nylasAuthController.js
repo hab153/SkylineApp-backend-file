@@ -1,4 +1,4 @@
-const nylas = require('./nylasClient');
+const Nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 
 exports.getAuthUrl = async (req, res) => {
@@ -12,12 +12,11 @@ exports.getAuthUrl = async (req, res) => {
       throw new Error('Missing NYLAS_CLIENT_ID or NYLAS_REDIRECT_URI in environment variables.');
     }
 
-    // Generate the OAuth URL using the v6 SDK
-    // Note: In v6, this is often nylas.auth.urlForOAuth2
-    const authUrl = nylas.auth.urlForOAuth2({
+    // Generate the OAuth URL using v5 SDK
+    const authUrl = Nylas.urlForAuthentication({
       clientId: clientId,
       redirectUri: redirectUri,
-      scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
+      scopes: ['email.send', 'email.read_only'], // v5 uses simpler scope names
     });
 
     console.log('✅ [Nylas Auth] URL generated successfully');
@@ -37,25 +36,22 @@ exports.handleCallback = async (req, res) => {
 
     console.log('🔍 [Nylas Callback] Exchanging code for tokens...');
 
-    // Exchange code for tokens using v6 SDK
-    const response = await nylas.auth.exchangeCodeForToken({
-      clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_CLIENT_SECRET, 
-      redirectUri: process.env.NYLAS_REDIRECT_URI,
-      code: code,
-    });
+    // Exchange code for tokens using v5 SDK
+    // Note: In v5, this is done via a direct API call or the helper
+    const response = await Nylas.exchangeCodeForToken(code, process.env.NYLAS_CLIENT_SECRET);
     
-    console.log('✅ [Nylas Callback] Tokens received. Grant ID:', response.grant_id);
+    console.log('✅ [Nylas Callback] Tokens received. Account ID:', response.account_id);
 
     // Save or Update the EmailAccount in MongoDB
+    // Note: v5 returns account_id instead of grant_id
     await EmailAccount.findOneAndUpdate(
       { userId },
       {
-        nylasGrantId: response.grant_id,
-        emailAddress: response.email,
+        nylasGrantId: response.account_id, 
+        emailAddress: response.email_address,
         accessToken: response.access_token,
-        refreshToken: response.refresh_token,
-        tokenExpiry: new Date(Date.now() + response.expires_in * 1000),
+        refreshToken: response.refresh_token, // v5 might not always return this depending on scopes
+        tokenExpiry: new Date(Date.now() + 3600 * 1000), // Approximate expiry
         isConnected: true,
         provider: 'gmail' 
       },
