@@ -152,6 +152,7 @@ app.use(cors());
 
 // ════════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM CSRF & XSS)
+//  NOTE: These must be BEFORE express.json() to handle raw payloads
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 
