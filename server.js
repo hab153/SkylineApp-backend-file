@@ -17,8 +17,9 @@ const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFol
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 
 // ✅ NEW: Nylas imports
-const nylasAuthController = require('./nylasAuthController');
-const { handleWebhook } = require('./nylasWebhookHandler');
+const { startNylasTokenRefreshJob } = require('./nylasTokenRefresh');
+const nylasRoutes = require('./nylasRoutes');
+const { handleNylasWebhook } = require('./nylasInboundWebhook');
 
 const { startExpiryJob } = require('./expiryJob');
 const { startFollowUpJob } = require('./followUpJob');
@@ -154,41 +155,12 @@ app.use(cors());
 //  WEBHOOKS (EXEMPT FROM CSRF & XSS)
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
-app.post('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+
+// ✅ NEW: Nylas inbound webhook
+app.post('/api/webhooks/nylas', express.raw({ type: 'application/json' }), handleNylasWebhook);
 
 // ════════════════════════════════════════════
-//  JSON PARSER & STATIC FILES
-// ════════════════════════════════════════════
-app.use(express.json());
-app.use(express.static(path.join(__dirname)));
-
-// ════════════════════════════════════════════
-//  XSS PROTECTION MIDDLEWARE
-// ════════════════════════════════════════════
-app.use(xssProtection);
-app.use(xssOutputProtection);
-
-// ════════════════════════════════════════════
-//  MONGODB CONNECTION
-// ════════════════════════════════════════════
-mongoose.connect(process.env.MONGODB_URI, {
-    maxPoolSize: 50,
-    serverSelectionTimeoutMS: 5000
-})
-    .then(() => {
-        console.log('✅ MongoDB Connected');
-        
-        startExpiryJob();
-        startFollowUpJob();
-        if (process.env.NODE_ENV !== 'test') {
-            startBackupJob();
-        }
-        startDataExportCleanupJob();
-    })
-    .catch(err => console.log('❌ MongoDB Connection Error:', err));
-
-// ════════════════════════════════════════════
-//  ⚠️ TEMPORARY ADMIN RESET ROUTE – REMOVE AFTER USE
+//  ⚠️ TEMPORARY ADMIN RESET ROUTE – REMOVE AFTER USE ⚠️
 // ════════════════════════════════════════════
 app.get('/temp-admin-reset', async (req, res) => {
     try {
@@ -217,10 +189,10 @@ app.get('/temp-admin-reset', async (req, res) => {
                 <h1>✅ Admin Password Reset Successfully!</h1>
                 <p><strong>Email:</strong> ${user.email}</p>
                 <p><strong>Password:</strong> ${newPassword}</p>
-                <p><strong>isAdmin:</strong> ${user.isAdmin}</p>
+                <p><strong>Layer 2 Answers:</strong> janna food, 24434, naimat, roheemat</p>
+                <p><strong>Layer 3 Answers:</strong> ridwanullah, Allah, khaafir, skyline</p>
                 <hr>
-                <p><a href="/dashboard.html">Go to Dashboard</a></p>
-                <p style="color: red; font-size: 12px;">⚠️ Remove this route after testing!</p>
+                <p><strong>IMPORTANT:</strong> Remove this route from server.js after testing!</p>
             `);
         } else {
             // Create admin if not exists
@@ -235,15 +207,50 @@ app.get('/temp-admin-reset', async (req, res) => {
                 <h1>✅ New Admin Created!</h1>
                 <p><strong>Email:</strong> ${adminEmail}</p>
                 <p><strong>Password:</strong> ${newPassword}</p>
+                <p><strong>Layer 2 Answers:</strong> janna food, 24434, naimat, roheemat</p>
+                <p><strong>Layer 3 Answers:</strong> ridwanullah, Allah, khaafir, skyline</p>
                 <hr>
-                <p><a href="/dashboard.html">Go to Dashboard</a></p>
-                <p style="color: red; font-size: 12px;">⚠️ Remove this route after testing!</p>
+                <p><strong>IMPORTANT:</strong> Remove this route from server.js after testing!</p>
             `);
         }
     } catch (err) {
-        res.status(500).send(`<h1>❌ Error</h1><p>${err.message}</p>`);
+        res.status(500).send('❌ Error: ' + err.message);
     }
 });
+
+// ════════════════════════════════════════════
+//  JSON PARSER & STATIC FILES
+// ════════════════════════════════════════════
+app.use(express.json());
+app.use(express.static(path.join(__dirname)));
+
+// ════════════════════════════════════════════
+//  XSS PROTECTION MIDDLEWARE
+// ════════════════════════════════════════════
+app.use(xssProtection);
+app.use(xssOutputProtection);
+
+// ════════════════════════════════════════════
+//  MONGODB CONNECTION
+// ════════════════════════════════════════════
+mongoose.connect(process.env.MONGODB_URI, {
+    maxPoolSize: 50,
+    serverSelectionTimeoutMS: 5000
+})
+    .then(() => {
+        console.log('✅ MongoDB Connected');
+        
+        // ✅ NEW: Nylas token refresh job
+        startNylasTokenRefreshJob();
+        
+        startExpiryJob();
+        startFollowUpJob();
+        if (process.env.NODE_ENV !== 'test') {
+            startBackupJob();
+        }
+        startDataExportCleanupJob();
+    })
+    .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
 // ════════════════════════════════════════════
 //  ROUTES
@@ -257,9 +264,8 @@ app.post('/api/auth/revoke-tokens', verifyToken, csrfProtection, revokeAllTokens
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ✅ NEW: Nylas Auth Routes
-app.get('/api/auth/nylas/connect', verifyToken, nylasAuthController.getAuthUrl);
-app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
+// ✅ NEW: Nylas routes
+app.use('/api', nylasRoutes);
 
 // ──────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
