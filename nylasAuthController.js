@@ -13,11 +13,18 @@ exports.getAuthUrl = async (req, res) => {
     }
 
     // Generate the OAuth URL using v8 SDK
-    const authUrl = nylas.auth.urlForOAuth2({
+    let authUrl = nylas.auth.urlForOAuth2({
       clientId: clientId,
       redirectUri: redirectUri,
       scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
     });
+
+    // 🔧 FIX: Ensure response_type=code is present (Nylas v8 sometimes omits it)
+    if (!authUrl.includes('response_type=')) {
+      const separator = authUrl.includes('?') ? '&' : '?';
+      authUrl = `${authUrl}${separator}response_type=code`;
+      console.log('🔧 [Nylas Auth] Appended missing response_type=code to URL');
+    }
 
     console.log('✅ [Nylas Auth] URL generated successfully');
     res.json({ url: authUrl });
