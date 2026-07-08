@@ -1,4 +1,4 @@
-const nylas = require('./nylasClient');
+const Nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 
 exports.sendEmail = async (userId, to, subject, body) => {
@@ -6,17 +6,16 @@ exports.sendEmail = async (userId, to, subject, body) => {
     const account = await EmailAccount.findOne({ userId, isConnected: true });
     if (!account) throw new Error('No connected email account found.');
 
+    const nylasInstance = Nylas.with(account.accessToken);
+
     const message = {
       to: [{ email: to }],
       subject: subject,
       body: body,
     };
 
-    // Send using the v6 SDK
-    const sentMessage = await nylas.messages.send({
-      identifier: account.nylasGrantId,
-      requestBody: message,
-    });
+    // Send using v5 SDK
+    const sentMessage = await nylasInstance.messages.send(message);
 
     return { success: true, messageId: sentMessage.id };
   } catch (error) {
@@ -30,10 +29,9 @@ exports.getThreads = async (userId, limit = 10) => {
     const account = await EmailAccount.findOne({ userId, isConnected: true });
     if (!account) throw new Error('No connected email account found.');
 
-    const threads = await nylas.threads.list({
-      identifier: account.nylasGrantId,
-      queryParams: { limit: limit },
-    });
+    const nylasInstance = Nylas.with(account.accessToken);
+
+    const threads = await nylasInstance.threads.list({ limit: limit });
 
     return threads;
   } catch (error) {
