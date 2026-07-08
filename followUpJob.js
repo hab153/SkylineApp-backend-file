@@ -1,7 +1,8 @@
 // followUpJob.js
 const cron = require('node-cron');
 const Lead = require('./Lead');
-const { sendNylasEmail, isNylasConnected } = require('./nylasService');
+const EmailAccount = require('./EmailAccount');
+const { sendEmail } = require('./nylasService'); // Updated import
 const { generateFollowUpSuggestion } = require('./followUpAI');
 
 /**
@@ -12,8 +13,8 @@ async function processFollowUp(lead, userId) {
         console.log(`📧 [FOLLOW-UP] Processing follow-up for lead: ${lead.email}`);
 
         // Check if Nylas is still connected
-        const isConnected = await isNylasConnected(userId);
-        if (!isConnected) {
+        const account = await EmailAccount.findOne({ userId, isConnected: true });
+        if (!account) {
             console.error(`❌ [FOLLOW-UP] Nylas not connected for user ${userId}`);
             // Disable auto follow-up for this lead
             lead.autoFollowUpEnabled = false;
@@ -38,12 +39,16 @@ async function processFollowUp(lead, userId) {
 
         // Send the email using Nylas API
         const subject = `Following up | ${lead.company || 'our conversation'}`;
-        await sendNylasEmail(
+        const result = await sendEmail(
             userId,
             lead.email,
             subject,
             followUpMessage
         );
+
+        if (!result.success) {
+            throw new Error(result.error);
+        }
 
         // Update lead record
         lead.lastFollowUpSent = new Date();
@@ -117,8 +122,8 @@ async function processPendingFollowUps() {
             console.log(`📋 [FOLLOW-UP JOB] Processing ${leads.length} leads for user ${userId}`);
 
             // Check if user has Nylas connected
-            const isConnected = await isNylasConnected(userId);
-            if (!isConnected) {
+            const account = await EmailAccount.findOne({ userId, isConnected: true });
+            if (!account) {
                 console.error(`❌ [FOLLOW-UP JOB] Nylas not connected for user ${userId}, skipping ${leads.length} leads`);
                 // Disable auto follow-up for all leads of this user
                 for (const lead of leads) {
