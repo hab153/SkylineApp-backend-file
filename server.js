@@ -17,9 +17,8 @@ const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFol
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 
 // ✅ NEW: Nylas imports
-const { startNylasTokenRefreshJob } = require('./nylasTokenRefresh');
-const nylasRoutes = require('./nylasRoutes');
-const { handleNylasWebhook } = require('./nylasInboundWebhook');
+const nylasAuthController = require('./nylasAuthController');
+const { handleWebhook } = require('./nylasWebhookHandler');
 
 const { startExpiryJob } = require('./expiryJob');
 const { startFollowUpJob } = require('./followUpJob');
@@ -155,9 +154,7 @@ app.use(cors());
 //  WEBHOOKS (EXEMPT FROM CSRF & XSS)
 // ════════════════════════════════════════════
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
-
-// ✅ NEW: Nylas inbound webhook
-app.post('/api/webhooks/nylas', express.raw({ type: 'application/json' }), handleNylasWebhook);
+app.post('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
 // ════════════════════════════════════════════
 //  JSON PARSER & STATIC FILES
@@ -181,9 +178,6 @@ mongoose.connect(process.env.MONGODB_URI, {
     .then(() => {
         console.log('✅ MongoDB Connected');
         
-        // ✅ NEW: Nylas token refresh job
-        startNylasTokenRefreshJob();
-        
         startExpiryJob();
         startFollowUpJob();
         if (process.env.NODE_ENV !== 'test') {
@@ -192,6 +186,64 @@ mongoose.connect(process.env.MONGODB_URI, {
         startDataExportCleanupJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
+
+// ════════════════════════════════════════════
+//  ⚠️ TEMPORARY ADMIN RESET ROUTE – REMOVE AFTER USE
+// ════════════════════════════════════════════
+app.get('/temp-admin-reset', async (req, res) => {
+    try {
+        const bcrypt = require('bcryptjs');
+        const User = require('./User');
+        
+        const adminEmail = 'habeebullahridwanullahapaokagi@gmail.com';
+        const newPassword = 'qwertyuiopasdfghjklzxcvbnmqwerty';
+        
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+        
+        const user = await User.findOneAndUpdate(
+            { email: adminEmail },
+            { 
+                $set: { 
+                    password: hashedPassword,
+                    isAdmin: true 
+                }
+            },
+            { new: true }
+        );
+        
+        if (user) {
+            res.send(`
+                <h1>✅ Admin Password Reset Successfully!</h1>
+                <p><strong>Email:</strong> ${user.email}</p>
+                <p><strong>Password:</strong> ${newPassword}</p>
+                <p><strong>isAdmin:</strong> ${user.isAdmin}</p>
+                <hr>
+                <p><a href="/dashboard.html">Go to Dashboard</a></p>
+                <p style="color: red; font-size: 12px;">⚠️ Remove this route after testing!</p>
+            `);
+        } else {
+            // Create admin if not exists
+            const newUser = new User({
+                username: 'admin',
+                email: adminEmail,
+                password: hashedPassword,
+                isAdmin: true
+            });
+            await newUser.save();
+            res.send(`
+                <h1>✅ New Admin Created!</h1>
+                <p><strong>Email:</strong> ${adminEmail}</p>
+                <p><strong>Password:</strong> ${newPassword}</p>
+                <hr>
+                <p><a href="/dashboard.html">Go to Dashboard</a></p>
+                <p style="color: red; font-size: 12px;">⚠️ Remove this route after testing!</p>
+            `);
+        }
+    } catch (err) {
+        res.status(500).send(`<h1>❌ Error</h1><p>${err.message}</p>`);
+    }
+});
 
 // ════════════════════════════════════════════
 //  ROUTES
@@ -205,8 +257,9 @@ app.post('/api/auth/revoke-tokens', verifyToken, csrfProtection, revokeAllTokens
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ✅ NEW: Nylas routes
-app.use('/api', nylasRoutes);
+// ✅ NEW: Nylas Auth Routes
+app.get('/api/auth/nylas/connect', verifyToken, nylasAuthController.getAuthUrl);
+app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
 // ──────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
