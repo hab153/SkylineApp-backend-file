@@ -1,5 +1,5 @@
 const nylas = require('./nylasClient');
-const EmailAccount = require('./models/EmailAccount');
+const EmailAccount = require('./EmailAccount');
 
 exports.sendEmail = async (userId, to, subject, body) => {
   try {
