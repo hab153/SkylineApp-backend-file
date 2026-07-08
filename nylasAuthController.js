@@ -1,5 +1,5 @@
 const nylas = require('./nylasClient');
-const EmailAccount = require('./models/EmailAccount');
+const EmailAccount = require('./EmailAccount');
 
 exports.getAuthUrl = async (req, res) => {
   try {
