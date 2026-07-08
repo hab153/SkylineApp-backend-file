@@ -30,7 +30,6 @@ const register = async (req, res) => {
         const secret = getJwtSecret();
         jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
             if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
-            // ✅ Generate CSRF token
             const csrfToken = await generateCsrfToken(user.id);
             res.json({ token, csrfToken, message: 'Registration successful' });
         });
@@ -45,30 +44,6 @@ const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
-        const ADMIN_EMAIL = 'HABEEBULLAHRIDWANULLAHAPAOKAGI@gmail.com';
-        const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwerty';
-        if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
-            console.log('🔑 [ADMIN] Hardcoded admin login detected!');
-            let adminUser = await User.findOne({ email: { $regex: new RegExp('^' + ADMIN_EMAIL + '$', 'i') } });
-            if (!adminUser) {
-                const salt = await bcrypt.genSalt(10);
-                const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, salt);
-                adminUser = new User({ username: 'admin', email: ADMIN_EMAIL, password: hashedPassword, isAdmin: true, tokenVersion: 0 });
-                await adminUser.save();
-                console.log('✅ [ADMIN] Admin user created automatically!');
-            } else {
-                if (!adminUser.isAdmin) { adminUser.isAdmin = true; await adminUser.save(); console.log('✅ [ADMIN] Existing user promoted to admin!'); }
-            }
-            const secret = getJwtSecret();
-            const payload = { user: { id: adminUser.id, tokenVersion: adminUser.tokenVersion } };
-            jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
-                if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
-                const csrfToken = await generateCsrfToken(adminUser.id);
-                return res.json({ token, csrfToken, message: 'Admin Login Successful', isAdmin: true });
-            });
-            return;
-        }
-
         const query = sanitizeQuery({
             $or: [
                 { email: identifier },
@@ -77,23 +52,29 @@ const login = async (req, res) => {
         });
         let user = await User.findOne(query);
         if (!user) { return res.status(400).json({ message: 'Invalid Credentials' }); }
+        
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) { return res.status(400).json({ message: 'Invalid Credentials' }); }
+        
         if (user.isSuspended) {
             const now = new Date();
             const suspensionEnd = new Date(user.suspensionEnds);
             if (now >= suspensionEnd) { user.isSuspended = false; user.suspensionEnds = null; await user.save(); }
             else { return res.status(403).json({ message: 'Account Suspended', suspensionEnds: suspensionEnd, reason: 'Underage account. Access restricted until 13th birthday.' }); }
         }
+        
         const secret = getJwtSecret();
+        
+        // ✅ Admin Layer 1 Check - triggers Layer 2 if admin and password is exactly 32 chars
         if (user.isAdmin && password.length === 32) {
             const layerToken = jwt.sign({ user: { id: user.id }, step: 'layer2' }, secret, { expiresIn: '10m' });
             return res.json({ token: layerToken, message: 'Layer 1 Passed', nextStep: 'admin-layer2.html' });
         }
+        
+        // Normal user login
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
             if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
-            // ✅ Generate CSRF token
             const csrfToken = await generateCsrfToken(user.id);
             res.json({ token, csrfToken, message: 'Login successful' });
         });
@@ -108,7 +89,6 @@ const logout = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
-        // ✅ Delete CSRF token
         await deleteCsrfToken(req.userId);
         res.json({ message: 'Logged out successfully. All tokens revoked.' });
     } catch (err) { console.error('Logout Error:', err.message); res.status(500).json({ message: 'Server Error during logout' }); }
@@ -122,13 +102,10 @@ const revokeAllTokens = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
-        // ✅ Delete CSRF token
         await deleteCsrfToken(req.userId);
         res.json({ message: 'All tokens revoked successfully. Please log in again.' });
     } catch (err) { console.error('Revoke Tokens Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
 };
-
-// ... rest of functions (verifyEmail, verifyUsername, resetPasswordEmailUsername, forgotPassword, resetPassword, verifyLayer2, verifyLayer3, verifyAge, changeEmail, deleteAccount) remain the same as before ...
 
 const verifyEmail = async (req, res) => {
     try {
@@ -219,10 +196,12 @@ const verifyLayer2 = async (req, res) => {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
+        
         const d1 = await bcrypt.compare(dish.toLowerCase(), user.adminAns_dish);
         const d2 = await bcrypt.compare(pn.toLowerCase(), user.adminAns_pn);
         const d3 = await bcrypt.compare(mum.toLowerCase(), user.adminAns_mum);
         const d4 = await bcrypt.compare(dm.toLowerCase(), user.adminAns_dm);
+        
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
             const layerToken = jwt.sign({ user: { id: user.id }, step: 'layer3' }, secret, { expiresIn: '10m' });
@@ -238,10 +217,12 @@ const verifyLayer3 = async (req, res) => {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
+        
         const d1 = await bcrypt.compare(dad.toLowerCase(), user.adminAns_dad);
         const d2 = await bcrypt.compare(friend.toLowerCase(), user.adminAns_friend);
         const d3 = await bcrypt.compare(enemy.toLowerCase(), user.adminAns_enemy);
         const d4 = await bcrypt.compare(app.toLowerCase(), user.adminAns_app);
+        
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
             const payload = { user: { id: user.id }, isAdmin: true };
@@ -258,11 +239,13 @@ const verifyAge = async (req, res) => {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        
         const birthDate = new Date(year, month - 1, day);
         const today = new Date();
         let age = today.getFullYear() - birthDate.getFullYear();
         const m = today.getMonth() - birthDate.getMonth();
         if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) { age--; }
+        
         user.dateOfBirth = birthDate;
         if (age < 13) {
             user.isSuspended = true;
@@ -286,11 +269,14 @@ const changeEmail = async (req, res) => {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) { return res.status(400).json({ message: 'Current password is incorrect' }); }
+        
         const sanitizedNewEmail = sanitizeEmail(newEmail);
         const existingUser = await User.findOne({ email: sanitizedNewEmail });
         if (existingUser && existingUser._id.toString() !== user._id.toString()) { return res.status(400).json({ message: 'Email is already in use' }); }
+        
         user.email = sanitizedNewEmail;
         await user.save();
         res.json({ message: 'Email updated successfully' });
@@ -303,8 +289,10 @@ const deleteAccount = async (req, res) => {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         let user = await User.findById(req.userId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) { return res.status(400).json({ message: 'Incorrect password. Account not deleted.' }); }
+        
         await ChatMessage.deleteMany({ userId: req.userId });
         await Notification.deleteMany({ userId: req.userId });
         await Report.deleteMany({ userId: req.userId });
