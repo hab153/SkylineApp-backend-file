@@ -7,34 +7,18 @@ exports.getAuthUrl = async (req, res) => {
     const clientId = process.env.NYLAS_CLIENT_ID;
 
     console.log('🔍 [Nylas Auth] Generating URL with:', { clientId, redirectUri });
-    console.log('🔍 [Nylas Auth] Nylas object keys:', Object.keys(nylas));
 
     if (!clientId || !redirectUri) {
       throw new Error('Missing NYLAS_CLIENT_ID or NYLAS_REDIRECT_URI in environment variables.');
     }
 
-    // Try different ways to access the auth method depending on SDK version
-    let authUrl;
-    
-    // Method 1: Standard v6 way
-    if (nylas.auth && typeof nylas.auth.urlForOAuth2 === 'function') {
-      authUrl = nylas.auth.urlForOAuth2({
-        clientId: clientId,
-        redirectUri: redirectUri,
-        scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
-      });
-    } 
-    // Method 2: Fallback for some v6 implementations
-    else if (typeof nylas.urlForAuthentication === 'function') {
-       authUrl = nylas.urlForAuthentication({
-        clientId: clientId,
-        redirectUri: redirectUri,
-        scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
-      });
-    }
-    else {
-      throw new Error('Nylas SDK auth method not found. Check SDK version.');
-    }
+    // Generate the OAuth URL using the v6 SDK
+    // Note: In v6, this is often nylas.auth.urlForOAuth2
+    const authUrl = nylas.auth.urlForOAuth2({
+      clientId: clientId,
+      redirectUri: redirectUri,
+      scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
+    });
 
     console.log('✅ [Nylas Auth] URL generated successfully');
     res.json({ url: authUrl });
