@@ -1,5 +1,5 @@
 const Lead = require('./Lead');
-const { sendNylasEmail, isNylasConnected } = require('./nylasService');
+const { sendEmail, getThreads } = require('./nylasService'); // Updated import
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
 // GET /api/conversations
@@ -148,9 +148,10 @@ const batchSend = async (req, res) => {
             return res.status(400).json({ message: 'Leads array is required' });
         }
 
-        // Check Nylas connection
-        const isConnected = await isNylasConnected(req.userId);
-        if (!isConnected) {
+        // Check Nylas connection via EmailAccount model
+        const EmailAccount = require('./EmailAccount');
+        const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+        if (!account) {
             return res.status(401).json({
                 success: false,
                 error: 'NYLAS_DISCONNECTED',
@@ -210,14 +211,20 @@ const batchSend = async (req, res) => {
                 await lead.save();
 
                 if (leadData.messages?.length > 0) {
-                    await sendNylasEmail(
+                    // Use new service function
+                    const result = await sendEmail(
                         req.userId,
                         leadData.email,
                         leadData.messages[0].subject,
                         leadData.messages[0].body
                     );
-                    sentCount++;
-                    console.log(`✅ [batchSend] Email sent to ${leadData.email}`);
+                    
+                    if (result.success) {
+                        sentCount++;
+                        console.log(`✅ [batchSend] Email sent to ${leadData.email}`);
+                    } else {
+                        throw new Error(result.error);
+                    }
                 }
             } catch (err) {
                 console.error(`❌ [batchSend] Error sending to ${leadData.email}:`, err.message);
@@ -251,8 +258,9 @@ const reconnectAndSend = async (req, res) => {
         }
         console.log(`🔄 [reconnectAndSend] For user ${req.userId}`);
 
-        const isConnected = await isNylasConnected(req.userId);
-        if (!isConnected) {
+        const EmailAccount = require('./EmailAccount');
+        const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+        if (!account) {
             return res.status(401).json({
                 success: false,
                 error: 'NYLAS_DISCONNECTED',
@@ -266,14 +274,19 @@ const reconnectAndSend = async (req, res) => {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
             for (const msg of pendingMessages) {
                 try {
-                    await sendNylasEmail(
+                    // Use new service function
+                    const result = await sendEmail(
                         req.userId,
                         lead.email,
                         msg.subject || 'Re: Conversation',
                         msg.content
                     );
-                    msg.status = 'sent';
-                    sentCount++;
+                    if (result.success) {
+                        msg.status = 'sent';
+                        sentCount++;
+                    } else {
+                        msg.status = 'failed';
+                    }
                 } catch (err) {
                     console.error(`❌ [reconnectAndSend] Failed for ${lead.email}:`, err.message);
                     msg.status = 'failed';
