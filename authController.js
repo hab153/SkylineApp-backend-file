@@ -301,6 +301,7 @@ const deleteAccount = async (req, res) => {
     } catch (err) { console.error('Delete account error:', err.message); res.status(500).json({ message: 'Server Error' }); }
 };
 
+
 module.exports = {
     register, login, logout, revokeAllTokens, verifyEmail, verifyUsername, resetPasswordEmailUsername,
     forgotPassword, resetPassword, verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount
