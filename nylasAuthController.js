@@ -6,27 +6,19 @@ exports.getAuthUrl = async (req, res) => {
     const redirectUri = process.env.NYLAS_REDIRECT_URI;
     const clientId = process.env.NYLAS_CLIENT_ID;
 
-    console.log('🔍 [Nylas Auth] Generating URL with:', { clientId, redirectUri });
+    console.log('🔍 [Nylas Auth] Manually constructing OAuth URL...');
 
     if (!clientId || !redirectUri) {
       throw new Error('Missing NYLAS_CLIENT_ID or NYLAS_REDIRECT_URI in environment variables.');
     }
 
-    // Generate the OAuth URL using v8 SDK
-    let authUrl = nylas.auth.urlForOAuth2({
-      clientId: clientId,
-      redirectUri: redirectUri,
-      scopes: ['https://api.nylas.com/send', 'https://api.nylas.com/read'],
-    });
+    // Manually construct the OAuth URL to ensure 100% compliance
+    const baseUrl = 'https://api.nylas.com/oauth/authorize';
+    const scopes = encodeURIComponent('https://api.nylas.com/send https://api.nylas.com/read');
+    
+    const authUrl = `${baseUrl}?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&access_type=offline&scope=${scopes}`;
 
-    // 🔧 FIX: Ensure response_type=code is present (Nylas v8 sometimes omits it)
-    if (!authUrl.includes('response_type=')) {
-      const separator = authUrl.includes('?') ? '&' : '?';
-      authUrl = `${authUrl}${separator}response_type=code`;
-      console.log('🔧 [Nylas Auth] Appended missing response_type=code to URL');
-    }
-
-    console.log('✅ [Nylas Auth] URL generated successfully');
+    console.log('✅ [Nylas Auth] URL constructed successfully:', authUrl);
     res.json({ url: authUrl });
   } catch (error) {
     console.error('❌ [Nylas Auth] Error generating URL:', error);
