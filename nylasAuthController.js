@@ -6,22 +6,27 @@ exports.getAuthUrl = async (req, res) => {
     const redirectUri = process.env.NYLAS_REDIRECT_URI;
     const clientId = process.env.NYLAS_CLIENT_ID;
 
-    console.log('🔍 [Nylas Auth] Manually constructing OAuth URL...');
-
     if (!clientId || !redirectUri) {
-      throw new Error('Missing NYLAS_CLIENT_ID or NYLAS_REDIRECT_URI in environment variables.');
+      throw new Error('Missing NYLAS_CLIENT_ID or NYLAS_REDIRECT_URI.');
     }
 
-    // Manually construct the OAuth URL to ensure 100% compliance
-    const baseUrl = 'https://api.nylas.com/oauth/authorize';
-    const scopes = encodeURIComponent('https://api.nylas.com/send https://api.nylas.com/read');
-    
-    const authUrl = `${baseUrl}?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&access_type=offline&scope=${scopes}`;
+    // Use URLSearchParams for perfect encoding
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      access_type: 'offline',
+      provider: 'google', // Explicitly set to google to bypass the selection screen
+      scope: 'https://api.nylas.com/send https://api.nylas.com/read'
+    });
 
-    console.log('✅ [Nylas Auth] URL constructed successfully:', authUrl);
+    // Use the US-specific endpoint as per your dashboard
+    const authUrl = `https://api.us.nylas.com/v3/connect/auth?${params.toString()}`;
+
+    console.log('✅ [Nylas Auth] URL generated:', authUrl);
     res.json({ url: authUrl });
   } catch (error) {
-    console.error('❌ [Nylas Auth] Error generating URL:', error);
+    console.error('❌ [Nylas Auth] Error:', error);
     res.status(500).json({ message: 'Failed to generate authentication link.', error: error.message });
   }
 };
@@ -33,9 +38,8 @@ exports.handleCallback = async (req, res) => {
 
     if (!code) return res.status(400).json({ message: 'Authorization code missing.' });
 
-    console.log('🔍 [Nylas Callback] Exchanging code for tokens...');
+    console.log('🔍 [Nylas Callback] Exchanging code...');
 
-    // Exchange code for tokens using v8 SDK
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
       clientSecret: process.env.NYLAS_CLIENT_SECRET, 
@@ -43,9 +47,8 @@ exports.handleCallback = async (req, res) => {
       code: code,
     });
     
-    console.log('✅ [Nylas Callback] Tokens received. Grant ID:', response.grant_id);
+    console.log('✅ [Nylas Callback] Success. Grant ID:', response.grant_id);
 
-    // Save or Update the EmailAccount in MongoDB
     await EmailAccount.findOneAndUpdate(
       { userId },
       {
