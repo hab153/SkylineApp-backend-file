@@ -4,10 +4,9 @@ exports.handleWebhook = async (req, res) => {
   const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET;
 
   // 1. Handle Nylas Challenge (Verification Step - GET Request)
-  // Nylas sends a GET request with ?challenge=xyz during setup
   if (req.method === 'GET' && req.query.challenge) {
     console.log('🔔 [Nylas Webhook] Received GET challenge, responding...');
-    return res.status(200).send(req.query.challenge);
+    return res.status(200).type('text/plain').send(req.query.challenge);
   }
 
   // 2. Handle Actual Webhook Events (POST Request)
