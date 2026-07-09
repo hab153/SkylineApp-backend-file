@@ -16,19 +16,15 @@ exports.getAuthUrl = async (req, res) => {
     // 3. Pack the backpack (Convert to Base64 string so URLs can handle it)
     const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
-    // 4. Generate the Nylas URL with the packed backpack
-    const authUrl = nylas.auth.urlForOAuth2({
-      clientId: process.env.NYLAS_CLIENT_ID,
-      redirectUri: process.env.NYLAS_REDIRECT_URI,
-      provider: "google", 
-      // ✅ FIX: Scope must be an ARRAY, not a string
-      scope: ["email.read_only", "email.send", "email.modify", "offline_access"], 
-      accessType: "offline", 
-      responseType: "code", 
-      state: stateString, 
-    });
+    // 4. Manually Build the URL to ensure response_type is present
+    const clientId = process.env.NYLAS_CLIENT_ID;
+    const redirectUri = encodeURIComponent(process.env.NYLAS_REDIRECT_URI);
+    const scope = encodeURIComponent("email.read_only email.send email.modify offline_access");
+    
+    // Using the V3 endpoint explicitly
+    const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline`;
 
-    console.log('✅ [Nylas Auth] Auth URL generated for User:', userId);
+    console.log('✅ [Nylas Auth] Manual Auth URL generated for User:', userId);
     res.json({ url: authUrl });
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error);
