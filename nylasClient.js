@@ -1,10 +1,6 @@
 const Nylas = require('nylas');
 require('dotenv').config();
 
-if (!process.env.NYLAS_API_KEY) {
-  console.error('❌ CRITICAL: NYLAS_API_KEY is missing from environment variables.');
-}
-
 // Initialize Nylas v8 Client with US API URI
 const nylas = new Nylas({
   apiKey: process.env.NYLAS_API_KEY,
