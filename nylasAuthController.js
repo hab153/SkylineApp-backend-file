@@ -21,10 +21,11 @@ exports.getAuthUrl = async (req, res) => {
       clientId: process.env.NYLAS_CLIENT_ID,
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       provider: "google", 
-      scope: "email.read_only email.send email.modify offline_access", 
+      // ✅ FIX: Scope must be an ARRAY, not a string
+      scope: ["email.read_only", "email.send", "email.modify", "offline_access"], 
       accessType: "offline", 
       responseType: "code", 
-      state: stateString, // <--- The Backpack goes here
+      state: stateString, 
     });
 
     console.log('✅ [Nylas Auth] Auth URL generated for User:', userId);
@@ -38,7 +39,7 @@ exports.getAuthUrl = async (req, res) => {
 exports.handleCallback = async (req, res) => {
   try {
     const code = req.query.code;
-    const stateString = req.query.state; // <--- Retrieve the Backpack
+    const stateString = req.query.state; 
     const error = req.query.error;
 
     if (error) {
@@ -68,7 +69,7 @@ exports.handleCallback = async (req, res) => {
     // 6. Exchange the code for tokens
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_CLIENT_SECRET, // <--- Make sure this is in your .env
+      clientSecret: process.env.NYLAS_CLIENT_SECRET, 
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
@@ -79,7 +80,7 @@ exports.handleCallback = async (req, res) => {
 
     // 7. Save the connection to the Database using the UserID from the backpack
     await EmailAccount.findOneAndUpdate(
-      { userId: userId }, // <--- Now we know who this is!
+      { userId: userId }, 
       {
         nylasGrantId: grantId,
         isConnected: true,
