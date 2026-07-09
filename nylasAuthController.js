@@ -58,11 +58,3 @@ exports.handleCallback = async (req, res) => {
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`);
   }
 };
-```<sup><a href="#">1</a></sup>
-
-**Key changes:**
-1. Removed `clientSecret` from `exchangeCodeForToken()` - when using API key authentication, you don't need it
-2. Added `accessType: "offline"` to get refresh tokens<sup><a href="#">2</a></sup>
-3. Changed `provider` to match your email provider (use `"google"` for Gmail or `"microsoft"` for Outlook)
-
-**Verify your .env file has:**
