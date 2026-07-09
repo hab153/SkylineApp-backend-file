@@ -1,17 +1,33 @@
 const nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
+const crypto = require('crypto');
 
 exports.getAuthUrl = async (req, res) => {
   try {
+    // 1. Get the User ID from the verified token
+    const userId = req.userId; 
+
+    // 2. Create a "Backpack" (State) containing the User ID and a random security string
+    const stateObj = {
+      userId: userId,
+      nonce: crypto.randomBytes(16).toString('hex')
+    };
+    
+    // 3. Pack the backpack (Convert to Base64 string so URLs can handle it)
+    const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
+
+    // 4. Generate the Nylas URL with the packed backpack
     const authUrl = nylas.auth.urlForOAuth2({
       clientId: process.env.NYLAS_CLIENT_ID,
-      provider: "google",
       redirectUri: process.env.NYLAS_REDIRECT_URI,
-      loginHint: "email_to_connect@example.com",
-      accessType: "offline",
+      provider: "google", 
+      scope: "email.read_only email.send email.modify offline_access", 
+      accessType: "offline", 
+      responseType: "code", 
+      state: stateString, // <--- The Backpack goes here
     });
 
-    console.log('✅ [Nylas Auth] Auth URL generated:', authUrl);
+    console.log('✅ [Nylas Auth] Auth URL generated for User:', userId);
     res.json({ url: authUrl });
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error);
@@ -22,37 +38,61 @@ exports.getAuthUrl = async (req, res) => {
 exports.handleCallback = async (req, res) => {
   try {
     const code = req.query.code;
-    const userId = req.userId; 
+    const stateString = req.query.state; // <--- Retrieve the Backpack
+    const error = req.query.error;
 
-    if (!code) {
-      res.status(400).send("No authorization code returned from Nylas");
-      return;
+    if (error) {
+      return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error)}`);
     }
 
-    console.log('🔍 [Nylas Callback] Exchanging code for token...');
+    if (!code || !stateString) {
+      return res.status(400).send("Missing code or state");
+    }
 
+    // 5. Open the Backpack (Decode Base64)
+    let userId;
+    try {
+      const decodedState = JSON.parse(Buffer.from(stateString, 'base64').toString());
+      userId = decodedState.userId;
+    } catch (e) {
+      console.error('❌ [Nylas Callback] Invalid State format');
+      return res.status(400).send("Invalid state parameter");
+    }
+
+    if (!userId) {
+      return res.status(400).send("User ID missing from state");
+    }
+
+    console.log('🔍 [Nylas Callback] Exchanging code for token for User:', userId);
+
+    // 6. Exchange the code for tokens
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
+      clientSecret: process.env.NYLAS_CLIENT_SECRET, // <--- Make sure this is in your .env
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
     
-    const { grantId } = response;
+    const { grantId, accessToken, refreshToken, expiresIn } = response;
     
     console.log('✅ [Nylas Callback] Token exchanged successfully');
-    console.log('📊 [Nylas Callback] Grant ID:', grantId);
 
-    const emailAccount = await EmailAccount.findOneAndUpdate(
-      { userId },
+    // 7. Save the connection to the Database using the UserID from the backpack
+    await EmailAccount.findOneAndUpdate(
+      { userId: userId }, // <--- Now we know who this is!
       {
         nylasGrantId: grantId,
         isConnected: true,
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        tokenExpiry: new Date(Date.now() + (expiresIn * 1000))
       },
       { upsert: true, new: true }
     );
 
-    console.log('✅ [Nylas Callback] Email account saved to database');
+    console.log('✅ [Nylas Callback] Account saved for User:', userId);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=success`);
+
   } catch (error) {
     console.error('❌ [Nylas Callback] Error:', error.message);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`);
