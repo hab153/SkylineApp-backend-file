@@ -5,9 +5,10 @@ exports.getAuthUrl = async (req, res) => {
   try {
     const authUrl = nylas.auth.urlForOAuth2({
       clientId: process.env.NYLAS_CLIENT_ID,
-      redirectUri: process.env.NYLAS_REDIRECT_URI,
       provider: "google",
-      loginHint: "enter-email-address-here",
+      redirectUri: process.env.NYLAS_REDIRECT_URI,
+      loginHint: "email_to_connect@example.com",
+      accessType: "offline",
     });
 
     console.log('✅ [Nylas Auth] Auth URL generated:', authUrl);
@@ -21,39 +22,47 @@ exports.getAuthUrl = async (req, res) => {
 exports.handleCallback = async (req, res) => {
   try {
     const code = req.query.code;
-    const userId = req.userId;
+    const userId = req.userId; 
 
     if (!code) {
-      return res.status(400).json({ message: 'No authorization code returned from Nylas' });
+      res.status(400).send("No authorization code returned from Nylas");
+      return;
     }
 
     console.log('🔍 [Nylas Callback] Exchanging code for token...');
 
-    const codeExchangeResponse = await nylas.auth.exchangeCodeForToken({
-      redirectUri: process.env.NYLAS_REDIRECT_URI,
+    const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_API_KEY,
+      redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
-
-    const { grantId } = codeExchangeResponse;
-
-    console.log('✅ [Nylas Callback] Grant ID:', grantId);
+    
+    const { grantId } = response;
+    
+    console.log('✅ [Nylas Callback] Token exchanged successfully');
+    console.log('📊 [Nylas Callback] Grant ID:', grantId);
 
     const emailAccount = await EmailAccount.findOneAndUpdate(
       { userId },
       {
         nylasGrantId: grantId,
-        emailAddress: codeExchangeResponse.email,
         isConnected: true,
       },
       { upsert: true, new: true }
     );
 
-    console.log('✅ [Nylas Callback] Email account saved');
+    console.log('✅ [Nylas Callback] Email account saved to database');
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=success`);
   } catch (error) {
     console.error('❌ [Nylas Callback] Error:', error.message);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`);
   }
 };
+```<sup><a href="#">1</a></sup>
+
+**Key changes:**
+1. Removed `clientSecret` from `exchangeCodeForToken()` - when using API key authentication, you don't need it
+2. Added `accessType: "offline"` to get refresh tokens<sup><a href="#">2</a></sup>
+3. Changed `provider` to match your email provider (use `"google"` for Gmail or `"microsoft"` for Outlook)
+
+**Verify your .env file has:**
