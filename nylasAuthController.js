@@ -1,30 +1,27 @@
-const nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 const crypto = require('crypto');
 
 exports.getAuthUrl = async (req, res) => {
   try {
-    // 1. Get the User ID from the verified token
     const userId = req.userId; 
-
-    // 2. Create a "Backpack" (State) containing the User ID and a random security string
+    
+    // 1. Create State (Backpack)
     const stateObj = {
       userId: userId,
       nonce: crypto.randomBytes(16).toString('hex')
     };
-    
-    // 3. Pack the backpack (Convert to Base64 string so URLs can handle it)
     const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
-    // 4. Manually Build the URL to ensure response_type is present
+    // 2. Define Parameters
     const clientId = process.env.NYLAS_CLIENT_ID;
     const redirectUri = encodeURIComponent(process.env.NYLAS_REDIRECT_URI);
     const scope = encodeURIComponent("email.read_only email.send email.modify offline_access");
     
-    // Using the V3 endpoint explicitly
-    const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline`;
+    // 3. Manually Build the V3 Auth URL
+    // This ensures 'response_type=code' is always present
+    const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline&provider=google`;
 
-    console.log('✅ [Nylas Auth] Manual Auth URL generated for User:', userId);
+    console.log('✅ [Nylas Auth] Manual V3 URL generated');
     res.json({ url: authUrl });
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error);
@@ -46,7 +43,7 @@ exports.handleCallback = async (req, res) => {
       return res.status(400).send("Missing code or state");
     }
 
-    // 5. Open the Backpack (Decode Base64)
+    // 4. Decode State to get UserId
     let userId;
     try {
       const decodedState = JSON.parse(Buffer.from(stateString, 'base64').toString());
@@ -60,9 +57,10 @@ exports.handleCallback = async (req, res) => {
       return res.status(400).send("User ID missing from state");
     }
 
-    console.log('🔍 [Nylas Callback] Exchanging code for token for User:', userId);
+    console.log('🔍 [Nylas Callback] Exchanging code for token...');
 
-    // 6. Exchange the code for tokens
+    // 5. Exchange Code for Token using the SDK
+    const nylas = require('./nylasClient');
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
       clientSecret: process.env.NYLAS_CLIENT_SECRET, 
@@ -74,7 +72,7 @@ exports.handleCallback = async (req, res) => {
     
     console.log('✅ [Nylas Callback] Token exchanged successfully');
 
-    // 7. Save the connection to the Database using the UserID from the backpack
+    // 6. Save to Database
     await EmailAccount.findOneAndUpdate(
       { userId: userId }, 
       {
