@@ -1,6 +1,5 @@
 const EmailAccount = require('./EmailAccount');
 const crypto = require('crypto');
-const axios = require('axios');
 
 exports.getAuthUrl = async (req, res) => {
   try {
@@ -13,25 +12,20 @@ exports.getAuthUrl = async (req, res) => {
     };
     const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
-    // 2. Build BOTH URLs
+    // 2. Build URL with ONLY available scopes
     const clientId = process.env.NYLAS_CLIENT_ID;
     const redirectUri = encodeURIComponent(process.env.NYLAS_REDIRECT_URI);
-    const scopeV2 = encodeURIComponent("email.read_only email.send email.modify offline_access");
-    const scopeV3 = encodeURIComponent("email:read email:send email:modify");
     
-    // Try V2 first (more stable)
-    const authUrlV2 = `https://api.nylas.com/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scopeV2}&state=${stateString}`;
+    // ✅ ONLY use scopes that exist in your dashboard
+    // Remove 'offline_access' since it's not available
+    const scope = encodeURIComponent("email.read_only email.send email.modify");
     
-    // Fallback to V3
-    const authUrlV3 = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scopeV3}&state=${stateString}&access_type=offline&provider=google`;
+    const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline&provider=google`;
 
-    // ✅ Use V2 by default
-    console.log('✅ [Nylas Auth] V2 URL generated');
-    console.log('🔗 V2 URL:', authUrlV2);
-    console.log('🔗 V3 URL (fallback):', authUrlV3);
+    console.log('✅ [Nylas Auth] URL generated');
+    console.log('🔗 Auth URL:', authUrl);
     
-    // Try V2 first
-    res.json({ url: authUrlV2, version: 'v2' });
+    res.json({ url: authUrl });
     
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error);
@@ -48,7 +42,10 @@ exports.handleCallback = async (req, res) => {
     const stateString = req.query.state; 
     const error = req.query.error;
 
+    console.log('📥 [Nylas Callback] Received callback');
+
     if (error) {
+      console.log('❌ [Nylas Callback] Error:', error);
       return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error)}`);
     }
 
@@ -64,30 +61,29 @@ exports.handleCallback = async (req, res) => {
       return res.status(400).send("Invalid state parameter");
     }
 
-    console.log('🔍 [Nylas Callback] Exchanging code for token using V2...');
+    console.log('🔍 [Nylas Callback] Exchanging code for token...');
 
-    // ✅ Use V2 token exchange
-    const response = await axios.post('https://api.nylas.com/oauth/token', {
-      client_id: process.env.NYLAS_CLIENT_ID,
-      client_secret: process.env.NYLAS_API_KEY,
-      grant_type: 'authorization_code',
+    const nylas = require('./nylasClient');
+    const response = await nylas.auth.exchangeCodeForToken({
+      clientId: process.env.NYLAS_CLIENT_ID,
+      clientSecret: process.env.NYLAS_API_KEY,
+      redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
-      redirect_uri: process.env.NYLAS_REDIRECT_URI
     });
     
     console.log('✅ [Nylas Callback] Token exchange successful');
     
-    const { access_token, refresh_token, expires_in } = response.data;
+    const { grantId, accessToken, refreshToken, expiresIn } = response;
 
     // Save to Database
     await EmailAccount.findOneAndUpdate(
       { userId: userId },
       {
-        nylasGrantId: 'v2_' + userId,
+        nylasGrantId: grantId,
         isConnected: true,
-        accessToken: access_token,
-        refreshToken: refresh_token,
-        tokenExpiry: new Date(Date.now() + (expires_in * 1000))
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        tokenExpiry: new Date(Date.now() + (expiresIn * 1000))
       },
       { upsert: true, new: true }
     );
@@ -97,7 +93,6 @@ exports.handleCallback = async (req, res) => {
 
   } catch (error) {
     console.error('❌ [Nylas Callback] Error:', error.message);
-    console.error('❌ Full Error:', error.response?.data || error);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`);
   }
 };
