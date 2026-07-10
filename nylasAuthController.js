@@ -18,7 +18,7 @@ exports.getAuthUrl = async (req, res) => {
     const scope = encodeURIComponent("email.read_only email.send email.modify offline_access");
     
     // 3. Manually Build the V3 Auth URL
-    // This ensures 'response_type=code' is always present
+    // This ensures 'response_type=code' and 'provider=google' are always present
     const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline&provider=google`;
 
     console.log('✅ [Nylas Auth] Manual V3 URL generated');
