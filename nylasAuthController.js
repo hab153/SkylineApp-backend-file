@@ -1,5 +1,5 @@
 const EmailAccount = require('./EmailAccount');
-const User = require('./User');  // ✅ ADD THIS
+const User = require('./User');
 const crypto = require('crypto');
 
 exports.getAuthUrl = async (req, res) => {
@@ -26,9 +26,18 @@ exports.getAuthUrl = async (req, res) => {
       "https://www.googleapis.com/auth/gmail.modify"
     ].join(" "));
     
-    const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline&provider=google`;
+    // ✅ CRITICAL: access_type=offline is a QUERY PARAMETER for Google (not a scope)
+    const authUrl = `https://api.us.nylas.com/v3/connect/auth?` +
+      `client_id=${clientId}` +
+      `&redirect_uri=${redirectUri}` +
+      `&response_type=code` +
+      `&scope=${scope}` +
+      `&state=${stateString}` +
+      `&access_type=offline` +      // ← This is correct for Google
+      `&provider=google`;
 
     console.log('✅ [Nylas Auth] URL generated with full Google scopes');
+    console.log('✅ [Nylas Auth] access_type=offline included for refresh token');
     console.log('🔗 Auth URL:', authUrl);
     
     res.json({ url: authUrl });
@@ -136,7 +145,7 @@ exports.handleCallback = async (req, res) => {
       email: email || 'Not provided'
     });
 
-    // ✅ STEP 1: Save to EmailAccount model
+    // ✅ STEP 1: Save to EmailAccount model with refresh token
     console.log('💾 [NYLAS CALLBACK] Saving to EmailAccount for userId:', userId);
     await EmailAccount.findOneAndUpdate(
       { userId: userId },
@@ -146,7 +155,9 @@ exports.handleCallback = async (req, res) => {
         accessToken: accessToken,
         refreshToken: refreshToken,
         tokenExpiry: new Date(Date.now() + (expiresIn * 1000)),
-        emailAddress: email || 'Connected'
+        emailAddress: email || 'Connected',
+        refreshFailCount: 0,           // ✅ Reset refresh failures
+        lastRefreshError: null         // ✅ Clear any previous errors
       },
       { upsert: true, new: true }
     );
@@ -166,6 +177,7 @@ exports.handleCallback = async (req, res) => {
     );
 
     console.log('✅ [NYLAS CALLBACK] Account saved successfully to both models');
+    console.log('✅ [NYLAS CALLBACK] Refresh token saved:', refreshToken ? '✅ YES' : '❌ NO - This is the problem!');
     
     const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=success`;
     console.log('🔄 [NYLAS CALLBACK] Redirecting to:', redirectUrl);
