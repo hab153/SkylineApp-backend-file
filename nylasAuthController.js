@@ -1,30 +1,37 @@
 const EmailAccount = require('./EmailAccount');
 const crypto = require('crypto');
+const axios = require('axios');
 
 exports.getAuthUrl = async (req, res) => {
   try {
-    const userId = req.userId; 
+    const userId = req.userId;
     
-    // 1. Create State (Backpack)
+    // 1. Create State
     const stateObj = {
       userId: userId,
       nonce: crypto.randomBytes(16).toString('hex')
     };
     const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
-    // 2. ✅ CORRECT PARAMETERS
+    // 2. Build BOTH URLs
     const clientId = process.env.NYLAS_CLIENT_ID;
     const redirectUri = encodeURIComponent(process.env.NYLAS_REDIRECT_URI);
-    const scope = encodeURIComponent("email:read email:send email:modify");  // ← FIXED
-    const state = encodeURIComponent(stateString);
+    const scopeV2 = encodeURIComponent("email.read_only email.send email.modify offline_access");
+    const scopeV3 = encodeURIComponent("email:read email:send email:modify");
     
-    // 3. Build the V3 Auth URL
-    const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${state}&access_type=offline&provider=google`;
+    // Try V2 first (more stable)
+    const authUrlV2 = `https://api.nylas.com/oauth/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scopeV2}&state=${stateString}`;
+    
+    // Fallback to V3
+    const authUrlV3 = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scopeV3}&state=${stateString}&access_type=offline&provider=google`;
 
-    console.log('✅ [Nylas Auth] URL generated successfully');
-    console.log('🔗 Auth URL:', authUrl);
+    // ✅ Use V2 by default
+    console.log('✅ [Nylas Auth] V2 URL generated');
+    console.log('🔗 V2 URL:', authUrlV2);
+    console.log('🔗 V3 URL (fallback):', authUrlV3);
     
-    res.json({ url: authUrl });
+    // Try V2 first
+    res.json({ url: authUrlV2, version: 'v2' });
     
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error);
@@ -41,70 +48,46 @@ exports.handleCallback = async (req, res) => {
     const stateString = req.query.state; 
     const error = req.query.error;
 
-    console.log('📥 [Nylas Callback] Received callback', { 
-      hasCode: !!code, 
-      hasState: !!stateString,
-      error: error || 'none'
-    });
-
     if (error) {
-      console.log('❌ [Nylas Callback] Error:', error);
       return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error)}`);
     }
 
     if (!code || !stateString) {
-      console.log('❌ [Nylas Callback] Missing required parameters');
       return res.status(400).send("Missing code or state");
     }
 
-    // 4. Decode State to get UserId
     let userId;
     try {
       const decodedState = JSON.parse(Buffer.from(stateString, 'base64').toString());
       userId = decodedState.userId;
-      console.log('✅ [Nylas Callback] Decoded userId:', userId);
     } catch (e) {
-      console.error('❌ [Nylas Callback] Invalid State format', e);
       return res.status(400).send("Invalid state parameter");
     }
 
-    if (!userId) {
-      console.log('❌ [Nylas Callback] No userId in state');
-      return res.status(400).send("User ID missing from state");
-    }
+    console.log('🔍 [Nylas Callback] Exchanging code for token using V2...');
 
-    console.log('🔍 [Nylas Callback] Exchanging code for token...');
-
-    // 5. Exchange Code for Token
-    const nylas = require('./nylasClient');
-    const response = await nylas.auth.exchangeCodeForToken({
-      clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_API_KEY,
-      redirectUri: process.env.NYLAS_REDIRECT_URI,
+    // ✅ Use V2 token exchange
+    const response = await axios.post('https://api.nylas.com/oauth/token', {
+      client_id: process.env.NYLAS_CLIENT_ID,
+      client_secret: process.env.NYLAS_API_KEY,
+      grant_type: 'authorization_code',
       code: code,
+      redirect_uri: process.env.NYLAS_REDIRECT_URI
     });
     
     console.log('✅ [Nylas Callback] Token exchange successful');
     
-    const { grantId, accessToken, refreshToken, expiresIn } = response;
-    
-    // Log token info (without exposing full token)
-    console.log('📊 Token Info:', {
-      grantId: grantId,
-      expiresIn: expiresIn,
-      hasAccessToken: !!accessToken,
-      hasRefreshToken: !!refreshToken
-    });
+    const { access_token, refresh_token, expires_in } = response.data;
 
-    // 6. Save to Database
+    // Save to Database
     await EmailAccount.findOneAndUpdate(
-      { userId: userId }, 
+      { userId: userId },
       {
-        nylasGrantId: grantId,
+        nylasGrantId: 'v2_' + userId,
         isConnected: true,
-        accessToken: accessToken,
-        refreshToken: refreshToken,
-        tokenExpiry: new Date(Date.now() + (expiresIn * 1000))
+        accessToken: access_token,
+        refreshToken: refresh_token,
+        tokenExpiry: new Date(Date.now() + (expires_in * 1000))
       },
       { upsert: true, new: true }
     );
@@ -114,7 +97,7 @@ exports.handleCallback = async (req, res) => {
 
   } catch (error) {
     console.error('❌ [Nylas Callback] Error:', error.message);
-    console.error('❌ Full Error:', error);
+    console.error('❌ Full Error:', error.response?.data || error);
     res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`);
   }
 };
