@@ -217,6 +217,42 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
 
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
+// ✅ CHECK NYLAS CONNECTION STATUS
+app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
+  try {
+    const EmailAccount = require('./EmailAccount');
+    
+    // Check both EmailAccount and User models
+    const emailAccount = await EmailAccount.findOne({ 
+      userId: req.userId, 
+      isConnected: true 
+    });
+    
+    if (emailAccount) {
+      // Check if token is expired
+      const isExpired = emailAccount.tokenExpiry && new Date(emailAccount.tokenExpiry) < new Date();
+      
+      res.json({
+        connected: true,
+        email: emailAccount.emailAddress || 'Connected',
+        isExpired: isExpired,
+        grantId: emailAccount.nylasGrantId
+      });
+    } else {
+      res.json({
+        connected: false,
+        email: null
+      });
+    }
+  } catch (error) {
+    console.error('❌ [NYLAS STATUS] Error:', error);
+    res.status(500).json({ 
+      connected: false, 
+      error: 'Failed to check status' 
+    });
+  }
+});
+
 // ✅ TEST ROUTE: Check if callback route is reachable
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
