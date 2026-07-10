@@ -12,16 +12,22 @@ exports.getAuthUrl = async (req, res) => {
     };
     const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
-    // 2. ✅ USE THE CORRECT SCOPES FROM YOUR DASHBOARD
+    // 2. ✅ USE FULL GOOGLE SCOPE URIs
     const clientId = process.env.NYLAS_CLIENT_ID;
     const redirectUri = encodeURIComponent(process.env.NYLAS_REDIRECT_URI);
     
-    // ✅ These are the actual scope names in your Nylas dashboard
-    const scope = encodeURIComponent("gmail.readonly gmail.send gmail.modify");
+    const scope = encodeURIComponent([
+      "openid",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.modify"
+    ].join(" "));
     
     const authUrl = `https://api.us.nylas.com/v3/connect/auth?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=code&scope=${scope}&state=${stateString}&access_type=offline&provider=google`;
 
-    console.log('✅ [Nylas Auth] URL generated with Gmail scopes');
+    console.log('✅ [Nylas Auth] URL generated with full Google scopes');
     console.log('🔗 Auth URL:', authUrl);
     
     res.json({ url: authUrl });
