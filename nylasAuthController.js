@@ -1,4 +1,5 @@
 const EmailAccount = require('./EmailAccount');
+const User = require('./User');  // ✅ ADD THIS
 const crypto = require('crypto');
 
 exports.getAuthUrl = async (req, res) => {
@@ -43,7 +44,6 @@ exports.getAuthUrl = async (req, res) => {
 
 exports.handleCallback = async (req, res) => {
   try {
-    // ✅ DEBUG: Log EVERYTHING about the incoming request
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📥 [NYLAS CALLBACK] Received callback');
     console.log('📥 [NYLAS CALLBACK] Full URL:', req.originalUrl);
@@ -126,17 +126,18 @@ exports.handleCallback = async (req, res) => {
     console.log('✅ [NYLAS CALLBACK] Token exchange successful');
     console.log('📊 [NYLAS CALLBACK] Response keys:', Object.keys(response));
     
-    const { grantId, accessToken, refreshToken, expiresIn } = response;
+    const { grantId, accessToken, refreshToken, expiresIn, email } = response;
 
     console.log('📊 [NYLAS CALLBACK] Token info:', {
       grantId: grantId || 'MISSING',
       expiresIn: expiresIn || 'MISSING',
       hasAccessToken: !!accessToken,
-      hasRefreshToken: !!refreshToken
+      hasRefreshToken: !!refreshToken,
+      email: email || 'Not provided'
     });
 
-    // Save to Database
-    console.log('💾 [NYLAS CALLBACK] Saving to database for userId:', userId);
+    // ✅ STEP 1: Save to EmailAccount model
+    console.log('💾 [NYLAS CALLBACK] Saving to EmailAccount for userId:', userId);
     await EmailAccount.findOneAndUpdate(
       { userId: userId },
       {
@@ -144,12 +145,27 @@ exports.handleCallback = async (req, res) => {
         isConnected: true,
         accessToken: accessToken,
         refreshToken: refreshToken,
-        tokenExpiry: new Date(Date.now() + (expiresIn * 1000))
+        tokenExpiry: new Date(Date.now() + (expiresIn * 1000)),
+        emailAddress: email || 'Connected'
       },
       { upsert: true, new: true }
     );
 
-    console.log('✅ [NYLAS CALLBACK] Account saved successfully');
+    // ✅ STEP 2: ALSO update User.nylasIntegration
+    console.log('💾 [NYLAS CALLBACK] Updating User.nylasIntegration for userId:', userId);
+    await User.findOneAndUpdate(
+      { _id: userId },
+      {
+        'nylasIntegration.isConnected': true,
+        'nylasIntegration.accessToken': accessToken,
+        'nylasIntegration.grantId': grantId,
+        'nylasIntegration.emailAddress': email || 'Connected',
+        'nylasIntegration.tokenExpiry': new Date(Date.now() + (expiresIn * 1000))
+      },
+      { upsert: true, new: true }
+    );
+
+    console.log('✅ [NYLAS CALLBACK] Account saved successfully to both models');
     
     const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=success`;
     console.log('🔄 [NYLAS CALLBACK] Redirecting to:', redirectUrl);
