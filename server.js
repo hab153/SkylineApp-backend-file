@@ -203,6 +203,34 @@ app.use('/api', sessionRoutes);
 app.get('/api/auth/nylas/connect', verifyToken, nylasAuthController.getAuthUrl);
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
+// ✅ TEST ROUTE: Check if callback route is reachable
+app.get('/api/auth/nylas/test-callback', (req, res) => {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('✅ [TEST] Callback test route hit!');
+    console.log('📥 [TEST] Full URL:', req.originalUrl);
+    console.log('📥 [TEST] Query params:', req.query);
+    console.log('📥 [TEST] Headers:', {
+        host: req.headers.host,
+        'user-agent': req.headers['user-agent']
+    });
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    res.send(`
+        <h1>✅ Test Callback Working!</h1>
+        <p>If you see this, the route is accessible.</p>
+        <p>Full URL: ${req.originalUrl}</p>
+        <p>Query: ${JSON.stringify(req.query)}</p>
+        <p>Time: ${new Date().toISOString()}</p>
+        <hr>
+        <p><strong>Next Steps:</strong></p>
+        <ul>
+            <li>Check if this matches your Nylas redirect URI</li>
+            <li>Make sure this exact URI is whitelisted in Nylas Dashboard</li>
+            <li>Try the actual callback: <a href="/api/auth/nylas/callback?test=123">/api/auth/nylas/callback?test=123</a></li>
+        </ul>
+    `);
+});
+
 // ──────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
 // ──────────────────────────────────────────────────────────────
