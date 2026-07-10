@@ -213,23 +213,7 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     next();
 }, nylasAuthController.getAuthUrl);
 
-// ✅ Add response interceptor to log what's being sent
-const originalJson = express.response.json;
-express.response.json = function(data) {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📤 [NYLAS ROUTE] Response being sent:');
-    console.log('📤 [NYLAS ROUTE] Response data keys:', Object.keys(data));
-    if (data.url) {
-        console.log('✅ [NYLAS ROUTE] URL in response:', data.url);
-        console.log('✅ [NYLAS ROUTE] URL contains "response_type=code":', data.url.includes('response_type=code') ? '✅ YES' : '❌ NO');
-        console.log('✅ [NYLAS ROUTE] URL contains "&":', data.url.includes('&') ? '✅ YES' : '❌ NO');
-        console.log('✅ [NYLAS ROUTE] URL contains "&amp;":', data.url.includes('&amp;') ? '⚠️ WARNING - HTML ENTITY FOUND!' : '✅ CLEAN');
-    } else {
-        console.log('❌ [NYLAS ROUTE] No URL in response!');
-    }
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    return originalJson.call(this, data);
-};
+// ❌ RESPONSE INTERCEPTOR REMOVED - It was converting & to &amp;
 
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
