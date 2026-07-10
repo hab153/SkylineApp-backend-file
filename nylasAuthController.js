@@ -43,32 +43,79 @@ exports.getAuthUrl = async (req, res) => {
 
 exports.handleCallback = async (req, res) => {
   try {
+    // ✅ DEBUG: Log EVERYTHING about the incoming request
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📥 [NYLAS CALLBACK] Received callback');
+    console.log('📥 [NYLAS CALLBACK] Full URL:', req.originalUrl);
+    console.log('📥 [NYLAS CALLBACK] Method:', req.method);
+    console.log('📥 [NYLAS CALLBACK] Headers:', {
+      host: req.headers.host,
+      'user-agent': req.headers['user-agent'],
+      'x-forwarded-proto': req.headers['x-forwarded-proto']
+    });
+    console.log('📥 [NYLAS CALLBACK] Query params:', req.query);
+    console.log('📥 [NYLAS CALLBACK] Code present:', !!req.query.code);
+    console.log('📥 [NYLAS CALLBACK] State present:', !!req.query.state);
+    console.log('📥 [NYLAS CALLBACK] Error present:', req.query.error || 'none');
+    console.log('📥 [NYLAS CALLBACK] Full query string:', req.originalUrl.split('?')[1] || '');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
     const code = req.query.code;
     const stateString = req.query.state; 
     const error = req.query.error;
 
-    console.log('📥 [Nylas Callback] Received callback');
-
     if (error) {
-      console.log('❌ [Nylas Callback] Error:', error);
-      return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error)}`);
+      console.log('❌ [NYLAS CALLBACK] Error from Nylas:', error);
+      console.log('❌ [NYLAS CALLBACK] Full error details:', req.query);
+      const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error)}`;
+      console.log('🔄 [NYLAS CALLBACK] Redirecting to:', redirectUrl);
+      return res.redirect(redirectUrl);
     }
 
     if (!code || !stateString) {
-      return res.status(400).send("Missing code or state");
+      console.log('❌ [NYLAS CALLBACK] Missing required parameters');
+      console.log('❌ [NYLAS CALLBACK] code:', code || 'MISSING');
+      console.log('❌ [NYLAS CALLBACK] state:', stateString || 'MISSING');
+      console.log('❌ [NYLAS CALLBACK] All query params:', req.query);
+      return res.status(400).send(`
+        <h1>Missing Parameters</h1>
+        <p>Code: ${code ? '✅' : '❌'}</p>
+        <p>State: ${stateString ? '✅' : '❌'}</p>
+        <p>Error: ${error || 'none'}</p>
+        <p>Full query: ${JSON.stringify(req.query)}</p>
+      `);
     }
 
     let userId;
     try {
       const decodedState = JSON.parse(Buffer.from(stateString, 'base64').toString());
       userId = decodedState.userId;
+      console.log('✅ [NYLAS CALLBACK] Decoded userId:', userId);
+      console.log('✅ [NYLAS CALLBACK] Decoded state:', decodedState);
     } catch (e) {
+      console.error('❌ [NYLAS CALLBACK] Invalid State format:', e);
+      console.log('❌ [NYLAS CALLBACK] State string:', stateString);
       return res.status(400).send("Invalid state parameter");
     }
 
-    console.log('🔍 [Nylas Callback] Exchanging code for token...');
+    if (!userId) {
+      console.log('❌ [NYLAS CALLBACK] No userId in state');
+      return res.status(400).send("User ID missing from state");
+    }
+
+    console.log('🔍 [NYLAS CALLBACK] Exchanging code for token...');
+    console.log('🔍 [NYLAS CALLBACK] Code length:', code.length);
+    console.log('🔍 [NYLAS CALLBACK] Code first 10 chars:', code.substring(0, 10) + '...');
 
     const nylas = require('./nylasClient');
+    
+    console.log('🔍 [NYLAS CALLBACK] Exchange request params:', {
+      clientId: process.env.NYLAS_CLIENT_ID ? '✅' : '❌',
+      clientSecret: process.env.NYLAS_API_KEY ? '✅' : '❌',
+      redirectUri: process.env.NYLAS_REDIRECT_URI ? '✅' : '❌',
+      code: code.substring(0, 10) + '...'
+    });
+
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
       clientSecret: process.env.NYLAS_API_KEY,
@@ -76,11 +123,20 @@ exports.handleCallback = async (req, res) => {
       code: code,
     });
     
-    console.log('✅ [Nylas Callback] Token exchange successful');
+    console.log('✅ [NYLAS CALLBACK] Token exchange successful');
+    console.log('📊 [NYLAS CALLBACK] Response keys:', Object.keys(response));
     
     const { grantId, accessToken, refreshToken, expiresIn } = response;
 
+    console.log('📊 [NYLAS CALLBACK] Token info:', {
+      grantId: grantId || 'MISSING',
+      expiresIn: expiresIn || 'MISSING',
+      hasAccessToken: !!accessToken,
+      hasRefreshToken: !!refreshToken
+    });
+
     // Save to Database
+    console.log('💾 [NYLAS CALLBACK] Saving to database for userId:', userId);
     await EmailAccount.findOneAndUpdate(
       { userId: userId },
       {
@@ -93,11 +149,23 @@ exports.handleCallback = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    console.log('✅ [Nylas Callback] Account saved for User:', userId);
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=success`);
+    console.log('✅ [NYLAS CALLBACK] Account saved successfully');
+    
+    const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=success`;
+    console.log('🔄 [NYLAS CALLBACK] Redirecting to:', redirectUrl);
+    res.redirect(redirectUrl);
 
   } catch (error) {
-    console.error('❌ [Nylas Callback] Error:', error.message);
-    res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`);
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.error('❌ [NYLAS CALLBACK] EXCEPTION CAUGHT:');
+    console.error('❌ [NYLAS CALLBACK] Error message:', error.message);
+    console.error('❌ [NYLAS CALLBACK] Error stack:', error.stack);
+    console.error('❌ [NYLAS CALLBACK] Error response:', error.response?.data || 'none');
+    console.error('❌ [NYLAS CALLBACK] Error status:', error.response?.status || 'none');
+    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message)}`;
+    console.log('🔄 [NYLAS CALLBACK] Redirecting with error to:', redirectUrl);
+    res.redirect(redirectUrl);
   }
 };
