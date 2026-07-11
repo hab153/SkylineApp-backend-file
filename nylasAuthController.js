@@ -156,8 +156,8 @@ exports.handleCallback = async (req, res) => {
         refreshToken: refreshToken,
         tokenExpiry: new Date(Date.now() + (expiresIn * 1000)),
         emailAddress: email || 'Connected',
-        refreshFailCount: 0,           // ✅ Reset refresh failures
-        lastRefreshError: null         // ✅ Clear any previous errors
+        refreshFailCount: 0,
+        lastRefreshError: null
       },
       { upsert: true, new: true }
     );
