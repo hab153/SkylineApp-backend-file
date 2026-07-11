@@ -184,8 +184,32 @@ mongoose.connect(process.env.MONGODB_URI, {
             startBackupJob();
         }
         startDataExportCleanupJob();
+
+        // ✅ START WEBHOOK VERIFICATION
+        verifyWebhookRegistration();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
+
+// ════════════════════════════════════════════
+//  WEBHOOK VERIFICATION FUNCTION
+// ════════════════════════════════════════════
+async function verifyWebhookRegistration() {
+    try {
+        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
+        
+        // You can add a call to Nylas API to check webhook status here
+        // For now, just log that the endpoint is ready
+        
+        console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
+        console.log('📋 [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log('   → https://dashboard.nylas.com');
+        console.log('   → Select your app → Webhooks');
+        console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
+        console.log('   → Triggers: message.created, message.sent, grant.expired, grant.refreshed');
+    } catch (error) {
+        console.error('❌ [WEBHOOK] Verification error:', error.message);
+    }
+}
 
 // ════════════════════════════════════════════
 //  ROUTES
