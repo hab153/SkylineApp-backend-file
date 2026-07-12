@@ -1,689 +1,521 @@
 'use strict';
 
 /**
- * agent3.js – Enrichment / Verification Agent
+ * agent3.js – Stage 3: Multi-Source Search & Retrieval Engine
  * 
- * The third layer in the B2B lead-generation system.
+ * The retrieval engine of Skyline's Lead Intelligence System.
  * 
  * PRIMARY RESPONSIBILITIES:
- * 1. Read Agent 2 output carefully.
- * 2. For each prospect, find missing or stale public information.
- * 3. Enrich records with website, company details, identity clues, role, location, industry, and contact clues.
- * 4. Search only when needed for live public facts.
- * 5. Infer an email candidate only when supported by domain/name patterns or source clues.
- * 6. Verify email candidates when possible.
- * 7. Assign a verification status and confidence.
- * 8. Return clean structured JSON only.
+ * 1. Receive hypotheses from Stage 2 (industries/verticals to search).
+ * 2. For each hypothesis, generate multiple search variations (query expansion).
+ * 3. Execute searches across multiple sources (Tavily with API key rotation).
+ * 4. Run searches in parallel where possible.
+ * 5. Collect all candidate companies into a temporary pool.
+ * 6. Track which hypothesis/source each candidate came from.
+ * 7. Return raw candidate records for Stages 4-7.
  * 
  * YOU MUST NOT:
- * - Write outreach.
- * - Send emails.
- * - Pretend guessed emails are verified.
- * - Return a paragraph.
- * - Invent facts not supported by sources.
- * - Over-search when the input is already strong.
+ * - Deduplicate companies (Stage 4 handles this).
+ * - Enrich company profiles (Stage 5 handles this).
+ * - Score or rank companies (Stages 6-7 handle this).
+ * - Save to database (Stage 8 handles this).
+ * - Learn from outcomes (Stage 9 handles this).
+ * - Verify emails (this is handled in Stage 5).
+ * - Produce long explanations.
  */
 
 const axios = require('axios');
-const dns = require('dns').promises;
 
 // ────────────────────────────────────────────────────────────────
 // 1. Configuration
 // ────────────────────────────────────────────────────────────────
 
-const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 1200;
-const MAX_SEARCH_RESULTS = 5;
-const MAX_QUERIES_PER_PROSPECT = 2;
-const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
-const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
+// Tavily API Keys (8 keys, 1k free searches each per month)
+// These should be set in your .env file as:
+// TAVILY_API_KEY1=your_key_1
+// TAVILY_API_KEY2=your_key_2
+// ... up to TAVILY_API_KEY8
 
-// Common email patterns for inference
-const COMMON_PATTERNS = [
-  '{first}@{domain}',
-  '{first}.{last}@{domain}',
-  '{first}{last}@{domain}',
-  '{first}_{last}@{domain}',
-  '{first}-{last}@{domain}',
-  '{last}@{domain}',
-  '{first}@mail.{domain}',
-  'info@{domain}',
-  'contact@{domain}',
-  'hello@{domain}',
-];
-
-// ────────────────────────────────────────────────────────────────
-// 2. The Agent 3 System Prompt (Updated with email rules)
-// ────────────────────────────────────────────────────────────────
-
-const AGENT3_SYSTEM_PROMPT = `You are Agent 3, the Enrichment / Verification layer in a B2B lead-generation system.
-
-Your job is to take raw prospect records from Agent 2 and enrich them with reliable public information, especially contact data such as email candidates, then assess how trustworthy each record is.
-
-PRIMARY RESPONSIBILITIES
-1. Read Agent 2 output carefully.
-2. For each prospect, find missing or stale public information.
-3. Enrich records with website, company details, identity clues, role, location, industry, and contact clues.
-4. Search only when needed for live public facts.
-5. Infer an email candidate only when supported by domain/name patterns or source clues.
-6. Verify email candidates when possible.
-7. Assign a verification status and confidence.
-8. Return clean structured JSON only.
-
-YOU MUST NOT
-- Write outreach.
-- Send emails.
-- Pretend guessed emails are verified.
-- Return a paragraph.
-- Invent facts not supported by sources.
-- Over-search when the input is already strong.
-
-EMAIL RULES
-- If a real email is found, return it as "found".
-- If only a pattern is available, create an email candidate and label it as "inferred-pattern".
-- Verification status must be one of: verified, partial, unverified.
-- Never mark guessed email as verified unless validation supports it.
-- Use emailConfidence: "found" | "inferred-pattern" | "unknown"
-
-SEARCH RULES
-- Use targeted searches only when needed.
-- Prefer official websites, about pages, team pages, and public profile pages.
-- Keep searches minimal and focused.
-- Do not search broadly if the record is already strong.
-
-OUTPUT FORMAT
-Return valid JSON only using this schema:
-{
-  "intent": string,
-  "confidence": number,
-  "needs_clarification": boolean,
-  "clarification_question": string|null,
-  "next_pipeline": string|null,
-  "entities": {
-    "industry": string|null,
-    "location": string|null,
-    "role": string|null,
-    "company": string|null,
-    "lead_count": number|null,
-    "email": string|null,
-    "domain": string|null,
-    "source_type": string|null
-  },
-  "risk_level": "low" | "medium" | "high",
-  "policy_flags": string[],
-  "reason": string,
-  "enriched_prospects": [
-    {
-      "name": string|null,
-      "company": string|null,
-      "domain": string|null,
-      "website": string|null,
-      "location": string|null,
-      "role": string|null,
-      "industry": string|null,
-      "linkedin_url": string|null,
-      "email": string|null,
-      "emailCandidate": string|null,
-      "emailConfidence": "found" | "inferred-pattern" | "unknown",
-      "emailLabel": string|null,
-      "verificationStatus": "verified" | "partial" | "unverified",
-      "confidence": number|null,
-      "mxValid": boolean|null,
-      "smtpResult": string|null,
-      "notes": string|null
-    }
-  ],
-  "stats": {
-    "checked": number,
-    "enriched": number,
-    "emails_found": number,
-    "emails_inferred": number,
-    "verified": number,
-    "returned": number
+const TAVILY_KEYS = [];
+for (let i = 1; i <= 8; i++) {
+  const key = process.env[`TAVILY_API_KEY${i}`];
+  if (key) {
+    TAVILY_KEYS.push(key);
   }
 }
 
-CONFIDENCE GUIDELINES
-- 0.90 to 1.00 = very clear and well supported.
-- 0.70 to 0.89 = mostly clear.
-- 0.50 to 0.69 = incomplete, needs caution.
-- below 0.50 = stop and clarify.`;
+// Default key count if no env vars set (for development)
+const DEFAULT_KEYS = ['dummy_key_1', 'dummy_key_2', 'dummy_key_3'];
+
+const TAVILY_API_KEYS = TAVILY_KEYS.length > 0 ? TAVILY_KEYS : DEFAULT_KEYS;
+
+// Search configuration
+const MAX_RESULTS_PER_SEARCH = 10;
+const MAX_SEARCHES_PER_HYPOTHESIS = 5;
+const MAX_QUERIES_PER_HYPOTHESIS = 4;
+const SEARCH_TIMEOUT_MS = 15000;
+const MAX_CONCURRENT_SEARCHES = 5;
+const MIN_CANDIDATES_PER_HYPOTHESIS = 20;
+const MAX_CANDIDATES_TOTAL = 5000;
+
+// Key rotation state (shared across all instances)
+let currentKeyIndex = 0;
+let keyUsageCount = {};
+let keyResetDate = new Date();
+
+// Initialize usage counts for each key
+TAVILY_API_KEYS.forEach((key, index) => {
+  keyUsageCount[index] = 0;
+});
 
 // ────────────────────────────────────────────────────────────────
-// 3. Utility: Retry helper
+// 2. Utility: Retry helper
 // ────────────────────────────────────────────────────────────────
 
 async function withRetry(fn, label, retries = 2, delayMs = 800) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            const isLast = attempt === retries;
-            if (err.response?.status && err.response.status < 500 && err.response.status !== 429) {
-                console.warn(`⛔ [${label}] Non-retryable (${err.response.status}): ${err.message}`);
-                return null;
-            }
-            console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
-            if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
-        }
-    }
-    return null;
-}
-
-// ────────────────────────────────────────────────────────────────
-// 4. Tavily Search Helper
-// ────────────────────────────────────────────────────────────────
-
-async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
-    if (!tavilyKey) {
-        console.warn('⚠️ [TAVILY] No API key provided');
-        return [];
-    }
-
+  for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-        const response = await withRetry(() => axios.post(
-            'https://api.tavily.com/search',
-            {
-                api_key: tavilyKey,
-                query: query,
-                search_depth: 'basic',
-                max_results: maxResults,
-                include_answer: false,
-                include_raw_content: false,
-            },
-            {
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 10000
-            }
-        ), `Tavily:${query.slice(0, 40)}`);
-
-        if (!response) return [];
-
-        return (response.data?.results || []).map(r => ({
-            title: r.title || '',
-            url: r.url || '',
-            snippet: r.content || '',
-            date: r.published_date || null,
-        }));
-
-    } catch (error) {
-        console.error(`❌ [TAVILY] Search failed:`, error.message);
-        return [];
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// 5. Email Inference Functions
-// ────────────────────────────────────────────────────────────────
-
-function extractDomain(url) {
-    if (!url) return null;
-    try {
-        const domain = new URL(url).hostname.replace('www.', '');
-        return domain;
-    } catch {
+      return await fn();
+    } catch (err) {
+      const isLast = attempt === retries;
+      if (err.response?.status && err.response.status < 500 && err.response.status !== 429) {
+        console.warn(`⛔ [Stage3] Non-retryable (${err.response.status}): ${err.message}`);
         return null;
+      }
+      console.warn(`⚠️ [Stage3] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
+      if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
     }
+  }
+  return null;
 }
 
-function generateEmailPatterns(firstName, lastName, domain) {
-    if (!domain || !firstName) return [];
-    
-    const first = firstName.toLowerCase().trim();
-    const last = lastName ? lastName.toLowerCase().trim() : '';
-    const domainClean = domain.replace(/^www\./, '');
-    
-    const patterns = [];
-    
-    // Simple patterns
-    patterns.push(`${first}@${domainClean}`);
-    if (last) {
-        patterns.push(`${first}.${last}@${domainClean}`);
-        patterns.push(`${first}${last}@${domainClean}`);
-        patterns.push(`${first}_${last}@${domainClean}`);
-        patterns.push(`${first}-${last}@${domainClean}`);
-        patterns.push(`${last}@${domainClean}`);
+// ────────────────────────────────────────────────────────────────
+// 3. Tavily API Key Rotation
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Gets the next Tavily API key with rotation.
+ * Each key can handle 1000 searches per month (free tier).
+ * When a key reaches 1000, move to the next one.
+ * After all 8 keys reach 1000, reset and start over.
+ */
+function getNextTavilyKey() {
+  const now = new Date();
+  const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
+  
+  // Reset counts if it's a new month
+  if (keyResetDate < monthAgo) {
+    console.log(`🔄 [Stage3] New month detected - resetting Tavily key usage counts`);
+    TAVILY_API_KEYS.forEach((_, index) => {
+      keyUsageCount[index] = 0;
+    });
+    keyResetDate = now;
+    currentKeyIndex = 0;
+  }
+
+  // Find the next key that hasn't reached 1000 searches
+  const maxSearchesPerKey = 1000;
+  const totalKeys = TAVILY_API_KEYS.length;
+  
+  for (let attempt = 0; attempt < totalKeys; attempt++) {
+    const index = (currentKeyIndex + attempt) % totalKeys;
+    if (keyUsageCount[index] < maxSearchesPerKey) {
+      currentKeyIndex = index;
+      keyUsageCount[index] = (keyUsageCount[index] || 0) + 1;
+      console.log(`🔑 [Stage3] Using Tavily Key ${index + 1}/${totalKeys} (${keyUsageCount[index]}/${maxSearchesPerKey} searches used)`);
+      return TAVILY_API_KEYS[index];
     }
-    
-    // Common role-based emails
-    patterns.push(`info@${domainClean}`);
-    patterns.push(`contact@${domainClean}`);
-    patterns.push(`hello@${domainClean}`);
-    patterns.push(`sales@${domainClean}`);
-    patterns.push(`team@${domainClean}`);
-    
-    return [...new Set(patterns)];
+  }
+
+  // All keys have reached 1000 - reset all counts and start over
+  console.log(`🔄 [Stage3] All Tavily keys exhausted (1000 each). Resetting...`);
+  TAVILY_API_KEYS.forEach((_, index) => {
+    keyUsageCount[index] = 0;
+  });
+  currentKeyIndex = 0;
+  keyUsageCount[0] = 1;
+  console.log(`🔑 [Stage3] Using Tavily Key 1 (reset, 1/${maxSearchesPerKey})`);
+  return TAVILY_API_KEYS[0];
 }
 
-async function validateMX(domain) {
-    if (!domain) return false;
+/**
+ * Gets the current usage statistics for Tavily keys.
+ */
+function getTavilyUsageStats() {
+  const stats = {};
+  TAVILY_API_KEYS.forEach((_, index) => {
+    stats[`key${index + 1}`] = {
+      used: keyUsageCount[index] || 0,
+      remaining: Math.max(0, 1000 - (keyUsageCount[index] || 0))
+    };
+  });
+  return stats;
+}
+
+// ────────────────────────────────────────────────────────────────
+// 4. Tavily Search Helper with Key Rotation
+// ────────────────────────────────────────────────────────────────
+
+async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
+  if (TAVILY_API_KEYS.length === 0 || TAVILY_API_KEYS[0] === 'dummy_key_1') {
+    console.warn('⚠️ [Stage3] No valid Tavily API keys provided, returning mock data');
+    return generateMockResults(query, maxResults);
+  }
+
+  const apiKey = getNextTavilyKey();
+  
+  if (!apiKey) {
+    console.warn('⚠️ [Stage3] No Tavily API key available');
+    return [];
+  }
+
+  try {
+    const response = await withRetry(() => axios.post(
+      'https://api.tavily.com/search',
+      {
+        api_key: apiKey,
+        query: query,
+        search_depth: 'basic',
+        max_results: maxResults,
+        include_answer: false,
+        include_raw_content: false,
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: SEARCH_TIMEOUT_MS
+      }
+    ), `Tavily:${query.slice(0, 40)}`);
+
+    if (!response) return [];
+
+    return (response.data?.results || []).map(r => ({
+      title: r.title || '',
+      url: r.url || '',
+      snippet: r.content || '',
+      date: r.published_date || null,
+      source: 'tavily'
+    }));
+
+  } catch (error) {
+    console.error(`❌ [Stage3] Tavily search failed for "${query}":`, error.message);
+    return [];
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 5. Mock Search Results (for development without API keys)
+// ────────────────────────────────────────────────────────────────
+
+function generateMockResults(query, maxResults) {
+  const mockCompanies = [
+    { title: 'ABC Healthcare GmbH', url: 'https://abchealthcare.de', snippet: 'Leading healthcare provider in Germany specializing in digital health solutions.' },
+    { title: 'Deutsche Bank AG', url: 'https://deutsche-bank.de', snippet: 'One of Germany\'s largest financial institutions offering comprehensive banking services.' },
+    { title: 'SAP SE', url: 'https://sap.com', snippet: 'Global enterprise software company headquartered in Germany, specializing in cloud solutions.' },
+    { title: 'Siemens Healthineers', url: 'https://siemens-healthineers.com', snippet: 'Medical technology company focused on diagnostic imaging and healthcare IT.' },
+    { title: 'Klarna', url: 'https://klarna.com', snippet: 'Fintech company providing buy now pay later services and online payment solutions.' },
+    { title: 'Helios Kliniken', url: 'https://helios-gesundheit.de', snippet: 'One of Europe\'s largest hospital operators with extensive healthcare services.' },
+    { title: 'Commerzbank', url: 'https://commerzbank.de', snippet: 'Major German bank with extensive corporate and investment banking operations.' },
+    { title: 'Zalando', url: 'https://zalando.de', snippet: 'Europe\'s leading online fashion platform with advanced e-commerce technology.' },
+    { title: 'Delivery Hero', url: 'https://deliveryhero.com', snippet: 'Global food delivery platform with extensive logistics and technology infrastructure.' },
+    { title: 'N26', url: 'https://n26.com', snippet: 'Digital bank offering mobile banking services across Europe.' },
+    { title: 'Axa Germany', url: 'https://axa.de', snippet: 'Major insurance company with extensive digital transformation initiatives.' },
+    { title: 'DHL Group', url: 'https://dhl.com', snippet: 'Global logistics provider with advanced supply chain technology and digital services.' },
+    { title: 'E.ON', url: 'https://eon.com', snippet: 'Energy company with significant investments in renewable energy and smart grid technology.' },
+    { title: 'Deutsche Telekom', url: 'https://telekom.de', snippet: 'Major telecommunications provider with extensive enterprise services.' },
+    { title: 'Bayer AG', url: 'https://bayer.com', snippet: 'Pharmaceutical and life sciences company with advanced research and digital health initiatives.' },
+  ];
+  
+  // Filter by query keywords
+  const keywords = query.toLowerCase().split(' ').filter(w => w.length > 3);
+  const filtered = mockCompanies.filter(c => {
+    const text = (c.title + ' ' + c.snippet).toLowerCase();
+    return keywords.some(k => text.includes(k)) || keywords.length === 0;
+  });
+  
+  return filtered.slice(0, maxResults);
+}
+
+// ────────────────────────────────────────────────────────────────
+// 6. Query Expansion for Each Hypothesis
+// ────────────────────────────────────────────────────────────────
+
+function expandQuery(industry, location, service, targetType) {
+  const queries = [];
+  const country = location || 'Germany';
+  
+  // Base query variations
+  const baseQueries = [
+    `${industry} companies ${country}`,
+    `${industry} businesses ${country}`,
+    `${industry} startups ${country}`,
+    `top ${industry} companies ${country}`,
+    `leading ${industry} firms ${country}`,
+  ];
+  
+  // Add location-specific variations
+  if (location) {
+    baseQueries.push(`${industry} companies in ${location}`);
+    baseQueries.push(`${industry} ${location} list`);
+    baseQueries.push(`${industry} ${location} directory`);
+  }
+  
+  // Add service-specific variations (if provided)
+  if (service) {
+    baseQueries.push(`${industry} companies using ${service}`);
+    baseQueries.push(`${industry} ${service} solutions ${country}`);
+    baseQueries.push(`${industry} ${service} providers ${country}`);
+  }
+  
+  // Add target type variations
+  if (targetType === 'Startups') {
+    baseQueries.push(`${industry} startups ${country}`);
+    baseQueries.push(`${industry} early stage ${country}`);
+  } else if (targetType === 'SME') {
+    baseQueries.push(`${industry} SMEs ${country}`);
+    baseQueries.push(`${industry} mid-size companies ${country}`);
+  } else if (targetType === 'Enterprise') {
+    baseQueries.push(`${industry} enterprises ${country}`);
+    baseQueries.push(`${industry} large companies ${country}`);
+  }
+  
+  // Add diversity queries (about/team pages for real contacts)
+  baseQueries.push(`${industry} ${country} about us team`);
+  baseQueries.push(`${industry} ${country} contact us`);
+  
+  // Remove duplicates and limit
+  return [...new Set(baseQueries)].slice(0, MAX_QUERIES_PER_HYPOTHESIS);
+}
+
+// ────────────────────────────────────────────────────────────────
+// 7. Execute a Single Hypothesis Search
+// ────────────────────────────────────────────────────────────────
+
+async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
+  const { industry, confidence } = hypothesis;
+  const location = searchPackage.countries?.[0] || 'Global';
+  const service = searchPackage.service_needed || null;
+  const targetType = searchPackage.target_type || 'Companies';
+  
+  console.log(`🔍 [Stage3] Executing hypothesis: ${industry} (confidence: ${confidence})`);
+  onProgress?.(`🔎 Searching ${industry}...`);
+  
+  // Generate expanded queries for this hypothesis
+  const queries = expandQuery(industry, location, service, targetType);
+  console.log(`📋 [Stage3] Queries for ${industry}:`, queries);
+  
+  // Execute searches in parallel (with concurrency limit)
+  const searchPromises = queries.map(query => searchTavily(query, MAX_RESULTS_PER_SEARCH));
+  const results = await Promise.all(searchPromises);
+  
+  // Flatten results
+  let allResults = [];
+  results.forEach((result, index) => {
+    if (result && result.length > 0) {
+      const query = queries[index] || 'unknown';
+      allResults = allResults.concat(
+        result.map(r => ({
+          ...r,
+          query: query,
+          industry: industry,
+          hypothesis_confidence: confidence
+        }))
+      );
+    }
+  });
+  
+  // Remove duplicates from this hypothesis (by URL)
+  const seenUrls = new Set();
+  const uniqueResults = allResults.filter(r => {
+    if (seenUrls.has(r.url)) return false;
+    seenUrls.add(r.url);
+    return true;
+  });
+  
+  console.log(`✅ [Stage3] ${industry}: Found ${uniqueResults.length} unique results from ${queries.length} queries`);
+  
+  return {
+    hypothesis: industry,
+    confidence: confidence,
+    queries_used: queries,
+    results: uniqueResults,
+    total_found: uniqueResults.length
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 8. Extract Companies from Search Results
+// ────────────────────────────────────────────────────────────────
+
+function extractCompaniesFromResults(searchResults, source) {
+  if (!searchResults || searchResults.length === 0) return [];
+  
+  const companies = [];
+  const seenDomains = new Set();
+  
+  for (const result of searchResults) {
+    // Extract domain from URL
+    let domain = null;
     try {
-        const records = await dns.resolveMx(domain);
-        return records && records.length > 0;
+      const urlObj = new URL(result.url);
+      domain = urlObj.hostname.replace('www.', '');
     } catch {
-        return false;
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// 6. Build Enrichment Queries for a Prospect
-// ────────────────────────────────────────────────────────────────
-
-function buildEnrichmentQueries(prospect) {
-    const queries = [];
-    const company = prospect.company || prospect.name || '';
-    const domain = prospect.domain || '';
-
-    // If we have a domain, search the site directly
-    if (domain) {
-        queries.push(`site:${domain} about team contact`);
-        queries.push(`site:${domain} email "@${domain}"`);
+      // Skip invalid URLs
     }
     
-    // Search for company info
-    if (company) {
-        queries.push(`"${company}" about team leadership contact`);
-        queries.push(`"${company}" email contact`);
-    }
+    if (!domain) continue;
     
-    // If we have a name, search for them specifically
-    if (prospect.name && company) {
-        queries.push(`"${prospect.name}" "${company}" email`);
-    }
-
-    // Limit queries
-    return queries.slice(0, MAX_QUERIES_PER_PROSPECT);
-}
-
-// ────────────────────────────────────────────────────────────────
-// 7. Enrich a Single Prospect (FIXED: Finds/Infers Emails)
-// ────────────────────────────────────────────────────────────────
-
-async function enrichSingleProspect(prospect, tavilyKey, apiKey) {
-    console.log(`🔍 [AGENT3] Enriching: ${prospect.company || prospect.name || 'Unknown'}`);
-    console.log(`📧 [AGENT3] Input email_candidates: ${JSON.stringify(prospect.email_candidates || [])}`);
-    console.log(`📧 [AGENT3] Input email: ${prospect.email || 'null'}`);
-
-    // Extract domain from prospect
-    let domain = prospect.domain || null;
-    if (!domain && prospect.source_url) {
-        domain = extractDomain(prospect.source_url);
-    }
-
-    // Check if we already have a high-confidence email
-    const hasEmail = prospect.email_candidates && prospect.email_candidates.length > 0;
-    const hasStrongEmail = hasEmail && prospect.fit_score >= 0.85;
-
-    if (hasStrongEmail && domain) {
-        console.log(`⏭️ [AGENT3] Skipping enrichment - already has email and domain`);
-        return {
-            ...prospect,
-            domain: domain || prospect.domain,
-            confidence: prospect.fit_score || 0.7,
-            verification_status: 'partial',
-            email: prospect.email_candidates[0] || null,
-            emailCandidate: prospect.email_candidates[0] || null,
-            emailConfidence: 'found',
-            emailLabel: '✓ Email found from source',
-            mxValid: await validateMX(domain),
-            smtpResult: 'unknown',
-            notes: prospect.notes || 'Email already found from source.',
-            // Preserve all existing fields
-            email_candidates: prospect.email_candidates || [],
-        };
-    }
-
-    // Build and execute search queries
-    const queries = buildEnrichmentQueries(prospect);
-    if (queries.length === 0) {
-        return createFallbackEnrichment(prospect, domain);
-    }
-
-    let allResults = [];
-    for (const query of queries) {
-        const results = await searchTavily(query, tavilyKey, 3);
-        if (results && results.length > 0) {
-            allResults = allResults.concat(results);
-        }
-    }
-
-    // Build snippets for GPT
-    const snippets = allResults.length > 0 
-        ? allResults.map((r, i) => 
-            `[${i + 1}] TITLE: ${r.title}\nURL: ${r.url}\nSNIPPET: ${r.snippet}`
-          ).join('\n\n---\n\n')
-        : 'No search results found.';
-
-    // Extract emails from snippets using regex
-    const allText = allResults.map(r => `${r.title} ${r.snippet} ${r.url}`).join(' ');
-    const regexEmails = extractEmailsWithRegex(allText);
-    console.log(`📧 [AGENT3] Regex found emails: ${JSON.stringify(regexEmails)}`);
-
-    // Build the enrichment prompt with email focus
-    const enrichmentPrompt = `
-You are an enrichment and email discovery specialist. Enrich this prospect with public information from the search results.
-
-PROSPECT TO ENRICH:
-- Name: ${prospect.name || 'Unknown'}
-- Company: ${prospect.company || 'Unknown'}
-- Domain: ${domain || 'Unknown'}
-- Location: ${prospect.location || 'Unknown'}
-- Role: ${prospect.role || 'Unknown'}
-
-SEARCH RESULTS:
-${snippets}
-
-EXTRACTED EMAILS FROM SOURCES (USE THESE IF VALID):
-${JSON.stringify(regexEmails)}
-
-EMAIL DISCOVERY RULES:
-1. If an email is found in the search results, use it and set emailConfidence to "found".
-2. If no email is found, infer a likely email pattern using the domain and name.
-3. For inferred emails, set emailConfidence to "inferred-pattern" and label it clearly.
-4. Common patterns: first@domain, first.last@domain, firstlast@domain, info@domain, contact@domain
-
-Extract and return ONLY valid JSON with these fields:
-{
-  "name": "Full name if found, otherwise keep original",
-  "company": "Company name if found, otherwise keep original",
-  "domain": "Domain if found, otherwise keep original",
-  "website": "Official website URL if found, otherwise null",
-  "location": "City/Country if found, otherwise keep original",
-  "role": "Role/title if found, otherwise keep original",
-  "industry": "Industry if found, otherwise null",
-  "linkedin_url": "LinkedIn URL if found, otherwise null",
-  "email": "Best email candidate (found or inferred), null if none",
-  "emailCandidate": "The email candidate (same as email or inferred)",
-  "emailConfidence": "found" | "inferred-pattern" | "unknown",
-  "emailLabel": "Description of email source (e.g., 'Found in source', 'Inferred from domain pattern')",
-  "verificationStatus": "verified" | "partial" | "unverified",
-  "confidence": 0.0 to 1.0,
-  "notes": "Brief notes on what was found and any discrepancies"
-}
-
-Be conservative. Only mark as verified if you have clear evidence.`;
-
-    try {
-        const response = await withRetry(() => axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            {
-                model: MODEL,
-                messages: [
-                    { role: 'system', content: 'You extract structured enrichment data from search results. Return only valid JSON.' },
-                    { role: 'user', content: enrichmentPrompt }
-                ],
-                max_tokens: 400,
-                temperature: 0.0,
-                response_format: { type: 'json_object' }
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 15000
-            }
-        ), 'GPT:enrichProspect');
-
-        if (!response) {
-            return createFallbackEnrichment(prospect, domain);
-        }
-
-        const rawContent = response.data.choices[0].message.content.trim();
-        const enriched = JSON.parse(rawContent);
-
-        // Determine final domain
-        const finalDomain = enriched.domain || domain || prospect.domain || null;
-        
-        // Determine email
-        let email = enriched.email || null;
-        let emailCandidate = enriched.emailCandidate || null;
-        let emailConfidence = enriched.emailConfidence || 'unknown';
-        let emailLabel = enriched.emailLabel || null;
-
-        // If GPT didn't find an email but we have regex emails, use the first one
-        if (!email && regexEmails.length > 0) {
-            email = regexEmails[0];
-            emailCandidate = regexEmails[0];
-            emailConfidence = 'found';
-            emailLabel = '📧 Found in search results';
-            console.log(`📧 [AGENT3] Using regex email: ${email}`);
-        }
-
-        // If still no email, try to infer one
-        if (!email && finalDomain && prospect.name) {
-            const nameParts = prospect.name.split(' ');
-            const firstName = nameParts[0] || '';
-            const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
-            const inferredPatterns = generateEmailPatterns(firstName, lastName, finalDomain);
-            if (inferredPatterns.length > 0) {
-                email = inferredPatterns[0];
-                emailCandidate = inferredPatterns[0];
-                emailConfidence = 'inferred-pattern';
-                emailLabel = `⚠ Inferred from domain pattern (${firstName}@${finalDomain})`;
-                console.log(`📧 [AGENT3] Inferred email: ${email}`);
-            }
-        }
-
-        // Validate MX if we have a domain
-        const mxValid = finalDomain ? await validateMX(finalDomain) : false;
-
-        const merged = {
-            ...prospect,
-            name: enriched.name || prospect.name,
-            company: enriched.company || prospect.company,
-            domain: finalDomain,
-            website: enriched.website || null,
-            location: enriched.location || prospect.location,
-            role: enriched.role || prospect.role,
-            industry: enriched.industry || null,
-            linkedin_url: enriched.linkedin_url || null,
-            email: email,
-            emailCandidate: emailCandidate,
-            emailConfidence: emailConfidence,
-            emailLabel: emailLabel,
-            confidence: enriched.confidence || prospect.fit_score || 0.5,
-            verificationStatus: enriched.verificationStatus || (email ? 'partial' : 'unverified'),
-            mxValid: mxValid,
-            smtpResult: 'unknown',
-            notes: enriched.notes || (email ? `Email ${emailConfidence}.` : 'No email found.'),
-            // Preserve original email_candidates
-            email_candidates: regexEmails.length > 0 ? regexEmails : (prospect.email_candidates || []),
-        };
-
-        console.log(`✅ [AGENT3] Enriched: ${merged.company} → confidence: ${merged.confidence}`);
-        console.log(`📧 [AGENT3] Email: ${merged.email || 'null'} (${merged.emailConfidence})`);
-        console.log(`📧 [AGENT3] Output email_candidates: ${JSON.stringify(merged.email_candidates || [])}`);
-        
-        return merged;
-
-    } catch (error) {
-        console.error(`❌ [AGENT3] Enrichment failed:`, error.message);
-        return createFallbackEnrichment(prospect, domain);
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// 8. Helper: Extract Emails with Regex
-// ────────────────────────────────────────────────────────────────
-
-function extractEmailsWithRegex(text) {
-    if (!text) return [];
-    const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-    const matches = text.match(emailRegex) || [];
-    return [...new Set(matches)];
-}
-
-// ────────────────────────────────────────────────────────────────
-// 9. Helper: Create Fallback Enrichment
-// ────────────────────────────────────────────────────────────────
-
-function createFallbackEnrichment(prospect, domain) {
-    // Try to infer email from domain and name
-    let email = null;
-    let emailConfidence = 'unknown';
-    let emailLabel = null;
+    // Skip known non-company domains
+    const skipDomains = ['youtube.com', 'twitter.com', 'linkedin.com', 'facebook.com', 
+                        'instagram.com', 'reddit.com', 'medium.com', 'wikipedia.org',
+                        'getprospect.com', 'apollo.io', 'zoominfo.com', 'crunchbase.com',
+                        'github.com', 'glassdoor.com', 'indeed.com', 'xing.com', 'personio.de'];
+    if (skipDomains.some(skip => domain.includes(skip))) continue;
     
-    if (domain && prospect.name) {
-        const nameParts = prospect.name.split(' ');
-        const firstName = nameParts[0] || '';
-        const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : '';
-        const patterns = generateEmailPatterns(firstName, lastName, domain);
-        if (patterns.length > 0) {
-            email = patterns[0];
-            emailConfidence = 'inferred-pattern';
-            emailLabel = `⚠ Inferred from domain pattern`;
-        }
-    }
+    // Deduplicate by domain
+    if (seenDomains.has(domain)) continue;
+    seenDomains.add(domain);
+    
+    // Extract company name from title or domain
+    let name = result.title || domain;
+    // Clean up title
+    name = name
+      .replace(/\s*[|\-–].*$/, '') // Remove trailing separators
+      .replace(/\s*•\s*.*$/, '')    // Remove bullet points
+      .replace(/\b(Ltd|LLC|Inc|Limited|PLC|Corp|Corporation|GmbH|AG)\b/gi, '')
+      .trim();
+    
+    if (name.length < 2) name = domain.split('.')[0];
+    
+    companies.push({
+      name: name,
+      domain: domain,
+      website: result.url,
+      source: source || 'tavily',
+      source_url: result.url,
+      snippet: result.snippet || '',
+      industry: result.industry || null,
+      hypothesis_confidence: result.hypothesis_confidence || 0.5,
+      query: result.query || null,
+      date: result.date || null,
+      raw_title: result.title || null
+    });
+  }
+  
+  return companies;
+}
 
+// ────────────────────────────────────────────────────────────────
+// 9. Main Stage 3 Function: Multi-Source Search
+// ────────────────────────────────────────────────────────────────
+
+async function multiSourceSearch({ 
+  hypotheses, 
+  searchPackage, 
+  userId = 'anonymous', 
+  onProgress = null,
+  sources = ['tavily'] // Can be extended for multiple sources
+}) {
+  console.log(`🔍 [Stage3] Starting multi-source search for user ${userId}...`);
+  console.log(`📋 [Stage3] Hypotheses:`, hypotheses.map(h => h.industry).join(', '));
+  console.log(`📋 [Stage3] Search Package:`, JSON.stringify(searchPackage, null, 2));
+  onProgress?.('🔎 Searching multiple sources...');
+
+  // ─── Validate input ───
+  if (!hypotheses || hypotheses.length === 0) {
     return {
-        ...prospect,
-        domain: domain || prospect.domain || null,
-        email: email,
-        emailCandidate: email,
-        emailConfidence: emailConfidence,
-        emailLabel: emailLabel,
-        confidence: prospect.fit_score || 0.4,
-        verificationStatus: 'unverified',
-        mxValid: false,
-        smtpResult: 'unknown',
-        notes: email ? `Email inferred from domain pattern.` : 'No email could be found or inferred.',
-        email_candidates: prospect.email_candidates || [],
+      success: false,
+      error: 'No hypotheses provided to Stage 3',
+      candidates: [],
+      stats: { searched: 0, found: 0, returned: 0, hypotheses: 0 }
     };
+  }
+
+  // ─── Execute searches for each hypothesis (in parallel with concurrency limit) ───
+  const startTime = Date.now();
+  let allResults = [];
+  let hypothesisResults = [];
+  let totalSearches = 0;
+
+  // Sort hypotheses by confidence (highest first)
+  const sortedHypotheses = [...hypotheses].sort((a, b) => b.confidence - a.confidence);
+
+  // Execute with concurrency limit
+  const chunks = [];
+  for (let i = 0; i < sortedHypotheses.length; i += MAX_CONCURRENT_SEARCHES) {
+    chunks.push(sortedHypotheses.slice(i, i + MAX_CONCURRENT_SEARCHES));
+  }
+
+  for (const chunk of chunks) {
+    const chunkPromises = chunk.map(h => 
+      executeHypothesisSearch(h, searchPackage, onProgress)
+    );
+    const chunkResults = await Promise.all(chunkPromises);
+    chunkResults.forEach(r => {
+      if (r && r.results) {
+        hypothesisResults.push(r);
+        allResults = allResults.concat(r.results);
+        totalSearches += r.queries_used?.length || 0;
+      }
+    });
+  }
+
+  // ─── Extract companies from results ───
+  console.log(`📊 [Stage3] Found ${allResults.length} raw results from ${hypothesisResults.length} hypotheses`);
+  onProgress?.('📋 Extracting companies...');
+
+  let allCompanies = [];
+  for (const source of sources) {
+    const companies = extractCompaniesFromResults(allResults, source);
+    allCompanies = allCompanies.concat(companies);
+  }
+
+  // ─── Apply total limit ───
+  const limit = Math.min(searchPackage.requested_results * 3 || 500, MAX_CANDIDATES_TOTAL);
+  const limitedCompanies = allCompanies.slice(0, limit);
+
+  // ─── Calculate stats ───
+  const endTime = Date.now();
+  const duration = endTime - startTime;
+
+  const stats = {
+    searched: totalSearches,
+    found: allResults.length,
+    returned: limitedCompanies.length,
+    hypotheses: hypothesisResults.length,
+    duration_ms: duration,
+    sources: sources,
+    tavily_usage: getTavilyUsageStats()
+  };
+
+  console.log(`✅ [Stage3] Search complete: ${limitedCompanies.length} candidates found from ${hypothesisResults.length} hypotheses`);
+  console.log(`📊 [Stage3] Stats:`, stats);
+
+  return {
+    success: true,
+    candidates: limitedCompanies,
+    hypothesis_results: hypothesisResults,
+    stats: stats,
+    userId: userId,
+    search_package: searchPackage
+  };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 10. Main Agent 3 Function (FIXED: No unnecessary clarification)
-// ────────────────────────────────────────────────────────────────
-
-async function enrichProspects({ prospects, intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
-    console.log(`🔍 [AGENT3] Starting enrichment for user ${userId}...`);
-    onProgress?.('🔬 Enriching and verifying prospects...');
-
-    if (!prospects || prospects.length === 0) {
-        return {
-            intent: 'lead_enrichment',
-            confidence: 0.0,
-            needs_clarification: true,
-            clarification_question: 'No prospects were provided to enrich. Please run discovery first.',
-            next_pipeline: null,
-            entities: intent?.entities || {},
-            risk_level: 'low',
-            policy_flags: ['no_prospects'],
-            reason: 'No prospects provided to Agent 3.',
-            enriched_prospects: [],
-            stats: { checked: 0, enriched: 0, emails_found: 0, emails_inferred: 0, verified: 0, returned: 0 }
-        };
-    }
-
-    console.log(`📥 [AGENT3] RECEIVED ${prospects.length} prospects from Agent 2`);
-    prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
-    });
-
-    const enriched = [];
-    let enrichedCount = 0;
-    let verifiedCount = 0;
-    let emailsFound = 0;
-    let emailsInferred = 0;
-
-    for (let i = 0; i < prospects.length; i++) {
-        const prospect = prospects[i];
-        onProgress?.(`🔍 Enriching ${i + 1}/${prospects.length}: ${prospect.company || prospect.name || 'Unknown'}...`);
-
-        const enrichedProspect = await enrichSingleProspect(prospect, tavilyKey, apiKey);
-        enriched.push(enrichedProspect);
-
-        if (enrichedProspect.verificationStatus === 'verified') verifiedCount++;
-        if (enrichedProspect.confidence >= 0.5) enrichedCount++;
-        if (enrichedProspect.emailConfidence === 'found') emailsFound++;
-        if (enrichedProspect.emailConfidence === 'inferred-pattern') emailsInferred++;
-    }
-
-    const avgConfidence = enriched.reduce((sum, p) => sum + (p.confidence || 0), 0) / enriched.length;
-    const verifiedRatio = verifiedCount / enriched.length;
-    let confidence = 0.7 + (verifiedRatio * 0.2);
-    if (avgConfidence > 0.7) confidence += 0.1;
-    confidence = Math.min(confidence, 0.98);
-
-    // --- FIX: Only check confidence, NOT verifiedCount ---
-    // Even if no prospects are "verified", we still have enriched data to return
-    const needsClarification = confidence < CONFIDENCE_THRESHOLD_CLARIFY;
-
-    const result = {
-        intent: 'lead_enrichment',
-        confidence: Math.round(confidence * 100) / 100,
-        needs_clarification: needsClarification,
-        clarification_question: needsClarification 
-            ? 'I enriched the prospects but many records are incomplete. Could you provide more specific details about your ideal customer profile?'
-            : null,
-        // --- FIX: Always send to qualification if we have enriched prospects ---
-        next_pipeline: enriched.length > 0 ? 'lead_qualification' : null,
-        entities: intent?.entities || {
-            industry: intent?.industry || null,
-            location: intent?.location || null,
-            role: intent?.role || null,
-            company: intent?.company || null,
-            lead_count: enriched.length,
-            email: null,
-            domain: null,
-            source_type: 'web_search'
-        },
-        risk_level: verifiedCount / enriched.length < 0.5 ? 'medium' : 'low',
-        policy_flags: verifiedCount / enriched.length < 0.3 ? ['low_verification_rate'] : [],
-        reason: `Enriched ${enriched.length} prospects. ${verifiedCount} verified, ${enrichedCount} partially verified. Found ${emailsFound} emails, inferred ${emailsInferred}.`,
-        enriched_prospects: enriched.map(p => ({
-            name: p.name || null,
-            company: p.company || null,
-            domain: p.domain || null,
-            website: p.website || null,
-            location: p.location || null,
-            role: p.role || null,
-            industry: p.industry || null,
-            linkedin_url: p.linkedin_url || null,
-            email: p.email || null,
-            emailCandidate: p.emailCandidate || null,
-            emailConfidence: p.emailConfidence || 'unknown',
-            emailLabel: p.emailLabel || null,
-            verificationStatus: p.verificationStatus || 'unverified',
-            confidence: p.confidence || 0.5,
-            mxValid: p.mxValid || false,
-            smtpResult: p.smtpResult || 'unknown',
-            notes: p.notes || null,
-            email_candidates: p.email_candidates || [],
-        })),
-        stats: {
-            checked: prospects.length,
-            enriched: enrichedCount,
-            emails_found: emailsFound,
-            emails_inferred: emailsInferred,
-            verified: verifiedCount,
-            returned: enriched.length,
-        }
-    };
-
-    console.log(`📤 [AGENT3] Returning ${result.enriched_prospects.length} enriched prospects`);
-    result.enriched_prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email: ${p.email || 'null'} (${p.emailConfidence})`);
-    });
-
-    console.log(`✅ [AGENT3] Enrichment complete: ${verifiedCount} verified, ${enrichedCount} enriched`);
-    console.log(`📧 [AGENT3] Emails: ${emailsFound} found, ${emailsInferred} inferred`);
-    return result;
-}
-
-// ────────────────────────────────────────────────────────────────
-// 11. Public Exports
+// 10. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
-    enrichProspects,
-    enrichSingleProspect,
-    buildEnrichmentQueries,
-    searchTavily,
-    generateEmailPatterns,
-    validateMX,
-    extractEmailsWithRegex,
-    CONFIDENCE_THRESHOLD_ROUTE,
-    CONFIDENCE_THRESHOLD_CLARIFY,
+  multiSourceSearch,
+  searchTavily,
+  getNextTavilyKey,
+  getTavilyUsageStats,
+  expandQuery,
+  executeHypothesisSearch,
+  extractCompaniesFromResults,
+  generateMockResults,
+  TAVILY_API_KEYS,
+  MAX_RESULTS_PER_SEARCH,
+  MAX_QUERIES_PER_HYPOTHESIS,
+  MAX_CONCURRENT_SEARCHES,
+  MAX_CANDIDATES_TOTAL
 };
