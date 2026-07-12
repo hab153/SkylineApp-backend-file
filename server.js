@@ -35,19 +35,11 @@ const followUpController = require('./followUpController');
 const revenueController = require('./revenueController');
 
 // AI SERVICES
+const freeAI = require('./Free');
+const goAI = require('./Go');
+const { generateBusinessResponse } = require('./businessAI');
 const { generateAIReply } = require('./aiReplyGenerator');
 const { generateSuggestion } = require('./aiSuggestion');
-
-// SKYLINE AGENTS (Stages 1-9)
-const agent1 = require('./agent1.js');
-const agent2 = require('./agent2.js');
-const agent3 = require('./agent3.js');
-const agent4 = require('./agent4.js');
-const agent5 = require('./agent5.js');
-const agent6 = require('./agent6.js');
-const agent7 = require('./agent7.js');
-const agent8 = require('./agent8.js');
-const agent9 = require('./agent9.js');
 
 // MODELS & SERVICES
 const Lead = require('./Lead');
