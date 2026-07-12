@@ -1,730 +1,697 @@
 'use strict';
 
 /**
- * agent4.js – Qualification / Personalization Agent
+ * agent4.js – Stage 4: Data Normalization & Entity Resolution Engine
  * 
- * The fourth layer in the B2B lead-generation system.
+ * The data quality engine of Skyline's Lead Intelligence System.
  * 
  * PRIMARY RESPONSIBILITIES:
- * 1. Read Agent 3 output carefully.
- * 2. Evaluate each prospect against ICP, role, location, industry, and available public signals.
- * 3. Determine qualification status: qualified, unqualified, or review.
- * 4. Assign fit score and priority.
- * 5. Choose the best outreach/personalization angle for qualified leads.
- * 6. Return clean structured JSON only.
+ * 1. Standardize all company records (names, domains, locations, etc.)
+ * 2. Detect duplicate records using fuzzy matching.
+ * 3. Resolve entities by merging duplicates into unified profiles.
+ * 4. Merge attributes from multiple sources (richer than any single source).
+ * 5. Track confidence scores for each merge.
+ * 6. Clean low-quality records (missing names, invalid domains, etc.)
+ * 7. Return a clean, deduplicated dataset for Stages 5-9.
  * 
  * YOU MUST NOT:
- * - Send outreach.
- * - Write full emails unless the output schema explicitly asks for an angle only.
- * - Invent facts that are not supported by the input or sources.
- * - Over-search when the input is already strong.
- * - Return a paragraph.
+ * - Enrich companies (Stage 5 handles this).
+ * - Score or rank companies (Stages 6-7 handle this).
+ * - Save to database (Stage 8 handles this).
+ * - Learn from outcomes (Stage 9 handles this).
+ * - Qualify or personalize leads (these are later stages).
  */
-
-const axios = require('axios');
 
 // ────────────────────────────────────────────────────────────────
 // 1. Configuration
 // ────────────────────────────────────────────────────────────────
 
-const MODEL = 'gpt-4o-mini';
-const MAX_OUTPUT_TOKENS = 900;
-const MAX_SEARCH_RESULTS = 5;
-const MAX_QUERIES = 2;
-const CONFIDENCE_THRESHOLD_ROUTE = 0.90;
-const CONFIDENCE_THRESHOLD_CLARIFY = 0.50;
-const MIN_FORCED_LEADS = 2; // Always return at least this many leads
+const MIN_NAME_LENGTH = 2;
+const MIN_DOMAIN_LENGTH = 4;
+const FUZZY_MATCH_THRESHOLD = 0.75;
+const HIGH_CONFIDENCE_THRESHOLD = 0.90;
+const MEDIUM_CONFIDENCE_THRESHOLD = 0.70;
+const MAX_CANDIDATES_AFTER_DEDUPE = 3000;
 
 // ────────────────────────────────────────────────────────────────
-// 2. The Agent 4 System Prompt (locked, production-grade)
+// 2. Utility: String Similarity (Levenshtein-based)
 // ────────────────────────────────────────────────────────────────
 
-const AGENT4_SYSTEM_PROMPT = `You are Agent 4, the Qualification / Personalization layer in a B2B lead-generation system.
-
-Your job is to take enriched prospect records from Agent 3 and decide which ones are worth pursuing now. You must score fit, prioritize leads, determine the best personalization angle, and return a structured JSON object for the next step.
-
-PRIMARY RESPONSIBILITIES
-1. Read Agent 3 output carefully.
-2. Evaluate each prospect against ICP, role, location, industry, and available public signals.
-3. Determine qualification status: qualified, unqualified, or review.
-4. Assign fit score and priority.
-5. Choose the best outreach/personalization angle for qualified leads.
-6. Return clean structured JSON only.
-
-YOU MUST NOT
-- Send outreach.
-- Write full emails unless the output schema explicitly asks for an angle only.
-- Invent facts that are not supported by the input or sources.
-- Over-search when the input is already strong.
-- Return a paragraph.
-
-QUALIFICATION RULES (LIBERAL)
-- Favor prospects with any relevant signal.
-- If there's ANY match (industry, location, or role partially), consider it qualified.
-- Always return at least 2-3 prospects even if they're weak matches.
-- Email presence is a strong positive signal.
-
-OUTPUT FORMAT
-Return valid JSON only using this schema:
-{
-  "intent": string,
-  "confidence": number,
-  "needs_clarification": boolean,
-  "clarification_question": string|null,
-  "next_pipeline": string|null,
-  "entities": {
-    "industry": string|null,
-    "location": string|null,
-    "role": string|null,
-    "company": string|null,
-    "lead_count": number|null,
-    "email": string|null,
-    "domain": string|null,
-    "source_type": string|null
-  },
-  "risk_level": "low" | "medium" | "high",
-  "policy_flags": string[],
-  "reason": string,
-  "qualified_prospects": [
-    {
-      "name": string|null,
-      "company": string|null,
-      "domain": string|null,
-      "website": string|null,
-      "location": string|null,
-      "role": string|null,
-      "fit_score": number|null,
-      "priority": "high" | "medium" | "low",
-      "qualification_status": "qualified" | "unqualified" | "review",
-      "personalization_angle": string|null,
-      "notes": string|null,
-      "email_candidates": string[],
-      "email": string|null
+function levenshteinDistance(a, b) {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b[i - 1] === a[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
     }
-  ],
-  "stats": {
-    "reviewed": number,
-    "qualified": number,
-    "rejected": number,
-    "returned": number
+  }
+  return matrix[b.length][a.length];
+}
+
+function stringSimilarity(a, b) {
+  if (!a || !b) return 0;
+  const aClean = a.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+  const bClean = b.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+  if (aClean === bClean) return 1;
+  if (aClean.length === 0 || bClean.length === 0) return 0;
+  const distance = levenshteinDistance(aClean, bClean);
+  return 1 - (distance / Math.max(aClean.length, bClean.length));
+}
+
+// ────────────────────────────────────────────────────────────────
+// 3. Utility: Domain Extraction
+// ────────────────────────────────────────────────────────────────
+
+function extractDomain(url) {
+  if (!url) return null;
+  try {
+    // Handle URLs with protocols
+    let domain = url;
+    if (domain.includes('://')) {
+      domain = domain.split('://')[1];
+    }
+    // Remove path, query, hash
+    domain = domain.split('/')[0];
+    domain = domain.split('?')[0];
+    domain = domain.split('#')[0];
+    // Remove www prefix
+    domain = domain.replace(/^www\./, '');
+    return domain.toLowerCase();
+  } catch {
+    return null;
   }
 }
 
-CONFIDENCE GUIDELINES
-- 0.90 to 1.00 = very clear, strong fit.
-- 0.70 to 0.89 = mostly clear.
-- 0.50 to 0.69 = mixed, needs caution.
-- below 0.50 = stop and clarify.`;
-
-// ────────────────────────────────────────────────────────────────
-// 3. Utility: Retry helper
-// ────────────────────────────────────────────────────────────────
-
-async function withRetry(fn, label, retries = 2, delayMs = 800) {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            const isLast = attempt === retries;
-            if (err.response?.status && err.response.status < 500 && err.response.status !== 429) {
-                console.warn(`⛔ [${label}] Non-retryable (${err.response.status}): ${err.message}`);
-                return null;
-            }
-            console.warn(`⚠️ [${label}] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
-            if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
-        }
+function getBaseDomain(domain) {
+  if (!domain) return null;
+  const parts = domain.split('.');
+  if (parts.length >= 2) {
+    // Handle country TLDs (co.uk, com.au, etc.)
+    if (parts.length >= 3 && parts[parts.length - 2].length <= 3) {
+      return parts.slice(-3).join('.');
     }
+    return parts.slice(-2).join('.');
+  }
+  return domain;
+}
+
+// ────────────────────────────────────────────────────────────────
+// 4. Utility: Normalize Company Name
+// ────────────────────────────────────────────────────────────────
+
+function normalizeCompanyName(name) {
+  if (!name) return null;
+  
+  let normalized = name
+    .replace(/\s+/g, ' ')
+    .trim()
+    // Remove common suffixes
+    .replace(/\b(GmbH|AG|LLC|Inc|Limited|Ltd|Corp|Corporation|PLC|S.A|S.p.A|AB|OY|AS|ApS|SRL|BV|NV|B.V|N.V)\b/gi, '')
+    // Remove legal entity indicators
+    .replace(/\b(LLP|LP|LLC|PLLC|PC|PA|P.A|C.A|S.A.S|SAS|SARL|SRL)\b/gi, '')
+    // Remove "The" prefix
+    .replace(/^The\s+/i, '')
+    // Remove "and" / "&" patterns
+    .replace(/\s+and\s+/gi, ' ')
+    .replace(/\s+&\s+/gi, ' ')
+    // Remove special characters
+    .replace(/[^a-zA-Z0-9\s\-]/g, '')
+    // Normalize multiple spaces
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  // If result is empty, return original cleaned
+  if (normalized.length < MIN_NAME_LENGTH) {
+    normalized = name
+      .replace(/[^a-zA-Z0-9\s\-]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  
+  return normalized;
+}
+
+// ────────────────────────────────────────────────────────────────
+// 5. Utility: Normalize Location
+// ────────────────────────────────────────────────────────────────
+
+function normalizeLocation(location) {
+  if (!location) return null;
+  
+  let normalized = location
+    .replace(/\s+/g, ' ')
+    .trim()
+    // Remove common prefixes
+    .replace(/^(in|from|based in|near|located in)\s+/i, '')
+    // Normalize country names
+    .replace(/\b(Germany|DE|Deutschland)\b/i, 'Germany')
+    .replace(/\b(United States|USA|US|United States of America)\b/i, 'United States')
+    .replace(/\b(United Kingdom|UK|Great Britain|GB)\b/i, 'United Kingdom')
+    .replace(/\b(France|FR|République française)\b/i, 'France')
+    .replace(/\b(Italy|IT|Repubblica Italiana)\b/i, 'Italy')
+    .replace(/\b(Spain|ES|Reino de España)\b/i, 'Spain')
+    .replace(/\b(Netherlands|NL|Holland)\b/i, 'Netherlands')
+    .replace(/\b(Switzerland|CH|Suisse)\b/i, 'Switzerland')
+    .replace(/\b(Austria|AT|Österreich)\b/i, 'Austria')
+    .replace(/\b(Sweden|SE|Sverige)\b/i, 'Sweden')
+    .replace(/\b(Norway|NO|Norge)\b/i, 'Norway')
+    .replace(/\b(Denmark|DK|Danmark)\b/i, 'Denmark')
+    .replace(/\b(Finland|FI|Suomi)\b/i, 'Finland')
+    .replace(/\b(Ireland|IE|Éire)\b/i, 'Ireland')
+    .replace(/\b(Portugal|PT|República Portuguesa)\b/i, 'Portugal')
+    .replace(/\b(Greece|GR|Ελλάδα)\b/i, 'Greece')
+    .replace(/\b(Poland|PL|Polska)\b/i, 'Poland')
+    .replace(/\b(Czech Republic|CZ|Česko)\b/i, 'Czech Republic')
+    .replace(/\b(Canada|CA)\b/i, 'Canada')
+    .replace(/\b(Australia|AU)\b/i, 'Australia')
+    .replace(/\b(Japan|JP|日本)\b/i, 'Japan')
+    .replace(/\b(China|CN|中国)\b/i, 'China')
+    .replace(/\b(India|IN)\b/i, 'India')
+    .replace(/\b(Brazil|BR|Brasil)\b/i, 'Brazil')
+    .replace(/\b(Mexico|MX|México)\b/i, 'Mexico')
+    .trim();
+  
+  return normalized || null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// 6. Utility: Clean Candidate Record
+// ────────────────────────────────────────────────────────────────
+
+function cleanCandidate(candidate) {
+  if (!candidate) return null;
+  
+  // Extract and normalize fields
+  const name = normalizeCompanyName(candidate.name || candidate.company || candidate.title || null);
+  const domain = extractDomain(candidate.domain || candidate.website || candidate.source_url || candidate.url || null);
+  const baseDomain = domain ? getBaseDomain(domain) : null;
+  const location = normalizeLocation(candidate.location || null);
+  const website = candidate.website || candidate.source_url || candidate.url || null;
+  
+  // If no name and no domain, this is useless
+  if (!name && !domain) {
     return null;
+  }
+  
+  // Use domain as name if no name exists
+  const finalName = name || (domain ? domain.split('.')[0] : null);
+  
+  return {
+    original: candidate,
+    name: finalName,
+    company: candidate.company || finalName,
+    domain: domain,
+    baseDomain: baseDomain,
+    website: website,
+    location: location,
+    industry: candidate.industry || null,
+    description: candidate.snippet || candidate.description || null,
+    source: candidate.source || 'unknown',
+    source_url: candidate.source_url || candidate.url || null,
+    confidence: candidate.confidence || candidate.fit_score || candidate.hypothesis_confidence || 0.5,
+    signals: candidate.signals || [],
+    metadata: {
+      raw_title: candidate.raw_title || candidate.title || null,
+      raw_snippet: candidate.snippet || null,
+      query: candidate.query || null,
+      date: candidate.date || null,
+      hypothesis_confidence: candidate.hypothesis_confidence || null
+    }
+  };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 4. Tavily Search Helper
+// 7. Core Function: Detect Duplicate Companies
 // ────────────────────────────────────────────────────────────────
 
-async function searchTavily(query, tavilyKey, maxResults = MAX_SEARCH_RESULTS) {
-    if (!tavilyKey) {
-        console.warn('⚠️ [TAVILY] No API key provided');
-        return [];
+function findDuplicates(companyA, companyB) {
+  // If either is null, no match
+  if (!companyA || !companyB) return { isDuplicate: false, confidence: 0, reasons: [] };
+  
+  const reasons = [];
+  let maxConfidence = 0;
+  
+  // 1. Domain match (highest confidence)
+  if (companyA.domain && companyB.domain) {
+    const similarity = stringSimilarity(companyA.domain, companyB.domain);
+    if (similarity >= 0.95) {
+      reasons.push('Domain matches exactly or near-exactly');
+      maxConfidence = Math.max(maxConfidence, 0.98);
+    } else if (similarity >= 0.85) {
+      const baseA = getBaseDomain(companyA.domain);
+      const baseB = getBaseDomain(companyB.domain);
+      if (baseA === baseB) {
+        reasons.push('Base domain matches');
+        maxConfidence = Math.max(maxConfidence, 0.92);
+      }
     }
-
-    try {
-        const response = await withRetry(() => axios.post(
-            'https://api.tavily.com/search',
-            {
-                api_key: tavilyKey,
-                query: query,
-                search_depth: 'basic',
-                max_results: maxResults,
-                include_answer: false,
-                include_raw_content: false,
-            },
-            {
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 10000
-            }
-        ), `Tavily:${query.slice(0, 40)}`);
-
-        if (!response) return [];
-
-        return (response.data?.results || []).map(r => ({
-            title: r.title || '',
-            url: r.url || '',
-            snippet: r.content || '',
-            date: r.published_date || null,
-        }));
-
-    } catch (error) {
-        console.error(`❌ [TAVILY] Search failed:`, error.message);
-        return [];
+  }
+  
+  // 2. Website URL match
+  if (companyA.website && companyB.website) {
+    const sim = stringSimilarity(companyA.website, companyB.website);
+    if (sim >= 0.90) {
+      reasons.push('Website URLs match');
+      maxConfidence = Math.max(maxConfidence, 0.95);
     }
+  }
+  
+  // 3. Company name similarity
+  if (companyA.name && companyB.name) {
+    const sim = stringSimilarity(companyA.name, companyB.name);
+    if (sim >= FUZZY_MATCH_THRESHOLD) {
+      reasons.push(`Company names are ${Math.round(sim * 100)}% similar`);
+      maxConfidence = Math.max(maxConfidence, sim * 0.9);
+    }
+    // Check for partial matches (e.g., "ABC" in "ABC Technologies")
+    const nameA = companyA.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nameB = companyB.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (nameA.includes(nameB) || nameB.includes(nameA)) {
+      reasons.push('Company name contains the other');
+      maxConfidence = Math.max(maxConfidence, 0.85);
+    }
+  }
+  
+  // 4. Location match
+  if (companyA.location && companyB.location) {
+    const sim = stringSimilarity(companyA.location, companyB.location);
+    if (sim >= 0.70) {
+      reasons.push('Locations match');
+      maxConfidence = Math.max(maxConfidence, 0.75);
+    }
+  }
+  
+  // 5. Industry match
+  if (companyA.industry && companyB.industry) {
+    const sim = stringSimilarity(companyA.industry, companyB.industry);
+    if (sim >= 0.60) {
+      reasons.push('Industries match');
+      maxConfidence = Math.max(maxConfidence, 0.70);
+    }
+  }
+  
+  // Determine if duplicate based on confidence
+  const isDuplicate = maxConfidence >= FUZZY_MATCH_THRESHOLD;
+  
+  return {
+    isDuplicate,
+    confidence: Math.min(maxConfidence, 1.0),
+    reasons: reasons
+  };
 }
 
 // ────────────────────────────────────────────────────────────────
-// 5. Build Qualification Queries for a Prospect
+// 8. Core Function: Merge Duplicate Records
 // ────────────────────────────────────────────────────────────────
 
-function buildQualificationQueries(prospect) {
-    const queries = [];
-    const company = prospect.company || prospect.name || '';
-    const domain = prospect.domain || '';
-
-    // Only search if the prospect is uncertain or missing key signals
-    const needsRecentNews = !prospect.notes || prospect.notes.includes('No recent');
-    const needsFundingSignal = prospect.confidence < 0.7;
-
-    if (needsRecentNews && company) {
-        queries.push(`"${company}" news funding expansion`);
-    }
-
-    if (needsFundingSignal && company) {
-        queries.push(`"${company}" funding round investment`);
-    }
-
-    // If we have domain, check for recent activity
-    if (domain && (needsRecentNews || needsFundingSignal)) {
-        queries.push(`site:${domain} news funding`);
-    }
-
-    return queries.slice(0, MAX_QUERIES);
-}
-
-// ────────────────────────────────────────────────────────────────
-// 6. Search for Additional Qualification Signals
-// ────────────────────────────────────────────────────────────────
-
-async function searchQualificationSignals(prospect, tavilyKey) {
-    const queries = buildQualificationQueries(prospect);
-    if (queries.length === 0) {
-        return { signals: [], searched: 0 };
-    }
-
-    let allResults = [];
-    for (const query of queries) {
-        const results = await searchTavily(query, tavilyKey, 3);
-        if (results && results.length > 0) {
-            allResults = allResults.concat(results);
-        }
-    }
-
-    return { signals: allResults, searched: queries.length };
-}
-
-// ────────────────────────────────────────────────────────────────
-// 7. FIX: Safe JSON Parsing with Auto-Fix
-// ────────────────────────────────────────────────────────────────
-
-function safeJsonParse(jsonString) {
-    // Try normal parse first
-    try {
-        return { success: true, data: JSON.parse(jsonString) };
-    } catch (error) {
-        console.warn(`⚠️ [JSON] Parse error: ${error.message}`);
-        console.warn(`⚠️ [JSON] Attempting to auto-fix...`);
-        
-        let fixed = jsonString;
-        
-        // Fix 1: Incomplete numbers (0. → 0.0, 1. → 1.0)
-        fixed = fixed.replace(/(\d+)\.\s*([,\}\]])/g, '$1.0$2');
-        fixed = fixed.replace(/(\d+)\.\s*$/g, '$1.0');
-        fixed = fixed.replace(/(\d+)\.\s*\n/g, '$1.0\n');
-        
-        // Fix 2: Trailing commas before } or ]
-        fixed = fixed.replace(/,\s*}/g, '}');
-        fixed = fixed.replace(/,\s*\]/g, ']');
-        
-        // Fix 3: Unterminated strings - find strings that don't have closing quotes
-        // Look for a quote that starts a string but doesn't have a closing quote before } or ]
-        const lines = fixed.split('\n');
-        let fixedLines = [];
-        let inString = false;
-        let stringStartLine = -1;
-        
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i];
-            
-            // Count quotes in this line (ignoring escaped quotes)
-            const quotes = (line.match(/"/g) || []).length;
-            const escapedQuotes = (line.match(/\\"/g) || []).length;
-            const effectiveQuotes = quotes - escapedQuotes;
-            
-            if (inString) {
-                // We're inside a string - check if this line closes it
-                if (effectiveQuotes % 2 === 1) {
-                    // Odd quotes means the string closes in this line
-                    inString = false;
-                    fixedLines.push(line);
-                } else {
-                    // String continues - add line as-is
-                    fixedLines.push(line);
-                }
-            } else {
-                // We're not in a string - check if this line starts one
-                if (effectiveQuotes % 2 === 1) {
-                    // Odd quotes means a string starts and ends in this line? Or just starts?
-                    // Check if the line ends with a quote that would close it
-                    const trimmedLine = line.trim();
-                    if (trimmedLine.endsWith('"') || trimmedLine.endsWith('",') || trimmedLine.endsWith('":')) {
-                        // Likely the string is closed in this line
-                        fixedLines.push(line);
-                    } else {
-                        // String starts in this line but doesn't close
-                        inString = true;
-                        stringStartLine = i;
-                        // Add a closing quote at the end of the line
-                        if (!line.endsWith('"') && !line.endsWith('",') && !line.endsWith('":')) {
-                            line = line + '"';
-                        }
-                        fixedLines.push(line);
-                    }
-                } else {
-                    fixedLines.push(line);
-                }
-            }
-        }
-        
-        // If we finished the file and we're still in a string, add a closing quote
-        if (inString) {
-            fixedLines[fixedLines.length - 1] = fixedLines[fixedLines.length - 1] + '"';
-            console.log(`🔧 [JSON] Added closing quote for unterminated string at line ${stringStartLine + 1}`);
-        }
-        
-        fixed = fixedLines.join('\n');
-        
-        // Fix 4: Missing closing brackets (add if unbalanced)
-        const openBraces = (fixed.match(/\{/g) || []).length;
-        const closeBraces = (fixed.match(/\}/g) || []).length;
-        const openBrackets = (fixed.match(/\[/g) || []).length;
-        const closeBrackets = (fixed.match(/\]/g) || []).length;
-        
-        if (openBraces > closeBraces) {
-            fixed += '}'.repeat(openBraces - closeBraces);
-        }
-        if (openBrackets > closeBrackets) {
-            fixed += ']'.repeat(openBrackets - closeBrackets);
-        }
-        
-        // Fix 5: Remove anything after the last complete JSON structure
-        const lastBrace = fixed.lastIndexOf('}');
-        const lastBracket = fixed.lastIndexOf(']');
-        const lastEnd = Math.max(lastBrace, lastBracket);
-        if (lastEnd > 0 && lastEnd < fixed.length - 1) {
-            const trailing = fixed.substring(lastEnd + 1).trim();
-            if (trailing && !trailing.startsWith(',') && !trailing.startsWith(']') && !trailing.startsWith('}')) {
-                fixed = fixed.substring(0, lastEnd + 1);
-            }
-        }
-        
-        try {
-            const data = JSON.parse(fixed);
-            console.log(`✅ [JSON] Auto-fix successful`);
-            return { success: true, data };
-        } catch (retryError) {
-            console.error(`❌ [JSON] Auto-fix failed: ${retryError.message}`);
-            return { success: false, error: retryError };
-        }
-    }
-}
-
-// ────────────────────────────────────────────────────────────────
-// 8. FIX: Main Agent 4 Function with Forced Lead Qualification
-// ────────────────────────────────────────────────────────────────
-
-async function qualifyProspects({ enriched_prospects, intent, apiKey, tavilyKey, userId = 'anonymous', onProgress = null }) {
-    console.log(`🏆 [AGENT4] Starting qualification for user ${userId}...`);
-    onProgress?.('🏆 Evaluating and prioritizing leads...');
-
-    // Validate input
-    if (!enriched_prospects || enriched_prospects.length === 0) {
-        return {
-            intent: 'lead_qualification',
-            confidence: 0.0,
-            needs_clarification: true,
-            clarification_question: 'No prospects were provided to qualify. Please run enrichment first.',
-            next_pipeline: null,
-            entities: intent?.entities || {},
-            risk_level: 'low',
-            policy_flags: ['no_prospects'],
-            reason: 'No prospects provided to Agent 4.',
-            qualified_prospects: [],
-            stats: { reviewed: 0, qualified: 0, rejected: 0, returned: 0 }
-        };
-    }
-
-    // ─── LOG: What Agent 4 received ───
-    console.log(`📥 [AGENT4] RECEIVED ${enriched_prospects.length} prospects from Agent 3`);
-    enriched_prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email_candidates: ${JSON.stringify(p.email_candidates || [])}, email: ${p.email || 'null'}`);
-    });
-
-    // ─── Step 1: Gather qualification signals for each prospect ───
-    const prospectsWithSignals = [];
-    for (const prospect of enriched_prospects) {
-        let signals = [];
-        let searched = 0;
-
-        // Only search if the prospect needs it (low confidence or missing signals)
-        if (prospect.confidence < 0.7) {
-            const result = await searchQualificationSignals(prospect, tavilyKey);
-            signals = result.signals;
-            searched = result.searched;
-        }
-
-        prospectsWithSignals.push({
-            prospect,
-            signals,
-            searched,
-        });
-    }
-
-    // ─── Step 2: Build input for GPT qualification ───
-    const prospectsForGPT = prospectsWithSignals.map(({ prospect, signals }) => {
-        const signalText = signals.length > 0 
-            ? signals.map(s => `- ${s.title}: ${s.snippet}`).join('\n')
-            : 'No additional signals found.';
-
-        return {
-            prospect: {
-                name: prospect.name || 'Unknown',
-                company: prospect.company || 'Unknown',
-                domain: prospect.domain || 'Unknown',
-                website: prospect.website || null,
-                location: prospect.location || 'Unknown',
-                role: prospect.role || 'Unknown',
-                industry: prospect.industry || 'Unknown',
-                confidence: prospect.confidence || 0.5,
-                verification_status: prospect.verification_status || 'unverified',
-                notes: prospect.notes || 'No notes.',
-                linkedin_url: prospect.linkedin_url || null,
-                // --- PRESERVE EMAIL FROM AGENT 3 ---
-                email_candidates: prospect.email_candidates || [],
-                email: prospect.email || null,
-            },
-            signals: signalText,
-        };
-    });
-
-    const qualificationPrompt = `
-You are a lead qualification specialist. Evaluate each prospect and decide if they are worth pursuing.
-
-USER'S INTENT:
-- Industry: ${intent?.industry || 'Any'}
-- Location: ${intent?.location || 'Any'}
-- Role: ${intent?.role || 'Any'}
-- Target: ${intent?.target || 'Any'}
-
-PROSPECTS TO EVALUATE:
-${prospectsForGPT.map((p, i) => `
-PROSPECT ${i + 1}:
-- Name: ${p.prospect.name}
-- Company: ${p.prospect.company}
-- Domain: ${p.prospect.domain}
-- Location: ${p.prospect.location}
-- Role: ${p.prospect.role}
-- Industry: ${p.prospect.industry}
-- Confidence: ${p.prospect.confidence}
-- Verification Status: ${p.prospect.verification_status}
-- Notes: ${p.prospect.notes}
-- LinkedIn: ${p.prospect.linkedin_url || 'Not found'}
-- Email Candidates: ${JSON.stringify(p.prospect.email_candidates || [])}
-- Email: ${p.prospect.email || 'null'}
-- Additional Signals:
-${p.signals}
-`).join('\n---\n')}
-
-QUALIFICATION RULES (LIBERAL - ALWAYS QUALIFY SOME):
-1. A prospect is QUALIFIED if:
-   - Industry matches OR is related to the user's intent
-   - OR Location matches OR is reasonably close
-   - OR Role is relevant (founder, CEO, director, owner, VP, head of)
-   - OR Has any email candidate (strong signal)
-   - Confidence is at least 0.3
-
-2. A prospect is REVIEW if:
-   - Some things match but key signals are missing
-   - Confidence is between 0.2 and 0.4
-
-3. A prospect is UNQUALIFIED only if:
-   - Absolutely NO matches on any criteria
-   - No email and no domain and no company name
-
-4. Priority levels:
-   - HIGH: Good match on key criteria + has email
-   - MEDIUM: Partial match or has email
-   - LOW: Weak match but still some signal
-
-IMPORTANT: You MUST return at least 2-3 prospects as QUALIFIED even if they are weak matches.
-Always prefer prospects with emails over those without.
-
-Return ONLY valid JSON with this schema:
-{
-  "qualified_prospects": [
-    {
-      "name": string|null,
-      "company": string|null,
-      "domain": string|null,
-      "website": string|null,
-      "location": string|null,
-      "role": string|null,
-      "fit_score": number (0-1),
-      "priority": "high" | "medium" | "low",
-      "qualification_status": "qualified" | "unqualified" | "review",
-      "personalization_angle": string|null,
-      "notes": string|null,
-      "email_candidates": string[],
-      "email": string|null
-    }
-  ],
-  "stats": {
-    "reviewed": number,
-    "qualified": number,
-    "rejected": number,
-    "returned": number
-  },
-  "reason": string,
-  "confidence": number,
-  "needs_clarification": boolean
-}
-`;
-
-    // ─── Step 3: Try qualification with retries and safe parsing ───
-    let lastError = null;
-    let parsedResult = null;
+function mergeRecords(records, matchConfidence) {
+  if (!records || records.length === 0) return null;
+  if (records.length === 1) return records[0];
+  
+  // Start with the first record as base
+  const base = { ...records[0] };
+  const sources = new Set([base.source]);
+  const allSignals = new Set(base.signals || []);
+  const allMetadata = [];
+  
+  // Track which fields were merged from where
+  const mergedFrom = {
+    name: [base.name],
+    domain: [base.domain],
+    website: [base.website],
+    location: [base.location],
+    industry: [base.industry],
+    description: [base.description],
+    confidence: [base.confidence]
+  };
+  
+  // Merge other records
+  for (let i = 1; i < records.length; i++) {
+    const record = records[i];
     
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            console.log(`🏆 [AGENT4] Qualification attempt ${attempt}/3...`);
-            
-            const response = await withRetry(() => axios.post(
-                'https://api.openai.com/v1/chat/completions',
-                {
-                    model: MODEL,
-                    messages: [
-                        { role: 'system', content: AGENT4_SYSTEM_PROMPT },
-                        { role: 'user', content: qualificationPrompt }
-                    ],
-                    max_tokens: MAX_OUTPUT_TOKENS,
-                    temperature: 0.0,
-                    response_format: { type: 'json_object' }
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 20000
-                }
-            ), 'GPT:qualifyProspects');
-
-            if (!response) {
-                console.warn(`⚠️ [AGENT4] Qualification attempt ${attempt} returned null`);
-                if (attempt === 3) break;
-                continue;
-            }
-
-            const rawContent = response.data.choices[0].message.content.trim();
-            
-            // ─── SAFE JSON PARSE with auto-fix ───
-            const parseResult = safeJsonParse(rawContent);
-            
-            if (!parseResult.success) {
-                console.warn(`⚠️ [AGENT4] JSON parse failed on attempt ${attempt}`);
-                if (attempt === 3) break;
-                continue;
-            }
-
-            parsedResult = parseResult.data;
-            break;
-
-        } catch (error) {
-            lastError = error;
-            console.error(`❌ [AGENT4] Qualification attempt ${attempt} failed:`, error.message);
-            if (attempt === 3) break;
-        }
+    // Track source
+    if (record.source) sources.add(record.source);
+    if (record.signals) {
+      record.signals.forEach(s => allSignals.add(s));
     }
-
-    // ─── Step 4: Process result or fallback ───
-    let qualifiedProspects = [];
-    let stats = {
-        reviewed: enriched_prospects.length,
-        qualified: 0,
-        rejected: 0,
-        returned: 0
-    };
-    let confidence = 0;
-    let needsClarification = false;
-    let reason = '';
-
-    if (parsedResult && parsedResult.qualified_prospects) {
-        qualifiedProspects = parsedResult.qualified_prospects || [];
-        stats = parsedResult.stats || stats;
-        confidence = parsedResult.confidence || (qualifiedProspects.length / enriched_prospects.length);
-        needsClarification = parsedResult.needs_clarification || confidence < CONFIDENCE_THRESHOLD_CLARIFY;
-        reason = parsedResult.reason || `Qualified ${qualifiedProspects.length} out of ${enriched_prospects.length} prospects.`;
-    } else {
-        console.log(`🔄 [AGENT4] Using fallback qualification...`);
-        // Fallback: qualify prospects with emails or high confidence
-        const sortedByConfidence = [...enriched_prospects].sort((a, b) => (b.confidence || b.fit_score || 0) - (a.confidence || a.fit_score || 0));
-        
-        for (const p of sortedByConfidence) {
-            const hasEmail = p.email_candidates && p.email_candidates.length > 0;
-            const hasDomain = p.domain && p.domain.length > 3;
-            const hasName = p.name || p.company;
-            
-            if (hasEmail || (hasDomain && hasName)) {
-                qualifiedProspects.push({
-                    name: p.name || null,
-                    company: p.company || null,
-                    domain: p.domain || null,
-                    website: p.website || null,
-                    location: p.location || null,
-                    role: p.role || null,
-                    fit_score: p.confidence || p.fit_score || 0.5,
-                    priority: hasEmail ? 'medium' : 'low',
-                    qualification_status: 'qualified',
-                    personalization_angle: null,
-                    notes: hasEmail ? 'Has email candidate' : 'Partial match',
-                    email_candidates: p.email_candidates || [],
-                    email: p.email || null,
-                });
-                if (qualifiedProspects.length >= MIN_FORCED_LEADS) break;
-            }
-        }
-        stats.qualified = qualifiedProspects.length;
-        stats.rejected = enriched_prospects.length - qualifiedProspects.length;
-        stats.returned = qualifiedProspects.length;
-        confidence = Math.min(0.6 + (qualifiedProspects.length / enriched_prospects.length) * 0.3, 0.9);
-        reason = `Fallback qualification: ${qualifiedProspects.length} prospects qualified`;
+    if (record.metadata) {
+      allMetadata.push(record.metadata);
     }
-
-    // ─── FORCE: Ensure we have at least MIN_FORCED_LEADS qualified ───
-    if (qualifiedProspects.length < MIN_FORCED_LEADS && enriched_prospects.length > 0) {
-        console.log(`🔄 [AGENT4] Forcing ${MIN_FORCED_LEADS} leads (only ${qualifiedProspects.length} qualified)`);
-        
-        const alreadyQualified = new Set(qualifiedProspects.map(p => p.company || p.domain || p.name));
-        const available = enriched_prospects.filter(p => {
-            const key = p.company || p.domain || p.name;
-            return !alreadyQualified.has(key);
-        });
-        
-        for (const p of available) {
-            const hasEmail = p.email_candidates && p.email_candidates.length > 0;
-            qualifiedProspects.push({
-                name: p.name || null,
-                company: p.company || null,
-                domain: p.domain || null,
-                website: p.website || null,
-                location: p.location || null,
-                role: p.role || null,
-                fit_score: p.confidence || p.fit_score || 0.3,
-                priority: 'low',
-                qualification_status: 'qualified',
-                personalization_angle: null,
-                notes: 'Forced qualification - limited matches found',
-                email_candidates: p.email_candidates || [],
-                email: p.email || null,
-            });
-            if (qualifiedProspects.length >= MIN_FORCED_LEADS) break;
-        }
-        
-        stats.qualified = qualifiedProspects.length;
-        stats.returned = qualifiedProspects.length;
-        stats.rejected = enriched_prospects.length - qualifiedProspects.length;
-        reason = `Forced ${qualifiedProspects.length} prospects due to limited matches`;
-        confidence = Math.max(confidence, 0.5);
+    
+    // Merge name (prefer longer/more complete)
+    if (record.name && record.name.length > base.name.length) {
+      mergedFrom.name.push(record.name);
+      base.name = record.name;
+    } else if (record.name) {
+      mergedFrom.name.push(record.name);
     }
-
-    // ─── Preserve email data from original prospects ───
-    qualifiedProspects = qualifiedProspects.map((p, index) => {
-        const original = enriched_prospects[index] || enriched_prospects.find(e => e.company === p.company || e.email === p.email) || {};
-        return {
-            name: p.name || null,
-            company: p.company || null,
-            domain: p.domain || null,
-            website: p.website || null,
-            location: p.location || null,
-            role: p.role || null,
-            fit_score: p.fit_score || 0.5,
-            priority: p.priority || 'medium',
-            qualification_status: p.qualification_status || 'qualified',
-            personalization_angle: p.personalization_angle || null,
-            notes: p.notes || null,
-            email_candidates: original.email_candidates || p.email_candidates || [],
-            email: original.email || p.email || null,
-        };
-    });
-
-    // ─── Build final result ───
-    const totalQualified = qualifiedProspects.length;
-    const result = {
-        intent: 'lead_qualification',
-        confidence: Math.round(confidence * 100) / 100,
-        needs_clarification: needsClarification,
-        clarification_question: needsClarification 
-            ? 'I found some leads but the qualification is uncertain. Could you confirm your ICP or provide more specific criteria?'
-            : null,
-        next_pipeline: totalQualified > 0 ? 'outreach_drafting' : null,
-        entities: intent?.entities || {
-            industry: intent?.industry || null,
-            location: intent?.location || null,
-            role: intent?.role || null,
-            company: intent?.company || null,
-            lead_count: totalQualified,
-            email: null,
-            domain: null,
-            source_type: 'web_search'
-        },
-        risk_level: totalQualified / enriched_prospects.length < 0.3 ? 'medium' : 'low',
-        policy_flags: totalQualified === 0 ? ['no_qualified_leads'] : [],
-        reason: reason || `Qualified ${totalQualified} out of ${enriched_prospects.length} prospects.`,
-        qualified_prospects: qualifiedProspects,
-        stats: {
-            reviewed: stats.reviewed || enriched_prospects.length,
-            qualified: stats.qualified || totalQualified,
-            rejected: stats.rejected || 0,
-            returned: stats.returned || totalQualified,
-        }
-    };
-
-    // ─── LOG: What Agent 4 is returning ───
-    console.log(`📤 [AGENT4] Returning ${result.qualified_prospects.length} qualified prospects`);
-    result.qualified_prospects.forEach((p, i) => {
-        console.log(`   ${i + 1}. ${p.company || 'Unknown'} → email: ${p.email || 'null'}`);
-    });
-
-    console.log(`✅ [AGENT4] Qualification complete: ${totalQualified} qualified, ${result.stats.rejected} rejected`);
-    return result;
+    
+    // Merge company
+    if (record.company && !base.company) {
+      base.company = record.company;
+    } else if (record.company && record.company.length > (base.company || '').length) {
+      base.company = record.company;
+    }
+    
+    // Merge domain (prefer base domain)
+    if (record.domain && !base.domain) {
+      mergedFrom.domain.push(record.domain);
+      base.domain = record.domain;
+      base.baseDomain = getBaseDomain(record.domain);
+    } else if (record.domain) {
+      mergedFrom.domain.push(record.domain);
+    }
+    
+    // Merge website (prefer official-looking)
+    if (record.website && !base.website) {
+      mergedFrom.website.push(record.website);
+      base.website = record.website;
+    } else if (record.website) {
+      mergedFrom.website.push(record.website);
+    }
+    
+    // Merge location (prefer more specific)
+    if (record.location && (!base.location || record.location.length > base.location.length)) {
+      mergedFrom.location.push(record.location);
+      base.location = record.location;
+    } else if (record.location) {
+      mergedFrom.location.push(record.location);
+    }
+    
+    // Merge industry
+    if (record.industry && !base.industry) {
+      mergedFrom.industry.push(record.industry);
+      base.industry = record.industry;
+    } else if (record.industry && record.industry !== base.industry) {
+      mergedFrom.industry.push(record.industry);
+      // If multiple industries, keep the most common or first
+      if (base.industry && record.industry !== base.industry) {
+        // Don't override, just collect
+      }
+    }
+    
+    // Merge description (prefer longer/more detailed)
+    if (record.description && (!base.description || record.description.length > base.description.length)) {
+      mergedFrom.description.push(record.description);
+      base.description = record.description;
+    } else if (record.description) {
+      mergedFrom.description.push(record.description);
+    }
+    
+    // Merge confidence (take max)
+    if (record.confidence > base.confidence) {
+      base.confidence = record.confidence;
+    }
+    mergedFrom.confidence.push(record.confidence);
+    
+    // Merge source_url (keep all)
+    if (record.source_url && !base.source_url) {
+      base.source_url = record.source_url;
+    }
+  }
+  
+  // Set merged fields
+  base.sources = Array.from(sources);
+  base.signals = Array.from(allSignals);
+  base.metadata = allMetadata;
+  base.mergedFrom = mergedFrom;
+  base.matchConfidence = matchConfidence;
+  base.mergedCount = records.length;
+  base.isMerged = records.length > 1;
+  
+  return base;
 }
 
 // ────────────────────────────────────────────────────────────────
-// 9. Public Exports
+// 9. Core Function: Deduplicate and Normalize Candidates
+// ────────────────────────────────────────────────────────────────
+
+function deduplicateCandidates(candidates) {
+  console.log(`📊 [Stage4] Starting deduplication with ${candidates.length} candidates...`);
+  
+  // Step 1: Clean all candidates
+  const cleaned = [];
+  const invalidReasons = [];
+  
+  for (const candidate of candidates) {
+    const cleanedRecord = cleanCandidate(candidate);
+    if (!cleanedRecord) {
+      invalidReasons.push('Missing name and domain');
+      continue;
+    }
+    if (!cleanedRecord.name || cleanedRecord.name.length < MIN_NAME_LENGTH) {
+      invalidReasons.push('Name too short or invalid');
+      continue;
+    }
+    cleaned.push(cleanedRecord);
+  }
+  
+  console.log(`🧹 [Stage4] Cleaned: ${cleaned.length} valid candidates (${candidates.length - cleaned.length} removed)`);
+  
+  if (cleaned.length === 0) {
+    return {
+      success: true,
+      companies: [],
+      stats: {
+        total_input: candidates.length,
+        cleaned: 0,
+        invalid_removed: candidates.length,
+        duplicates_merged: 0,
+        final_companies: 0
+      }
+    };
+  }
+  
+  // Step 2: Group by domain first (fast path)
+  const domainGroups = new Map();
+  const noDomain = [];
+  
+  for (const record of cleaned) {
+    if (record.baseDomain) {
+      if (!domainGroups.has(record.baseDomain)) {
+        domainGroups.set(record.baseDomain, []);
+      }
+      domainGroups.get(record.baseDomain).push(record);
+    } else {
+      noDomain.push(record);
+    }
+  }
+  
+  console.log(`📂 [Stage4] Grouped by domain: ${domainGroups.size} domains + ${noDomain.length} without domain`);
+  
+  // Step 3: Process each domain group (merge exact domain matches)
+  const mergedByDomain = [];
+  const processedDomains = new Set();
+  
+  for (const [domain, records] of domainGroups) {
+    if (records.length === 1) {
+      mergedByDomain.push(records[0]);
+    } else {
+      // Multiple records with same base domain - merge them
+      const merged = mergeRecords(records, 0.95);
+      if (merged) {
+        mergedByDomain.push(merged);
+      } else {
+        // Fallback: take the first
+        mergedByDomain.push(records[0]);
+      }
+    }
+    processedDomains.add(domain);
+  }
+  
+  // Step 4: Process no-domain records separately (they'll be matched by name)
+  const candidatesToMatch = [...mergedByDomain, ...noDomain];
+  
+  // Step 5: Fuzzy match remaining candidates
+  const finalCompanies = [];
+  const matchedIndices = new Set();
+  
+  for (let i = 0; i < candidatesToMatch.length; i++) {
+    if (matchedIndices.has(i)) continue;
+    
+    const current = candidatesToMatch[i];
+    const matches = [current];
+    
+    // Find all similar records
+    for (let j = i + 1; j < candidatesToMatch.length; j++) {
+      if (matchedIndices.has(j)) continue;
+      
+      const other = candidatesToMatch[j];
+      const result = findDuplicates(current, other);
+      
+      if (result.isDuplicate) {
+        matches.push(other);
+        matchedIndices.add(j);
+      }
+    }
+    
+    // If multiple matches, merge them
+    if (matches.length > 1) {
+      const merged = mergeRecords(matches, 0.85);
+      if (merged) {
+        finalCompanies.push(merged);
+      } else {
+        // Fallback: push first match
+        finalCompanies.push(matches[0]);
+      }
+    } else {
+      finalCompanies.push(current);
+    }
+    
+    matchedIndices.add(i);
+  }
+  
+  // Step 6: Clean up merged records
+  const cleanedCompanies = finalCompanies.map(company => {
+    // Remove mergedFrom metadata (internal)
+    const { mergedFrom, metadata, original, ...clean } = company;
+    return clean;
+  });
+  
+  // Step 7: Sort by confidence (highest first) and limit
+  const sorted = cleanedCompanies.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+  const limited = sorted.slice(0, MAX_CANDIDATES_AFTER_DEDUPE);
+  
+  console.log(`✅ [Stage4] Deduplication complete: ${limited.length} unique companies`);
+  console.log(`📊 [Stage4] Removed ${candidates.length - limited.length} duplicates/invalid records`);
+  
+  return {
+    success: true,
+    companies: limited,
+    stats: {
+      total_input: candidates.length,
+      cleaned: cleaned.length,
+      invalid_removed: candidates.length - cleaned.length,
+      duplicates_merged: cleaned.length - limited.length,
+      final_companies: limited.length,
+      domains_processed: processedDomains.size,
+      no_domain: noDomain.length
+    }
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 10. Main Stage 4 Function: Normalize & Deduplicate
+// ────────────────────────────────────────────────────────────────
+
+function normalizeAndDeduplicate({ 
+  candidates, 
+  searchPackage, 
+  userId = 'anonymous', 
+  onProgress = null 
+}) {
+  console.log(`📋 [Stage4] Starting normalization for user ${userId}...`);
+  console.log(`📋 [Stage4] Received ${candidates?.length || 0} candidates from Stage 3`);
+  onProgress?.('📋 Normalizing and deduplicating companies...');
+  
+  // ─── Validate input ───
+  if (!candidates || candidates.length === 0) {
+    return {
+      success: false,
+      error: 'No candidates provided to Stage 4',
+      companies: [],
+      stats: {
+        total_input: 0,
+        cleaned: 0,
+        invalid_removed: 0,
+        duplicates_merged: 0,
+        final_companies: 0
+      }
+    };
+  }
+  
+  // ─── Run deduplication ───
+  const result = deduplicateCandidates(candidates);
+  
+  // ─── Add user and search context ───
+  result.userId = userId;
+  result.search_package = searchPackage;
+  result.timestamp = new Date().toISOString();
+  
+  // ─── Log summary ───
+  console.log(`✅ [Stage4] Normalization complete: ${result.companies.length} unique companies`);
+  console.log(`📊 [Stage4] Stats:`, result.stats);
+  
+  return result;
+}
+
+// ────────────────────────────────────────────────────────────────
+// 11. Helper: Get Company Statistics
+// ────────────────────────────────────────────────────────────────
+
+function getCompanyStats(companies) {
+  if (!companies || companies.length === 0) {
+    return {
+      total: 0,
+      with_domain: 0,
+      with_website: 0,
+      with_location: 0,
+      with_industry: 0,
+      with_description: 0,
+      average_confidence: 0,
+      merged_count: 0
+    };
+  }
+  
+  let withDomain = 0, withWebsite = 0, withLocation = 0, withIndustry = 0, withDescription = 0, merged = 0;
+  let totalConfidence = 0;
+  
+  for (const company of companies) {
+    if (company.domain) withDomain++;
+    if (company.website) withWebsite++;
+    if (company.location) withLocation++;
+    if (company.industry) withIndustry++;
+    if (company.description) withDescription++;
+    if (company.isMerged) merged++;
+    totalConfidence += company.confidence || 0;
+  }
+  
+  return {
+    total: companies.length,
+    with_domain: withDomain,
+    with_website: withWebsite,
+    with_location: withLocation,
+    with_industry: withIndustry,
+    with_description: withDescription,
+    average_confidence: totalConfidence / companies.length,
+    merged_count: merged
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 12. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
-    qualifyProspects,
-    buildQualificationQueries,
-    searchQualificationSignals,
-    searchTavily,
-    safeJsonParse,
-    CONFIDENCE_THRESHOLD_ROUTE,
-    CONFIDENCE_THRESHOLD_CLARIFY,
+  normalizeAndDeduplicate,
+  deduplicateCandidates,
+  cleanCandidate,
+  findDuplicates,
+  mergeRecords,
+  normalizeCompanyName,
+  normalizeLocation,
+  extractDomain,
+  getBaseDomain,
+  stringSimilarity,
+  levenshteinDistance,
+  getCompanyStats,
+  FUZZY_MATCH_THRESHOLD,
+  MAX_CANDIDATES_AFTER_DEDUPE
 };
