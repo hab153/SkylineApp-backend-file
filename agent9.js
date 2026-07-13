@@ -668,14 +668,144 @@ async function manageKnowledge(request, options = {}) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 12. Public Exports
+// 12. checkExisting - Wrapper for Free.js compatibility
+// ────────────────────────────────────────────────────────────────
+
+function checkExisting(request) {
+    try {
+        // Clean expired packages first
+        cleanExpiredPackages();
+
+        // Find matching package
+        const match = findMatchingPackage(request);
+        
+        if (!match) {
+            return {
+                exists: false,
+                message: 'No data found'
+            };
+        }
+
+        // Check cooldown
+        const cooldownStatus = checkCooldown(request);
+        if (cooldownStatus.blocked) {
+            return {
+                exists: true,
+                blocked: true,
+                packageId: match.package_id,
+                message: `This request has been made ${cooldownStatus.count} times. Please wait ${cooldownStatus.remaining_hours} hours.`,
+                cooldown_until: cooldownStatus.cooldown_until
+            };
+        }
+
+        // Load the package to get more details
+        const packagePath = path.join(REPOSITORY_DIR, 'packages', `${match.package_id}.json`);
+        if (!fs.existsSync(packagePath)) {
+            removeFromIndex(match.package_id);
+            return { exists: false, message: 'Package file not found' };
+        }
+
+        const fullPackage = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+
+        return {
+            exists: true,
+            blocked: false,
+            packageId: match.package_id,
+            totalAvailable: fullPackage.total_companies || 0,
+            age: Math.floor((Date.now() - new Date(fullPackage.metadata?.created_at || Date.now()).getTime()) / (1000 * 60 * 60 * 24)),
+            isStale: false,
+            similarity_score: match.similarity_score || 0
+        };
+
+    } catch (error) {
+        console.error('❌ [Stage9] checkExisting error:', error.message);
+        return { exists: false, message: 'Error checking repository' };
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 13. retrievePackageWrapper - Wrapper for Free.js compatibility
+// ────────────────────────────────────────────────────────────────
+
+function retrievePackageWrapper(request, limit = null) {
+    const result = retrievePackage(request, limit);
+    
+    if (result.success && result.found) {
+        return {
+            found: true,
+            packageId: result.package_id,
+            totalAvailable: result.total_available,
+            leads: (result.companies || []).map(c => {
+                // Check if company has outreach data
+                const hasOutreach = c.outreach || c.messages;
+                return {
+                    name: c.name || c.company_name || c.company || 'Unknown',
+                    company: c.company || c.company_name || c.name || 'Unknown',
+                    domain: c.domain || c.company_domain || null,
+                    email: c.email || c.contact_email || null,
+                    messages: hasOutreach ? [
+                        {
+                            type: 'initial',
+                            subject: c.outreach?.subject || (c.messages && c.messages[0]?.subject) || `Introduction: ${c.name || 'Your Company'}`,
+                            body: c.outreach?.body || (c.messages && c.messages[0]?.body) || `Hi,\n\nI came across your company and wanted to reach out.\n\nBest,\nAlex`
+                        },
+                        {
+                            type: 'followup',
+                            subject: `Re: ${c.outreach?.subject || (c.messages && c.messages[0]?.subject) || `Introduction: ${c.name || 'Your Company'}`}`,
+                            body: `Hi,\n\nJust following up on my previous message.\n\nBest,\nAlex`
+                        },
+                        {
+                            type: 'breakup',
+                            subject: `Closing the loop`,
+                            body: `Hi,\n\nAssuming timing isn't right, I'll stop following up. Reach out whenever it makes sense.\n\nBest,\nAlex`
+                        }
+                    ] : [
+                        {
+                            type: 'initial',
+                            subject: `Introduction: ${c.name || 'Your Company'}`,
+                            body: `Hi,\n\nI came across your company and wanted to reach out.\n\nBest,\nAlex`
+                        }
+                    ],
+                    leadScore: c.leadScore || c.confidence || 0.5,
+                    ...c
+                };
+            }) || [],
+            companies: result.companies || [],
+            emails: result.companies?.map(c => c.email || c.contact_email).filter(Boolean) || [],
+            messages: result.companies?.map(c => c.messages || c.outreach).filter(Boolean) || [],
+            metadata: result.metadata || {},
+            isStale: false,
+            age: Math.floor((Date.now() - new Date(result.metadata?.created_at || Date.now()).getTime()) / (1000 * 60 * 60 * 24)),
+            similarity_score: result.similarity_score || 0
+        };
+    }
+
+    return {
+        found: false,
+        message: result.message || 'No data found'
+    };
+}
+
+// ────────────────────────────────────────────────────────────────
+// 14. storePackageWrapper - Wrapper for Free.js compatibility
+// ────────────────────────────────────────────────────────────────
+
+function storePackageWrapper(packageData) {
+    return storePackage(packageData);
+}
+
+// ────────────────────────────────────────────────────────────────
+// 15. Public Exports
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
-    // Main function
-    manageKnowledge,
+    // Main functions for Free.js compatibility
+    checkExisting,
+    retrievePackage: retrievePackageWrapper,
+    storePackage: storePackageWrapper,
 
-    // Individual functions for flexibility
+    // Legacy functions
+    manageKnowledge,
     storePackage,
     retrievePackage,
     findMatchingPackage,
