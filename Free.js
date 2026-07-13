@@ -4,15 +4,132 @@
 // 1. IMPORTS – All 9 Agents
 // ────────────────────────────────────────────────────────────────
 
-const agent1 = require('./agent1');  // Router - Intent Classification
-const agent2 = require('./agent2');  // Prospector - Search & Discovery
-const agent3 = require('./agent3');  // Enrichment - Company Intelligence
-const agent4 = require('./agent4');  // Qualification - Lead Scoring
-const agent5 = require('./agent5');  // Formatter - Email Generation
-const agent6 = require('./agent6');  // (Reserved for future)
-const agent7 = require('./agent7');  // (Reserved for future)
-const agent8 = require('./agent8');  // (Reserved for future)
-const agent9 = require('./agent9');  // Knowledge Repository - Storage & Retrieval
+const agent1 = require('./agent1');
+const agent2 = require('./agent2');
+const agent3 = require('./agent3');
+const agent4 = require('./agent4');
+const agent5 = require('./agent5');
+const agent6 = require('./agent6');
+const agent7 = require('./agent7');
+const agent8 = require('./agent8');
+
+// ── Agent9 with safety wrapper ──
+let agent9 = require('./agent9');
+
+// ✅ Ensure agent9 has all required methods
+if (typeof agent9.checkExisting !== 'function') {
+    console.warn('⚠️ [FREE] agent9 methods missing, creating wrapper...');
+    
+    const originalAgent9 = agent9;
+    agent9 = {
+        checkExisting: async (request) => {
+            if (typeof originalAgent9.checkExisting === 'function') {
+                return originalAgent9.checkExisting(request);
+            }
+            try {
+                const KnowledgePackage = require('./KnowledgePackage');
+                const normalized = request.toLowerCase().trim();
+                const pkg = await KnowledgePackage.findOne({ 
+                    'request.normalized': normalized 
+                });
+                if (pkg) {
+                    return { exists: true, packageId: pkg.packageId, blocked: false };
+                }
+                return { exists: false, message: 'No data found' };
+            } catch (err) {
+                return { exists: false, message: 'No data found' };
+            }
+        },
+        retrievePackage: async (request, count) => {
+            if (typeof originalAgent9.retrievePackage === 'function') {
+                return originalAgent9.retrievePackage(request, count);
+            }
+            try {
+                const KnowledgePackage = require('./KnowledgePackage');
+                const normalized = request.toLowerCase().trim();
+                const pkg = await KnowledgePackage.findOne({ 
+                    'request.normalized': normalized 
+                });
+                if (pkg) {
+                    const leads = pkg.results?.leads || [];
+                    return {
+                        found: true,
+                        packageId: pkg.packageId,
+                        totalAvailable: leads.length,
+                        leads: leads.slice(0, count || leads.length),
+                        companies: pkg.results?.companies || [],
+                        emails: pkg.results?.emails || [],
+                        messages: pkg.results?.messages || [],
+                        metadata: pkg.metadata || {},
+                        isStale: false,
+                        age: 0,
+                    };
+                }
+                return { found: false, message: 'No data found' };
+            } catch (err) {
+                return { found: false, message: 'No data found' };
+            }
+        },
+        storePackage: async (data) => {
+            if (typeof originalAgent9.storePackage === 'function') {
+                return originalAgent9.storePackage(data);
+            }
+            try {
+                const KnowledgePackage = require('./KnowledgePackage');
+                const packageId = `pkg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+                const pkg = new KnowledgePackage({
+                    packageId,
+                    request: data.request || {},
+                    searchParams: data.searchParams || {},
+                    results: {
+                        total: data.leads?.length || 0,
+                        leads: data.leads || [],
+                        companies: data.companies || [],
+                        emails: data.emails || [],
+                        messages: data.messages || [],
+                    },
+                    metadata: {
+                        createdAt: new Date(),
+                        expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
+                    },
+                    performance: data.performance || {},
+                });
+                await pkg.save();
+                return pkg;
+            } catch (err) {
+                console.error('❌ [AGENT9] Store fallback failed:', err.message);
+                return null;
+            }
+        },
+        cleanupExpired: async () => {
+            if (typeof originalAgent9.cleanupExpired === 'function') {
+                return originalAgent9.cleanupExpired();
+            }
+            try {
+                const KnowledgePackage = require('./KnowledgePackage');
+                const result = await KnowledgePackage.deleteMany({
+                    'metadata.expiresAt': { $lt: new Date() }
+                });
+                return result.deletedCount;
+            } catch (err) {
+                return 0;
+            }
+        },
+        getStatistics: async () => {
+            if (typeof originalAgent9.getStatistics === 'function') {
+                return originalAgent9.getStatistics();
+            }
+            try {
+                const KnowledgePackage = require('./KnowledgePackage');
+                const total = await KnowledgePackage.countDocuments();
+                return { totalPackages: total, expiredPackages: 0, totalLeads: 0 };
+            } catch (err) {
+                return { totalPackages: 0, expiredPackages: 0, totalLeads: 0 };
+            }
+        }
+    };
+    console.log('✅ [FREE] agent9 wrapper created with fallback methods');
+}
 
 const fs = require('fs');
 const path = require('path');
@@ -172,10 +289,8 @@ class AgentLogger {
     _sanitizeData(data) {
         if (!data) return null;
         
-        // Deep clone and sanitize
         const sanitized = JSON.parse(JSON.stringify(data));
         
-        // Remove large arrays or truncate
         if (sanitized.leads && Array.isArray(sanitized.leads)) {
             sanitized.leads = sanitized.leads.slice(0, 3).map(l => ({
                 name: l.name || l.company || 'Unknown',
@@ -215,7 +330,6 @@ class AgentLogger {
             sanitized._qualifiedCount = data.qualified_prospects?.length || 0;
         }
         
-        // Truncate long strings
         for (const key in sanitized) {
             if (typeof sanitized[key] === 'string' && sanitized[key].length > 500) {
                 sanitized[key] = sanitized[key].substring(0, 500) + '... [TRUNCATED]';
