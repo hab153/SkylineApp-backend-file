@@ -4,132 +4,15 @@
 // 1. IMPORTS – All 9 Agents
 // ────────────────────────────────────────────────────────────────
 
-const agent1 = require('./agent1');
-const agent2 = require('./agent2');
-const agent3 = require('./agent3');
-const agent4 = require('./agent4');
-const agent5 = require('./agent5');
-const agent6 = require('./agent6');
-const agent7 = require('./agent7');
-const agent8 = require('./agent8');
-
-// ── Agent9 with safety wrapper ──
-let agent9 = require('./agent9');
-
-// ✅ Ensure agent9 has all required methods
-if (typeof agent9.checkExisting !== 'function') {
-    console.warn('⚠️ [FREE] agent9 methods missing, creating wrapper...');
-    
-    const originalAgent9 = agent9;
-    agent9 = {
-        checkExisting: async (request) => {
-            if (typeof originalAgent9.checkExisting === 'function') {
-                return originalAgent9.checkExisting(request);
-            }
-            try {
-                const KnowledgePackage = require('./KnowledgePackage');
-                const normalized = request.toLowerCase().trim();
-                const pkg = await KnowledgePackage.findOne({ 
-                    'request.normalized': normalized 
-                });
-                if (pkg) {
-                    return { exists: true, packageId: pkg.packageId, blocked: false };
-                }
-                return { exists: false, message: 'No data found' };
-            } catch (err) {
-                return { exists: false, message: 'No data found' };
-            }
-        },
-        retrievePackage: async (request, count) => {
-            if (typeof originalAgent9.retrievePackage === 'function') {
-                return originalAgent9.retrievePackage(request, count);
-            }
-            try {
-                const KnowledgePackage = require('./KnowledgePackage');
-                const normalized = request.toLowerCase().trim();
-                const pkg = await KnowledgePackage.findOne({ 
-                    'request.normalized': normalized 
-                });
-                if (pkg) {
-                    const leads = pkg.results?.leads || [];
-                    return {
-                        found: true,
-                        packageId: pkg.packageId,
-                        totalAvailable: leads.length,
-                        leads: leads.slice(0, count || leads.length),
-                        companies: pkg.results?.companies || [],
-                        emails: pkg.results?.emails || [],
-                        messages: pkg.results?.messages || [],
-                        metadata: pkg.metadata || {},
-                        isStale: false,
-                        age: 0,
-                    };
-                }
-                return { found: false, message: 'No data found' };
-            } catch (err) {
-                return { found: false, message: 'No data found' };
-            }
-        },
-        storePackage: async (data) => {
-            if (typeof originalAgent9.storePackage === 'function') {
-                return originalAgent9.storePackage(data);
-            }
-            try {
-                const KnowledgePackage = require('./KnowledgePackage');
-                const packageId = `pkg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-                const pkg = new KnowledgePackage({
-                    packageId,
-                    request: data.request || {},
-                    searchParams: data.searchParams || {},
-                    results: {
-                        total: data.leads?.length || 0,
-                        leads: data.leads || [],
-                        companies: data.companies || [],
-                        emails: data.emails || [],
-                        messages: data.messages || [],
-                    },
-                    metadata: {
-                        createdAt: new Date(),
-                        expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
-                    },
-                    performance: data.performance || {},
-                });
-                await pkg.save();
-                return pkg;
-            } catch (err) {
-                console.error('❌ [AGENT9] Store fallback failed:', err.message);
-                return null;
-            }
-        },
-        cleanupExpired: async () => {
-            if (typeof originalAgent9.cleanupExpired === 'function') {
-                return originalAgent9.cleanupExpired();
-            }
-            try {
-                const KnowledgePackage = require('./KnowledgePackage');
-                const result = await KnowledgePackage.deleteMany({
-                    'metadata.expiresAt': { $lt: new Date() }
-                });
-                return result.deletedCount;
-            } catch (err) {
-                return 0;
-            }
-        },
-        getStatistics: async () => {
-            if (typeof originalAgent9.getStatistics === 'function') {
-                return originalAgent9.getStatistics();
-            }
-            try {
-                const KnowledgePackage = require('./KnowledgePackage');
-                const total = await KnowledgePackage.countDocuments();
-                return { totalPackages: total, expiredPackages: 0, totalLeads: 0 };
-            } catch (err) {
-                return { totalPackages: 0, expiredPackages: 0, totalLeads: 0 };
-            }
-        }
-    };
-    console.log('✅ [FREE] agent9 wrapper created with fallback methods');
-}
+const agent1 = require('./agent1');  // ✅ understandRequest()
+const agent2 = require('./agent2');  // ✅ generateHypotheses()
+const agent3 = require('./agent3');  // ✅ multiSourceSearch()
+const agent4 = require('./agent4');  // ✅ normalizeAndDeduplicate()
+const agent5 = require('./agent5');  // ✅ enrichCompanies()
+const agent6 = require('./agent6');  // ✅ scoreCompanies()
+const agent7 = require('./agent7');  // ✅ rankCompanies()
+const agent8 = require('./agent8');  // ✅ prepareOutreach()
+const agent9 = require('./agent9');  // ✅ Knowledge Repository
 
 const fs = require('fs');
 const path = require('path');
@@ -140,9 +23,6 @@ const path = require('path');
 
 const MAX_LEADS_RETURNED = 5;
 const MAX_MESSAGE_LENGTH = 800;
-const CURRENT_YEAR = new Date().getFullYear();
-
-// Output quantity control
 const QUANTITY_RULE_HARD_MIN = 2;
 const QUANTITY_RULE_DEFAULT_MAX = MAX_LEADS_RETURNED;
 
@@ -157,7 +37,6 @@ class AgentLogger {
         this.logs = [];
         this.logDir = path.join(__dirname, 'logs', 'agents');
         
-        // Create log directory if it doesn't exist
         if (!fs.existsSync(this.logDir)) {
             fs.mkdirSync(this.logDir, { recursive: true });
         }
@@ -200,10 +79,8 @@ class AgentLogger {
             status: 'started',
             input: this._sanitizeData(input),
         });
-        
         console.log(`🔄 [${agent}] Started at ${new Date().toISOString()}`);
         console.log(`   📥 Input: ${JSON.stringify(this._sanitizeData(input)).substring(0, 150)}...`);
-        
         return entry;
     }
 
@@ -213,10 +90,8 @@ class AgentLogger {
             duration: duration,
             output: this._sanitizeData(output),
         });
-        
         console.log(`✅ [${agent}] Completed in ${duration}ms`);
         console.log(`   📤 Output: ${JSON.stringify(this._sanitizeData(output)).substring(0, 150)}...`);
-        
         return entry;
     }
 
@@ -226,9 +101,7 @@ class AgentLogger {
             error: error.message,
             stack: error.stack,
         });
-        
         console.error(`❌ [${agent}] Error: ${error.message}`);
-        
         return entry;
     }
 
@@ -239,13 +112,11 @@ class AgentLogger {
             blocked: result.blocked || false,
             packageId: result.packageId || null,
         });
-        
         console.log(`📦 [${agent}] Cache check: ${result.exists ? 'HIT ✅' : 'MISS ❌'}`);
         if (result.exists) {
             console.log(`   📦 Package: ${result.packageId}`);
             console.log(`   ⛔ Blocked: ${result.blocked ? 'YES' : 'NO'}`);
         }
-        
         return entry;
     }
 
@@ -258,14 +129,12 @@ class AgentLogger {
             age: result.age || null,
             isStale: result.isStale || false,
         });
-        
         console.log(`📦 [${agent}] Cache retrieval: ${result.found ? 'SUCCESS ✅' : 'FAILED ❌'}`);
         if (result.found) {
             console.log(`   📊 Total available: ${result.totalAvailable}`);
             console.log(`   📊 Returned: ${result.leads?.length || 0}`);
             console.log(`   📅 Age: ${result.age?.toFixed(1) || 'Unknown'} days`);
         }
-        
         return entry;
     }
 
@@ -276,60 +145,57 @@ class AgentLogger {
             packageId: result?.packageId || null,
             totalLeads: result?.results?.total || 0,
         });
-        
         console.log(`💾 [${agent}] Storage: ${result ? 'SUCCESS ✅' : 'FAILED ❌'}`);
         if (result) {
             console.log(`   📦 Package: ${result.packageId}`);
             console.log(`   📊 Leads stored: ${result.results?.total || 0}`);
         }
-        
         return entry;
     }
 
     _sanitizeData(data) {
         if (!data) return null;
-        
         const sanitized = JSON.parse(JSON.stringify(data));
+        
+        // Truncate large arrays
+        if (sanitized.companies && Array.isArray(sanitized.companies)) {
+            sanitized.companies = sanitized.companies.slice(0, 3).map(c => ({
+                name: c.name || c.company || 'Unknown',
+                domain: c.domain || 'N/A',
+                score: c.score?.overall || c.confidence || 'N/A'
+            }));
+            sanitized._companyCount = data.companies?.length || 0;
+        }
+        
+        if (sanitized.candidates && Array.isArray(sanitized.candidates)) {
+            sanitized.candidates = sanitized.candidates.slice(0, 3);
+            sanitized._candidateCount = data.candidates?.length || 0;
+        }
+        
+        if (sanitized.hypotheses && Array.isArray(sanitized.hypotheses)) {
+            sanitized.hypotheses = sanitized.hypotheses.slice(0, 5);
+            sanitized._hypothesisCount = data.hypotheses?.length || 0;
+        }
+        
+        if (sanitized.prospects && Array.isArray(sanitized.prospects)) {
+            sanitized.prospects = sanitized.prospects.slice(0, 3).map(p => ({
+                company_name: p.company_name || 'Unknown',
+                contact_email: p.contact_email || 'N/A',
+                quality_passed: p.quality_passed || false
+            }));
+            sanitized._prospectCount = data.prospects?.length || 0;
+        }
         
         if (sanitized.leads && Array.isArray(sanitized.leads)) {
             sanitized.leads = sanitized.leads.slice(0, 3).map(l => ({
                 name: l.name || l.company || 'Unknown',
                 company: l.company || 'Unknown',
                 email: l.email || 'N/A',
-                score: l.leadScore || l.fit_score || 'N/A',
             }));
             sanitized._leadCount = data.leads?.length || 0;
         }
         
-        if (sanitized.prospects && Array.isArray(sanitized.prospects)) {
-            sanitized.prospects = sanitized.prospects.slice(0, 3).map(p => ({
-                name: p.name || p.company || 'Unknown',
-                company: p.company || 'Unknown',
-                domain: p.domain || 'N/A',
-            }));
-            sanitized._prospectCount = data.prospects?.length || 0;
-        }
-        
-        if (sanitized.enriched_prospects && Array.isArray(sanitized.enriched_prospects)) {
-            sanitized.enriched_prospects = sanitized.enriched_prospects.slice(0, 3).map(p => ({
-                name: p.name || p.company || 'Unknown',
-                company: p.company || 'Unknown',
-                email: p.email || 'N/A',
-                confidence: p.confidence || 'N/A',
-            }));
-            sanitized._enrichedCount = data.enriched_prospects?.length || 0;
-        }
-        
-        if (sanitized.qualified_prospects && Array.isArray(sanitized.qualified_prospects)) {
-            sanitized.qualified_prospects = sanitized.qualified_prospects.slice(0, 3).map(p => ({
-                name: p.name || 'Unknown',
-                company: p.company || 'Unknown',
-                score: p.fit_score || p.leadScore || 'N/A',
-                status: p.qualification_status || 'N/A',
-            }));
-            sanitized._qualifiedCount = data.qualified_prospects?.length || 0;
-        }
-        
+        // Truncate long strings
         for (const key in sanitized) {
             if (typeof sanitized[key] === 'string' && sanitized[key].length > 500) {
                 sanitized[key] = sanitized[key].substring(0, 500) + '... [TRUNCATED]';
@@ -351,15 +217,12 @@ class AgentLogger {
                 agents: [...new Set(this.logs.map(l => l.agent.replace(/_.*$/, '')))],
                 logs: this.logs,
             };
-            
             fs.writeFileSync(logFile, JSON.stringify(summary, null, 2));
-            
             console.log(`\n${'═'.repeat(80)}`);
             console.log(`📋 [LOGGER] Session saved: ${logFile}`);
             console.log(`📋 [LOGGER] Total duration: ${summary.totalDuration}ms`);
             console.log(`📋 [LOGGER] Total logs: ${summary.totalLogs}`);
             console.log(`${'═'.repeat(80)}\n`);
-            
             return logFile;
         } catch (error) {
             console.error('❌ [LOGGER] Failed to save session log:', error.message);
@@ -408,7 +271,6 @@ function buildUserProfile(userProfile) {
 // ────────────────────────────────────────────────────────────────
 
 async function generateFreeResponse(message, history, userProfile, onProgress) {
-    // ── Initialize logger ──
     const logger = new AgentLogger();
     const userId = userProfile?.userId || userProfile?.id || 'anonymous';
     logger.startSession(userId, message);
@@ -419,8 +281,11 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
         const apiKey = process.env.OPENAI_API_KEY;
-        const tavilyKey = process.env.TAVILY_API_KEY;
         const profile = buildUserProfile(userProfile);
+
+        if (!apiKey) {
+            throw new Error('OPENAI_API_KEY is not set in environment variables');
+        }
 
         // ── Sanitize input ──
         const rawMessage = typeof message === 'string' ? message.slice(0, MAX_MESSAGE_LENGTH) : '';
@@ -439,7 +304,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log('📦 [AGENT9] Checking knowledge repository...');
         onProgress?.('🔍 Checking existing knowledge...');
 
-        const cacheCheckStart = Date.now();
         const cachedResult = await agent9.checkExisting(safeMessage);
         logger.logCacheCheck('AGENT9', cachedResult);
 
@@ -448,7 +312,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             console.log(`✅ [AGENT9] Cache HIT! Package: ${cachedResult.packageId}`);
             onProgress?.('📦 Retrieving cached results...');
 
-            const retrievalStart = Date.now();
             const retrievalResult = await agent9.retrievePackage(safeMessage, QUANTITY_RULE_DEFAULT_MAX);
             logger.logCacheRetrieval('AGENT9', retrievalResult);
 
@@ -517,7 +380,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log('🔄 [AGENT9] Cache MISS. Starting full pipeline...');
         onProgress?.('🧠 No cache found. Building fresh results...');
 
-        // ─── Agent1: Router ───
+        // ─── Agent1: Router (Query Understanding) ───
         console.log('🔁 [AGENT1] Routing request...');
         onProgress?.('🧠 Understanding your request...');
 
@@ -526,12 +389,13 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         let routerResult;
         try {
-            routerResult = await agent1.routeRequest({
+            routerResult = await agent1.understandRequest({
                 message: safeMessage,
                 apiKey: apiKey,
                 history: history,
                 userId: userId,
                 onProgress: onProgress,
+                autoClarify: true
             });
             logger.logAgentComplete('AGENT1', routerResult, Date.now() - agent1Start);
         } catch (error) {
@@ -542,7 +406,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log(`📋 [AGENT1] Intent: ${routerResult.intent}, Confidence: ${routerResult.confidence}`);
 
         // ── Handle non-lead intents ──
-        if (routerResult.intent !== 'lead_generation') {
+        if (routerResult.intent !== 'find_companies' && routerResult.intent !== 'find_startups' && routerResult.intent !== 'find_decision_makers') {
             console.log(`📋 [AGENT1] Non-lead intent: ${routerResult.intent}`);
             
             const result = {
@@ -587,34 +451,39 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             return result;
         }
 
-        // ── Extract lead intent ──
-        const entities = routerResult.entities || {};
-        const leadIntent = {
-            industry: entities.industry || 'general',
-            location: entities.location || null,
-            target: entities.company || entities.industry || 'businesses',
-            preferredContact: entities.role || 'Any',
-            lead_count: entities.lead_count || QUANTITY_RULE_DEFAULT_MAX,
-            entities: entities,
-        };
+        // ── Extract search package ──
+        const searchPackage = routerResult.search_package;
+        if (!searchPackage) {
+            const result = {
+                reply: 'I couldn\'t understand your request properly. Could you please provide more details about what you\'re looking for?',
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'Please provide more details about your search.' }
+                ],
+                _meta: { error: 'No search_package generated' }
+            };
+            await logger.saveSessionLog();
+            return result;
+        }
 
-        console.log(`🎯 [ORCHESTRATOR] Lead Intent:`, leadIntent);
+        console.log(`📦 [ORCHESTRATOR] Search Package:`, JSON.stringify(searchPackage, null, 2));
 
-        // ─── Agent2: Prospector ───
-        console.log('🔁 [AGENT2] Discovering prospects...');
-        onProgress?.('🔎 Searching for matching prospects...');
+        // ─── Agent2: Generate Hypotheses ───
+        console.log('🔁 [AGENT2] Generating search hypotheses...');
+        onProgress?.('🧠 Generating search strategies...');
 
         const agent2Start = Date.now();
-        logger.logAgentStart('AGENT2', { intent: leadIntent });
+        logger.logAgentStart('AGENT2', { searchPackage: searchPackage });
 
         let agent2Result;
         try {
-            agent2Result = await agent2.discoverProspects({
-                intent: leadIntent,
+            agent2Result = await agent2.generateHypotheses({
+                searchPackage: searchPackage,
                 apiKey: apiKey,
-                tavilyKey: tavilyKey,
                 userId: userId,
                 onProgress: onProgress,
+                historicalData: null
             });
             logger.logAgentComplete('AGENT2', agent2Result, Date.now() - agent2Start);
         } catch (error) {
@@ -622,52 +491,43 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             throw error;
         }
 
-        if (agent2Result.needs_clarification) {
-            const result = {
-                reply: agent2Result.clarification_question || 'I need more information to find the right prospects.',
-                updatedHistory: [
-                    ...(history || []),
-                    { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: agent2Result.clarification_question }
-                ],
-                _meta: { needsClarification: true }
-            };
-            await logger.saveSessionLog();
-            return result;
-        }
-
-        if (!agent2Result.prospects || agent2Result.prospects.length === 0) {
-            const msg = `I couldn't find any matching prospects for ${leadIntent.industry || 'your industry'}${leadIntent.location ? ' in ' + leadIntent.location : ''}. Try a different industry or location.`;
+        if (!agent2Result.success || !agent2Result.hypotheses || agent2Result.hypotheses.length === 0) {
+            const msg = `I couldn't generate any search hypotheses for ${searchPackage.service_needed || 'your request'}. Please try a different service or industry.`;
             const result = {
                 reply: msg,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: 'No matching prospects found.' }
+                    { role: 'assistant', content: 'No search hypotheses generated.' }
                 ],
-                _meta: { found: 0 }
+                _meta: { found: 0, error: agent2Result.error }
             };
-            logger.log('FINAL_RESPONSE', { source: 'no_prospects' });
+            logger.log('FINAL_RESPONSE', { source: 'no_hypotheses' });
             await logger.saveSessionLog();
             return result;
         }
 
-        // ─── Agent3: Enrichment ───
-        console.log('🔁 [AGENT3] Enriching prospects...');
-        onProgress?.('🔬 Enriching and verifying prospects...');
+        console.log(`✅ [AGENT2] Generated ${agent2Result.hypotheses.length} hypotheses`);
+        console.log(`   📊 Primary: ${agent2Result.search_strategy?.primary_hypotheses?.join(', ') || 'N/A'}`);
+
+        // ─── Agent3: Multi-Source Search ───
+        console.log('🔁 [AGENT3] Executing multi-source search...');
+        onProgress?.('🔎 Searching multiple sources...');
 
         const agent3Start = Date.now();
-        logger.logAgentStart('AGENT3', { prospectsCount: agent2Result.prospects?.length || 0 });
+        logger.logAgentStart('AGENT3', {
+            hypotheses: agent2Result.hypotheses.map(h => h.industry),
+            hypothesisCount: agent2Result.hypotheses.length
+        });
 
         let agent3Result;
         try {
-            agent3Result = await agent3.enrichProspects({
-                prospects: agent2Result.prospects,
-                intent: leadIntent,
-                apiKey: apiKey,
-                tavilyKey: tavilyKey,
+            agent3Result = await agent3.multiSourceSearch({
+                hypotheses: agent2Result.hypotheses,
+                searchPackage: searchPackage,
                 userId: userId,
                 onProgress: onProgress,
+                sources: ['tavily']
             });
             logger.logAgentComplete('AGENT3', agent3Result, Date.now() - agent3Start);
         } catch (error) {
@@ -675,51 +535,38 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             throw error;
         }
 
-        if (agent3Result.needs_clarification) {
+        if (!agent3Result.success || !agent3Result.candidates || agent3Result.candidates.length === 0) {
+            const msg = `I searched for ${searchPackage.service_needed || 'your request'} but couldn't find any matching companies. Try a different service or industry.`;
             const result = {
-                reply: agent3Result.clarification_question || 'I enriched the prospects but many records are incomplete.',
+                reply: msg,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: agent3Result.clarification_question }
+                    { role: 'assistant', content: 'No candidates found.' }
                 ],
-                _meta: { needsClarification: true }
+                _meta: { found: 0, stats: agent3Result.stats }
             };
+            logger.log('FINAL_RESPONSE', { source: 'no_candidates' });
             await logger.saveSessionLog();
             return result;
         }
 
-        if (!agent3Result.enriched_prospects || agent3Result.enriched_prospects.length === 0) {
-            const result = {
-                reply: `I found prospects but couldn't verify any of them. Try a different industry or location.`,
-                updatedHistory: [
-                    ...(history || []),
-                    { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: 'No verified prospects found.' }
-                ],
-                _meta: { found: 0 }
-            };
-            logger.log('FINAL_RESPONSE', { source: 'no_enriched' });
-            await logger.saveSessionLog();
-            return result;
-        }
+        console.log(`✅ [AGENT3] Found ${agent3Result.candidates.length} candidates from ${agent3Result.stats?.hypotheses || 0} hypotheses`);
 
-        // ─── Agent4: Qualification ───
-        console.log('🔁 [AGENT4] Qualifying prospects...');
-        onProgress?.('🏆 Evaluating and prioritizing leads...');
+        // ─── Agent4: Normalize & Deduplicate ───
+        console.log('🔁 [AGENT4] Normalizing and deduplicating...');
+        onProgress?.('📋 Normalizing company data...');
 
         const agent4Start = Date.now();
-        logger.logAgentStart('AGENT4', { enrichedCount: agent3Result.enriched_prospects?.length || 0 });
+        logger.logAgentStart('AGENT4', { candidatesCount: agent3Result.candidates.length });
 
         let agent4Result;
         try {
-            agent4Result = await agent4.qualifyProspects({
-                enriched_prospects: agent3Result.enriched_prospects,
-                intent: leadIntent,
-                apiKey: apiKey,
-                tavilyKey: tavilyKey,
+            agent4Result = await agent4.normalizeAndDeduplicate({
+                candidates: agent3Result.candidates,
+                searchPackage: searchPackage,
                 userId: userId,
-                onProgress: onProgress,
+                onProgress: onProgress
             });
             logger.logAgentComplete('AGENT4', agent4Result, Date.now() - agent4Start);
         } catch (error) {
@@ -727,55 +574,37 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             throw error;
         }
 
-        if (agent4Result.needs_clarification) {
+        if (!agent4Result.success || !agent4Result.companies || agent4Result.companies.length === 0) {
             const result = {
-                reply: agent4Result.clarification_question || 'I found some leads but the qualification is uncertain.',
+                reply: `I found candidates but couldn't normalize them into clean company profiles. Please try again.`,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: agent4Result.clarification_question }
+                    { role: 'assistant', content: 'No valid companies after deduplication.' }
                 ],
-                _meta: { needsClarification: true }
+                _meta: { found: 0, stats: agent4Result.stats }
             };
+            logger.log('FINAL_RESPONSE', { source: 'no_companies_after_dedupe' });
             await logger.saveSessionLog();
             return result;
         }
 
-        const qualifiedProspects = agent4Result.qualified_prospects || [];
-        const qualified = qualifiedProspects.filter(p => p.qualification_status === 'qualified');
+        console.log(`✅ [AGENT4] Normalized ${agent4Result.companies.length} unique companies`);
 
-        if (qualified.length === 0) {
-            const result = {
-                reply: `I reviewed ${agent4Result.stats?.reviewed || 0} prospects but none met the qualification criteria. Try broadening your search.`,
-                updatedHistory: [
-                    ...(history || []),
-                    { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: 'No qualified leads found.' }
-                ],
-                _meta: { found: 0 }
-            };
-            logger.log('FINAL_RESPONSE', { source: 'no_qualified' });
-            await logger.saveSessionLog();
-            return result;
-        }
-
-        // ─── Agent5: Formatter ───
-        console.log('🔁 [AGENT5] Formatting final leads...');
-        onProgress?.('📦 Packaging final leads...');
+        // ─── Agent5: Enrich Companies ───
+        console.log('🔁 [AGENT5] Enriching company intelligence...');
+        onProgress?.('📊 Enriching company data...');
 
         const agent5Start = Date.now();
-        logger.logAgentStart('AGENT5', { qualifiedCount: qualified.length });
+        logger.logAgentStart('AGENT5', { companiesCount: agent4Result.companies.length });
 
         let agent5Result;
         try {
-            agent5Result = await agent5.formatFinalLeads({
-                qualified_prospects: qualified,
-                intent: leadIntent,
-                userProfile: profile,
-                apiKey: apiKey,
-                tavilyKey: tavilyKey,
+            agent5Result = await agent5.enrichCompanies({
+                companies: agent4Result.companies,
+                searchPackage: searchPackage,
                 userId: userId,
-                onProgress: onProgress,
+                onProgress: onProgress
             });
             logger.logAgentComplete('AGENT5', agent5Result, Date.now() - agent5Start);
         } catch (error) {
@@ -783,36 +612,195 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             throw error;
         }
 
-        if (agent5Result.needs_clarification) {
+        if (!agent5Result.success || !agent5Result.companies || agent5Result.companies.length === 0) {
             const result = {
-                reply: agent5Result.clarification_question || 'I formatted the leads but some fields are missing. Please check the output.',
+                reply: `I found ${agent4Result.companies.length} companies but couldn't enrich them. Please try again.`,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: agent5Result.clarification_question }
+                    { role: 'assistant', content: 'Enrichment failed.' }
                 ],
-                _meta: { needsClarification: true }
+                _meta: { found: 0, stats: agent5Result.stats }
             };
+            logger.log('FINAL_RESPONSE', { source: 'enrichment_failed' });
             await logger.saveSessionLog();
             return result;
         }
 
-        const finalLeads = agent5Result.leads || [];
+        console.log(`✅ [AGENT5] Enriched ${agent5Result.companies.length} companies`);
 
-        if (finalLeads.length === 0) {
+        // ─── Agent6: Skyline Intelligence (Scoring) ───
+        console.log('🔁 [AGENT6] Running Skyline Intelligence...');
+        onProgress?.('🧠 Analyzing company intelligence...');
+
+        const agent6Start = Date.now();
+        logger.logAgentStart('AGENT6', { companiesCount: agent5Result.companies.length });
+
+        let agent6Result;
+        try {
+            agent6Result = await agent6.scoreCompanies({
+                companies: agent5Result.companies,
+                searchPackage: searchPackage,
+                userId: userId,
+                onProgress: onProgress
+            });
+            logger.logAgentComplete('AGENT6', agent6Result, Date.now() - agent6Start);
+        } catch (error) {
+            logger.logAgentError('AGENT6', error);
+            throw error;
+        }
+
+        if (!agent6Result.success || !agent6Result.companies || agent6Result.companies.length === 0) {
             const result = {
-                reply: `I processed ${qualified.length} qualified prospects but couldn't generate final leads. Please try again.`,
+                reply: `I enriched ${agent5Result.companies.length} companies but couldn't score them. Please try again.`,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: safeMessage },
-                    { role: 'assistant', content: 'No final leads generated.' }
+                    { role: 'assistant', content: 'Scoring failed.' }
                 ],
-                _meta: { found: 0 }
+                _meta: { found: 0, stats: agent6Result.stats }
             };
-            logger.log('FINAL_RESPONSE', { source: 'no_final_leads' });
+            logger.log('FINAL_RESPONSE', { source: 'scoring_failed' });
             await logger.saveSessionLog();
             return result;
         }
+
+        console.log(`✅ [AGENT6] Scored ${agent6Result.companies.length} companies`);
+        console.log(`   📊 High: ${agent6Result.stats?.high_confidence || 0}`);
+        console.log(`   📊 Medium: ${agent6Result.stats?.medium_confidence || 0}`);
+        console.log(`   📊 Low: ${agent6Result.stats?.low_confidence || 0}`);
+
+        // ─── Agent7: Ranking & Recommendation ───
+        console.log('🔁 [AGENT7] Ranking companies...');
+        onProgress?.('🏆 Ranking and prioritizing...');
+
+        const agent7Start = Date.now();
+        logger.logAgentStart('AGENT7', { companiesCount: agent6Result.companies.length });
+
+        let agent7Result;
+        try {
+            agent7Result = await agent7.rankCompanies({
+                companies: agent6Result.companies,
+                searchPackage: searchPackage,
+                userId: userId,
+                onProgress: onProgress,
+                limit: MAX_LEADS_RETURNED * 2,
+                diversify: true
+            });
+            logger.logAgentComplete('AGENT7', agent7Result, Date.now() - agent7Start);
+        } catch (error) {
+            logger.logAgentError('AGENT7', error);
+            throw error;
+        }
+
+        if (!agent7Result.success || !agent7Result.companies || agent7Result.companies.length === 0) {
+            const result = {
+                reply: `I scored ${agent6Result.companies.length} companies but couldn't rank them. Please try again.`,
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'Ranking failed.' }
+                ],
+                _meta: { found: 0, stats: agent7Result.stats }
+            };
+            logger.log('FINAL_RESPONSE', { source: 'ranking_failed' });
+            await logger.saveSessionLog();
+            return result;
+        }
+
+        console.log(`✅ [AGENT7] Ranked ${agent7Result.companies.length} companies`);
+
+        // ─── Agent8: Outreach Preparation ───
+        console.log('🔁 [AGENT8] Preparing outreach...');
+        onProgress?.('📝 Generating personalized outreach...');
+
+        const agent8Start = Date.now();
+        logger.logAgentStart('AGENT8', { companiesCount: agent7Result.companies.length });
+
+        let agent8Result;
+        try {
+            agent8Result = await agent8.prepareOutreach({
+                companies: agent7Result.companies,
+                searchPackage: searchPackage,
+                userProfile: profile,
+                apiKey: apiKey,
+                userId: userId,
+                onProgress: onProgress,
+                limit: MAX_LEADS_RETURNED * 2
+            });
+            logger.logAgentComplete('AGENT8', agent8Result, Date.now() - agent8Start);
+        } catch (error) {
+            logger.logAgentError('AGENT8', error);
+            throw error;
+        }
+
+        if (!agent8Result.success || !agent8Result.prospects || agent8Result.prospects.length === 0) {
+            const result = {
+                reply: `I ranked ${agent7Result.companies.length} companies but couldn't prepare outreach. Please try again.`,
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: safeMessage },
+                    { role: 'assistant', content: 'Outreach preparation failed.' }
+                ],
+                _meta: { found: 0, stats: agent8Result.stats }
+            };
+            logger.log('FINAL_RESPONSE', { source: 'outreach_failed' });
+            await logger.saveSessionLog();
+            return result;
+        }
+
+        console.log(`✅ [AGENT8] Prepared outreach for ${agent8Result.prospects.length} companies`);
+        console.log(`   📊 With email: ${agent8Result.stats?.with_email || 0}`);
+        console.log(`   📊 Quality passed: ${agent8Result.stats?.quality_passed || 0}`);
+
+        // ─── Convert prepared prospects to final leads format ───
+        const finalLeads = agent8Result.prospects.map(prospect => {
+            return {
+                name: prospect.company_name || 'Unknown',
+                company: prospect.company_name || 'Unknown',
+                domain: prospect.company_domain || null,
+                website: prospect.company_domain ? `https://${prospect.company_domain}` : null,
+                email: prospect.contact_email || null,
+                emailConfidence: prospect.contact_confidence || 'none',
+                emailLabel: prospect.contact_source === 'none' ? 'No email found' : `Email from ${prospect.contact_source}`,
+                role: searchPackage.filters?.job_titles?.[0] || 'Decision Maker',
+                industry: prospect.company_industry || searchPackage.industries?.[0] || 'general',
+                hq: prospect.company_location || searchPackage.countries?.[0] || null,
+                employees: prospect.company_employees || null,
+                leadScore: prospect.confidence || 0.5,
+                rank: prospect.rank || null,
+                rank_label: prospect.rank_label || null,
+                quality_score: prospect.quality_score || 0,
+                quality_passed: prospect.quality_passed || false,
+                quality_issues: prospect.quality_issues || [],
+                quality_warnings: prospect.quality_warnings || [],
+                outreach: {
+                    subject: prospect.outreach_subject || '',
+                    body: prospect.outreach_body || '',
+                    personalization_used: prospect.personalization_used || [],
+                    evidence_summary: prospect.evidence_summary || [],
+                },
+                reason_selected: prospect.reason_selected || [],
+                messages: [
+                    {
+                        type: 'initial',
+                        subject: prospect.outreach_subject || `Introduction: ${prospect.company_name}`,
+                        body: prospect.outreach_body || `Hi,\n\nI came across ${prospect.company_name} and wanted to reach out.\n\nBest,\n${profile.senderName}`
+                    },
+                    {
+                        type: 'followup',
+                        subject: `Re: ${prospect.outreach_subject || `Introduction: ${prospect.company_name}`}`,
+                        body: `Hi,\n\nJust following up on my previous message.\n\nBest,\n${profile.senderName}`
+                    },
+                    {
+                        type: 'breakup',
+                        subject: `Closing the loop`,
+                        body: `Hi,\n\nAssuming timing isn't right, I'll stop following up. Reach out whenever it makes sense.\n\nBest,\n${profile.senderName}`
+                    }
+                ],
+                _prospect_data: prospect // Keep original data for reference
+            };
+        });
 
         // ─── Apply quantity rules ───
         const finalLeadsSliced = _applyOutputQuantityRules(finalLeads, QUANTITY_RULE_DEFAULT_MAX);
@@ -829,9 +817,9 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                     normalized: safeMessage.toLowerCase(),
                 },
                 searchParams: {
-                    industry: leadIntent.industry,
-                    region: leadIntent.location,
-                    jobTitle: leadIntent.preferredContact,
+                    industry: searchPackage.industries?.[0] || 'general',
+                    region: searchPackage.countries?.[0] || null,
+                    jobTitle: searchPackage.filters?.job_titles?.[0] || 'Any',
                     leadCount: finalLeadsSliced.length,
                 },
                 leads: finalLeadsSliced,
@@ -840,9 +828,9 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 messages: finalLeadsSliced.map(l => l.messages || []),
                 performance: {
                     searchTime: Date.now() - logger.startTime,
-                    aiCalls: 5,
-                    apiCalls: 3,
-                    costEstimate: 0.08,
+                    aiCalls: 8,
+                    apiCalls: 4,
+                    costEstimate: 0.15,
                 }
             });
             logger.logStorage('AGENT9', storageResult);
@@ -853,7 +841,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         }
 
         // ─── Return final results ───
-        console.log(`✅ [FREE ENGINE] Returning ${finalLeadsSliced.length} fresh leads`);
+        console.log(`✅ [FREE ENGINE] Returning ${finalLeadsSliced.length} final leads`);
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
         const result = {
@@ -861,15 +849,25 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             updatedHistory: [
                 ...(history || []),
                 { role: 'user', content: safeMessage },
-                { role: 'assistant', content: `[Generated ${finalLeadsSliced.length} fresh leads]` },
+                { role: 'assistant', content: `[Generated ${finalLeadsSliced.length} final leads]` },
             ],
             _meta: {
                 source: 'fresh',
                 totalGenerated: finalLeadsSliced.length,
-                agent2Stats: agent2Result.stats,
+                agent1Stats: {
+                    intent: routerResult.intent,
+                    confidence: routerResult.confidence
+                },
+                agent2Stats: {
+                    hypotheses: agent2Result.hypotheses?.length || 0,
+                    confidence: agent2Result.confidence
+                },
                 agent3Stats: agent3Result.stats,
                 agent4Stats: agent4Result.stats,
                 agent5Stats: agent5Result.stats,
+                agent6Stats: agent6Result.stats,
+                agent7Stats: agent7Result.stats,
+                agent8Stats: agent8Result.stats,
                 storedInRepository: !!storageResult,
             }
         };
