@@ -93,7 +93,7 @@ PRIMARY RESPONSIBILITIES
    - Country / Countries
    - City or Region (if specified)
    - Industry / Industries
-   - Service Needed (what the user is selling or looking for)
+   - Service Needed (what the user is selling or looking for) ← **INFER FROM CONTEXT**
    - Target Type (Companies, Startups, Agencies, Decision Makers, Investors, Partners, Competitors, Hiring Companies)
    - Amount Requested (number of results)
    - Language preference (if specified)
@@ -108,7 +108,7 @@ PRIMARY RESPONSIBILITIES
 3. Detect missing information:
    - If country is missing, flag it.
    - If industry is missing, flag it.
-   - If service needed is missing, flag it.
+   - **If service_needed is missing for lead generation, infer from context or use default "business solutions".**
    - If amount is missing, use default of 100.
    - If target type is missing, use default of "Companies".
 
@@ -130,6 +130,14 @@ PRIMARY RESPONSIBILITIES
    - unknown
 
 6. Create a structured search package that every later stage can use.
+
+**CRITICAL RULES FOR SERVICE_NEEDED:**
+- If the user is asking to find leads or companies, and service_needed is not explicitly stated, INFER it from context:
+  - If the user mentions "CEOs", "founders", "decision makers" → default service_needed = "business solutions" or "professional services"
+  - If the user mentions an industry → service_needed = "solutions for [industry]"
+  - If the user is selling something specific, use that.
+- Do NOT ask for clarification on service_needed for lead generation requests unless absolutely necessary.
+- Only ask for clarification when BOTH country AND industry AND service_needed are missing.
 
 YOU MUST NOT:
 - Search for leads.
@@ -200,7 +208,7 @@ IMPORTANT
 - Do not hallucinate entities.
 - Do not output extra commentary.
 - Do not explain your reasoning beyond the reason field.
-- Always prefer safe clarification over incorrect extraction.`;
+- **For lead generation requests, prefer inferring service_needed over asking for clarification.**`;
 
 // ────────────────────────────────────────────────────────────────
 // 3. Utility: Retry helper
@@ -234,6 +242,16 @@ function validateExtractedData(parsed) {
   // Validate entities
   const entities = parsed.entities || {};
 
+  // ✅ Detect if this is a lead generation request
+  const isLeadGen = parsed.intent === 'find_companies' || 
+                    parsed.intent === 'find_startups' || 
+                    parsed.intent === 'find_agencies' ||
+                    parsed.intent === 'find_decision_makers' ||
+                    parsed.intent === 'find_investors' ||
+                    parsed.intent === 'find_partners' ||
+                    parsed.intent === 'find_competitors' ||
+                    parsed.intent === 'find_hiring_companies';
+
   // Check countries
   if (entities.countries && entities.countries.length > 0) {
     const invalidCountries = entities.countries.filter(c => !VALID_COUNTRIES.includes(c));
@@ -254,9 +272,25 @@ function validateExtractedData(parsed) {
     missing.push('industry');
   }
 
-  // Check service_needed
+  // ✅ FIX: Check service_needed with inference for lead generation
   if (!entities.service_needed) {
-    missing.push('service_needed');
+    if (isLeadGen) {
+      // ✅ Infer service_needed from industry or default
+      if (entities.industries && entities.industries.length > 0) {
+        entities.service_needed = `solutions for ${entities.industries[0]}`;
+        console.log(`🔧 [Stage1] Inferred service_needed: "${entities.service_needed}" from industry`);
+      } else {
+        entities.service_needed = 'business solutions';
+        console.log(`🔧 [Stage1] Using default service_needed: "business solutions"`);
+      }
+      // ✅ Remove from missing since we inferred it
+      const serviceIndex = missing.indexOf('service_needed');
+      if (serviceIndex > -1) {
+        missing.splice(serviceIndex, 1);
+      }
+    } else {
+      missing.push('service_needed');
+    }
   }
 
   // Check requested_results
@@ -382,6 +416,14 @@ Extract structured entities from this request and return valid JSON only.`;
   // Validate extracted data
   const { errors, missing, entities } = validateExtractedData(result);
 
+  // ✅ After validation, check if service_needed is still missing
+  // If it is, but this is lead gen, we already inferred it in validateExtractedData
+  // But if it's still missing for some reason, set a default
+  if (!entities.service_needed && (result.intent === 'find_companies' || result.intent === 'find_decision_makers')) {
+    entities.service_needed = 'business solutions';
+    console.log(`🔧 [Stage1] Emergency fallback: set service_needed to "business solutions"`);
+  }
+
   // Build search_package
   const searchPackage = {
     countries: entities.countries || [],
@@ -404,7 +446,8 @@ Extract structured entities from this request and return valid JSON only.`;
   };
 
   // Determine if clarification is needed
-  const criticalMissing = missing.filter(f => ['country', 'industry', 'service_needed'].includes(f));
+  // ✅ FIX: Don't ask for clarification if only service_needed is missing (we already infer it)
+  const criticalMissing = missing.filter(f => ['country', 'industry'].includes(f));
   const needsClarification = result.needs_clarification || 
                            (result.confidence < 0.50) || 
                            (criticalMissing.length > 0) ||
