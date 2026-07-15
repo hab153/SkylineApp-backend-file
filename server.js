@@ -56,6 +56,9 @@ const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login 
 // ✅ Import sessionController for session routes
 const sessionController = require('./sessionController');
 
+// ✅ NEW: Import history routes
+const historyRoutes = require('./historyRoutes');
+
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -221,6 +224,9 @@ app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
+
+// ✅ NEW: History Routes (NEW SYSTEM)
+app.use('/api/history', historyRoutes);
 
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
@@ -399,25 +405,6 @@ app.use('/api/sessions', (req, res, next) => {
 // ✅ FIXED: Use sessionController for session routes
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.post('/api/sessions', verifyToken, sessionController.createSession);
-
-// ✅ DEBUG: Log ALL history route requests with FULL details
-app.use('/api/history', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📜 [HISTORY ROUTE] /api/history called');
-    console.log('📝 [HISTORY ROUTE] Method:', req.method);
-    console.log('📝 [HISTORY ROUTE] Full URL:', req.originalUrl);
-    console.log('📝 [HISTORY ROUTE] Params:', req.params);
-    console.log('📝 [HISTORY ROUTE] Query:', req.query);
-    console.log('📝 [HISTORY ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
-        'user-agent': req.headers['user-agent'] || 'Not set'
-    });
-    console.log('📝 [HISTORY ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
-
-app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
 
 // ──────────────────────────────────────────────────────────────
 //  DREAMS ROUTES
