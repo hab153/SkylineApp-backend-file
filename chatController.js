@@ -20,34 +20,44 @@ const handleQueueError = (error, res) => {
     return res.status(500).json({ message: 'AI service error. Please try again later.' });
 };
 
-// POST /api/chat
+// POST /api/chat - COMPLETE FIXED VERSION
 const sendMessage = async (req, res) => {
     let { message, history, sessionId } = req.body;
     const userId = req.userId;
-    if (!message) return res.status(400).json({ message: 'Message is required' });
     
-    // Sanitize user message
-    message = sanitizeString(message);
-    if (history && Array.isArray(history)) {
-        history = history.map(h => ({
-            role: h.role,
-            content: sanitizeString(h.content)
-        }));
+    console.log('🔍 [CHAT] Received message:', message);
+    console.log('🔍 [CHAT] User ID:', userId);
+    
+    if (!message) {
+        console.log('❌ [CHAT] Message is empty');
+        return res.status(400).json({ message: 'Message is required' });
     }
+    
+    // ✅ FIX: Store original message, sanitize ONLY for display
+    const originalMessage = message;
+    
+    // Sanitize for display purposes only
+    const displayMessage = sanitizeString(message);
+    
+    console.log('🔍 [CHAT] Original message:', originalMessage);
+    console.log('🔍 [CHAT] Original length:', originalMessage.length);
     
     const currentSessionId = sessionId || uuidv4();
     const user = await User.findById(userId);
     const plan = user.subscriptionTier || 'free';
 
     try {
-        // Save user message
-        await ChatMessage.create({
+        // ✅ SAVE USER MESSAGE - Store the ORIGINAL message
+        const savedUserMessage = await ChatMessage.create({
             userId,
             sessionId: currentSessionId,
             role: 'user',
-            content: message,
-            title: message.substring(0, 30) + '...'
+            content: originalMessage,  // ✅ Store original, NOT sanitized
+            title: originalMessage.substring(0, 30) + '...'
         });
+        
+        console.log('✅ [CHAT] User message saved:', savedUserMessage._id);
+        console.log('✅ [CHAT] Content length saved:', originalMessage.length);
 
         // --- Create/Update Session metadata ---
         const existingSession = await Session.findOne({ userId, sessionId: currentSessionId });
@@ -56,23 +66,26 @@ const sendMessage = async (req, res) => {
                 userId,
                 sessionId: currentSessionId,
                 type: 'lead',
-                name: message.substring(0, 50) || 'Lead Search',
+                name: originalMessage.substring(0, 50) || 'Lead Search',
                 updatedAt: new Date()
             });
+            console.log('✅ [CHAT] Session created:', currentSessionId);
         } else {
             await Session.findOneAndUpdate(
                 { userId, sessionId: currentSessionId },
                 { updatedAt: new Date() }
             );
+            console.log('✅ [CHAT] Session updated:', currentSessionId);
         }
 
+        // --- Get AI Response ---
         let aiReply, updatedHistory;
         if (plan === 'free') {
-            const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(message, history || [], user));
+            const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(originalMessage, history || [], user));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
-            const result = await goQueue.enqueue(() => goAI.generateGoResponse(message, history || [], user));
+            const result = await goQueue.enqueue(() => goAI.generateGoResponse(originalMessage, history || [], user));
             aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
             updatedHistory = result ? (result.updatedHistory || []) : [];
         } else { // pro
@@ -85,18 +98,41 @@ const sendMessage = async (req, res) => {
                 bio: user.bio,
                 userId: user._id.toString()
             };
-            const result = await proQueue.enqueue(() => generateBusinessResponse(message, history || [], userProfile));
+            const result = await proQueue.enqueue(() => generateBusinessResponse(originalMessage, history || [], userProfile));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
 
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: aiReply });
-        res.json({ reply: aiReply, sessionId: currentSessionId, history: updatedHistory });
+        // ✅ SAVE AI RESPONSE
+        const savedAiMessage = await ChatMessage.create({ 
+            userId, 
+            sessionId: currentSessionId, 
+            role: 'ai', 
+            content: aiReply 
+        });
+        
+        console.log('✅ [CHAT] AI response saved:', savedAiMessage._id);
+        console.log('✅ [CHAT] AI response length:', aiReply ? aiReply.length : 0);
+
+        // ✅ VERIFY messages were saved
+        const verifyCount = await ChatMessage.countDocuments({ 
+            userId, 
+            sessionId: currentSessionId 
+        });
+        console.log('✅ [CHAT] Total messages in session:', verifyCount);
+
+        res.json({ 
+            reply: aiReply, 
+            sessionId: currentSessionId, 
+            history: updatedHistory,
+            messageCount: verifyCount
+        });
+        
     } catch (error) {
+        console.error('❌ [CHAT] Error:', error);
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
             return handleQueueError(error, res);
         }
-        console.error('Chat route error:', error);
         res.status(500).json({ message: error.message || 'Server Error' });
     }
 };
@@ -182,10 +218,14 @@ const analyzeDream = async (req, res) => {
     let { dream, sessionId } = req.body;
     const userId = req.userId;
     if (!dream) return res.status(400).json({ message: 'Dream description is required' });
+    
+    // ✅ FIX: Store original, sanitize for display
+    const originalDream = dream;
     dream = sanitizeString(dream);
+    
     const currentSessionId = sessionId || uuidv4();
     try {
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: dream, title: dream.substring(0, 30) + '...' });
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: originalDream, title: originalDream.substring(0, 30) + '...' });
         const user = await User.findById(userId);
         const userProfile = {
             fullName: user.fullName,
@@ -196,7 +236,7 @@ const analyzeDream = async (req, res) => {
             bio: user.bio,
             userId: user._id.toString()
         };
-        const result = await proQueue.enqueue(() => generateBusinessResponse(dream, [], userProfile));
+        const result = await proQueue.enqueue(() => generateBusinessResponse(originalDream, [], userProfile));
         await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply });
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
@@ -213,11 +253,15 @@ const refineDream = async (req, res) => {
     let { followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
     if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
+    
+    // ✅ FIX: Store original
+    const originalFollowUp = followUpAnswer;
     followUpAnswer = sanitizeString(followUpAnswer);
     dreamDescription = sanitizeString(dreamDescription);
+    
     const currentSessionId = sessionId || uuidv4();
     try {
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: followUpAnswer });
+        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: originalFollowUp });
         const user = await User.findById(userId);
         const userProfile = {
             fullName: user.fullName,
@@ -228,7 +272,7 @@ const refineDream = async (req, res) => {
             bio: user.bio,
             userId: user._id.toString()
         };
-        const result = await proQueue.enqueue(() => generateBusinessResponse(followUpAnswer, [], userProfile));
+        const result = await proQueue.enqueue(() => generateBusinessResponse(originalFollowUp, [], userProfile));
         await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply });
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
