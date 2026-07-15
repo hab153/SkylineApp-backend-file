@@ -1,31 +1,25 @@
 // sanitize.js
 
 /**
- * Sanitize string input (remove XSS vectors)
+ * Sanitize string input - SAFE VERSION
+ * Only escapes dangerous characters, does NOT remove content
  * @param {string} input - The string to sanitize
- * @returns {string} - Sanitized string
+ * @returns {string} - Sanitized string (escaped, but content preserved)
  */
 function sanitizeString(input) {
     if (!input || typeof input !== 'string') return input;
     
-    // Remove any HTML tags
-    let sanitized = input.replace(/<[^>]*>/g, '');
+    // ✅ Only escape dangerous characters, don't remove anything
+    let sanitized = String(input);
     
-    // Remove any script-like content
-    sanitized = sanitized.replace(/javascript:/gi, '');
-    sanitized = sanitized.replace(/on\w+=/gi, '');
-    sanitized = sanitized.replace(/data:text\/html/gi, '');
-    
-    // Remove extra whitespace (preserve meaningful spaces)
-    sanitized = sanitized.replace(/\s+/g, ' ').trim();
-    
-    // Escape any remaining special characters
+    // ✅ Escape HTML entities to prevent XSS
     sanitized = sanitized
         .replace(/&/g, '&amp;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;')
+        .replace(/`/g, '&#x60;');
     
     return sanitized;
 }
@@ -166,7 +160,7 @@ function isValidEmail(email) {
 }
 
 // ============================================================
-// XSS PROTECTION FUNCTIONS (NEW)
+// XSS PROTECTION FUNCTIONS
 // ============================================================
 
 /**
@@ -297,7 +291,7 @@ module.exports = {
     isSafeString,
     validatePasswordStrength,
     isValidEmail,
-    // XSS exports (NEW)
+    // XSS exports
     escapeHtml,
     sanitizeOutput,
     // NoSQL exports
