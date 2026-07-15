@@ -463,6 +463,50 @@ app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
 // ──────────────────────────────────────────────────────────────
 app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
 
+// ──────────────────────────────────────────────────────────────
+//  DEBUG ROUTE - Check messages (Remove after fixing)
+// ──────────────────────────────────────────────────────────────
+app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
+    try {
+        const ChatMessage = require('./ChatMessage');
+        const Session = require('./Session');
+        
+        const userId = req.userId;
+        
+        // Get sessions
+        const sessions = await Session.find({ userId }).sort({ updatedAt: -1 }).limit(5);
+        
+        let result = {
+            userId: userId,
+            totalSessions: sessions.length,
+            sessions: []
+        };
+        
+        for (const session of sessions) {
+            const messages = await ChatMessage.find({ 
+                userId, 
+                sessionId: session.sessionId 
+            }).sort({ createdAt: 1 });
+            
+            result.sessions.push({
+                sessionId: session.sessionId,
+                name: session.name,
+                messageCount: messages.length,
+                messages: messages.map(m => ({
+                    role: m.role,
+                    content: m.content ? m.content.substring(0, 100) : '⚠️ EMPTY',
+                    contentLength: m.content ? m.content.length : 0,
+                    hasContent: !!m.content
+                }))
+            });
+        }
+        
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ════════════════════════════════════════════
 //  START SERVER
 // ════════════════════════════════════════════
