@@ -400,13 +400,19 @@ app.use('/api/sessions', (req, res, next) => {
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.post('/api/sessions', verifyToken, sessionController.createSession);
 
-// ✅ DEBUG: Log ALL history route requests
+// ✅ DEBUG: Log ALL history route requests with FULL details
 app.use('/api/history', (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📜 [HISTORY ROUTE] /api/history called');
     console.log('📝 [HISTORY ROUTE] Method:', req.method);
-    console.log('📝 [HISTORY ROUTE] User ID:', req.userId || 'Not authenticated');
+    console.log('📝 [HISTORY ROUTE] Full URL:', req.originalUrl);
     console.log('📝 [HISTORY ROUTE] Params:', req.params);
+    console.log('📝 [HISTORY ROUTE] Query:', req.query);
+    console.log('📝 [HISTORY ROUTE] Headers:', {
+        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
+        'user-agent': req.headers['user-agent'] || 'Not set'
+    });
+    console.log('📝 [HISTORY ROUTE] User ID:', req.userId || 'Not authenticated');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 });
