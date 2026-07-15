@@ -59,6 +59,9 @@ const sessionController = require('./sessionController');
 // ✅ NEW: Import history routes
 const historyRoutes = require('./historyRoutes');
 
+// ✅ NEW: Import usage controller
+const UsageController = require('./UsageController');
+
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -499,6 +502,11 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// ════════════════════════════════════════════
+//  USAGE ROUTE (Real-time usage tracking)
+// ════════════════════════════════════════════
+app.get('/api/usage', verifyToken, UsageController.getUsage);
 
 // ════════════════════════════════════════════
 //  START SERVER
