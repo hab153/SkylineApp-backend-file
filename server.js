@@ -53,6 +53,9 @@ const requestQueue = require('./requestQueue');
 // Import auth controller functions
 const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login } = require('./authController');
 
+// ✅ Import sessionController for session routes
+const sessionController = require('./sessionController');
+
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -196,10 +199,6 @@ mongoose.connect(process.env.MONGODB_URI, {
 async function verifyWebhookRegistration() {
     try {
         console.log('🔍 [WEBHOOK] Verifying webhook registration...');
-        
-        // You can add a call to Nylas API to check webhook status here
-        // For now, just log that the endpoint is ready
-        
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
         console.log('📋 [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
@@ -237,8 +236,6 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     next();
 }, nylasAuthController.getAuthUrl);
 
-// ❌ RESPONSE INTERCEPTOR REMOVED - It was converting & to &amp;
-
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
 // ✅ CHECK NYLAS CONNECTION STATUS
@@ -246,14 +243,12 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
   try {
     const EmailAccount = require('./EmailAccount');
     
-    // Check both EmailAccount and User models
     const emailAccount = await EmailAccount.findOne({ 
       userId: req.userId, 
       isConnected: true 
     });
     
     if (emailAccount) {
-      // Check if token is expired
       const isExpired = emailAccount.tokenExpiry && new Date(emailAccount.tokenExpiry) < new Date();
       
       res.json({
@@ -381,17 +376,14 @@ app.use('/api/chat', (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('💬 [CHAT ROUTE] /api/chat called');
     console.log('📝 [CHAT ROUTE] Method:', req.method);
-    console.log('📝 [CHAT ROUTE] Body:', JSON.stringify(req.body).substring(0, 200));
+    console.log('📝 [CHAT ROUTE] Body:', req.body ? JSON.stringify(req.body).substring(0, 200) : 'None');
     console.log('📝 [CHAT ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('📝 [CHAT ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
-        'content-type': req.headers['content-type'] || 'Not set'
-    });
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 });
 
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
+app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
 
 // ✅ DEBUG: Log ALL session route requests
 app.use('/api/sessions', (req, res, next) => {
@@ -404,8 +396,9 @@ app.use('/api/sessions', (req, res, next) => {
     next();
 });
 
-app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, chatController.getSessions);
-app.post('/api/sessions', verifyToken, chatController.createSession);
+// ✅ FIXED: Use sessionController for session routes
+app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
+app.post('/api/sessions', verifyToken, sessionController.createSession);
 
 // ✅ DEBUG: Log ALL history route requests
 app.use('/api/history', (req, res, next) => {
@@ -419,6 +412,12 @@ app.use('/api/history', (req, res, next) => {
 });
 
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
+
+// ──────────────────────────────────────────────────────────────
+//  DREAMS ROUTES
+// ──────────────────────────────────────────────────────────────
+app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
+app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 
 // ──────────────────────────────────────────────────────────────
 //  AI SUGGESTION ROUTE
