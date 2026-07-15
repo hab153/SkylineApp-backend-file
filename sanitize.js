@@ -1,521 +1,302 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const dotenv = require('dotenv');
-const path = require('path');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
-const crypto = require('crypto');
+// sanitize.js
 
-// MIDDLEWARE & UTILITIES
-const { verifyToken } = require('./authMiddleware');
-const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware');
-const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
-
-// ✅ NEW: Nylas imports
-const nylasAuthController = require('./nylasAuthController');
-const { handleWebhook } = require('./nylasWebhookHandler');
-
-const { startExpiryJob } = require('./expiryJob');
-const { startFollowUpJob } = require('./followUpJob');
-const flutterwaveWebhook = require('./flutterwaveWebhook');
-
-const { createFlutterwavePayment } = require('./Flutterwavepayment');
-const leadController = require('./leadController');
-const chatController = require('./chatController');
-const userController = require('./userController');
-const adminController = require('./adminController');
-const notificationController = require('./notificationController');
-const reportController = require('./reportController');
-const followUpController = require('./followUpController');
-const revenueController = require('./revenueController');
-
-// AI SERVICES
-const freeAI = require('./Free');
-const goAI = require('./Go');
-const { generateBusinessResponse } = require('./businessAI');
-const { generateAIReply } = require('./aiReplyGenerator');
-const { generateSuggestion } = require('./aiSuggestion');
-
-// MODELS & SERVICES
-const Lead = require('./Lead');
-const authRoutes = require('./authRoutes');
-const assistantRoutes = require('./assistantRoutes');
-const sessionRoutes = require('./sessionRoutes');
-const User = require('./User');
-const Report = require('./Report');
-const requestQueue = require('./requestQueue');
-
-// Import auth controller functions
-const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login } = require('./authController');
-
-// ✅ Import sessionController for session routes
-const sessionController = require('./sessionController');
-
-// Validation imports
-const { validate } = require('./validationMiddleware');
-const {
-    registerSchema,
-    loginSchema,
-    changeEmailSchema,
-    resetPasswordSchema,
-    forgotPasswordSchema,
-    verifyAgeSchema,
-    updateProfileSchema,
-    batchSendSchema,
-    renameLeadSchema,
-    updateAutoReplySchema,
-    chatSchema,
-    feedbackSchema,
-    adminMessageSchema,
-    reportSchema,
-    autoFollowUpSchema,
-    assistantSchema,
-    dreamSchema,
-    dreamRefineSchema
-} = require('./validationSchemas');
-
-// Backup job
-const { startBackupJob } = require('./backupJob');
-
-// XSS protection
-const { xssProtection, xssOutputProtection } = require('./xssMiddleware');
-
-// Data Export Routes
-const dataExportRoutes = require('./dataExportRoutes');
-
-// Data Export Cleanup Job
-const { startDataExportCleanupJob } = require('./dataExportJob');
-
-dotenv.config();
-const app = express();
-
-// ════════════════════════════════════════════
-//  CRITICAL STARTUP CHECKS
-// ════════════════════════════════════════════
-if (!process.env.JWT_SECRET) {
-    console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('❌ Please set JWT_SECRET in your .env file and restart the server.');
-    process.exit(1);
+/**
+ * Sanitize string input - SAFE VERSION
+ * Only escapes dangerous characters, does NOT remove content
+ * @param {string} input - The string to sanitize
+ * @returns {string} - Sanitized string (escaped, but content preserved)
+ */
+function sanitizeString(input) {
+    if (!input || typeof input !== 'string') return input;
+    
+    // ✅ Only escape dangerous characters, don't remove anything
+    let sanitized = String(input);
+    
+    // ✅ Escape HTML entities to prevent XSS
+    sanitized = sanitized
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;')
+        .replace(/`/g, '&#x60;');
+    
+    return sanitized;
 }
-console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
 
-// ════════════════════════════════════════════
-//  BACKUP CHECK
-// ════════════════════════════════════════════
-const fs = require('fs-extra');
-const backupDir = process.env.BACKUP_DIR || './backups';
+/**
+ * Sanitize email address
+ * @param {string} email - The email to sanitize
+ * @returns {string} - Sanitized email (lowercase, trimmed)
+ */
+function sanitizeEmail(email) {
+    if (!email || typeof email !== 'string') return email;
+    return email.toLowerCase().trim();
+}
 
-try {
-    if (fs.existsSync(backupDir)) {
-        const backups = fs.readdirSync(backupDir).filter(f => f.endsWith('.zip'));
-        if (backups.length === 0) {
-            console.warn('⚠️ [BACKUP] No backups found. Run "npm run backup" to create one.');
-        } else {
-            const latest = backups.sort().pop();
-            const stats = fs.statSync(path.join(backupDir, latest));
-            const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
-            if (days > 7) {
-                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+/**
+ * Sanitize username
+ * @param {string} username - The username to sanitize
+ * @returns {string} - Sanitized username
+ */
+function sanitizeUsername(username) {
+    if (!username || typeof username !== 'string') return username;
+    // Remove any special characters except letters, numbers, underscore
+    return username.trim().replace(/[^a-zA-Z0-9_]/g, '');
+}
+
+/**
+ * Sanitize an entire object (recursive)
+ * @param {object} obj - The object to sanitize
+ * @param {array} exclude - Fields to exclude from sanitization
+ * @returns {object} - Sanitized object
+ */
+function sanitizeObject(obj, exclude = []) {
+    if (!obj || typeof obj !== 'object') return obj;
+    
+    const result = {};
+    for (const [key, value] of Object.entries(obj)) {
+        // Skip excluded fields
+        if (exclude.includes(key)) {
+            result[key] = value;
+            continue;
+        }
+        
+        if (typeof value === 'string') {
+            // Special handling for email fields
+            if (key === 'email' || key === 'newEmail') {
+                result[key] = sanitizeEmail(value);
+            } else if (key === 'username' || key === 'identifier') {
+                result[key] = sanitizeUsername(value);
             } else {
-                console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
+                result[key] = sanitizeString(value);
             }
-        }
-    } else {
-        console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
-    }
-} catch (err) {
-    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
-}
-
-// ════════════════════════════════════════════
-//  SECURITY MIDDLEWARE
-// ════════════════════════════════════════════
-app.use(helmet());
-app.disable('x-powered-by');
-app.set('trust proxy', 1);
-
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 200,
-    keyGenerator: (req) => req.userId || req.ip,
-    skipSuccessfulRequests: false,
-    standardHeaders: true,
-    legacyHeaders: false,
-});
-app.use(globalLimiter);
-app.use(cors());
-
-// ════════════════════════════════════════════
-//  WEBHOOKS (EXEMPT FROM XSS)
-//  NOTE: These must be BEFORE express.json() to handle raw payloads
-// ════════════════════════════════════════════
-app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
-
-// ✅ NEW: Nylas inbound webhook (Handles both GET for challenge and POST for events)
-app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
-
-// ════════════════════════════════════════════
-//  JSON PARSER & STATIC FILES
-// ════════════════════════════════════════════
-app.use(express.json());
-app.use(express.static(path.join(__dirname)));
-
-// ════════════════════════════════════════════
-//  XSS PROTECTION MIDDLEWARE
-// ════════════════════════════════════════════
-app.use(xssProtection);
-app.use(xssOutputProtection);
-
-// ════════════════════════════════════════════
-//  MONGODB CONNECTION
-// ════════════════════════════════════════════
-mongoose.connect(process.env.MONGODB_URI, {
-    maxPoolSize: 50,
-    serverSelectionTimeoutMS: 5000
-})
-    .then(() => {
-        console.log('✅ MongoDB Connected');
-        
-        startExpiryJob();
-        startFollowUpJob();
-        if (process.env.NODE_ENV !== 'test') {
-            startBackupJob();
-        }
-        startDataExportCleanupJob();
-
-        // ✅ START WEBHOOK VERIFICATION
-        verifyWebhookRegistration();
-    })
-    .catch(err => console.log('❌ MongoDB Connection Error:', err));
-
-// ════════════════════════════════════════════
-//  WEBHOOK VERIFICATION FUNCTION
-// ════════════════════════════════════════════
-async function verifyWebhookRegistration() {
-    try {
-        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
-        console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log('📋 [WEBHOOK] Please register this URL in Nylas Dashboard:');
-        console.log('   → https://dashboard.nylas.com');
-        console.log('   → Select your app → Webhooks');
-        console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log('   → Triggers: message.created, message.sent, grant.expired, grant.refreshed');
-    } catch (error) {
-        console.error('❌ [WEBHOOK] Verification error:', error.message);
-    }
-}
-
-// ════════════════════════════════════════════
-//  ROUTES
-// ════════════════════════════════════════════
-app.use('/api/auth', authRoutes);
-
-// Logout & Revoke routes
-app.post('/api/auth/logout', verifyToken, logout);
-app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
-
-app.use('/api', assistantRoutes);
-app.use('/api', sessionRoutes);
-
-// ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
-app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
-    console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
-    console.log('📝 [NYLAS ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
-        'content-type': req.headers['content-type'] || 'Not set'
-    });
-    console.log('📝 [NYLAS ROUTE] Method:', req.method);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-}, nylasAuthController.getAuthUrl);
-
-app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
-
-// ✅ CHECK NYLAS CONNECTION STATUS
-app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
-  try {
-    const EmailAccount = require('./EmailAccount');
-    
-    const emailAccount = await EmailAccount.findOne({ 
-      userId: req.userId, 
-      isConnected: true 
-    });
-    
-    if (emailAccount) {
-      const isExpired = emailAccount.tokenExpiry && new Date(emailAccount.tokenExpiry) < new Date();
-      
-      res.json({
-        connected: true,
-        email: emailAccount.emailAddress || 'Connected',
-        isExpired: isExpired,
-        grantId: emailAccount.nylasGrantId
-      });
-    } else {
-      res.json({
-        connected: false,
-        email: null
-      });
-    }
-  } catch (error) {
-    console.error('❌ [NYLAS STATUS] Error:', error);
-    res.status(500).json({ 
-      connected: false, 
-      error: 'Failed to check status' 
-    });
-  }
-});
-
-// ✅ TEST ROUTE: Check if callback route is reachable
-app.get('/api/auth/nylas/test-callback', (req, res) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('✅ [TEST] Callback test route hit!');
-    console.log('📥 [TEST] Full URL:', req.originalUrl);
-    console.log('📥 [TEST] Query params:', req.query);
-    console.log('📥 [TEST] Headers:', {
-        host: req.headers.host,
-        'user-agent': req.headers['user-agent']
-    });
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    
-    res.send(`
-        <h1>✅ Test Callback Working!</h1>
-        <p>If you see this, the route is accessible.</p>
-        <p>Full URL: ${req.originalUrl}</p>
-        <p>Query: ${JSON.stringify(req.query)}</p>
-        <p>Time: ${new Date().toISOString()}</p>
-        <hr>
-        <p><strong>Next Steps:</strong></p>
-        <ul>
-            <li>Check if this matches your Nylas redirect URI</li>
-            <li>Make sure this exact URI is whitelisted in Nylas Dashboard</li>
-            <li>Try the actual callback: <a href="/api/auth/nylas/callback?test=123">/api/auth/nylas/callback?test=123</a></li>
-        </ul>
-    `);
-});
-
-// ──────────────────────────────────────────────────────────────
-//  PAYMENT ROUTE
-// ──────────────────────────────────────────────────────────────
-app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
-
-// ──────────────────────────────────────────────────────────────
-//  AUTH ROUTES
-// ──────────────────────────────────────────────────────────────
-app.post('/api/auth/register', validate(registerSchema), register);
-app.post('/api/auth/login', validate(loginSchema), login);
-app.put('/api/auth/change-email', verifyToken, validate(changeEmailSchema), userController.changeEmail);
-app.post('/api/auth/forgot-password', validate(forgotPasswordSchema), forgotPassword);
-app.post('/api/auth/reset-password', validate(resetPasswordSchema), resetPassword);
-app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
-
-// ──────────────────────────────────────────────────────────────
-//  USER PROFILE ROUTES
-// ──────────────────────────────────────────────────────────────
-app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
-app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
-app.put('/api/auth/change-password', verifyToken, userController.changePassword);
-
-// ──────────────────────────────────────────────────────────────
-//  ACCOUNT DELETION ROUTES (Right to Be Forgotten – GDPR)
-// ──────────────────────────────────────────────────────────────
-app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
-app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserAccount);
-app.post('/api/users/me/restore', verifyToken, userController.restoreUserAccount);
-app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletionStatus);
-
-// ──────────────────────────────────────────────────────────────
-//  DATA EXPORT ROUTES (Right to Data Portability – GDPR)
-// ──────────────────────────────────────────────────────────────
-app.use('/api/data', dataExportRoutes);
-
-// ──────────────────────────────────────────────────────────────
-//  LEAD / CONVERSATION ROUTES
-// ──────────────────────────────────────────────────────────────
-app.get('/api/conversations', verifyToken, leadController.getConversations);
-app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
-app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
-app.put('/api/leads/:leadId/auto-reply', verifyToken, validate(updateAutoReplySchema), leadController.updateAutoReply);
-app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
-app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
-app.get('/api/leads', verifyToken, leadController.getAllLeads);
-
-// ──────────────────────────────────────────────────────────────
-//  FOLLOW-UP ROUTES
-// ──────────────────────────────────────────────────────────────
-app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
-app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
-app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
-
-// ──────────────────────────────────────────────────────────────
-//  REVENUE TRACKING
-// ──────────────────────────────────────────────────────────────
-if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
-    app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
-}
-
-// ──────────────────────────────────────────────────────────────
-//  NOTIFICATIONS
-// ──────────────────────────────────────────────────────────────
-app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
-app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
-app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
-
-// ──────────────────────────────────────────────────────────────
-//  CHAT & DREAMS ROUTES WITH DEBUG LOGS
-// ──────────────────────────────────────────────────────────────
-
-// ✅ DEBUG: Log ALL chat route requests
-app.use('/api/chat', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('💬 [CHAT ROUTE] /api/chat called');
-    console.log('📝 [CHAT ROUTE] Method:', req.method);
-    console.log('📝 [CHAT ROUTE] Body:', req.body ? JSON.stringify(req.body).substring(0, 200) : 'None');
-    console.log('📝 [CHAT ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
-
-app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
-app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
-
-// ✅ DEBUG: Log ALL session route requests
-app.use('/api/sessions', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📂 [SESSIONS ROUTE] /api/sessions called');
-    console.log('📝 [SESSIONS ROUTE] Method:', req.method);
-    console.log('📝 [SESSIONS ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('📝 [SESSIONS ROUTE] Body:', req.body ? JSON.stringify(req.body).substring(0, 200) : 'None');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
-
-// ✅ FIXED: Use sessionController for session routes
-app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
-app.post('/api/sessions', verifyToken, sessionController.createSession);
-
-// ✅ DEBUG: Log ALL history route requests with FULL details
-app.use('/api/history', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📜 [HISTORY ROUTE] /api/history called');
-    console.log('📝 [HISTORY ROUTE] Method:', req.method);
-    console.log('📝 [HISTORY ROUTE] Full URL:', req.originalUrl);
-    console.log('📝 [HISTORY ROUTE] Params:', req.params);
-    console.log('📝 [HISTORY ROUTE] Query:', req.query);
-    console.log('📝 [HISTORY ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
-        'user-agent': req.headers['user-agent'] || 'Not set'
-    });
-    console.log('📝 [HISTORY ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
-
-app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
-
-// ──────────────────────────────────────────────────────────────
-//  DREAMS ROUTES
-// ──────────────────────────────────────────────────────────────
-app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
-app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
-
-// ──────────────────────────────────────────────────────────────
-//  AI SUGGESTION ROUTE
-// ──────────────────────────────────────────────────────────────
-app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
-    try {
-        const { messages } = req.body;
-        if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: 'Invalid message format.' });
-        }
-        const contextMessages = messages.slice(-3);
-        const suggestion = await generateSuggestion(contextMessages);
-        res.json({
-            suggestion,
-            remainingHints: req.remainingHints
-        });
-    } catch (error) {
-        console.error('AI Suggestion Error:', error);
-        res.status(500).json({ error: 'Failed to generate suggestion.' });
-    }
-});
-
-// ──────────────────────────────────────────────────────────────
-//  ASSISTANT ROUTE
-// ──────────────────────────────────────────────────────────────
-app.post('/api/assistant', verifyToken, checkAssistantLimit, validate(assistantSchema), require('./assistantController').assistantChat);
-
-// ──────────────────────────────────────────────────────────────
-//  ADMIN ROUTES
-// ──────────────────────────────────────────────────────────────
-app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
-app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
-app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
-app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
-app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
-app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserChatView);
-app.post('/api/admin/users/:id/message', verifyToken, validate(adminMessageSchema), adminController.sendUserMessage);
-app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
-
-// ──────────────────────────────────────────────────────────────
-//  REPORTS
-// ──────────────────────────────────────────────────────────────
-app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
-
-// ──────────────────────────────────────────────────────────────
-//  DEBUG ROUTE - Check messages (Remove after fixing)
-// ──────────────────────────────────────────────────────────────
-app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
-    try {
-        const ChatMessage = require('./ChatMessage');
-        const Session = require('./Session');
-        
-        const userId = req.userId;
-        
-        // Get sessions
-        const sessions = await Session.find({ userId }).sort({ updatedAt: -1 }).limit(5);
-        
-        let result = {
-            userId: userId,
-            totalSessions: sessions.length,
-            sessions: []
-        };
-        
-        for (const session of sessions) {
-            const messages = await ChatMessage.find({ 
-                userId, 
-                sessionId: session.sessionId 
-            }).sort({ createdAt: 1 });
-            
-            result.sessions.push({
-                sessionId: session.sessionId,
-                name: session.name,
-                messageCount: messages.length,
-                messages: messages.map(m => ({
-                    role: m.role,
-                    content: m.content ? m.content.substring(0, 100) : '⚠️ EMPTY',
-                    contentLength: m.content ? m.content.length : 0,
-                    hasContent: !!m.content
-                }))
+        } else if (Array.isArray(value)) {
+            result[key] = value.map(item => {
+                if (typeof item === 'string') return sanitizeString(item);
+                if (typeof item === 'object') return sanitizeObject(item, exclude);
+                return item;
             });
+        } else if (typeof value === 'object' && value !== null) {
+            result[key] = sanitizeObject(value, exclude);
+        } else {
+            result[key] = value;
         }
-        
-        res.json(result);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
-});
+    return result;
+}
 
-// ════════════════════════════════════════════
-//  START SERVER
-// ════════════════════════════════════════════
-const PORT = process.env.PORT || 5001;
-const server = app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
-server.timeout = 300000;
+/**
+ * Validate that a string does not contain injection patterns
+ * @param {string} input - The string to check
+ * @returns {boolean} - True if safe
+ */
+function isSafeString(input) {
+    if (!input || typeof input !== 'string') return true;
+    
+    // Check for dangerous patterns
+    const dangerousPatterns = [
+        /<script/i,
+        /javascript:/i,
+        /on\w+=/i,
+        /alert\(/i,
+        /eval\(/i,
+        /document\./i,
+        /window\./i,
+        /<iframe/i,
+        /<object/i,
+        /<embed/i,
+        /<form/i,
+        /<input/i
+    ];
+    
+    for (const pattern of dangerousPatterns) {
+        if (pattern.test(input)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Validate that a string is a valid password
+ * @param {string} password - The password to check
+ * @returns {object} - { valid: boolean, errors: string[] }
+ */
+function validatePasswordStrength(password) {
+    const errors = [];
+    
+    if (!password || password.length < 8) {
+        errors.push('Password must be at least 8 characters');
+    }
+    if (!/[a-z]/.test(password)) {
+        errors.push('Password must contain at least one lowercase letter');
+    }
+    if (!/[A-Z]/.test(password)) {
+        errors.push('Password must contain at least one uppercase letter');
+    }
+    if (!/\d/.test(password)) {
+        errors.push('Password must contain at least one number');
+    }
+    if (password.length > 100) {
+        errors.push('Password cannot exceed 100 characters');
+    }
+    
+    return {
+        valid: errors.length === 0,
+        errors
+    };
+}
+
+/**
+ * Check if a string is a valid email
+ * @param {string} email - The email to check
+ * @returns {boolean} - True if valid
+ */
+function isValidEmail(email) {
+    if (!email || typeof email !== 'string') return false;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+}
+
+// ============================================================
+// XSS PROTECTION FUNCTIONS
+// ============================================================
+
+/**
+ * Escape HTML special characters to prevent XSS attacks
+ * @param {string} str - The string to escape
+ * @returns {string} - Escaped string safe for HTML output
+ */
+function escapeHtml(str) {
+    if (!str || typeof str !== 'string') return str;
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+/**
+ * Sanitize output for JSON responses (HTML-safe)
+ * @param {any} data - The data to sanitize
+ * @returns {any} - Sanitized data
+ */
+function sanitizeOutput(data) {
+    if (!data) return data;
+    if (typeof data === 'string') {
+        return escapeHtml(data);
+    }
+    if (Array.isArray(data)) {
+        return data.map(item => sanitizeOutput(item));
+    }
+    if (typeof data === 'object' && data !== null) {
+        const result = {};
+        for (const [key, value] of Object.entries(data)) {
+            result[key] = sanitizeOutput(value);
+        }
+        return result;
+    }
+    return data;
+}
+
+// ============================================================
+// NOSQL INJECTION PROTECTION
+// ============================================================
+
+/**
+ * Check if input string contains NoSQL injection operators
+ * @param {any} input - The value to check
+ * @returns {boolean} - True if dangerous patterns found
+ */
+function hasNoSQLInjection(input) {
+    if (!input || typeof input !== 'string') return false;
+
+    const operators = [
+        '$eq', '$ne', '$gt', '$gte', '$lt', '$lte',
+        '$in', '$nin', '$or', '$and', '$not', '$nor',
+        '$exists', '$type', '$regex', '$where',
+        '$all', '$elemMatch', '$size', '$slice'
+    ];
+
+    for (const op of operators) {
+        if (input.includes(op)) return true;
+    }
+
+    // Check for JSON-like injection patterns
+    if (/{"\$[a-z]+":/i.test(input)) return true;
+    if (/{\s*"\$[a-z]+"\s*:/i.test(input)) return true;
+
+    return false;
+}
+
+/**
+ * Sanitize a query object (remove any keys with $)
+ * @param {object} query - The query object to sanitize
+ * @returns {object} - Sanitized query
+ */
+function sanitizeQuery(query) {
+    if (!query || typeof query !== 'object') return query;
+
+    const sanitized = {};
+    for (const [key, value] of Object.entries(query)) {
+        // Skip any key starting with '$'
+        if (key.startsWith('$')) continue;
+
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            // Check if value contains operator keys
+            const hasOperator = Object.keys(value).some(k => k.startsWith('$'));
+            if (hasOperator) continue; // strip operator objects
+            sanitized[key] = sanitizeQuery(value);
+        } else if (typeof value === 'string') {
+            if (!hasNoSQLInjection(value)) {
+                sanitized[key] = value;
+            }
+            // if injection detected, skip this field
+        } else {
+            sanitized[key] = value;
+        }
+    }
+    return sanitized;
+}
+
+/**
+ * Validate MongoDB ObjectId
+ * @param {string} id - The ID to validate
+ * @returns {boolean} - True if valid
+ */
+function isValidObjectId(id) {
+    if (!id || typeof id !== 'string') return false;
+    return /^[a-fA-F0-9]{24}$/.test(id) || id === 'assistant';
+}
+
+/**
+ * Sanitize a string ID (remove special characters)
+ * @param {string} id - The ID string
+ * @returns {string|null} - Sanitized ID or null
+ */
+function sanitizeId(id) {
+    if (!id || typeof id !== 'string') return null;
+    const cleaned = id.replace(/[^a-zA-Z0-9-]/g, '');
+    return cleaned || null;
+}
+
+module.exports = {
+    // Existing exports
+    sanitizeString,
+    sanitizeEmail,
+    sanitizeUsername,
+    sanitizeObject,
+    isSafeString,
+    validatePasswordStrength,
+    isValidEmail,
+    // XSS exports
+    escapeHtml,
+    sanitizeOutput,
+    // NoSQL exports
+    hasNoSQLInjection,
+    sanitizeQuery,
+    isValidObjectId,
+    sanitizeId
+};
