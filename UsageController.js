@@ -10,7 +10,8 @@ exports.getUsage = async (req, res) => {
     try {
         const userId = req.userId;
 
-        // ✅ Check if userId exists
+        console.log(`📊 [Usage] Fetching usage for userId: ${userId}`);
+
         if (!userId) {
             console.error('❌ [Usage] No userId found in request');
             return res.status(401).json({ 
@@ -20,6 +21,7 @@ exports.getUsage = async (req, res) => {
         }
 
         const user = await User.findById(userId).select('usage subscriptionTier');
+        
         if (!user) {
             console.error(`❌ [Usage] User not found: ${userId}`);
             return res.status(404).json({ 
@@ -28,9 +30,18 @@ exports.getUsage = async (req, res) => {
             });
         }
 
+        // ✅ Ensure usage object exists
+        if (!user.usage) {
+            console.log(`📊 [Usage] Creating usage object for user: ${userId}`);
+            user.usage = {};
+            await user.save();
+        }
+
         const plan = user.subscriptionTier || 'free';
         const usage = user.usage || {};
         const limits = getLimits(plan);
+
+        console.log(`📊 [Usage] User ${userId} (${plan}) - Usage:`, usage);
 
         // ── Current usage values ──
         const currentUsage = {
@@ -95,11 +106,12 @@ exports.getUsage = async (req, res) => {
             }
         };
 
-        console.log(`📊 [Usage] User ${userId} (${plan}): ${currentUsage.chatMessages}/${limits.chat} chat used`);
+        console.log(`✅ [Usage] Response sent for user ${userId} (${plan})`);
         res.json(response);
 
     } catch (error) {
-        console.error('❌ [Usage] Error:', error);
+        console.error('❌ [Usage] Error:', error.message);
+        console.error('❌ [Usage] Stack:', error.stack);
         res.status(500).json({ 
             error: 'Failed to fetch usage data',
             message: error.message 
@@ -112,4 +124,4 @@ function getPercentage(used, limit) {
     if (limit === 0) return 0;
     const pct = (used / limit) * 100;
     return Math.min(Math.round(pct), 100);
-                }
+    }
