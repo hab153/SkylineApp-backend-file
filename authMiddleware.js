@@ -25,14 +25,24 @@ const verifyToken = async (req, res, next) => {
         const secret = getJwtSecret();
         const decoded = jwt.verify(token, secret);
         
-        const userId = decoded.user.id;
+        // ✅ FIX: Try multiple ways to get userId
+        let userId = decoded.userId || decoded.id || decoded.user?.id || decoded.user?.userId;
+        
+        // If userId is still not found, try decoded._id or decoded.sub
+        if (!userId) {
+            userId = decoded._id || decoded.sub;
+        }
+        
+        if (!userId) {
+            console.error('❌ [AUTH] No userId found in token:', Object.keys(decoded));
+            return res.status(401).json({ message: 'Invalid token: no user ID' });
+        }
         
         // ✅ Check if this is a special token (layer token or admin token)
         const isLayerToken = decoded.step && ['layer2', 'layer3'].includes(decoded.step);
         const isAdminToken = decoded.isAdmin === true;
         
         if (isLayerToken || isAdminToken) {
-            // Special tokens: skip tokenVersion check
             if (isLayerToken) {
                 console.log('🔑 [AUTH] Layer token verified (step:', decoded.step, ')');
                 req.layerStep = decoded.step;
@@ -46,13 +56,14 @@ const verifyToken = async (req, res, next) => {
         // Normal token: verify tokenVersion matches user's current version
         const user = await User.findById(userId).select('tokenVersion');
         if (!user) {
-            console.error('❌ [AUTH] User not found');
+            console.error('❌ [AUTH] User not found:', userId);
             return res.status(401).json({ message: 'User not found' });
         }
         
-        const tokenVersion = decoded.user.tokenVersion;
+        // Get tokenVersion from decoded token (handle different structures)
+        let tokenVersion = decoded.user?.tokenVersion || decoded.tokenVersion || decoded.version;
         
-        if (tokenVersion !== user.tokenVersion) {
+        if (tokenVersion !== undefined && tokenVersion !== user.tokenVersion) {
             console.error('❌ [AUTH] Token revoked - version mismatch',
                 'token:', tokenVersion,
                 'user:', user.tokenVersion);
