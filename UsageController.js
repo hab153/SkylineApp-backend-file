@@ -10,9 +10,22 @@ exports.getUsage = async (req, res) => {
     try {
         const userId = req.userId;
 
+        // ✅ Check if userId exists
+        if (!userId) {
+            console.error('❌ [Usage] No userId found in request');
+            return res.status(401).json({ 
+                error: 'Unauthorized',
+                message: 'Please log in again.'
+            });
+        }
+
         const user = await User.findById(userId).select('usage subscriptionTier');
         if (!user) {
-            return res.status(404).json({ error: 'User not found' });
+            console.error(`❌ [Usage] User not found: ${userId}`);
+            return res.status(404).json({ 
+                error: 'User not found',
+                message: 'Please log in again.'
+            });
         }
 
         const plan = user.subscriptionTier || 'free';
@@ -87,7 +100,10 @@ exports.getUsage = async (req, res) => {
 
     } catch (error) {
         console.error('❌ [Usage] Error:', error);
-        res.status(500).json({ error: 'Failed to fetch usage data' });
+        res.status(500).json({ 
+            error: 'Failed to fetch usage data',
+            message: error.message 
+        });
     }
 };
 
@@ -96,4 +112,4 @@ function getPercentage(used, limit) {
     if (limit === 0) return 0;
     const pct = (used / limit) * 100;
     return Math.min(Math.round(pct), 100);
-            }
+                }
