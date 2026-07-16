@@ -25,28 +25,14 @@ const verifyToken = async (req, res, next) => {
         const secret = getJwtSecret();
         const decoded = jwt.verify(token, secret);
         
-        console.log('🔍 [AUTH] Decoded token:', JSON.stringify(decoded, null, 2));
-        
-        // ✅ Extract userId from the nested user object
-        let userId = null;
-        if (decoded.user && decoded.user.id) {
-            userId = decoded.user.id;
-        } else if (decoded.userId) {
-            userId = decoded.userId;
-        } else if (decoded.id) {
-            userId = decoded.id;
-        }
-        
-        if (!userId) {
-            console.error('❌ [AUTH] No userId found in token');
-            return res.status(401).json({ message: 'Invalid token: no user ID' });
-        }
+        const userId = decoded.user.id;
         
         // ✅ Check if this is a special token (layer token or admin token)
         const isLayerToken = decoded.step && ['layer2', 'layer3'].includes(decoded.step);
         const isAdminToken = decoded.isAdmin === true;
         
         if (isLayerToken || isAdminToken) {
+            // Special tokens: skip tokenVersion check
             if (isLayerToken) {
                 console.log('🔑 [AUTH] Layer token verified (step:', decoded.step, ')');
                 req.layerStep = decoded.step;
@@ -57,17 +43,16 @@ const verifyToken = async (req, res, next) => {
             return next();
         }
         
-        // ✅ Normal token: verify user exists and token version matches
+        // Normal token: verify tokenVersion matches user's current version
         const user = await User.findById(userId).select('tokenVersion');
         if (!user) {
-            console.error('❌ [AUTH] User not found:', userId);
-            return res.status(401).json({ message: 'User not found. Please log in again.' });
+            console.error('❌ [AUTH] User not found');
+            return res.status(401).json({ message: 'User not found' });
         }
         
-        // ✅ Get tokenVersion from decoded token
-        let tokenVersion = decoded.user?.tokenVersion || decoded.tokenVersion || decoded.version;
+        const tokenVersion = decoded.user.tokenVersion;
         
-        if (tokenVersion !== undefined && tokenVersion !== user.tokenVersion) {
+        if (tokenVersion !== user.tokenVersion) {
             console.error('❌ [AUTH] Token revoked - version mismatch',
                 'token:', tokenVersion,
                 'user:', user.tokenVersion);
@@ -79,7 +64,7 @@ const verifyToken = async (req, res, next) => {
         next();
     } catch (err) {
         console.error('❌ [AUTH] Invalid token:', err.message);
-        return res.status(401).json({ message: 'Invalid token. Please log in again.' });
+        return res.status(401).json({ message: 'Invalid token' });
     }
 };
 
