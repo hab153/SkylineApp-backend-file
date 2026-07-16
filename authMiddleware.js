@@ -25,16 +25,20 @@ const verifyToken = async (req, res, next) => {
         const secret = getJwtSecret();
         const decoded = jwt.verify(token, secret);
         
-        // ✅ FIX: Try multiple ways to get userId
-        let userId = decoded.userId || decoded.id || decoded.user?.id || decoded.user?.userId;
+        console.log('🔍 [AUTH] Decoded token:', JSON.stringify(decoded, null, 2));
         
-        // If userId is still not found, try decoded._id or decoded.sub
-        if (!userId) {
-            userId = decoded._id || decoded.sub;
+        // ✅ Extract userId from the nested user object
+        let userId = null;
+        if (decoded.user && decoded.user.id) {
+            userId = decoded.user.id;
+        } else if (decoded.userId) {
+            userId = decoded.userId;
+        } else if (decoded.id) {
+            userId = decoded.id;
         }
         
         if (!userId) {
-            console.error('❌ [AUTH] No userId found in token:', Object.keys(decoded));
+            console.error('❌ [AUTH] No userId found in token');
             return res.status(401).json({ message: 'Invalid token: no user ID' });
         }
         
@@ -53,14 +57,14 @@ const verifyToken = async (req, res, next) => {
             return next();
         }
         
-        // Normal token: verify tokenVersion matches user's current version
+        // ✅ Normal token: verify user exists and token version matches
         const user = await User.findById(userId).select('tokenVersion');
         if (!user) {
             console.error('❌ [AUTH] User not found:', userId);
-            return res.status(401).json({ message: 'User not found' });
+            return res.status(401).json({ message: 'User not found. Please log in again.' });
         }
         
-        // Get tokenVersion from decoded token (handle different structures)
+        // ✅ Get tokenVersion from decoded token
         let tokenVersion = decoded.user?.tokenVersion || decoded.tokenVersion || decoded.version;
         
         if (tokenVersion !== undefined && tokenVersion !== user.tokenVersion) {
@@ -75,7 +79,7 @@ const verifyToken = async (req, res, next) => {
         next();
     } catch (err) {
         console.error('❌ [AUTH] Invalid token:', err.message);
-        return res.status(401).json({ message: 'Invalid token' });
+        return res.status(401).json({ message: 'Invalid token. Please log in again.' });
     }
 };
 
