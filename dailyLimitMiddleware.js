@@ -1,191 +1,246 @@
 const User = require('./User');
 
-// Helper to get chat limit message based on tier
+// ── Daily Limits per plan ──
+const LIMITS = {
+    free: {
+        chat: 10,
+        hints: 3,
+        emails: 5,
+        followUp: 5,
+        autoFollowUp: 0,
+        assistant: 20,
+        leadGen: 1,
+        images: 0,
+        files: 0
+    },
+    go: {
+        chat: 50,
+        hints: 15,
+        emails: 200,
+        followUp: 30,
+        autoFollowUp: 15,
+        assistant: 70,
+        leadGen: 50,
+        images: 5,
+        files: 5
+    },
+    pro: {
+        chat: 150,
+        hints: 70,
+        emails: 1000,
+        followUp: 200,
+        autoFollowUp: 100,
+        assistant: 200,
+        leadGen: Infinity,
+        images: 20,
+        files: 20
+    }
+};
+
+// ── Helper to get limits for a tier ──
+function getLimits(tier) {
+    return LIMITS[tier] || LIMITS.free;
+}
+
+// ── Helper to reset daily usage ──
+async function resetDailyUsageIfNeeded(user) {
+    const today = new Date().toDateString();
+    const lastReset = user.usage?.lastResetDate ? new Date(user.usage.lastResetDate).toDateString() : null;
+    
+    if (lastReset !== today) {
+        user.usage = {
+            ...user.usage,
+            dailyCallCount: 0,
+            lastCallDate: null,
+            dailyHintCount: 0,
+            lastHintDate: null,
+            dailySentCount: 0,
+            lastSentDate: null,
+            dailySuggestFollowUpCount: 0,
+            lastSuggestFollowUpDate: null,
+            dailyAutoFollowUpCount: 0,
+            lastAutoFollowUpDate: null,
+            assistantCount: 0,
+            assistantLastDate: null,
+            dailyImageCount: 0,
+            lastImageUploadDate: null,
+            dailyFileCount: 0,
+            lastFileUploadDate: null,
+            lastResetDate: new Date()
+        };
+        await user.save();
+        return true;
+    }
+    return false;
+}
+
+// ── Helper to get chat limit message ──
 function getChatLimitMessage(tier, limit) {
     if (tier === 'free') return `Daily chat limit reached (10/10). Upgrade to Go (50/day) or Pro (150/day) for more conversations.`;
     if (tier === 'go') return `Daily chat limit reached (50/50). Upgrade to Pro for 150 chats per day.`;
     return `Daily chat limit reached (150/150). Please continue tomorrow.`;
 }
 
-// Helper to get hint limit message (Free:3, Go:15, Pro:70)
+// ── Helper to get hint limit message ──
 function getHintLimitMessage(tier, limit) {
     if (tier === 'free') return `You've used all your free hints (3/3). Upgrade to Go (15/day) or Pro (70/day) for more AI suggestions.`;
     if (tier === 'go') return `Daily hint limit reached (15/15). Upgrade to Pro for 70 hints per day.`;
     return `Daily hint limit reached (70/70). Please try again tomorrow.`;
 }
 
-// Helper to get email send limit message (Free:5, Go:200, Pro:1000)
+// ── Helper to get email send limit message ──
 function getSendLimitMessage(tier, limit) {
     if (tier === 'free') return `Daily email send limit reached (5/5). Upgrade to Go (200/day) or Pro (1000/day) to send more emails.`;
     if (tier === 'go') return `Daily email send limit reached (200/200). Upgrade to Pro for 1000 emails per day.`;
     return `Daily email send limit reached (1000/1000). Please try again tomorrow.`;
 }
 
-// Helper to get assistant limit message (Free:20, Go:70, Pro:200)
+// ── Helper to get assistant limit message ──
 function getAssistantLimitMessage(tier, limit) {
     if (tier === 'free') return `Daily assistant limit reached (20/20). Upgrade to Go (70/day) or Pro (200/day) for more assistance.`;
     if (tier === 'go') return `Daily assistant limit reached (70/70). Upgrade to Pro for 200 assistant messages per day.`;
     return `Daily assistant limit reached (200/200). Please try again tomorrow.`;
 }
 
-// Daily limit for chat/dreams (Free:10, Go:50, Pro:150)
+// ── Helper to get follow-up suggestion limit message ──
+function getFollowUpLimitMessage(tier, limit) {
+    if (tier === 'free') return `Daily follow-up suggestion limit reached (5/5). Upgrade to Go (30/day) or Pro (200/day) for more.`;
+    if (tier === 'go') return `Daily follow-up suggestion limit reached (30/30). Upgrade to Pro for 200/day.`;
+    return `Daily follow-up suggestion limit reached (200/200). Please try again tomorrow.`;
+}
+
+// ── Helper to get auto follow-up limit message ──
+function getAutoFollowUpLimitMessage(tier, limit) {
+    if (tier === 'free') return `Auto follow-up is not available on the Free plan. Upgrade to Go (15/day) or Pro (100/day).`;
+    if (tier === 'go') return `Daily auto follow-up limit reached (15/15). Upgrade to Pro for 100/day.`;
+    return `Daily auto follow-up limit reached (100/100). Please try again tomorrow.`;
+}
+
+// ── Daily limit for chat/dreams/lead gen ──
 const checkDailyLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
-        if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
-        
-        let limit = 10; // Free plan
-        const tier = user.subscriptionTier;
-        if (tier === 'go') limit = 50;
-        if (tier === 'pro') limit = 150;
-        
-        const todayStr = new Date().toDateString();
-        const lastStr = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
-        
-        if (lastStr !== todayStr) {
-            user.usage.dailyCallCount = 0;
-            user.usage.lastCallDate = new Date();
-            await user.save();
-        }
-        
-        if (user.usage.dailyCallCount >= limit) {
+        if (!user.usage) user.usage = {};
+
+        await resetDailyUsageIfNeeded(user);
+
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).chat;
+        const used = user.usage.dailyCallCount || 0;
+
+        if (used >= limit) {
             const message = getChatLimitMessage(tier, limit);
             return res.status(429).json({ message });
         }
-        
-        user.usage.dailyCallCount += 1;
+
+        user.usage.dailyCallCount = (user.usage.dailyCallCount || 0) + 1;
+        user.usage.lastCallDate = new Date();
         await user.save();
         next();
     } catch (err) {
-        console.error('Error checking daily limit:', err);
+        console.error('❌ Daily limit error:', err);
         res.status(500).json({ message: 'Server Error checking usage limits' });
     }
 };
 
-// Hint limit middleware (Free:3, Go:15, Pro:70)
+// ── Hint limit middleware ──
 const checkHintLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (!user.usage) user.usage = {};
-        if (user.usage.dailyHintCount === undefined) user.usage.dailyHintCount = 0;
-        if (!user.usage.lastHintDate) user.usage.lastHintDate = null;
 
-        let limit = 3; // Free plan
-        const tier = user.subscriptionTier;
-        if (tier === 'go') limit = 15;
-        if (tier === 'pro') limit = 70;
+        await resetDailyUsageIfNeeded(user);
 
-        const today = new Date().toDateString();
-        const lastHintDateStr = user.usage.lastHintDate ? new Date(user.usage.lastHintDate).toDateString() : null;
-        if (lastHintDateStr !== today) {
-            user.usage.dailyHintCount = 0;
-            user.usage.lastHintDate = new Date();
-            await user.save();
-        }
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).hints;
+        const used = user.usage.dailyHintCount || 0;
 
-        if (user.usage.dailyHintCount >= limit) {
+        if (used >= limit) {
             const message = getHintLimitMessage(tier, limit);
             return res.status(403).json({ message, redirect: '/dashboard' });
         }
 
-        user.usage.dailyHintCount += 1;
+        user.usage.dailyHintCount = (user.usage.dailyHintCount || 0) + 1;
+        user.usage.lastHintDate = new Date();
         await user.save();
 
         req.remainingHints = limit - user.usage.dailyHintCount;
         next();
     } catch (err) {
-        console.error('Hint limit error:', err);
+        console.error('❌ Hint limit error:', err);
         res.status(500).json({ message: 'Server error checking hint limit' });
     }
 };
 
-// Helper to check and increment daily email send limit (Free:5, Go:200, Pro:1000)
+// ── Email send limit ──
 const checkAndIncrementSendLimit = async (userId) => {
     const user = await User.findById(userId);
     if (!user) throw new Error('User not found');
     if (!user.usage) user.usage = {};
-    if (user.usage.dailySentCount === undefined) user.usage.dailySentCount = 0;
-    if (!user.usage.lastSentDate) user.usage.lastSentDate = null;
 
-    let limit = 5; // Free
-    const tier = user.subscriptionTier;
-    if (tier === 'go') limit = 200;
-    if (tier === 'pro') limit = 1000;
+    await resetDailyUsageIfNeeded(user);
 
-    const today = new Date().toDateString();
-    const lastSentStr = user.usage.lastSentDate ? new Date(user.usage.lastSentDate).toDateString() : null;
-    if (lastSentStr !== today) {
-        user.usage.dailySentCount = 0;
-        user.usage.lastSentDate = new Date();
-        await user.save();
-    }
+    const tier = user.subscriptionTier || 'free';
+    const limit = getLimits(tier).emails;
+    const used = user.usage.dailySentCount || 0;
 
-    if (user.usage.dailySentCount >= limit) {
+    if (used >= limit) {
         const message = getSendLimitMessage(tier, limit);
         throw new Error(message);
     }
 
-    user.usage.dailySentCount += 1;
+    user.usage.dailySentCount = (user.usage.dailySentCount || 0) + 1;
+    user.usage.lastSentDate = new Date();
     await user.save();
+
     return { remaining: limit - user.usage.dailySentCount };
 };
 
-// Suggest follow-up limit (Free:5, Go:30, Pro:200)
+// ── Suggest follow-up limit ──
 const checkSuggestFollowUpLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (!user.usage) user.usage = {};
-        if (user.usage.dailySuggestFollowUpCount === undefined) user.usage.dailySuggestFollowUpCount = 0;
-        if (!user.usage.lastSuggestFollowUpDate) user.usage.lastSuggestFollowUpDate = null;
 
-        let limit = 5; // Free
-        const tier = user.subscriptionTier;
-        if (tier === 'go') limit = 30;
-        if (tier === 'pro') limit = 200;
+        await resetDailyUsageIfNeeded(user);
 
-        const today = new Date().toDateString();
-        const lastDateStr = user.usage.lastSuggestFollowUpDate ? new Date(user.usage.lastSuggestFollowUpDate).toDateString() : null;
-        if (lastDateStr !== today) {
-            user.usage.dailySuggestFollowUpCount = 0;
-            user.usage.lastSuggestFollowUpDate = new Date();
-            await user.save();
-        }
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).followUp;
+        const used = user.usage.dailySuggestFollowUpCount || 0;
 
-        if (user.usage.dailySuggestFollowUpCount >= limit) {
-            let message = '';
-            if (tier === 'free') message = 'Daily suggest follow-up limit reached (5/5). Upgrade to Go (30/day) or Pro (200/day) for more.';
-            else if (tier === 'go') message = 'Daily suggest follow-up limit reached (30/30). Upgrade to Pro for 200/day.';
-            else message = 'Daily suggest follow-up limit reached (200/200). Please try again tomorrow.';
+        if (used >= limit) {
+            const message = getFollowUpLimitMessage(tier, limit);
             return res.status(429).json({ message });
         }
 
-        req.userWithSuggestLimit = user;
+        user.usage.dailySuggestFollowUpCount = (user.usage.dailySuggestFollowUpCount || 0) + 1;
+        user.usage.lastSuggestFollowUpDate = new Date();
+        await user.save();
+
         next();
     } catch (err) {
-        console.error('Suggest follow-up limit error:', err);
-        res.status(500).json({ message: 'Server error checking limit' });
+        console.error('❌ Follow-up limit error:', err);
+        res.status(500).json({ message: 'Server error checking follow-up limit' });
     }
 };
 
-// Auto follow-up enable limit (Free:0, Go:15, Pro:100)
+// ── Auto follow-up limit ──
 const checkAutoFollowUpLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (!user.usage) user.usage = {};
-        if (user.usage.dailyAutoFollowUpCount === undefined) user.usage.dailyAutoFollowUpCount = 0;
-        if (!user.usage.lastAutoFollowUpDate) user.usage.lastAutoFollowUpDate = null;
 
-        let limit = 0; // Free
-        const tier = user.subscriptionTier;
-        if (tier === 'go') limit = 15;
-        if (tier === 'pro') limit = 100;
+        await resetDailyUsageIfNeeded(user);
+
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).autoFollowUp;
 
         if (limit === 0) {
             return res.status(403).json({
@@ -193,74 +248,145 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
             });
         }
 
-        const today = new Date().toDateString();
-        const lastDateStr = user.usage.lastAutoFollowUpDate ? new Date(user.usage.lastAutoFollowUpDate).toDateString() : null;
-        if (lastDateStr !== today) {
-            user.usage.dailyAutoFollowUpCount = 0;
-            user.usage.lastAutoFollowUpDate = new Date();
-            await user.save();
-        }
+        const used = user.usage.dailyAutoFollowUpCount || 0;
 
-        if (user.usage.dailyAutoFollowUpCount >= limit) {
-            let message = '';
-            if (tier === 'go') message = 'Daily auto follow-up limit reached (15/15). Upgrade to Pro for 100/day.';
-            else message = 'Daily auto follow-up limit reached (100/100). Please try again tomorrow.';
+        if (used >= limit) {
+            const message = getAutoFollowUpLimitMessage(tier, limit);
             return res.status(429).json({ message });
         }
 
-        req.userWithAutoLimit = user;
+        user.usage.dailyAutoFollowUpCount = (user.usage.dailyAutoFollowUpCount || 0) + 1;
+        user.usage.lastAutoFollowUpDate = new Date();
+        await user.save();
+
         next();
     } catch (err) {
-        console.error('Auto follow-up limit error:', err);
-        res.status(500).json({ message: 'Server error checking limit' });
+        console.error('❌ Auto follow-up limit error:', err);
+        res.status(500).json({ message: 'Server error checking auto follow-up limit' });
     }
 };
 
-// NEW: Assistant limit middleware (Free:20, Go:70, Pro:200)
+// ── Assistant limit middleware ──
 const checkAssistantLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
         if (!user.usage) user.usage = {};
-        if (user.usage.assistantCount === undefined) user.usage.assistantCount = 0;
-        if (!user.usage.assistantLastDate) user.usage.assistantLastDate = null;
 
-        let limit = 20; // Free plan
-        const tier = user.subscriptionTier;
-        if (tier === 'go') limit = 70;
-        if (tier === 'pro') limit = 200;
+        await resetDailyUsageIfNeeded(user);
 
-        const today = new Date().toDateString();
-        const lastDateStr = user.usage.assistantLastDate ? new Date(user.usage.assistantLastDate).toDateString() : null;
-        if (lastDateStr !== today) {
-            user.usage.assistantCount = 0;
-            user.usage.assistantLastDate = new Date();
-            await user.save();
-        }
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).assistant;
+        const used = user.usage.assistantCount || 0;
 
-        if (user.usage.assistantCount >= limit) {
+        if (used >= limit) {
             const message = getAssistantLimitMessage(tier, limit);
             return res.status(429).json({ message });
         }
 
-        // Store user and remaining count in req for later use
-        req.userDoc = user;
-        req.assistantLimit = limit;
-        req.assistantRemaining = limit - user.usage.assistantCount;
+        user.usage.assistantCount = (user.usage.assistantCount || 0) + 1;
+        user.usage.assistantLastDate = new Date();
+        await user.save();
 
+        req.assistantRemaining = limit - user.usage.assistantCount;
         next();
     } catch (err) {
-        console.error('Assistant limit error:', err);
+        console.error('❌ Assistant limit error:', err);
         res.status(500).json({ message: 'Server error checking assistant limit' });
     }
 };
 
-module.exports = { 
-    checkDailyLimit, 
-    checkHintLimit, 
+// ── Image upload limit ──
+const checkImageLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) user.usage = {};
+
+        await resetDailyUsageIfNeeded(user);
+
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).images;
+
+        if (limit === 0) {
+            return res.status(403).json({
+                message: 'Image upload is not available on the Free plan. Upgrade to Go (5/day) or Pro (20/day).'
+            });
+        }
+
+        const used = user.usage.dailyImageCount || 0;
+
+        if (used >= limit) {
+            const messages = {
+                go: 'Daily image upload limit reached (5/5). Upgrade to Pro for 20/day.',
+                pro: 'Daily image upload limit reached (20/20). Please try again tomorrow.'
+            };
+            return res.status(429).json({ message: messages[tier] || messages.go });
+        }
+
+        user.usage.dailyImageCount = (user.usage.dailyImageCount || 0) + 1;
+        user.usage.lastImageUploadDate = new Date();
+        await user.save();
+
+        next();
+    } catch (err) {
+        console.error('❌ Image limit error:', err);
+        res.status(500).json({ message: 'Server error checking image limit' });
+    }
+};
+
+// ── File upload limit ──
+const checkFileLimit = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        if (!user.usage) user.usage = {};
+
+        await resetDailyUsageIfNeeded(user);
+
+        const tier = user.subscriptionTier || 'free';
+        const limit = getLimits(tier).files;
+
+        if (limit === 0) {
+            return res.status(403).json({
+                message: 'File upload is not available on the Free plan. Upgrade to Go (5/day) or Pro (20/day).'
+            });
+        }
+
+        const used = user.usage.dailyFileCount || 0;
+
+        if (used >= limit) {
+            const messages = {
+                go: 'Daily file upload limit reached (5/5). Upgrade to Pro for 20/day.',
+                pro: 'Daily file upload limit reached (20/20). Please try again tomorrow.'
+            };
+            return res.status(429).json({ message: messages[tier] || messages.go });
+        }
+
+        user.usage.dailyFileCount = (user.usage.dailyFileCount || 0) + 1;
+        user.usage.lastFileUploadDate = new Date();
+        await user.save();
+
+        next();
+    } catch (err) {
+        console.error('❌ File limit error:', err);
+        res.status(500).json({ message: 'Server error checking file limit' });
+    }
+};
+
+module.exports = {
+    LIMITS,
+    getLimits,
+    resetDailyUsageIfNeeded,
+    checkDailyLimit,
+    checkHintLimit,
     checkAndIncrementSendLimit,
     checkSuggestFollowUpLimit,
     checkAutoFollowUpLimit,
-    checkAssistantLimit  // <-- NEW
+    checkAssistantLimit,
+    checkImageLimit,
+    checkFileLimit
 };
