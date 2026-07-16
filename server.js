@@ -62,6 +62,9 @@ const historyRoutes = require('./historyRoutes');
 // ✅ NEW: Import usage controller
 const UsageController = require('./UsageController');
 
+// ✅ NEW: Import usage reset job
+const { startUsageResetJob } = require('./usageResetJob');
+
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -196,6 +199,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 
         // ✅ START WEBHOOK VERIFICATION
         verifyWebhookRegistration();
+
+        // ✅ START USAGE RESET JOB (Daily at midnight)
+        startUsageResetJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
