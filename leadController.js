@@ -1,21 +1,27 @@
 const Lead = require('./Lead');
-const { sendEmail, getThreads } = require('./nylasService'); // Updated import
+const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
 // GET /api/conversations
 const getConversations = async (req, res) => {
+    console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
+    console.log('🔵 [getConversations] Request headers:', req.headers ? 'present' : 'none');
     try {
         if (!req.userId) {
             console.error('❌ [getConversations] No userId in request');
             return res.status(401).json({ message: 'Unauthorized: No user ID' });
         }
         if (!isValidObjectId(req.userId)) {
+            console.error('❌ [getConversations] Invalid userId format:', req.userId);
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
         const query = sanitizeQuery({ userId: req.userId });
+        console.log(`📡 [getConversations] Query:`, JSON.stringify(query));
+        
         const leads = await Lead.find(query).sort({ lastContactDate: -1 }).limit(50);
         console.log(`✅ [getConversations] Found ${leads.length} leads`);
+        
         const conversations = leads.map(lead => {
             const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
             const preview = lastReply
@@ -33,34 +39,40 @@ const getConversations = async (req, res) => {
                 autoReplyEnabled: lead.autoReplyEnabled
             };
         });
+        console.log(`📤 [getConversations] Returning ${conversations.length} conversations`);
         res.json(conversations);
     } catch (err) {
         console.error('❌ [getConversations] Error:', err);
+        console.error('❌ [getConversations] Error stack:', err.stack);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
 // GET /api/conversations/:leadId
 const getConversationById = async (req, res) => {
+    console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId, 'userId:', req.userId);
     try {
         if (!req.userId) {
             console.error('❌ [getConversationById] No userId');
             return res.status(401).json({ message: 'Unauthorized' });
         }
         if (!isValidObjectId(req.userId)) {
+            console.error('❌ [getConversationById] Invalid userId format');
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         const { leadId } = req.params;
         if (!isValidObjectId(leadId)) {
+            console.error('❌ [getConversationById] Invalid leadId format:', leadId);
             return res.status(400).json({ message: 'Invalid lead ID' });
         }
         console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
         const query = sanitizeQuery({ _id: leadId, userId: req.userId });
         const lead = await Lead.findOne(query);
         if (!lead) {
-            console.warn(`⚠️ [getConversationById] Lead not found`);
+            console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
             return res.status(404).json({ message: 'Conversation not found' });
         }
+        console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
         const cleanHistory = (lead.replies || []).map(msg => ({
             ...msg.toObject(),
             content: msg.content.replace(/<[^>]*>?/gm, '')
@@ -79,12 +91,14 @@ const getConversationById = async (req, res) => {
         });
     } catch (err) {
         console.error('❌ [getConversationById] Error:', err);
+        console.error('❌ [getConversationById] Error stack:', err.stack);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
 // PUT /api/leads/:leadId/rename
 const renameLead = async (req, res) => {
+    console.log('🔵 [renameLead] ENTERED - leadId:', req.params.leadId);
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
@@ -110,6 +124,7 @@ const renameLead = async (req, res) => {
 
 // PUT /api/leads/:leadId/auto-reply
 const updateAutoReply = async (req, res) => {
+    console.log('🔵 [updateAutoReply] ENTERED - leadId:', req.params.leadId);
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
@@ -136,6 +151,7 @@ const updateAutoReply = async (req, res) => {
 
 // POST /api/leads/batch-send
 const batchSend = async (req, res) => {
+    console.log('🔵 [batchSend] ENTERED');
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         if (!isValidObjectId(req.userId)) {
@@ -147,19 +163,20 @@ const batchSend = async (req, res) => {
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
+        console.log(`📧 [batchSend] Processing ${leads.length} leads`);
 
-        // Check Nylas connection via EmailAccount model
         const EmailAccount = require('./EmailAccount');
         const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
         if (!account) {
+            console.error('❌ [batchSend] No Nylas connection found for user:', req.userId);
             return res.status(401).json({
                 success: false,
                 error: 'NYLAS_DISCONNECTED',
                 message: 'Please connect your email account first.'
             });
         }
+        console.log(`✅ [batchSend] Nylas account found for user`);
 
-        // Sanitize each lead
         const sanitizedLeads = leads.map(lead => ({
             name: lead.name ? lead.name.trim().slice(0, 100) : '',
             email: sanitizeEmail(lead.email),
@@ -211,7 +228,6 @@ const batchSend = async (req, res) => {
                 await lead.save();
 
                 if (leadData.messages?.length > 0) {
-                    // Use new service function
                     const result = await sendEmail(
                         req.userId,
                         leadData.email,
@@ -229,7 +245,6 @@ const batchSend = async (req, res) => {
             } catch (err) {
                 console.error(`❌ [batchSend] Error sending to ${leadData.email}:`, err.message);
                 errors.push({ email: leadData.email, error: err.message });
-                // Update lead status to failed
                 try {
                     const lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
                     if (lead) {
@@ -241,16 +256,18 @@ const batchSend = async (req, res) => {
                 }
             }
         }
-
+        console.log(`📤 [batchSend] Completed. Sent ${sentCount} emails, ${errors.length} errors`);
         res.json({ success: true, message: `Sent ${sentCount} emails.`, errors });
     } catch (err) {
         console.error('❌ [batchSend] Error:', err);
+        console.error('❌ [batchSend] Error stack:', err.stack);
         res.status(500).json({ message: 'Server Error during batch send' });
     }
 };
 
 // POST /api/reconnect-and-send
 const reconnectAndSend = async (req, res) => {
+    console.log('🔵 [reconnectAndSend] ENTERED');
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         if (!isValidObjectId(req.userId)) {
@@ -261,6 +278,7 @@ const reconnectAndSend = async (req, res) => {
         const EmailAccount = require('./EmailAccount');
         const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
         if (!account) {
+            console.error('❌ [reconnectAndSend] No Nylas connection found');
             return res.status(401).json({
                 success: false,
                 error: 'NYLAS_DISCONNECTED',
@@ -269,12 +287,12 @@ const reconnectAndSend = async (req, res) => {
         }
 
         const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
+        console.log(`📧 [reconnectAndSend] Found ${leadsWithPending.length} leads with pending messages`);
         let sentCount = 0;
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
             for (const msg of pendingMessages) {
                 try {
-                    // Use new service function
                     const result = await sendEmail(
                         req.userId,
                         lead.email,
@@ -284,8 +302,10 @@ const reconnectAndSend = async (req, res) => {
                     if (result.success) {
                         msg.status = 'sent';
                         sentCount++;
+                        console.log(`✅ [reconnectAndSend] Sent to ${lead.email}`);
                     } else {
                         msg.status = 'failed';
+                        console.error(`❌ [reconnectAndSend] Failed for ${lead.email}:`, result.error);
                     }
                 } catch (err) {
                     console.error(`❌ [reconnectAndSend] Failed for ${lead.email}:`, err.message);
@@ -294,15 +314,18 @@ const reconnectAndSend = async (req, res) => {
             }
             await lead.save();
         }
+        console.log(`📤 [reconnectAndSend] Completed. Sent ${sentCount} messages`);
         res.json({ success: true, sentCount });
     } catch (err) {
         console.error('❌ [reconnectAndSend] Error:', err);
+        console.error('❌ [reconnectAndSend] Error stack:', err.stack);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
 // GET /api/leads
 const getAllLeads = async (req, res) => {
+    console.log('🔵 [getAllLeads] ENTERED - userId:', req.userId);
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
         if (!isValidObjectId(req.userId)) {
@@ -310,6 +333,7 @@ const getAllLeads = async (req, res) => {
         }
         const query = sanitizeQuery({ userId: req.userId });
         const leads = await Lead.find(query).sort({ createdAt: -1 });
+        console.log(`✅ [getAllLeads] Found ${leads.length} leads`);
         res.json(leads);
     } catch (err) {
         console.error('❌ [getAllLeads] Error:', err);
