@@ -100,6 +100,10 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
+console.log('🚀 [SERVER] Starting server...');
+console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
+console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
+
 // ════════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
 // ════════════════════════════════════════════
@@ -156,14 +160,16 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 app.use(cors());
 
+console.log('✅ [SERVER] Security middleware applied');
+
 // ════════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
 // ════════════════════════════════════════════
+console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
-
-// ✅ NEW: Nylas inbound webhook (Handles both GET for challenge and POST for events)
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+console.log('✅ [SERVER] Webhook routes registered');
 
 // ════════════════════════════════════════════
 //  JSON PARSER & STATIC FILES
@@ -180,6 +186,7 @@ app.use(xssOutputProtection);
 // ════════════════════════════════════════════
 //  MONGODB CONNECTION
 // ════════════════════════════════════════════
+console.log('🔗 [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
     serverSelectionTimeoutMS: 5000
@@ -220,6 +227,7 @@ async function verifyWebhookRegistration() {
 //  ROUTES
 // ════════════════════════════════════════════
 app.use('/api/auth', authRoutes);
+console.log('✅ [SERVER] Auth routes registered');
 
 // Logout & Revoke routes
 app.post('/api/auth/logout', verifyToken, logout);
@@ -313,6 +321,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
 //  PAYMENT ROUTE
 // ──────────────────────────────────────────────────────────────
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
+console.log('✅ [SERVER] Payment route registered');
 
 // ──────────────────────────────────────────────────────────────
 //  AUTH ROUTES
@@ -345,28 +354,53 @@ app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletion
 app.use('/api/data', dataExportRoutes);
 
 // ──────────────────────────────────────────────────────────────
-//  LEAD / CONVERSATION ROUTES
+//  LEAD / CONVERSATION ROUTES (WITH DEBUG LOGS)
 // ──────────────────────────────────────────────────────────────
+console.log('🔧 [SERVER] Registering lead/conversation routes...');
+
+// ✅ DEBUG: Log ALL conversation route requests
+app.use('/api/conversations', (req, res, next) => {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📂 [CONVERSATIONS ROUTE] /api/conversations called');
+    console.log('📝 [CONVERSATIONS ROUTE] Method:', req.method);
+    console.log('📝 [CONVERSATIONS ROUTE] Full URL:', req.originalUrl);
+    console.log('📝 [CONVERSATIONS ROUTE] User ID:', req.userId || 'Not authenticated');
+    console.log('📝 [CONVERSATIONS ROUTE] Headers:', {
+        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
+        'content-type': req.headers['content-type'] || 'Not set'
+    });
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    next();
+});
+
 app.get('/api/conversations', verifyToken, leadController.getConversations);
+console.log('✅ [SERVER] GET /api/conversations registered');
+
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
+console.log('✅ [SERVER] GET /api/conversations/:leadId registered');
+
 app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
 app.put('/api/leads/:leadId/auto-reply', verifyToken, validate(updateAutoReplySchema), leadController.updateAutoReply);
 app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
+console.log('✅ [SERVER] All lead routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  FOLLOW-UP ROUTES
 // ──────────────────────────────────────────────────────────────
+console.log('🔧 [SERVER] Registering follow-up routes...');
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
+console.log('✅ [SERVER] Follow-up routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  REVENUE TRACKING
 // ──────────────────────────────────────────────────────────────
 if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
     app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
+    console.log('✅ [SERVER] Revenue tracking route registered');
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -375,6 +409,7 @@ if (typeof revenueController !== 'undefined' && revenueController.getRevenueTrac
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
+console.log('✅ [SERVER] Notification routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  CHAT & DREAMS ROUTES WITH DEBUG LOGS
@@ -408,17 +443,20 @@ app.use('/api/sessions', (req, res, next) => {
 // ✅ FIXED: Use sessionController for session routes
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.post('/api/sessions', verifyToken, sessionController.createSession);
+console.log('✅ [SERVER] Session routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  DREAMS ROUTES
 // ──────────────────────────────────────────────────────────────
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
+console.log('✅ [SERVER] Dreams routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  AI SUGGESTION ROUTE
 // ──────────────────────────────────────────────────────────────
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
+    console.log('💡 [AI SUGGEST] Request received');
     try {
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
@@ -435,6 +473,7 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
         res.status(500).json({ error: 'Failed to generate suggestion.' });
     }
 });
+console.log('✅ [SERVER] AI suggestion route registered');
 
 // ──────────────────────────────────────────────────────────────
 //  ASSISTANT ROUTE
@@ -453,11 +492,13 @@ app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDeta
 app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserChatView);
 app.post('/api/admin/users/:id/message', verifyToken, validate(adminMessageSchema), adminController.sendUserMessage);
 app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
+console.log('✅ [SERVER] Admin routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  REPORTS
 // ──────────────────────────────────────────────────────────────
 app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
+console.log('✅ [SERVER] Report routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  DEBUG ROUTE - Check messages (Remove after fixing)
@@ -512,5 +553,8 @@ app.get('/api/usage', verifyToken, UsageController.getUsage);
 //  START SERVER
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
-const server = app.listen(PORT, () => { console.log(`🚀 Server running on port ${PORT}`); });
+const server = app.listen(PORT, () => { 
+    console.log(`🚀 Server running on port ${PORT}`); 
+    console.log(`✅ [SERVER] All routes registered successfully`);
+});
 server.timeout = 300000;
