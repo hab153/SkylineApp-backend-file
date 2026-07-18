@@ -180,24 +180,85 @@ function escapeHtml(str) {
 
 /**
  * Sanitize output for JSON responses (HTML-safe)
+ * ✅ FIXED: Handles circular references and Mongoose documents
  * @param {any} data - The data to sanitize
+ * @param {Set} seen - Set of seen objects to prevent circular references
  * @returns {any} - Sanitized data
  */
-function sanitizeOutput(data) {
+function sanitizeOutput(data, seen = new Set()) {
     if (!data) return data;
+    
+    // Handle primitive types
     if (typeof data === 'string') {
         return escapeHtml(data);
     }
-    if (Array.isArray(data)) {
-        return data.map(item => sanitizeOutput(item));
+    if (typeof data !== 'object') {
+        return data;
     }
+    
+    // Handle Date objects
+    if (data instanceof Date) {
+        return data.toISOString();
+    }
+    
+    // Handle Mongoose documents
+    if (data.toObject && typeof data.toObject === 'function') {
+        try {
+            data = data.toObject({ virtuals: false, getters: false });
+        } catch (e) {
+            // If toObject fails, try spreading
+            data = { ...data };
+        }
+    }
+    
+    // Check for circular references
+    if (seen.has(data)) {
+        return '[Circular]';
+    }
+    seen.add(data);
+    
+    // Handle arrays
+    if (Array.isArray(data)) {
+        const result = data.map(item => sanitizeOutput(item, seen));
+        seen.delete(data);
+        return result;
+    }
+    
+    // Handle objects
     if (typeof data === 'object' && data !== null) {
         const result = {};
         for (const [key, value] of Object.entries(data)) {
-            result[key] = sanitizeOutput(value);
+            // Skip Mongoose internal fields
+            if (key.startsWith('$') || key === '__v' || key === '_doc') {
+                continue;
+            }
+            // Handle _id specially
+            if (key === '_id') {
+                result[key] = value?.toString ? value.toString() : value;
+                continue;
+            }
+            // Handle replies array specially
+            if (key === 'replies' && Array.isArray(value)) {
+                result[key] = value.map(reply => {
+                    if (reply && typeof reply === 'object') {
+                        // Convert Mongoose subdocument to plain object
+                        const plain = reply.toObject ? reply.toObject() : { ...reply };
+                        // Remove Mongoose internal fields
+                        delete plain.$__;
+                        delete plain.$isNew;
+                        delete plain._doc;
+                        return sanitizeOutput(plain, seen);
+                    }
+                    return sanitizeOutput(reply, seen);
+                });
+                continue;
+            }
+            result[key] = sanitizeOutput(value, seen);
         }
+        seen.delete(data);
         return result;
     }
+    
     return data;
 }
 
