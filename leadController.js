@@ -45,10 +45,8 @@ const getConversations = async (req, res) => {
                 unread: unreadCount > 0,
                 // ✅ Include auto-reply settings
                 autoReplyEnabled: lead.autoReplyEnabled || false,
-                autoReplyInstructions: lead.autoReplyInstructions || '',
-                // ✅ Include recent replies
-                lastReply: lastReply || null,
-                replies: lead.replies || []
+                autoReplyInstructions: lead.autoReplyInstructions || ''
+                // ✅ REMOVED: replies and lastReply (causes circular reference)
             };
         });
         console.log(`📤 [getConversations] Returning ${conversations.length} conversations`);
