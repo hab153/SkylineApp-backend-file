@@ -48,7 +48,7 @@ const getConversations = async (req, res) => {
     }
 };
 
-// GET /api/conversations/:leadId
+// GET /api/conversations/:leadId - ✅ FIXED: Fetches from both Lead.replies AND ChatMessage
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId, 'userId:', req.userId);
     try {
@@ -73,10 +73,72 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ message: 'Conversation not found' });
         }
         console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
-        const cleanHistory = (lead.replies || []).map(msg => ({
-            ...msg.toObject(),
-            content: msg.content.replace(/<[^>]*>?/gm, '')
+        
+        // ──────────────────────────────────────────────────────────────
+        // ✅ FIX: Also fetch messages from ChatMessage model
+        // ──────────────────────────────────────────────────────────────
+        const ChatMessage = require('./ChatMessage');
+        const chatMessages = await ChatMessage.find({
+            userId: req.userId,
+            sessionId: leadId
+        }).sort({ createdAt: 1 });
+        
+        console.log(`📊 [getConversationById] Found ${chatMessages.length} messages in ChatMessage`);
+        
+        // Convert ChatMessage to the same format as Lead.replies
+        const chatMessagesFormatted = chatMessages.map(msg => ({
+            date: msg.createdAt || new Date(),
+            content: msg.content || '',
+            subject: msg.title || '',
+            from: msg.role === 'user' ? 'lead' : 'ai',
+            emailId: msg._id.toString(),
+            isChatMessage: true
         }));
+        
+        // ──────────────────────────────────────────────────────────────
+        // Merge both sources
+        // ──────────────────────────────────────────────────────────────
+        let allMessages = [...(lead.replies || [])];
+        
+        // If there are ChatMessages, merge them
+        if (chatMessagesFormatted.length > 0) {
+            if (allMessages.length === 0) {
+                allMessages = chatMessagesFormatted;
+                console.log('📊 [getConversationById] Using ChatMessages as primary source');
+            } else {
+                // Merge: keep both but avoid duplicates by date
+                const existingDates = new Set();
+                // First, add all lead replies
+                for (const msg of allMessages) {
+                    const dateKey = msg.date ? new Date(msg.date).toISOString() : '';
+                    if (dateKey) existingDates.add(dateKey);
+                }
+                // Then add chat messages that don't duplicate
+                for (const msg of chatMessagesFormatted) {
+                    const dateKey = msg.date ? new Date(msg.date).toISOString() : '';
+                    if (!existingDates.has(dateKey)) {
+                        allMessages.push(msg);
+                        existingDates.add(dateKey);
+                    }
+                }
+                // Sort by date
+                allMessages.sort((a, b) => {
+                    const dateA = a.date ? new Date(a.date) : new Date(0);
+                    const dateB = b.date ? new Date(b.date) : new Date(0);
+                    return dateA - dateB;
+                });
+                console.log(`📊 [getConversationById] Merged ${allMessages.length} total messages`);
+            }
+        }
+        
+        // Clean content
+        const cleanHistory = allMessages.map(msg => ({
+            ...msg,
+            content: msg.content ? msg.content.replace(/<[^>]*>?/gm, '') : ''
+        }));
+        
+        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} total messages`);
+        
         res.json({
             lead: {
                 id: lead._id,
