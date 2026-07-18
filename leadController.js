@@ -2,7 +2,7 @@ const Lead = require('./Lead');
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
-// GET /api/conversations
+// GET /api/conversations - ✅ FIXED: Returns unreadCount for notifications.html
 const getConversations = async (req, res) => {
     console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
     console.log('🔵 [getConversations] Request headers:', req.headers ? 'present' : 'none');
@@ -27,16 +27,28 @@ const getConversations = async (req, res) => {
             const preview = lastReply
                 ? lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50)
                 : "No messages yet";
+            
+            // ✅ Count unread messages (replies from lead that haven't been read)
+            const unreadCount = lead.replies?.filter(r => r.from === 'lead' && !r.read).length || 0;
+            
             return {
                 id: lead._id,
-                name: lead.name,
-                company: lead.company,
-                email: lead.email,
-                status: lead.status,
+                name: lead.name || 'Unknown',
+                company: lead.company || '',
+                email: lead.email || '',
+                status: lead.status || 'New',
                 lastMessage: preview,
-                lastDate: lead.lastContactDate,
-                unread: !lastReply || lastReply.from === 'lead',
-                autoReplyEnabled: lead.autoReplyEnabled
+                lastDate: lead.lastContactDate || lead.createdAt,
+                // ✅ FIX: Use unreadCount (not unread)
+                unreadCount: unreadCount > 0 ? unreadCount : 0,
+                // ✅ Keep for backwards compatibility
+                unread: unreadCount > 0,
+                // ✅ Include auto-reply settings
+                autoReplyEnabled: lead.autoReplyEnabled || false,
+                autoReplyInstructions: lead.autoReplyInstructions || '',
+                // ✅ Include recent replies
+                lastReply: lastReply || null,
+                replies: lead.replies || []
             };
         });
         console.log(`📤 [getConversations] Returning ${conversations.length} conversations`);
@@ -74,6 +86,21 @@ const getConversationById = async (req, res) => {
         }
         console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
         
+        // ✅ Mark all lead replies as read
+        if (lead.replies && lead.replies.length > 0) {
+            let markedRead = false;
+            for (const reply of lead.replies) {
+                if (reply.from === 'lead' && !reply.read) {
+                    reply.read = true;
+                    markedRead = true;
+                }
+            }
+            if (markedRead) {
+                await lead.save();
+                console.log('📖 [getConversationById] Marked replies as read');
+            }
+        }
+        
         // ──────────────────────────────────────────────────────────────
         // ✅ FIX: Also fetch messages from ChatMessage model
         // ──────────────────────────────────────────────────────────────
@@ -92,7 +119,8 @@ const getConversationById = async (req, res) => {
             subject: msg.title || '',
             from: msg.role === 'user' ? 'lead' : 'ai',
             emailId: msg._id.toString(),
-            isChatMessage: true
+            isChatMessage: true,
+            read: true // Chat messages are always read
         }));
         
         // ──────────────────────────────────────────────────────────────
@@ -146,8 +174,8 @@ const getConversationById = async (req, res) => {
                 email: lead.email,
                 company: lead.company,
                 status: lead.status,
-                autoReplyEnabled: lead.autoReplyEnabled,
-                autoReplyInstructions: lead.autoReplyInstructions
+                autoReplyEnabled: lead.autoReplyEnabled || false,
+                autoReplyInstructions: lead.autoReplyInstructions || ''
             },
             messages: cleanHistory
         });
@@ -283,7 +311,8 @@ const batchSend = async (req, res) => {
                         content: leadData.messages[0].body,
                         subject: leadData.messages[0].subject,
                         from: 'ai',
-                        status: 'sent'
+                        status: 'sent',
+                        read: true
                     });
                     lead.followUpCount = (lead.followUpCount || 0) + 1;
                 }
