@@ -1,7 +1,7 @@
 const nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 
-// ── Refresh Token Function (FIXED for v8 SDK) ──
+// ── Refresh Token Function ──
 async function refreshNylasToken(userId) {
     try {
         console.log('🔄 [Nylas] Refreshing token for user:', userId);
@@ -17,7 +17,7 @@ async function refreshNylasToken(userId) {
             return null;
         }
 
-        // ✅ v8 SDK: Use the refresh method directly
+        // ✅ Use the refresh method
         const response = await nylas.auth.refreshAccessToken({
             clientId: process.env.NYLAS_CLIENT_ID,
             clientSecret: process.env.NYLAS_API_KEY,
@@ -39,7 +39,6 @@ async function refreshNylasToken(userId) {
         console.error('❌ [Nylas] Token refresh failed:', error.message);
         console.error('❌ [Nylas] Token refresh details:', error.response?.data || error);
         
-        // If refresh fails, mark as disconnected
         await EmailAccount.findOneAndUpdate(
             { userId },
             { 
@@ -62,13 +61,12 @@ exports.sendEmail = async (userId, to, subject, body) => {
             return { success: false, error: 'No connected email account found.' };
         }
 
-        // ✅ Check if token is expired or about to expire (within 5 minutes)
+        // ✅ Check if token is expired or about to expire
         const now = new Date();
         const expiry = account.tokenExpiry ? new Date(account.tokenExpiry) : null;
         const isExpired = !expiry || expiry < now;
         const isExpiringSoon = expiry && (expiry - now) < 5 * 60 * 1000;
 
-        // ✅ Refresh if expired or expiring soon
         if (isExpired || isExpiringSoon) {
             console.log(`⏰ [Nylas] Token ${isExpired ? 'expired' : 'expiring soon'}, refreshing...`);
             const refreshed = await refreshNylasToken(userId);
@@ -93,17 +91,16 @@ exports.sendEmail = async (userId, to, subject, body) => {
         console.log('📧 [Nylas Send] Subject:', subject);
         console.log('📧 [Nylas Send] Body length:', body?.length || 0);
 
-        // ✅ Send email using v8 SDK
-        const message = {
-            to: [{ email: to }],
-            subject: subject,
-            body: body,
-        };
-
-        const sentMessage = await nylas.messages.send(
-            account.nylasGrantId,
-            message
-        );
+        // ✅ CORRECT v8 SDK syntax - Use the send method with proper params
+        // Option 1: Using grant ID in the URL
+        const sentMessage = await nylas.messages.send({
+            identifier: account.nylasGrantId,
+            requestBody: {
+                to: [{ email: to }],
+                subject: subject,
+                body: body,
+            },
+        });
 
         console.log('✅ [Nylas Send] Email sent successfully. Message ID:', sentMessage?.id || 'unknown');
         return { success: true, messageId: sentMessage?.id };
@@ -117,7 +114,6 @@ exports.sendEmail = async (userId, to, subject, body) => {
             console.log('🔄 [Nylas] Token error, attempting one more refresh...');
             const refreshed = await refreshNylasToken(userId);
             if (refreshed) {
-                // Retry sending
                 return exports.sendEmail(userId, to, subject, body);
             }
         }
@@ -136,7 +132,6 @@ exports.checkConnection = async (userId) => {
 
         const isExpired = account.tokenExpiry && new Date(account.tokenExpiry) < new Date();
         
-        // If expired, try to refresh
         if (isExpired && account.refreshToken) {
             console.log('🔄 [Nylas] Status check - token expired, attempting refresh...');
             const refreshed = await refreshNylasToken(userId);
@@ -172,10 +167,10 @@ exports.getThreads = async (userId, limit = 10) => {
 
         console.log('📬 [Nylas Threads] Fetching threads for grant:', account.nylasGrantId);
 
-        const threads = await nylas.threads.list(
-            account.nylasGrantId,
-            { limit: limit }
-        );
+        const threads = await nylas.threads.list({
+            identifier: account.nylasGrantId,
+            queryParams: { limit: limit },
+        });
 
         console.log('✅ [Nylas Threads] Fetched', threads?.length || 0, 'threads');
         return threads || [];
