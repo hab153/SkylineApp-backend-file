@@ -15,27 +15,37 @@ exports.sendEmail = async (userId, to, subject, body) => {
       return { success: false, error: 'Grant ID not found.' };
     }
 
+    // ✅ Check token expiry
+    if (account.tokenExpiry && new Date(account.tokenExpiry) < new Date()) {
+      console.error('❌ [Nylas Send] Token expired for user:', userId);
+      return { success: false, error: 'Token expired. Please reconnect your email.' };
+    }
+
     console.log('📧 [Nylas Send] Sending email to:', to);
     console.log('📧 [Nylas Send] Using grant ID:', account.nylasGrantId);
+    console.log('📧 [Nylas Send] Subject:', subject);
+    console.log('📧 [Nylas Send] Body length:', body?.length || 0);
 
+    // ✅ CORRECT v8 SDK syntax - identifier as first argument, requestBody as second
     const message = {
       to: [{ email: to }],
       subject: subject,
       body: body,
     };
 
-    // ✅ Send using v8 SDK with proper identifier
-    const sentMessage = await nylas.messages.send({
-      identifier: account.nylasGrantId,
-      requestBody: message,
-    });
+    // ✅ Send using v8 SDK - CORRECT syntax
+    const sentMessage = await nylas.messages.send(
+      account.nylasGrantId,  // identifier (grantId)
+      message                // requestBody
+    );
 
-    console.log('✅ [Nylas Send] Email sent successfully. Message ID:', sentMessage.id);
-    return { success: true, messageId: sentMessage.id };
+    console.log('✅ [Nylas Send] Email sent successfully. Message ID:', sentMessage?.id || 'unknown');
+    return { success: true, messageId: sentMessage?.id };
+    
   } catch (error) {
     console.error('❌ [Nylas Send] Error:', error.message);
-    console.error('❌ [Nylas Send] Full error:', error);
-    return { success: false, error: error.message };
+    console.error('❌ [Nylas Send] Error details:', error.response?.data || error);
+    return { success: false, error: error.message, details: error.response?.data };
   }
 };
 
@@ -49,15 +59,17 @@ exports.getThreads = async (userId, limit = 10) => {
 
     console.log('📬 [Nylas Threads] Fetching threads for grant:', account.nylasGrantId);
 
-    const threads = await nylas.threads.list({
-      identifier: account.nylasGrantId,
-      queryParams: { limit: limit },
-    });
+    // ✅ CORRECT v8 SDK syntax
+    const threads = await nylas.threads.list(
+      account.nylasGrantId,  // identifier
+      { limit: limit }       // queryParams
+    );
 
-    console.log('✅ [Nylas Threads] Fetched', threads.length, 'threads');
-    return threads;
+    console.log('✅ [Nylas Threads] Fetched', threads?.length || 0, 'threads');
+    return threads || [];
   } catch (error) {
     console.error('❌ [Nylas Threads] Error:', error.message);
+    console.error('❌ [Nylas Threads] Error details:', error.response?.data || error);
     return [];
   }
 };
