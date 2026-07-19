@@ -1,7 +1,7 @@
 const nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 
-// ── Refresh Token Function ──
+// ── Refresh Token Function (FIXED for v8 SDK) ──
 async function refreshNylasToken(userId) {
     try {
         console.log('🔄 [Nylas] Refreshing token for user:', userId);
@@ -17,13 +17,11 @@ async function refreshNylasToken(userId) {
             return null;
         }
 
-        // ✅ Use the refresh token to get new access token
-        const response = await nylas.auth.exchangeCodeForToken({
+        // ✅ v8 SDK: Use the refresh method directly
+        const response = await nylas.auth.refreshAccessToken({
             clientId: process.env.NYLAS_CLIENT_ID,
             clientSecret: process.env.NYLAS_API_KEY,
-            redirectUri: process.env.NYLAS_REDIRECT_URI,
             refreshToken: account.refreshToken,
-            grantType: 'refresh_token'
         });
 
         // ✅ Update account with new tokens
