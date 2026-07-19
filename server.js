@@ -203,6 +203,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 
         // ✅ START WEBHOOK VERIFICATION
         verifyWebhookRegistration();
+
+        // ✅ START TOKEN REFRESH JOB
+        startTokenRefreshJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
@@ -221,6 +224,48 @@ async function verifyWebhookRegistration() {
     } catch (error) {
         console.error('❌ [WEBHOOK] Verification error:', error.message);
     }
+}
+
+// ════════════════════════════════════════════
+//  TOKEN REFRESH JOB
+// ════════════════════════════════════════════
+async function startTokenRefreshJob() {
+    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
+    
+    // Run every 5 minutes
+    setInterval(async () => {
+        try {
+            const EmailAccount = require('./EmailAccount');
+            const now = new Date();
+            const fiveMinutesFromNow = new Date(now.getTime() + 5 * 60 * 1000);
+            
+            // Find accounts with tokens expiring in the next 5 minutes
+            const expiringAccounts = await EmailAccount.find({
+                isConnected: true,
+                tokenExpiry: { 
+                    $lt: fiveMinutesFromNow,
+                    $gte: now
+                }
+            });
+            
+            if (expiringAccounts.length > 0) {
+                console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
+            }
+            
+            for (const account of expiringAccounts) {
+                try {
+                    const { refreshNylasToken } = require('./nylasService');
+                    console.log(`🔄 [TOKEN REFRESH] Refreshing token for user: ${account.userId}`);
+                    await refreshNylasToken(account.userId);
+                } catch (err) {
+                    console.error(`❌ [TOKEN REFRESH] Failed to refresh for user ${account.userId}:`, err.message);
+                }
+            }
+            
+        } catch (error) {
+            console.error('❌ [TOKEN REFRESH] Job error:', error.message);
+        }
+    }, 5 * 60 * 1000); // Run every 5 minutes
 }
 
 // ════════════════════════════════════════════
@@ -255,31 +300,12 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
 
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
-// ✅ CHECK NYLAS CONNECTION STATUS
+// ✅ CHECK NYLAS CONNECTION STATUS (with auto-refresh)
 app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
   try {
-    const EmailAccount = require('./EmailAccount');
-    
-    const emailAccount = await EmailAccount.findOne({ 
-      userId: req.userId, 
-      isConnected: true 
-    });
-    
-    if (emailAccount) {
-      const isExpired = emailAccount.tokenExpiry && new Date(emailAccount.tokenExpiry) < new Date();
-      
-      res.json({
-        connected: true,
-        email: emailAccount.emailAddress || 'Connected',
-        isExpired: isExpired,
-        grantId: emailAccount.nylasGrantId
-      });
-    } else {
-      res.json({
-        connected: false,
-        email: null
-      });
-    }
+    const { checkConnection } = require('./nylasService');
+    const status = await checkConnection(req.userId);
+    res.json(status);
   } catch (error) {
     console.error('❌ [NYLAS STATUS] Error:', error);
     res.status(500).json({ 
