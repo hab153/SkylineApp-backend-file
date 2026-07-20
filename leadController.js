@@ -237,7 +237,7 @@ const updateAutoReply = async (req, res) => {
     }
 };
 
-// POST /api/leads/batch-send
+// POST /api/leads/batch-send - ✅ FIXED: Now saves to ChatMessage too
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
     try {
@@ -264,6 +264,9 @@ const batchSend = async (req, res) => {
             });
         }
         console.log(`✅ [batchSend] Nylas account found for user`);
+
+        // ✅ Import ChatMessage model
+        const ChatMessage = require('./ChatMessage');
 
         const sanitizedLeads = leads.map(lead => ({
             name: lead.name ? lead.name.trim().slice(0, 100) : '',
@@ -303,24 +306,44 @@ const batchSend = async (req, res) => {
                 }
 
                 if (leadData.messages?.length > 0) {
+                    const msgContent = leadData.messages[0].body;
+                    const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
+                    
+                    // ✅ Save to Lead.replies
                     if (!lead.replies) lead.replies = [];
                     lead.replies.push({
                         date: now,
-                        content: leadData.messages[0].body,
-                        subject: leadData.messages[0].subject,
+                        content: msgContent,
+                        subject: msgSubject,
                         from: 'ai',
                         status: 'sent',
                         read: true
                     });
                     lead.followUpCount = (lead.followUpCount || 0) + 1;
+                    await lead.save();
+
+                    // ✅ ALSO save to ChatMessage model using lead._id as sessionId
+                    try {
+                        const chatMessage = new ChatMessage({
+                            userId: req.userId,
+                            sessionId: lead._id.toString(), // ✅ Use lead._id as sessionId
+                            role: 'user',
+                            content: msgContent,
+                            title: msgSubject,
+                            createdAt: now
+                        });
+                        await chatMessage.save();
+                        console.log(`📝 [batchSend] Saved message to ChatMessage for ${leadData.email}`);
+                    } catch (chatErr) {
+                        console.warn(`⚠️ [batchSend] Failed to save to ChatMessage:`, chatErr.message);
+                    }
                 }
-                await lead.save();
 
                 if (leadData.messages?.length > 0) {
                     const result = await sendEmail(
                         req.userId,
                         leadData.email,
-                        leadData.messages[0].subject,
+                        leadData.messages[0].subject || 'Re: Conversation',
                         leadData.messages[0].body
                     );
                     
