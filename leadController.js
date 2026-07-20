@@ -39,8 +39,9 @@ const getConversations = async (req, res) => {
             // ✅ Count unread messages (replies from lead that haven't been read)
             const unreadCount = lead.replies?.filter(r => r.from === 'lead' && !r.read).length || 0;
             
+            // ✅ FIX: Convert ObjectId to string
             const result = {
-                id: lead._id,
+                id: lead._id.toString(),  // ← FIXED: toString()
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
                 email: lead.email || '',
@@ -191,7 +192,7 @@ const getConversationById = async (req, res) => {
         
         res.json({
             lead: {
-                id: lead._id,
+                id: lead._id.toString(),  // ← FIXED: toString()
                 name: lead.name,
                 email: lead.email,
                 company: lead.company,
@@ -350,7 +351,7 @@ const batchSend = async (req, res) => {
                     try {
                         const chatMessage = new ChatMessage({
                             userId: req.userId,
-                            sessionId: lead._id.toString(), // ✅ Use lead._id as sessionId
+                            sessionId: lead._id.toString(),
                             role: 'user',
                             content: msgContent,
                             title: msgSubject,
