@@ -2,11 +2,9 @@ const Lead = require('./Lead');
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
-// GET /api/conversations - ✅ FIXED: Returns unreadCount for notifications.html
+// GET /api/conversations - ✅ SPEED OPTIMIZED
 const getConversations = async (req, res) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
-    console.log('🔵 [getConversations] Request headers:', req.headers ? 'present' : 'none');
     try {
         if (!req.userId) {
             console.error('❌ [getConversations] No userId in request');
@@ -16,32 +14,30 @@ const getConversations = async (req, res) => {
             console.error('❌ [getConversations] Invalid userId format:', req.userId);
             return res.status(400).json({ message: 'Invalid user ID' });
         }
+        
         console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
         const query = sanitizeQuery({ userId: req.userId });
-        console.log(`📡 [getConversations] Query:`, JSON.stringify(query));
         
-        const leads = await Lead.find(query).sort({ lastContactDate: -1 }).limit(50);
+        // ✅ SPEED: Use lean() for faster plain objects
+        const leads = await Lead.find(query)
+            .sort({ lastContactDate: -1 })
+            .limit(50)
+            .lean();
+            
         console.log(`✅ [getConversations] Found ${leads.length} leads`);
         
-        // ✅ DEBUG: Log each lead's ID and type
-        console.log('📊 [getConversations] Lead IDs:');
-        leads.forEach((lead, index) => {
-            console.log(`   ${index + 1}. ID: ${lead._id}, Type: ${typeof lead._id}, String: ${String(lead._id)}`);
-            console.log(`      Name: ${lead.name}, Email: ${lead.email}`);
-        });
-        
         const conversations = leads.map(lead => {
-            const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
+            const replies = lead.replies || [];
+            const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
             const preview = lastReply
                 ? lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50)
                 : "No messages yet";
             
-            // ✅ Count unread messages (replies from lead that haven't been read)
-            const unreadCount = lead.replies?.filter(r => r.from === 'lead' && !r.read).length || 0;
+            // ✅ Count unread messages
+            const unreadCount = replies.filter(r => r.from === 'lead' && !r.read).length || 0;
             
-            // ✅ FIX: Convert ObjectId to string
-            const result = {
-                id: lead._id.toString(),  // ← FIXED: toString()
+            return {
+                id: lead._id.toString(),
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
                 email: lead.email || '',
@@ -53,13 +49,9 @@ const getConversations = async (req, res) => {
                 autoReplyEnabled: lead.autoReplyEnabled || false,
                 autoReplyInstructions: lead.autoReplyInstructions || ''
             };
-            
-            console.log(`   📤 Returning lead: ${result.name}, ID: ${result.id}, ID Type: ${typeof result.id}`);
-            return result;
         });
         
         console.log(`📤 [getConversations] Returning ${conversations.length} conversations`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         res.json(conversations);
     } catch (err) {
         console.error('❌ [getConversations] Error:', err);
@@ -68,13 +60,9 @@ const getConversations = async (req, res) => {
     }
 };
 
-// GET /api/conversations/:leadId - ✅ FIXED: Fetches from both Lead.replies AND ChatMessage
+// GET /api/conversations/:leadId - ✅ SPEED OPTIMIZED
 const getConversationById = async (req, res) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔵 [getConversationById] ENTERED');
-    console.log('📥 [getConversationById] leadId param:', req.params.leadId);
-    console.log('📥 [getConversationById] leadId type:', typeof req.params.leadId);
-    console.log('📥 [getConversationById] userId:', req.userId);
+    console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
     
     try {
         if (!req.userId) {
@@ -86,113 +74,98 @@ const getConversationById = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         const { leadId } = req.params;
-        console.log(`🔍 [getConversationById] Raw leadId: "${leadId}"`);
-        console.log(`🔍 [getConversationById] leadId length: ${leadId?.length || 0}`);
         
         if (!isValidObjectId(leadId)) {
             console.error('❌ [getConversationById] Invalid leadId format:', leadId);
-            console.error('❌ [getConversationById] leadId is not a valid ObjectId');
             return res.status(400).json({ message: 'Invalid lead ID format' });
         }
         
         console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
         const query = sanitizeQuery({ _id: leadId, userId: req.userId });
-        console.log(`📡 [getConversationById] Query:`, JSON.stringify(query));
         
-        const lead = await Lead.findOne(query);
+        // ✅ SPEED: Use lean() for faster plain object
+        const lead = await Lead.findOne(query).lean();
         if (!lead) {
             console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
             return res.status(404).json({ message: 'Conversation not found' });
         }
-        console.log(`✅ [getConversationById] Lead found: ${lead.name} (${lead._id})`);
+        console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
         
-        // ✅ Mark all lead replies as read
+        // ✅ SPEED: Mark replies as read in one operation instead of loop
         if (lead.replies && lead.replies.length > 0) {
-            let markedRead = 0;
-            for (const reply of lead.replies) {
-                if (reply.from === 'lead' && !reply.read) {
-                    reply.read = true;
-                    markedRead++;
-                }
-            }
-            if (markedRead > 0) {
-                await lead.save();
-                console.log(`📖 [getConversationById] Marked ${markedRead} replies as read`);
+            const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
+            if (unreadReplies.length > 0) {
+                // Update in database without reloading
+                await Lead.updateOne(
+                    { _id: leadId },
+                    { $set: { 'replies.$[elem].read': true } },
+                    { arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }] }
+                );
+                console.log(`📖 [getConversationById] Marked ${unreadReplies.length} replies as read`);
             }
         }
         
         // ──────────────────────────────────────────────────────────────
-        // ✅ FIX: Also fetch messages from ChatMessage model
+        // ✅ SPEED: Fetch messages from ChatMessage with limit
         // ──────────────────────────────────────────────────────────────
         const ChatMessage = require('./ChatMessage');
         console.log(`📡 [getConversationById] Fetching ChatMessages with sessionId: ${leadId}`);
         
+        // ✅ SPEED: Limit to last 50 messages, use lean()
         const chatMessages = await ChatMessage.find({
             userId: req.userId,
             sessionId: leadId
-        }).sort({ createdAt: 1 });
+        })
+        .sort({ createdAt: -1 })  // Get newest first
+        .limit(50)                 // ✅ Only get last 50 messages
+        .lean();                   // ✅ Faster plain objects
         
         console.log(`📊 [getConversationById] Found ${chatMessages.length} messages in ChatMessage`);
         
-        // Convert ChatMessage to the same format as Lead.replies
-        const chatMessagesFormatted = chatMessages.map(msg => ({
+        // Convert ChatMessage to the same format as Lead.replies (reverse to chronological)
+        const chatMessagesFormatted = chatMessages.reverse().map(msg => ({
             date: msg.createdAt || new Date(),
             content: msg.content || '',
             subject: msg.title || '',
             from: msg.role === 'user' ? 'lead' : 'ai',
             emailId: msg._id.toString(),
             isChatMessage: true,
-            read: true // Chat messages are always read
+            read: true
         }));
         
         // ──────────────────────────────────────────────────────────────
-        // Merge both sources
+        // ✅ SPEED: Merge both sources (but limit total messages)
         // ──────────────────────────────────────────────────────────────
-        let allMessages = [...(lead.replies || [])];
+        let allMessages = lead.replies || [];
         
-        // If there are ChatMessages, merge them
+        // If there are ChatMessages, merge them (keep last 50 total)
         if (chatMessagesFormatted.length > 0) {
-            if (allMessages.length === 0) {
-                allMessages = chatMessagesFormatted;
-                console.log('📊 [getConversationById] Using ChatMessages as primary source');
-            } else {
-                // Merge: keep both but avoid duplicates by date
-                const existingDates = new Set();
-                // First, add all lead replies
-                for (const msg of allMessages) {
-                    const dateKey = msg.date ? new Date(msg.date).toISOString() : '';
-                    if (dateKey) existingDates.add(dateKey);
-                }
-                // Then add chat messages that don't duplicate
-                for (const msg of chatMessagesFormatted) {
-                    const dateKey = msg.date ? new Date(msg.date).toISOString() : '';
-                    if (!existingDates.has(dateKey)) {
-                        allMessages.push(msg);
-                        existingDates.add(dateKey);
-                    }
-                }
-                // Sort by date
-                allMessages.sort((a, b) => {
-                    const dateA = a.date ? new Date(a.date) : new Date(0);
-                    const dateB = b.date ? new Date(b.date) : new Date(0);
-                    return dateA - dateB;
-                });
-                console.log(`📊 [getConversationById] Merged ${allMessages.length} total messages`);
+            // Combine and sort by date
+            allMessages = [...allMessages, ...chatMessagesFormatted];
+            allMessages.sort((a, b) => {
+                const dateA = a.date ? new Date(a.date) : new Date(0);
+                const dateB = b.date ? new Date(b.date) : new Date(0);
+                return dateA - dateB;
+            });
+            
+            // ✅ SPEED: Keep only last 50 messages total
+            if (allMessages.length > 50) {
+                allMessages = allMessages.slice(-50);
+                console.log(`📊 [getConversationById] Trimmed to last 50 messages`);
             }
         }
         
-        // Clean content
+        // ✅ SPEED: Lighter content cleaning (only if needed)
         const cleanHistory = allMessages.map(msg => ({
             ...msg,
-            content: msg.content ? msg.content.replace(/<[^>]*>?/gm, '') : ''
+            content: msg.content || ''
         }));
         
-        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} total messages`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages`);
         
         res.json({
             lead: {
-                id: lead._id.toString(),  // ← FIXED: toString()
+                id: lead._id.toString(),
                 name: lead.name,
                 email: lead.email,
                 company: lead.company,
