@@ -4,6 +4,7 @@ const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = requir
 
 // GET /api/conversations - ✅ FIXED: Returns unreadCount for notifications.html
 const getConversations = async (req, res) => {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
     console.log('🔵 [getConversations] Request headers:', req.headers ? 'present' : 'none');
     try {
@@ -22,6 +23,13 @@ const getConversations = async (req, res) => {
         const leads = await Lead.find(query).sort({ lastContactDate: -1 }).limit(50);
         console.log(`✅ [getConversations] Found ${leads.length} leads`);
         
+        // ✅ DEBUG: Log each lead's ID and type
+        console.log('📊 [getConversations] Lead IDs:');
+        leads.forEach((lead, index) => {
+            console.log(`   ${index + 1}. ID: ${lead._id}, Type: ${typeof lead._id}, String: ${String(lead._id)}`);
+            console.log(`      Name: ${lead.name}, Email: ${lead.email}`);
+        });
+        
         const conversations = leads.map(lead => {
             const lastReply = lead.replies?.length > 0 ? lead.replies[lead.replies.length - 1] : null;
             const preview = lastReply
@@ -31,7 +39,7 @@ const getConversations = async (req, res) => {
             // ✅ Count unread messages (replies from lead that haven't been read)
             const unreadCount = lead.replies?.filter(r => r.from === 'lead' && !r.read).length || 0;
             
-            return {
+            const result = {
                 id: lead._id,
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
@@ -39,17 +47,18 @@ const getConversations = async (req, res) => {
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
-                // ✅ FIX: Use unreadCount (not unread)
                 unreadCount: unreadCount > 0 ? unreadCount : 0,
-                // ✅ Keep for backwards compatibility
                 unread: unreadCount > 0,
-                // ✅ Include auto-reply settings
                 autoReplyEnabled: lead.autoReplyEnabled || false,
                 autoReplyInstructions: lead.autoReplyInstructions || ''
-                // ✅ REMOVED: replies and lastReply (causes circular reference)
             };
+            
+            console.log(`   📤 Returning lead: ${result.name}, ID: ${result.id}, ID Type: ${typeof result.id}`);
+            return result;
         });
+        
         console.log(`📤 [getConversations] Returning ${conversations.length} conversations`);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         res.json(conversations);
     } catch (err) {
         console.error('❌ [getConversations] Error:', err);
@@ -60,7 +69,12 @@ const getConversations = async (req, res) => {
 
 // GET /api/conversations/:leadId - ✅ FIXED: Fetches from both Lead.replies AND ChatMessage
 const getConversationById = async (req, res) => {
-    console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId, 'userId:', req.userId);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔵 [getConversationById] ENTERED');
+    console.log('📥 [getConversationById] leadId param:', req.params.leadId);
+    console.log('📥 [getConversationById] leadId type:', typeof req.params.leadId);
+    console.log('📥 [getConversationById] userId:', req.userId);
+    
     try {
         if (!req.userId) {
             console.error('❌ [getConversationById] No userId');
@@ -71,31 +85,38 @@ const getConversationById = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         const { leadId } = req.params;
+        console.log(`🔍 [getConversationById] Raw leadId: "${leadId}"`);
+        console.log(`🔍 [getConversationById] leadId length: ${leadId?.length || 0}`);
+        
         if (!isValidObjectId(leadId)) {
             console.error('❌ [getConversationById] Invalid leadId format:', leadId);
-            return res.status(400).json({ message: 'Invalid lead ID' });
+            console.error('❌ [getConversationById] leadId is not a valid ObjectId');
+            return res.status(400).json({ message: 'Invalid lead ID format' });
         }
+        
         console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
         const query = sanitizeQuery({ _id: leadId, userId: req.userId });
+        console.log(`📡 [getConversationById] Query:`, JSON.stringify(query));
+        
         const lead = await Lead.findOne(query);
         if (!lead) {
             console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
             return res.status(404).json({ message: 'Conversation not found' });
         }
-        console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
+        console.log(`✅ [getConversationById] Lead found: ${lead.name} (${lead._id})`);
         
         // ✅ Mark all lead replies as read
         if (lead.replies && lead.replies.length > 0) {
-            let markedRead = false;
+            let markedRead = 0;
             for (const reply of lead.replies) {
                 if (reply.from === 'lead' && !reply.read) {
                     reply.read = true;
-                    markedRead = true;
+                    markedRead++;
                 }
             }
-            if (markedRead) {
+            if (markedRead > 0) {
                 await lead.save();
-                console.log('📖 [getConversationById] Marked replies as read');
+                console.log(`📖 [getConversationById] Marked ${markedRead} replies as read`);
             }
         }
         
@@ -103,6 +124,8 @@ const getConversationById = async (req, res) => {
         // ✅ FIX: Also fetch messages from ChatMessage model
         // ──────────────────────────────────────────────────────────────
         const ChatMessage = require('./ChatMessage');
+        console.log(`📡 [getConversationById] Fetching ChatMessages with sessionId: ${leadId}`);
+        
         const chatMessages = await ChatMessage.find({
             userId: req.userId,
             sessionId: leadId
@@ -164,6 +187,7 @@ const getConversationById = async (req, res) => {
         }));
         
         console.log(`📤 [getConversationById] Returning ${cleanHistory.length} total messages`);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         
         res.json({
             lead: {
