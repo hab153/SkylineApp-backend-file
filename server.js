@@ -184,15 +184,35 @@ app.use(xssProtection);
 app.use(xssOutputProtection);
 
 // ════════════════════════════════════════════
-//  MONGODB CONNECTION
+//  MONGODB CONNECTION & INDEX CREATION
 // ════════════════════════════════════════════
 console.log('🔗 [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
     serverSelectionTimeoutMS: 5000
 })
-    .then(() => {
+    .then(async () => {
         console.log('✅ MongoDB Connected');
+        
+        // ✅ SPEED: Create indexes for faster queries
+        try {
+            console.log('🔧 [SERVER] Creating database indexes...');
+            
+            // ChatMessage indexes
+            const ChatMessage = require('./ChatMessage');
+            await ChatMessage.collection.createIndex({ userId: 1, sessionId: 1 });
+            await ChatMessage.collection.createIndex({ userId: 1, createdAt: -1 });
+            console.log('✅ [SERVER] ChatMessage indexes created');
+            
+            // Lead indexes
+            await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
+            await Lead.collection.createIndex({ userId: 1, email: 1 });
+            console.log('✅ [SERVER] Lead indexes created');
+            
+            console.log('✅ [SERVER] All database indexes created');
+        } catch (indexErr) {
+            console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message);
+        }
         
         startExpiryJob();
         startFollowUpJob();
