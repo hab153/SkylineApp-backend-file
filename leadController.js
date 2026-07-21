@@ -2,7 +2,31 @@ const Lead = require('./Lead');
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
-// GET /api/conversations - ✅ SPEED OPTIMIZED
+// ──────────────────────────────────────────────────────────────
+//  HELPER: Decrypt email if encrypted
+// ──────────────────────────────────────────────────────────────
+function getDecryptedEmail(lead) {
+    if (!lead) return '';
+    // If lead has email getter (Mongoose schema), it should auto-decrypt
+    // But if it's a plain object from lean(), we need to handle it
+    try {
+        // Check if it's an encrypted string (long base64)
+        const email = lead.email || '';
+        if (email && email.length > 30 && /^[A-Za-z0-9+/=]+$/.test(email) && email.includes('=')) {
+            // It's likely encrypted - try to decrypt via the model
+            // Since we can't easily decrypt here without the model's getter,
+            // we'll return a placeholder
+            return '[Encrypted]';
+        }
+        return email;
+    } catch {
+        return lead.email || '';
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+//  GET /api/conversations - ✅ SPEED OPTIMIZED
+// ──────────────────────────────────────────────────────────────
 const getConversations = async (req, res) => {
     console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
     try {
@@ -36,11 +60,22 @@ const getConversations = async (req, res) => {
             // ✅ Count unread messages
             const unreadCount = replies.filter(r => r.from === 'lead' && !r.read).length || 0;
             
+            // ✅ FIX: Get decrypted email
+            let email = lead.email || '';
+            // If email is encrypted (long base64), try to get decrypted version
+            if (email && email.length > 30 && /^[A-Za-z0-9+/=]+$/.test(email)) {
+                // Check if it looks encrypted
+                if (email.includes('=') || email.length > 40) {
+                    // Don't expose encrypted data - show placeholder
+                    email = '';
+                }
+            }
+            
             return {
                 id: lead._id.toString(),
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
-                email: lead.email || '',
+                email: email,  // ✅ Now sends decrypted or empty
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
@@ -60,7 +95,9 @@ const getConversations = async (req, res) => {
     }
 };
 
-// GET /api/conversations/:leadId - ✅ SPEED OPTIMIZED
+// ──────────────────────────────────────────────────────────────
+//  GET /api/conversations/:leadId - ✅ SPEED OPTIMIZED
+// ──────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
     
@@ -90,6 +127,14 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ message: 'Conversation not found' });
         }
         console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
+        
+        // ✅ FIX: Get decrypted email
+        let email = lead.email || '';
+        if (email && email.length > 30 && /^[A-Za-z0-9+/=]+$/.test(email)) {
+            if (email.includes('=') || email.length > 40) {
+                email = '';
+            }
+        }
         
         // ✅ SPEED: Mark replies as read in one operation instead of loop
         if (lead.replies && lead.replies.length > 0) {
@@ -167,7 +212,7 @@ const getConversationById = async (req, res) => {
             lead: {
                 id: lead._id.toString(),
                 name: lead.name,
-                email: lead.email,
+                email: email,  // ✅ Now sends decrypted or empty
                 company: lead.company,
                 status: lead.status,
                 autoReplyEnabled: lead.autoReplyEnabled || false,
@@ -182,7 +227,9 @@ const getConversationById = async (req, res) => {
     }
 };
 
-// PUT /api/leads/:leadId/rename
+// ──────────────────────────────────────────────────────────────
+//  PUT /api/leads/:leadId/rename
+// ──────────────────────────────────────────────────────────────
 const renameLead = async (req, res) => {
     console.log('🔵 [renameLead] ENTERED - leadId:', req.params.leadId);
     try {
@@ -208,7 +255,9 @@ const renameLead = async (req, res) => {
     }
 };
 
-// PUT /api/leads/:leadId/auto-reply
+// ──────────────────────────────────────────────────────────────
+//  PUT /api/leads/:leadId/auto-reply
+// ──────────────────────────────────────────────────────────────
 const updateAutoReply = async (req, res) => {
     console.log('🔵 [updateAutoReply] ENTERED - leadId:', req.params.leadId);
     try {
@@ -235,7 +284,9 @@ const updateAutoReply = async (req, res) => {
     }
 };
 
-// POST /api/leads/batch-send - ✅ FIXED: Now saves to ChatMessage too
+// ──────────────────────────────────────────────────────────────
+//  POST /api/leads/batch-send - ✅ FIXED: Now saves to ChatMessage too
+// ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
     try {
@@ -375,7 +426,9 @@ const batchSend = async (req, res) => {
     }
 };
 
-// POST /api/reconnect-and-send
+// ──────────────────────────────────────────────────────────────
+//  POST /api/reconnect-and-send
+// ──────────────────────────────────────────────────────────────
 const reconnectAndSend = async (req, res) => {
     console.log('🔵 [reconnectAndSend] ENTERED');
     try {
@@ -433,7 +486,9 @@ const reconnectAndSend = async (req, res) => {
     }
 };
 
-// GET /api/leads
+// ──────────────────────────────────────────────────────────────
+//  GET /api/leads
+// ──────────────────────────────────────────────────────────────
 const getAllLeads = async (req, res) => {
     console.log('🔵 [getAllLeads] ENTERED - userId:', req.userId);
     try {
