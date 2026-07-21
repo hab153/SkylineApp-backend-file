@@ -273,7 +273,7 @@ async function findMatchingLead(userId, fromEmail) {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  PROCESS REPLY
+//  PROCESS REPLY - ✅ FIXED: Uses lead._id as sessionId
 // ──────────────────────────────────────────────────────────────
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   console.log('📝 [WEBHOOK] Processing reply for lead:', lead.name);
@@ -297,18 +297,18 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     await lead.save();
     console.log('✅ [WEBHOOK] Reply saved to Lead.replies');
 
-    // ✅ ALSO save to ChatMessage model
+    // ✅ ALSO save to ChatMessage model with CORRECT sessionId
     try {
       const chatMessage = new ChatMessage({
         userId: userId,
-        sessionId: lead._id.toString(),
+        sessionId: lead._id.toString(),  // ✅ KEY FIX: Use lead._id as sessionId
         role: 'user',
         content: body || snippet || '(No content)',
         title: subject || '(no subject)',
         createdAt: new Date()
       });
       await chatMessage.save();
-      console.log('✅ [WEBHOOK] Reply saved to ChatMessage');
+      console.log('✅ [WEBHOOK] Reply saved to ChatMessage with sessionId:', lead._id.toString());
     } catch (chatErr) {
       console.warn('⚠️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
     }
@@ -538,4 +538,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-                      }
+          }
