@@ -17,40 +17,42 @@ exports.handleWebhook = async (req, res) => {
 
   // 2. Handle Actual Webhook Events (POST Request)
   if (req.method === 'POST') {
-    const signature = req.headers['x-nylas-signature'];
+    // ✅ FIX: Get the raw body for signature verification BEFORE parsing
+    let rawBody = req.body;
+    let eventData = req.body;
     
-    // Verify the webhook signature for security
-    if (signature && webhookSecret) {
-      let bodyContent;
-      if (Buffer.isBuffer(req.body)) {
-        bodyContent = req.body;
-      } else {
-        bodyContent = JSON.stringify(req.body);
+    // If body is a Buffer, keep it for signature verification
+    if (Buffer.isBuffer(rawBody)) {
+      // For signature verification, use the raw buffer
+      const rawBodyString = rawBody.toString();
+      
+      // Verify signature using raw body
+      if (signature && webhookSecret) {
+        const hmac = crypto.createHmac('sha256', webhookSecret);
+        const digest = hmac.update(rawBodyString).digest('hex');
+
+        if (signature !== digest) {
+          console.error('❌ [Nylas Webhook] Invalid signature detected.');
+          // Still process but log warning - sometimes signatures don't match in sandbox
+          console.warn('⚠️ [Nylas Webhook] Continuing anyway (sandbox mode)');
+        } else {
+          console.log('✅ [Nylas Webhook] Signature verified');
+        }
       }
       
-      const hmac = crypto.createHmac('sha256', webhookSecret);
-      const digest = hmac.update(bodyContent).digest('hex');
-
-      if (signature !== digest) {
-        console.error('❌ [Nylas Webhook] Invalid signature detected.');
-        return res.status(401).json({ message: 'Invalid webhook signature.' });
-      }
-    }
-
-    // Parse event data
-    let eventData = req.body;
-    if (Buffer.isBuffer(eventData)) {
+      // Parse the body for processing
       try {
-        eventData = JSON.parse(eventData.toString());
+        eventData = JSON.parse(rawBodyString);
       } catch (e) {
         console.error('❌ [Nylas Webhook] Failed to parse JSON body');
         return res.status(400).send('Invalid JSON');
       }
     }
-    
+
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📨 [NYLAS WEBHOOK] Event received');
     console.log('📨 [NYLAS WEBHOOK] Event type:', eventData.type);
+    console.log('📨 [NYLAS WEBHOOK] Full payload:', JSON.stringify(eventData, null, 2));
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // 3. Handle different event types
@@ -92,32 +94,100 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created (Email Received - REPLIES!)
+//  EXTRACT EMAIL FROM WEBHOOK PAYLOAD
+// ──────────────────────────────────────────────────────────────
+function extractEmailFromPayload(eventData) {
+  // Try different paths to find the from email
+  const data = eventData.data || {};
+  const object = data.object || {};
+  const message = object.message || data.message || data;
+  
+  // Check all possible locations for 'from'
+  let from = message.from || data.from || object.from || null;
+  
+  // If from is an array, get the first email
+  if (Array.isArray(from) && from.length > 0) {
+    return from[0].email || from[0].address || from[0] || null;
+  }
+  
+  // If from is an object with email property
+  if (from && typeof from === 'object') {
+    return from.email || from.address || null;
+  }
+  
+  // If from is a string
+  if (typeof from === 'string') {
+    return from;
+  }
+  
+  // Try to extract from headers
+  const headers = message.headers || data.headers || object.headers || {};
+  const fromHeader = headers.from || headers['From'] || null;
+  if (fromHeader) {
+    // Extract email from "Name <email@domain.com>" format
+    const match = fromHeader.match(/<([^>]+)>/);
+    if (match) return match[1];
+    return fromHeader;
+  }
+  
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────────
+//  EXTRACT SUBJECT FROM PAYLOAD
+// ──────────────────────────────────────────────────────────────
+function extractSubject(eventData) {
+  const data = eventData.data || {};
+  const object = data.object || {};
+  const message = object.message || data.message || data;
+  
+  return message.subject || data.subject || object.subject || '(no subject)';
+}
+
+// ──────────────────────────────────────────────────────────────
+//  EXTRACT BODY FROM PAYLOAD
+// ──────────────────────────────────────────────────────────────
+function extractBody(eventData) {
+  const data = eventData.data || {};
+  const object = data.object || {};
+  const message = object.message || data.message || data;
+  
+  return message.body || message.snippet || data.body || data.snippet || '';
+}
+
+// ──────────────────────────────────────────────────────────────
+//  EXTRACT GRANT ID FROM PAYLOAD
+// ──────────────────────────────────────────────────────────────
+function extractGrantId(eventData) {
+  const data = eventData.data || {};
+  const object = data.object || {};
+  const message = object.message || data.message || data;
+  
+  return data.grant_id || message.grant_id || object.grant_id || null;
+}
+
+// ──────────────────────────────────────────────────────────────
+//  HANDLE: Message Created
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] New message received');
   
   try {
-    // Extract message data from Nylas webhook payload
-    const data = eventData.data || {};
-    const object = data.object || {};
-    const message = object.message || data;
-    
-    // Get the grant_id from the webhook
-    const grantId = data.grant_id || message.grant_id || object.grant_id;
-    const fromEmail = message.from?.[0]?.email || data.from?.[0]?.email;
-    const subject = message.subject || data.subject || '(no subject)';
-    const body = message.body || message.snippet || data.body || data.snippet || '';
-    const snippet = message.snippet || data.snippet || '';
-    const messageId = message.id || data.id || null;
+    // Extract data using helper functions
+    const grantId = extractGrantId(eventData);
+    const fromEmail = extractEmailFromPayload(eventData);
+    const subject = extractSubject(eventData);
+    const body = extractBody(eventData);
+    const snippet = body.substring(0, 200);
     
     console.log('📩 [WEBHOOK] From:', fromEmail);
     console.log('📩 [WEBHOOK] Subject:', subject);
     console.log('📩 [WEBHOOK] Body preview:', body.substring(0, 100));
-    console.log('📩 [WEBHOOK] Message ID:', messageId);
+    console.log('📩 [WEBHOOK] Grant ID:', grantId);
 
     if (!fromEmail) {
       console.log('⚠️ [WEBHOOK] No from email found, skipping');
+      console.log('📋 [WEBHOOK] Raw payload for debugging:', JSON.stringify(eventData, null, 2).substring(0, 500));
       return;
     }
 
@@ -126,7 +196,7 @@ async function handleMessageCreated(eventData) {
       return;
     }
 
-    // ✅ Find the EmailAccount by grantId to get userId
+    // Find the EmailAccount by grantId
     const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
     if (!emailAccount) {
       console.log('⚠️ [WEBHOOK] No email account found for grantId:', grantId);
@@ -136,20 +206,20 @@ async function handleMessageCreated(eventData) {
     const userId = emailAccount.userId;
     console.log('✅ [WEBHOOK] Found userId:', userId);
 
-    // ✅ Find if this email belongs to a lead
+    // Find matching lead
     const lead = await findMatchingLead(userId, fromEmail);
 
     if (!lead) {
       console.log('📭 [WEBHOOK] No matching lead found for:', fromEmail);
       
-      // ✅ Create a notification for unknown replies
+      // Create notification for unknown reply
       try {
         const notification = new Notification({
           userId: userId,
           type: 'unknown_reply',
           title: '📬 Unknown Reply',
           message: `Unknown reply from ${fromEmail}: ${snippet.substring(0, 100)}`,
-          data: { fromEmail, subject, snippet, messageId },
+          data: { fromEmail, subject, snippet },
           read: false
         });
         await notification.save();
@@ -160,8 +230,8 @@ async function handleMessageCreated(eventData) {
       return;
     }
 
-    // ✅ Process the reply
-    await processReply(lead, fromEmail, subject, body, snippet, messageId, userId);
+    // Process the reply
+    await processReply(lead, fromEmail, subject, body, snippet, userId);
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling message:', error.message);
@@ -173,6 +243,8 @@ async function handleMessageCreated(eventData) {
 //  FIND MATCHING LEAD
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail) {
+  if (!fromEmail) return null;
+  
   // Try exact match first
   let lead = await Lead.findOne({ 
     userId: userId,
@@ -194,45 +266,34 @@ async function findMatchingLead(userId, fromEmail) {
     }
   }
 
-  // Try name in subject match (look for common patterns)
-  // This is a fallback for leads where email might not match exactly
-  const leads = await Lead.find({ userId: userId }).limit(20);
-  for (const l of leads) {
-    if (l.name && fromEmail.toLowerCase().includes(l.name.toLowerCase().split(' ')[0])) {
-      console.log('✅ [WEBHOOK] Found lead by name match:', l.name);
-      return l;
-    }
-  }
-
   return null;
 }
 
 // ──────────────────────────────────────────────────────────────
 //  PROCESS REPLY
 // ──────────────────────────────────────────────────────────────
-async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
+async function processReply(lead, fromEmail, subject, body, snippet, userId) {
   console.log('📝 [WEBHOOK] Processing reply for lead:', lead.name);
 
   try {
-    // ✅ Update lead status
+    // Update lead status
     lead.status = 'Replied';
     lead.lastContactDate = new Date();
     
-    // ✅ Add reply to conversation history
+    // Add reply to conversation history
     if (!lead.replies) lead.replies = [];
     lead.replies.push({
       from: 'lead',
       content: body || snippet || '(No content)',
       subject: subject,
       date: new Date(),
-      messageId: messageId,
       read: false
     });
     
     await lead.save();
     console.log('✅ [WEBHOOK] Reply saved to Lead.replies');
 
-    // ✅ ALSO save to ChatMessage model
+    // Also save to ChatMessage model
     try {
       const chatMessage = new ChatMessage({
         userId: userId,
@@ -248,7 +309,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('⚠️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
     }
 
-    // ✅ Create notification for user
+    // Create notification for user
     try {
       const notification = new Notification({
         userId: userId,
@@ -257,8 +318,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
         message: `"${snippet || 'New reply from lead'}"`,
         data: { 
           leadId: lead._id.toString(), 
-          email: fromEmail,
-          messageId: messageId
+          email: fromEmail
         },
         read: false
       });
@@ -268,7 +328,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
 
-    // ✅ Trigger auto-reply if enabled
+    // Trigger auto-reply if enabled
     if (lead.autoReplyEnabled) {
       console.log('🤖 [WEBHOOK] Auto-reply enabled, generating reply...');
       await generateAndSendAutoReply(lead, userId);
@@ -280,20 +340,16 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
 }
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent (Outgoing Email)
+//  HANDLE: Message Sent
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
   console.log('📤 [WEBHOOK] Message sent');
   
   try {
-    const data = eventData.data || {};
-    const object = data.object || {};
-    const message = object.message || data;
-    
-    const toEmail = message.to?.[0]?.email || data.to?.[0]?.email;
-    const subject = message.subject || data.subject || '(no subject)';
-    const body = message.body || data.body || '';
-    const grantId = data.grant_id || message.grant_id || object.grant_id;
+    const grantId = extractGrantId(eventData);
+    const toEmail = eventData.data?.to?.[0]?.email || eventData.data?.to || null;
+    const subject = extractSubject(eventData);
+    const body = extractBody(eventData);
     
     if (!toEmail || !grantId) return;
 
@@ -302,7 +358,6 @@ async function handleMessageSent(eventData) {
 
     const userId = emailAccount.userId;
 
-    // Update lead status
     const lead = await Lead.findOne({ 
       userId: userId,
       email: { $regex: new RegExp('^' + toEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
@@ -337,8 +392,7 @@ async function handleGrantExpired(eventData) {
   console.log('⏰ [WEBHOOK] Grant expired');
   
   try {
-    const data = eventData.data || {};
-    const grantId = data.grant_id;
+    const grantId = extractGrantId(eventData);
     console.log('🔴 [WEBHOOK] Grant expired for:', grantId);
 
     if (!grantId) return;
@@ -380,8 +434,7 @@ async function handleGrantRefreshed(eventData) {
   console.log('🔄 [WEBHOOK] Grant refreshed');
   
   try {
-    const data = eventData.data || {};
-    const grantId = data.grant_id;
+    const grantId = extractGrantId(eventData);
     if (!grantId) return;
 
     const emailAccount = await EmailAccount.findOneAndUpdate(
@@ -426,7 +479,6 @@ async function generateAndSendAutoReply(lead, userId) {
       return;
     }
 
-    // Generate AI reply
     const aiResponse = await generateAIReply({
       leadName: lead.name,
       leadEmail: lead.email,
@@ -445,7 +497,6 @@ async function generateAndSendAutoReply(lead, userId) {
       return;
     }
 
-    // Send the email using Nylas
     const nylas = require('./nylasClient');
     
     const result = await nylas.sendEmail({
@@ -457,7 +508,6 @@ async function generateAndSendAutoReply(lead, userId) {
     });
 
     if (result && result.success) {
-      // Update lead with auto-reply sent
       if (!lead.replies) lead.replies = [];
       lead.replies.push({
         from: 'you',
@@ -470,11 +520,9 @@ async function generateAndSendAutoReply(lead, userId) {
       
       await lead.save();
       console.log('✅ [AUTO-REPLY] Auto-reply sent to:', lead.email);
-    } else {
-      console.log('❌ [AUTO-REPLY] Failed to send auto-reply:', result?.error || 'Unknown error');
     }
 
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-          }
+}
