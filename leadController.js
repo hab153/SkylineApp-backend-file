@@ -34,17 +34,14 @@ const getConversations = async (req, res) => {
                 ? lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50)
                 : "No messages yet";
             
-            // ✅ Count unread messages
             const unreadCount = replies.filter(r => r.from === 'lead' && !r.read).length || 0;
-            
-            // ✅ Get email - should be auto-decrypted by Mongoose getter
             const email = lead.email || '';
             
             return {
                 id: lead._id.toString(),
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
-                email: email,  // ✅ Should be decrypted!
+                email: email,
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
@@ -97,14 +94,12 @@ const getConversationById = async (req, res) => {
         }
         console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
         
-        // ✅ Get email - should be auto-decrypted by Mongoose getter
         const email = lead.email || '';
         
-        // ✅ SPEED: Mark replies as read in one operation instead of loop
+        // Mark replies as read
         if (lead.replies && lead.replies.length > 0) {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
-                // Update in database without reloading
                 await Lead.updateOne(
                     { _id: leadId },
                     { $set: { 'replies.$[elem].read': true } },
@@ -114,24 +109,21 @@ const getConversationById = async (req, res) => {
             }
         }
         
-        // ──────────────────────────────────────────────────────────────
-        // ✅ SPEED: Fetch messages from ChatMessage with limit
-        // ──────────────────────────────────────────────────────────────
+        // Fetch messages from ChatMessage
         const ChatMessage = require('./ChatMessage');
         console.log(`📡 [getConversationById] Fetching ChatMessages with sessionId: ${leadId}`);
         
-        // ✅ SPEED: Limit to last 50 messages, use lean() for performance
         const chatMessages = await ChatMessage.find({
             userId: req.userId,
             sessionId: leadId
         })
-        .sort({ createdAt: -1 })  // Get newest first
-        .limit(50)                 // ✅ Only get last 50 messages
-        .lean();                   // ✅ Fine for ChatMessage
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean();
         
         console.log(`📊 [getConversationById] Found ${chatMessages.length} messages in ChatMessage`);
         
-        // Convert ChatMessage to the same format as Lead.replies (reverse to chronological)
+        // Convert ChatMessage to format
         const chatMessagesFormatted = chatMessages.reverse().map(msg => ({
             date: msg.createdAt || new Date(),
             content: msg.content || '',
@@ -142,14 +134,10 @@ const getConversationById = async (req, res) => {
             read: true
         }));
         
-        // ──────────────────────────────────────────────────────────────
-        // ✅ SPEED: Merge both sources (but limit total messages)
-        // ──────────────────────────────────────────────────────────────
+        // Merge both sources
         let allMessages = lead.replies || [];
         
-        // If there are ChatMessages, merge them (keep last 50 total)
         if (chatMessagesFormatted.length > 0) {
-            // Combine and sort by date
             allMessages = [...allMessages, ...chatMessagesFormatted];
             allMessages.sort((a, b) => {
                 const dateA = a.date ? new Date(a.date) : new Date(0);
@@ -157,14 +145,12 @@ const getConversationById = async (req, res) => {
                 return dateA - dateB;
             });
             
-            // ✅ SPEED: Keep only last 50 messages total
             if (allMessages.length > 50) {
                 allMessages = allMessages.slice(-50);
                 console.log(`📊 [getConversationById] Trimmed to last 50 messages`);
             }
         }
         
-        // ✅ SPEED: Lighter content cleaning (only if needed)
         const cleanHistory = allMessages.map(msg => ({
             ...msg,
             content: msg.content || ''
@@ -176,7 +162,7 @@ const getConversationById = async (req, res) => {
             lead: {
                 id: lead._id.toString(),
                 name: lead.name,
-                email: email,  // ✅ Should be decrypted!
+                email: email,
                 company: lead.company,
                 status: lead.status,
                 autoReplyEnabled: lead.autoReplyEnabled || false,
@@ -244,7 +230,7 @@ const updateAutoReply = async (req, res) => {
     }
 };
 
-// POST /api/leads/batch-send - ✅ FIXED: Now saves to ChatMessage too
+// POST /api/leads/batch-send
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
     try {
@@ -272,7 +258,6 @@ const batchSend = async (req, res) => {
         }
         console.log(`✅ [batchSend] Nylas account found for user`);
 
-        // ✅ Import ChatMessage model
         const ChatMessage = require('./ChatMessage');
 
         const sanitizedLeads = leads.map(lead => ({
@@ -329,7 +314,7 @@ const batchSend = async (req, res) => {
                     lead.followUpCount = (lead.followUpCount || 0) + 1;
                     await lead.save();
 
-                    // ✅ ALSO save to ChatMessage model using lead._id as sessionId
+                    // ✅ ALSO save to ChatMessage model
                     try {
                         const chatMessage = new ChatMessage({
                             userId: req.userId,
