@@ -128,8 +128,6 @@ const getConversationById = async (req, res) => {
             date: msg.createdAt || new Date(),
             content: msg.content || '',
             subject: msg.title || '',
-            // ✅ FIX: 'user' messages are from YOU (the agent) → from: 'ai'
-            // ✅ FIX: 'ai' messages are from the lead → from: 'lead'
             from: msg.role === 'user' ? 'ai' : 'lead',
             emailId: msg._id.toString(),
             isChatMessage: true,
@@ -233,7 +231,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - ✅ FIXED: Uses leadId
+//  POST /api/leads/batch-send - ✅ FINAL FIX
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
@@ -244,7 +242,7 @@ const batchSend = async (req, res) => {
         }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
 
-        const { leads, leadId } = req.body;  // ✅ ADDED: Accept leadId from request
+        const { leads, leadId } = req.body;
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
@@ -286,34 +284,53 @@ const batchSend = async (req, res) => {
                     continue;
                 }
 
-                // ✅ FIX: Use leadId first, then fallback to email
+                // ✅ FINAL FIX: USE leadId FIRST and ONLY
                 let lead = null;
                 
-                // ✅ If leadId is provided, use it to find the exact lead
+                // ✅ If leadId is provided, USE IT - do NOT fallback to email
                 if (leadId && isValidObjectId(leadId)) {
                     lead = await Lead.findOne({ _id: leadId, userId: req.userId });
                     console.log(`🔍 [batchSend] Looking up lead by ID: ${leadId}`);
                 }
                 
-                // ✅ If not found by ID, fallback to email lookup
+                // ✅ CRITICAL: Only create new lead if leadId is NOT provided
+                // This prevents duplicate conversations!
                 if (!lead) {
-                    lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
-                    console.log(`🔍 [batchSend] Looking up lead by email: ${leadData.email}`);
+                    if (leadId && isValidObjectId(leadId)) {
+                        // ✅ If leadId is provided but lead not found, create with that ID
+                        console.log(`🆕 [batchSend] Creating lead with provided ID: ${leadId}`);
+                        lead = new Lead({
+                            _id: leadId,  // ← USE THE PROVIDED ID!
+                            userId: req.userId,
+                            name: leadData.name || 'Unknown',
+                            email: leadData.email,
+                            company: leadData.company || '',
+                            status: 'Contacted',
+                            lastContactDate: now,
+                            followUpCount: 0
+                        });
+                    } else {
+                        // ✅ Only fallback to email lookup if NO leadId was provided
+                        console.log(`🔍 [batchSend] No leadId provided, looking up by email: ${leadData.email}`);
+                        lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
+                        
+                        if (!lead) {
+                            console.log(`🆕 [batchSend] Creating new lead by email: ${leadData.email}`);
+                            lead = new Lead({
+                                userId: req.userId,
+                                name: leadData.name || 'Unknown',
+                                email: leadData.email,
+                                company: leadData.company || '',
+                                status: 'Contacted',
+                                lastContactDate: now,
+                                followUpCount: 0
+                            });
+                        }
+                    }
                 }
-                
-                if (!lead) {
-                    // ✅ Create new lead if not found
-                    lead = new Lead({
-                        userId: req.userId,
-                        name: leadData.name || 'Unknown',
-                        email: leadData.email,
-                        company: leadData.company || '',
-                        status: 'Contacted',
-                        lastContactDate: now,
-                        followUpCount: 0
-                    });
-                    console.log(`🆕 [batchSend] Created new lead: ${leadData.email}`);
-                } else {
+
+                // Update lead status
+                if (lead) {
                     lead.status = 'Contacted';
                     lead.lastContactDate = now;
                 }
@@ -335,11 +352,11 @@ const batchSend = async (req, res) => {
                     lead.followUpCount = (lead.followUpCount || 0) + 1;
                     await lead.save();
 
-                    // ✅ ALSO save to ChatMessage model with lead._id as sessionId
+                    // ✅ Save to ChatMessage with lead._id as sessionId
                     try {
                         const chatMessage = new ChatMessage({
                             userId: req.userId,
-                            sessionId: lead._id.toString(),  // ✅ Use lead._id
+                            sessionId: lead._id.toString(),
                             role: 'user',
                             content: msgContent,
                             title: msgSubject,
@@ -370,15 +387,6 @@ const batchSend = async (req, res) => {
             } catch (err) {
                 console.error(`❌ [batchSend] Error sending to ${leadData.email}:`, err.message);
                 errors.push({ email: leadData.email, error: err.message });
-                try {
-                    const lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
-                    if (lead) {
-                        lead.status = 'Failed';
-                        await lead.save();
-                    }
-                } catch (saveErr) {
-                    // Ignore
-                }
             }
         }
         console.log(`📤 [batchSend] Completed. Sent ${sentCount} emails, ${errors.length} errors`);
