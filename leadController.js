@@ -232,7 +232,9 @@ const updateAutoReply = async (req, res) => {
     }
 };
 
-// POST /api/leads/batch-send
+// ──────────────────────────────────────────────────────────────
+//  POST /api/leads/batch-send - ✅ FIXED: Uses leadId
+// ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
     try {
@@ -242,11 +244,12 @@ const batchSend = async (req, res) => {
         }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
 
-        const { leads } = req.body;
+        const { leads, leadId } = req.body;  // ✅ ADDED: Accept leadId from request
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
         console.log(`📧 [batchSend] Processing ${leads.length} leads`);
+        console.log(`📧 [batchSend] leadId provided: ${leadId || 'none'}`);
 
         const EmailAccount = require('./EmailAccount');
         const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
@@ -283,8 +286,23 @@ const batchSend = async (req, res) => {
                     continue;
                 }
 
-                let lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
+                // ✅ FIX: Use leadId first, then fallback to email
+                let lead = null;
+                
+                // ✅ If leadId is provided, use it to find the exact lead
+                if (leadId && isValidObjectId(leadId)) {
+                    lead = await Lead.findOne({ _id: leadId, userId: req.userId });
+                    console.log(`🔍 [batchSend] Looking up lead by ID: ${leadId}`);
+                }
+                
+                // ✅ If not found by ID, fallback to email lookup
                 if (!lead) {
+                    lead = await Lead.findOne({ email: leadData.email, userId: req.userId });
+                    console.log(`🔍 [batchSend] Looking up lead by email: ${leadData.email}`);
+                }
+                
+                if (!lead) {
+                    // ✅ Create new lead if not found
                     lead = new Lead({
                         userId: req.userId,
                         name: leadData.name || 'Unknown',
@@ -294,6 +312,7 @@ const batchSend = async (req, res) => {
                         lastContactDate: now,
                         followUpCount: 0
                     });
+                    console.log(`🆕 [batchSend] Created new lead: ${leadData.email}`);
                 } else {
                     lead.status = 'Contacted';
                     lead.lastContactDate = now;
@@ -316,18 +335,18 @@ const batchSend = async (req, res) => {
                     lead.followUpCount = (lead.followUpCount || 0) + 1;
                     await lead.save();
 
-                    // ✅ ALSO save to ChatMessage model
+                    // ✅ ALSO save to ChatMessage model with lead._id as sessionId
                     try {
                         const chatMessage = new ChatMessage({
                             userId: req.userId,
-                            sessionId: lead._id.toString(),
+                            sessionId: lead._id.toString(),  // ✅ Use lead._id
                             role: 'user',
                             content: msgContent,
                             title: msgSubject,
                             createdAt: now
                         });
                         await chatMessage.save();
-                        console.log(`📝 [batchSend] Saved message to ChatMessage for ${leadData.email}`);
+                        console.log(`📝 [batchSend] Saved message to ChatMessage with sessionId: ${lead._id.toString()}`);
                     } catch (chatErr) {
                         console.warn(`⚠️ [batchSend] Failed to save to ChatMessage:`, chatErr.message);
                     }
