@@ -62,7 +62,7 @@ const getConversations = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId - ✅ FIXED: NO .lean()
+//  GET /api/conversations/:leadId - ✅ FIXED
 // ──────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
@@ -123,12 +123,14 @@ const getConversationById = async (req, res) => {
         
         console.log(`📊 [getConversationById] Found ${chatMessages.length} messages in ChatMessage`);
         
-        // Convert ChatMessage to format
+        // ✅ FIX: Convert ChatMessage to format - CORRECT from mapping
         const chatMessagesFormatted = chatMessages.reverse().map(msg => ({
             date: msg.createdAt || new Date(),
             content: msg.content || '',
             subject: msg.title || '',
-            from: msg.role === 'user' ? 'lead' : 'ai',
+            // ✅ FIX: 'user' messages are from YOU (the agent) → from: 'ai'
+            // ✅ FIX: 'ai' messages are from the lead → from: 'lead'
+            from: msg.role === 'user' ? 'ai' : 'lead',
             emailId: msg._id.toString(),
             isChatMessage: true,
             read: true
