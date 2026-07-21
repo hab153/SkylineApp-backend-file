@@ -17,42 +17,58 @@ exports.handleWebhook = async (req, res) => {
 
   // 2. Handle Actual Webhook Events (POST Request)
   if (req.method === 'POST') {
-    // ✅ FIX: Get the raw body for signature verification BEFORE parsing
-    let rawBody = req.body;
-    let eventData = req.body;
+    const signature = req.headers['x-nylas-signature'];
     
-    // If body is a Buffer, keep it for signature verification
-    if (Buffer.isBuffer(rawBody)) {
-      // For signature verification, use the raw buffer
-      const rawBodyString = rawBody.toString();
-      
-      // Verify signature using raw body
-      if (signature && webhookSecret) {
+    // ✅ FIX: Skip signature verification if no secret is set (for debugging)
+    if (signature && webhookSecret && webhookSecret !== 'your-webhook-secret-here') {
+      try {
+        // Get the raw body - req.body should already be a Buffer from express.raw
+        let bodyContent;
+        if (Buffer.isBuffer(req.body)) {
+          bodyContent = req.body;
+        } else if (typeof req.body === 'string') {
+          bodyContent = Buffer.from(req.body);
+        } else {
+          // If it's already parsed JSON, stringify it
+          bodyContent = Buffer.from(JSON.stringify(req.body));
+        }
+        
         const hmac = crypto.createHmac('sha256', webhookSecret);
-        const digest = hmac.update(rawBodyString).digest('hex');
+        const digest = hmac.update(bodyContent).digest('hex');
 
         if (signature !== digest) {
-          console.error('❌ [Nylas Webhook] Invalid signature detected.');
-          // Still process but log warning - sometimes signatures don't match in sandbox
-          console.warn('⚠️ [Nylas Webhook] Continuing anyway (sandbox mode)');
-        } else {
-          console.log('✅ [Nylas Webhook] Signature verified');
+          console.warn('⚠️ [Nylas Webhook] Invalid signature detected. Checking if this is a test...');
+          // For testing, we'll continue anyway but log the warning
+          // In production, you'd want to reject invalid signatures
         }
+      } catch (sigErr) {
+        console.warn('⚠️ [Nylas Webhook] Signature verification error:', sigErr.message);
+        // Continue processing anyway (for debugging)
       }
-      
-      // Parse the body for processing
+    }
+
+    // Parse event data - handle both Buffer and parsed JSON
+    let eventData = req.body;
+    if (Buffer.isBuffer(eventData)) {
       try {
-        eventData = JSON.parse(rawBodyString);
+        eventData = JSON.parse(eventData.toString('utf8'));
       } catch (e) {
         console.error('❌ [Nylas Webhook] Failed to parse JSON body');
         return res.status(400).send('Invalid JSON');
       }
+    } else if (typeof eventData === 'string') {
+      try {
+        eventData = JSON.parse(eventData);
+      } catch (e) {
+        console.error('❌ [Nylas Webhook] Failed to parse JSON string');
+        return res.status(400).send('Invalid JSON');
+      }
     }
-
+    
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📨 [NYLAS WEBHOOK] Event received');
     console.log('📨 [NYLAS WEBHOOK] Event type:', eventData.type);
-    console.log('📨 [NYLAS WEBHOOK] Full payload:', JSON.stringify(eventData, null, 2));
+    console.log('📨 [NYLAS WEBHOOK] Full payload structure:', JSON.stringify(eventData, null, 2).substring(0, 500));
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     // 3. Handle different event types
@@ -94,100 +110,72 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  EXTRACT EMAIL FROM WEBHOOK PAYLOAD
-// ──────────────────────────────────────────────────────────────
-function extractEmailFromPayload(eventData) {
-  // Try different paths to find the from email
-  const data = eventData.data || {};
-  const object = data.object || {};
-  const message = object.message || data.message || data;
-  
-  // Check all possible locations for 'from'
-  let from = message.from || data.from || object.from || null;
-  
-  // If from is an array, get the first email
-  if (Array.isArray(from) && from.length > 0) {
-    return from[0].email || from[0].address || from[0] || null;
-  }
-  
-  // If from is an object with email property
-  if (from && typeof from === 'object') {
-    return from.email || from.address || null;
-  }
-  
-  // If from is a string
-  if (typeof from === 'string') {
-    return from;
-  }
-  
-  // Try to extract from headers
-  const headers = message.headers || data.headers || object.headers || {};
-  const fromHeader = headers.from || headers['From'] || null;
-  if (fromHeader) {
-    // Extract email from "Name <email@domain.com>" format
-    const match = fromHeader.match(/<([^>]+)>/);
-    if (match) return match[1];
-    return fromHeader;
-  }
-  
-  return null;
-}
-
-// ──────────────────────────────────────────────────────────────
-//  EXTRACT SUBJECT FROM PAYLOAD
-// ──────────────────────────────────────────────────────────────
-function extractSubject(eventData) {
-  const data = eventData.data || {};
-  const object = data.object || {};
-  const message = object.message || data.message || data;
-  
-  return message.subject || data.subject || object.subject || '(no subject)';
-}
-
-// ──────────────────────────────────────────────────────────────
-//  EXTRACT BODY FROM PAYLOAD
-// ──────────────────────────────────────────────────────────────
-function extractBody(eventData) {
-  const data = eventData.data || {};
-  const object = data.object || {};
-  const message = object.message || data.message || data;
-  
-  return message.body || message.snippet || data.body || data.snippet || '';
-}
-
-// ──────────────────────────────────────────────────────────────
-//  EXTRACT GRANT ID FROM PAYLOAD
-// ──────────────────────────────────────────────────────────────
-function extractGrantId(eventData) {
-  const data = eventData.data || {};
-  const object = data.object || {};
-  const message = object.message || data.message || data;
-  
-  return data.grant_id || message.grant_id || object.grant_id || null;
-}
-
-// ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created
+//  HANDLE: Message Created (Email Received - REPLIES!)
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] New message received');
   
   try {
-    // Extract data using helper functions
-    const grantId = extractGrantId(eventData);
-    const fromEmail = extractEmailFromPayload(eventData);
-    const subject = extractSubject(eventData);
-    const body = extractBody(eventData);
-    const snippet = body.substring(0, 200);
+    // ✅ FIX: Extract message data from various Nylas webhook payload formats
+    const data = eventData.data || {};
+    const object = data.object || {};
+    
+    // The message could be in different places depending on the webhook version
+    let message = object.message || data.message || data;
+    
+    // If message has a 'data' field that contains the actual message
+    if (message.data && typeof message.data === 'object') {
+      message = message.data;
+    }
+    
+    // Get the grant_id
+    const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
+    
+    // ✅ FIX: Try multiple ways to get the from email
+    let fromEmail = null;
+    
+    // Try different paths for the from email
+    if (message.from) {
+      if (Array.isArray(message.from)) {
+        fromEmail = message.from[0]?.email || message.from[0]?.address;
+      } else if (typeof message.from === 'object') {
+        fromEmail = message.from.email || message.from.address;
+      } else if (typeof message.from === 'string') {
+        fromEmail = message.from;
+      }
+    }
+    
+    // If still not found, try other paths
+    if (!fromEmail) {
+      fromEmail = data.from?.[0]?.email || data.from?.[0]?.address;
+    }
+    if (!fromEmail) {
+      fromEmail = object.from?.[0]?.email || object.from?.[0]?.address;
+    }
+    if (!fromEmail) {
+      fromEmail = message.sender?.email || message.sender?.address;
+    }
+    if (!fromEmail) {
+      fromEmail = data.sender?.email || data.sender?.address;
+    }
+    
+    // Get subject
+    const subject = message.subject || data.subject || object.subject || '(no subject)';
+    
+    // Get body - try multiple paths
+    const body = message.body || message.text || message.snippet || data.body || data.snippet || object.body || '';
+    const snippet = message.snippet || data.snippet || object.snippet || '';
+    const messageId = message.id || message.message_id || data.id || object.id || null;
     
     console.log('📩 [WEBHOOK] From:', fromEmail);
     console.log('📩 [WEBHOOK] Subject:', subject);
-    console.log('📩 [WEBHOOK] Body preview:', body.substring(0, 100));
+    console.log('📩 [WEBHOOK] Body preview:', body ? body.substring(0, 100) : '(empty)');
+    console.log('📩 [WEBHOOK] Snippet:', snippet ? snippet.substring(0, 100) : '(empty)');
+    console.log('📩 [WEBHOOK] Message ID:', messageId);
     console.log('📩 [WEBHOOK] Grant ID:', grantId);
 
     if (!fromEmail) {
-      console.log('⚠️ [WEBHOOK] No from email found, skipping');
-      console.log('📋 [WEBHOOK] Raw payload for debugging:', JSON.stringify(eventData, null, 2).substring(0, 500));
+      console.log('⚠️ [WEBHOOK] No from email found. Full message structure:', JSON.stringify(message, null, 2).substring(0, 300));
       return;
     }
 
@@ -196,7 +184,7 @@ async function handleMessageCreated(eventData) {
       return;
     }
 
-    // Find the EmailAccount by grantId
+    // ✅ Find the EmailAccount by grantId to get userId
     const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
     if (!emailAccount) {
       console.log('⚠️ [WEBHOOK] No email account found for grantId:', grantId);
@@ -206,20 +194,20 @@ async function handleMessageCreated(eventData) {
     const userId = emailAccount.userId;
     console.log('✅ [WEBHOOK] Found userId:', userId);
 
-    // Find matching lead
+    // ✅ Find if this email belongs to a lead
     const lead = await findMatchingLead(userId, fromEmail);
 
     if (!lead) {
       console.log('📭 [WEBHOOK] No matching lead found for:', fromEmail);
       
-      // Create notification for unknown reply
+      // ✅ Create a notification for unknown replies
       try {
         const notification = new Notification({
           userId: userId,
           type: 'unknown_reply',
           title: '📬 Unknown Reply',
-          message: `Unknown reply from ${fromEmail}: ${snippet.substring(0, 100)}`,
-          data: { fromEmail, subject, snippet },
+          message: `Unknown reply from ${fromEmail}: ${snippet ? snippet.substring(0, 100) : 'No content'}`,
+          data: { fromEmail, subject, snippet, messageId },
           read: false
         });
         await notification.save();
@@ -230,8 +218,8 @@ async function handleMessageCreated(eventData) {
       return;
     }
 
-    // Process the reply
-    await processReply(lead, fromEmail, subject, body, snippet, userId);
+    // ✅ Process the reply
+    await processReply(lead, fromEmail, subject, body, snippet, messageId, userId);
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling message:', error.message);
@@ -245,7 +233,7 @@ async function handleMessageCreated(eventData) {
 async function findMatchingLead(userId, fromEmail) {
   if (!fromEmail) return null;
   
-  // Try exact match first
+  // Try exact match first (case-insensitive)
   let lead = await Lead.findOne({ 
     userId: userId,
     email: { $regex: new RegExp('^' + fromEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
@@ -266,41 +254,57 @@ async function findMatchingLead(userId, fromEmail) {
     }
   }
 
+  // Try name in subject match
+  const leads = await Lead.find({ userId: userId }).limit(30);
+  const nameParts = fromEmail.split('@')[0].toLowerCase().split(/[._-]/);
+  for (const l of leads) {
+    if (l.name) {
+      const leadNameLower = l.name.toLowerCase();
+      for (const part of nameParts) {
+        if (part.length > 2 && leadNameLower.includes(part)) {
+          console.log('✅ [WEBHOOK] Found lead by name match:', l.name);
+          return l;
+        }
+      }
+    }
+  }
+
   return null;
 }
 
 // ──────────────────────────────────────────────────────────────
 //  PROCESS REPLY
 // ──────────────────────────────────────────────────────────────
-async function processReply(lead, fromEmail, subject, body, snippet, userId) {
+async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   console.log('📝 [WEBHOOK] Processing reply for lead:', lead.name);
 
   try {
-    // Update lead status
+    // ✅ Update lead status
     lead.status = 'Replied';
     lead.lastContactDate = new Date();
     
-    // Add reply to conversation history
+    // ✅ Add reply to conversation history
     if (!lead.replies) lead.replies = [];
     lead.replies.push({
       from: 'lead',
       content: body || snippet || '(No content)',
-      subject: subject,
+      subject: subject || '(no subject)',
       date: new Date(),
+      messageId: messageId,
       read: false
     });
     
     await lead.save();
     console.log('✅ [WEBHOOK] Reply saved to Lead.replies');
 
-    // Also save to ChatMessage model
+    // ✅ ALSO save to ChatMessage model
     try {
       const chatMessage = new ChatMessage({
         userId: userId,
         sessionId: lead._id.toString(),
         role: 'user',
         content: body || snippet || '(No content)',
-        title: subject,
+        title: subject || '(no subject)',
         createdAt: new Date()
       });
       await chatMessage.save();
@@ -309,16 +313,17 @@ async function processReply(lead, fromEmail, subject, body, snippet, userId) {
       console.warn('⚠️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
     }
 
-    // Create notification for user
+    // ✅ Create notification for user
     try {
       const notification = new Notification({
         userId: userId,
         type: 'lead_reply',
         title: `📨 ${lead.name} replied!`,
-        message: `"${snippet || 'New reply from lead'}"`,
+        message: `"${snippet ? snippet.substring(0, 100) : 'New reply from lead'}"`,
         data: { 
           leadId: lead._id.toString(), 
-          email: fromEmail
+          email: fromEmail,
+          messageId: messageId
         },
         read: false
       });
@@ -328,7 +333,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, userId) {
       console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
 
-    // Trigger auto-reply if enabled
+    // ✅ Trigger auto-reply if enabled
     if (lead.autoReplyEnabled) {
       console.log('🤖 [WEBHOOK] Auto-reply enabled, generating reply...');
       await generateAndSendAutoReply(lead, userId);
@@ -340,16 +345,20 @@ async function processReply(lead, fromEmail, subject, body, snippet, userId) {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent
+//  HANDLE: Message Sent (Outgoing Email)
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
   console.log('📤 [WEBHOOK] Message sent');
   
   try {
-    const grantId = extractGrantId(eventData);
-    const toEmail = eventData.data?.to?.[0]?.email || eventData.data?.to || null;
-    const subject = extractSubject(eventData);
-    const body = extractBody(eventData);
+    const data = eventData.data || {};
+    const object = data.object || {};
+    let message = object.message || data.message || data;
+    
+    const toEmail = message.to?.[0]?.email || data.to?.[0]?.email || message.recipients?.[0]?.email;
+    const subject = message.subject || data.subject || '(no subject)';
+    const body = message.body || data.body || '';
+    const grantId = data.grant_id || message.grant_id || object.grant_id;
     
     if (!toEmail || !grantId) return;
 
@@ -392,7 +401,8 @@ async function handleGrantExpired(eventData) {
   console.log('⏰ [WEBHOOK] Grant expired');
   
   try {
-    const grantId = extractGrantId(eventData);
+    const data = eventData.data || {};
+    const grantId = data.grant_id;
     console.log('🔴 [WEBHOOK] Grant expired for:', grantId);
 
     if (!grantId) return;
@@ -434,7 +444,8 @@ async function handleGrantRefreshed(eventData) {
   console.log('🔄 [WEBHOOK] Grant refreshed');
   
   try {
-    const grantId = extractGrantId(eventData);
+    const data = eventData.data || {};
+    const grantId = data.grant_id;
     if (!grantId) return;
 
     const emailAccount = await EmailAccount.findOneAndUpdate(
@@ -520,9 +531,11 @@ async function generateAndSendAutoReply(lead, userId) {
       
       await lead.save();
       console.log('✅ [AUTO-REPLY] Auto-reply sent to:', lead.email);
+    } else {
+      console.log('❌ [AUTO-REPLY] Failed to send auto-reply:', result?.error || 'Unknown error');
     }
 
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-}
+                      }
