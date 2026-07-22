@@ -231,7 +231,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - ✅ FINAL FIX
+//  POST /api/leads/batch-send - ✅ WITH allowNewLead FLAG
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
@@ -242,17 +242,17 @@ const batchSend = async (req, res) => {
         }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
 
-        const { leads, leadId } = req.body;
+        const { leads, leadId, allowNewLead = true } = req.body; // ← Default to true for backward compatibility
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
         console.log(`📧 [batchSend] leadId: ${leadId || 'none'}`);
+        console.log(`📧 [batchSend] allowNewLead: ${allowNewLead}`);
 
         // ✅ If leadId is provided, ONLY use that lead - NEVER create a new one
         if (leadId && isValidObjectId(leadId)) {
             console.log(`🔍 [batchSend] Using existing lead ID: ${leadId}`);
             
-            // Find the lead
             const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
             
             if (!targetLead) {
@@ -266,7 +266,6 @@ const batchSend = async (req, res) => {
             
             console.log(`✅ [batchSend] Found lead: ${targetLead.name} (${targetLead._id})`);
             
-            // Get the message
             const leadData = leads[0];
             if (!leadData?.messages?.length) {
                 return res.status(400).json({ message: 'No message content provided.' });
@@ -276,7 +275,7 @@ const batchSend = async (req, res) => {
             const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
             
-            // ✅ Save message to the existing lead
+            // Save message to existing lead
             if (!targetLead.replies) targetLead.replies = [];
             targetLead.replies.push({
                 date: now,
@@ -345,7 +344,17 @@ const batchSend = async (req, res) => {
             }
             
         } else {
-            // ✅ No leadId - create a new lead (first message)
+            // ✅ No leadId - check if new lead creation is allowed
+            if (allowNewLead === false) {
+                console.warn(`⚠️ [batchSend] New lead creation not allowed for this request`);
+                return res.status(400).json({
+                    success: false,
+                    error: 'NEW_LEAD_NOT_ALLOWED',
+                    message: 'Cannot create a new conversation. Please use the proper page to create leads.'
+                });
+            }
+            
+            // ✅ Create a new lead (only if allowNewLead is true)
             console.log(`🔍 [batchSend] Creating new lead (first message)`);
             
             const leadData = leads[0];
@@ -382,7 +391,6 @@ const batchSend = async (req, res) => {
                 });
                 newLead.followUpCount = 1;
                 
-                // Save to ChatMessage
                 try {
                     const ChatMessage = require('./ChatMessage');
                     const chatMessage = new ChatMessage({
@@ -400,7 +408,6 @@ const batchSend = async (req, res) => {
                 
                 await newLead.save();
                 
-                // Send email
                 const EmailAccount = require('./EmailAccount');
                 const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
                 if (!account) {
