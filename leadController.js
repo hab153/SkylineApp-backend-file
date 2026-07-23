@@ -231,7 +231,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - ✅ WITH allowNewLead FLAG
+//  POST /api/leads/batch-send - ✅ STRICTLY ENFORCES allowNewLead
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
@@ -242,19 +242,29 @@ const batchSend = async (req, res) => {
         }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
 
-        const { leads, leadId, allowNewLead = true } = req.body; // ← Default to true for backward compatibility
+        const { leads, leadId, allowNewLead = true } = req.body;
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
         console.log(`📧 [batchSend] leadId: ${leadId || 'none'}`);
         console.log(`📧 [batchSend] allowNewLead: ${allowNewLead}`);
 
-        // ✅ If leadId is provided, ONLY use that lead - NEVER create a new one
-        if (leadId && isValidObjectId(leadId)) {
-            console.log(`🔍 [batchSend] Using existing lead ID: ${leadId}`);
+        // ✅ CRITICAL: If allowNewLead is false, we MUST have a valid leadId
+        if (allowNewLead === false) {
+            console.log(`🔒 [batchSend] New lead creation is DISABLED`);
             
+            // ✅ MUST have a valid leadId
+            if (!leadId || !isValidObjectId(leadId)) {
+                console.error(`❌ [batchSend] leadId is required when allowNewLead is false`);
+                return res.status(400).json({
+                    success: false,
+                    error: 'MISSING_LEAD_ID',
+                    message: 'Cannot send message: conversation not found. Please refresh and try again.'
+                });
+            }
+            
+            // ✅ MUST find the existing lead
             const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
-            
             if (!targetLead) {
                 console.error(`❌ [batchSend] Lead not found for ID: ${leadId}`);
                 return res.status(404).json({
@@ -264,6 +274,7 @@ const batchSend = async (req, res) => {
                 });
             }
             
+            // ✅ At this point, we have a valid lead - proceed normally
             console.log(`✅ [batchSend] Found lead: ${targetLead.name} (${targetLead._id})`);
             
             const leadData = leads[0];
@@ -343,45 +354,32 @@ const batchSend = async (req, res) => {
                 });
             }
             
-        } else {
-            // ✅ No leadId - check if new lead creation is allowed
-            if (allowNewLead === false) {
-                console.warn(`⚠️ [batchSend] New lead creation not allowed for this request`);
-                return res.status(400).json({
-                    success: false,
-                    error: 'NEW_LEAD_NOT_ALLOWED',
-                    message: 'Cannot create a new conversation. Please use the proper page to create leads.'
-                });
-            }
+            return; // ✅ IMPORTANT: Exit the function after processing
+        }
+
+        // ✅ If we get here, allowNewLead is true (or undefined) - new lead creation is allowed
+        console.log(`🔓 [batchSend] New lead creation is ALLOWED`);
+        
+        // Check if we have a leadId to find existing lead
+        if (leadId && isValidObjectId(leadId)) {
+            console.log(`🔍 [batchSend] Looking for existing lead with ID: ${leadId}`);
             
-            // ✅ Create a new lead (only if allowNewLead is true)
-            console.log(`🔍 [batchSend] Creating new lead (first message)`);
+            const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
             
-            const leadData = leads[0];
-            if (!leadData || !leadData.email) {
-                return res.status(400).json({ 
-                    success: false, 
-                    message: 'Email is required to create a new conversation.' 
-                });
-            }
-            
-            const now = new Date();
-            const newLead = new Lead({
-                userId: req.userId,
-                name: leadData.name || 'Unknown',
-                email: leadData.email,
-                company: leadData.company || '',
-                status: 'Contacted',
-                lastContactDate: now,
-                followUpCount: 0,
-                replies: []
-            });
-            
-            if (leadData.messages?.length > 0) {
+            if (targetLead) {
+                console.log(`✅ [batchSend] Found existing lead: ${targetLead.name}`);
+                
+                const leadData = leads[0];
+                if (!leadData?.messages?.length) {
+                    return res.status(400).json({ message: 'No message content provided.' });
+                }
+                
                 const msgContent = leadData.messages[0].body;
                 const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
+                const now = new Date();
                 
-                newLead.replies.push({
+                if (!targetLead.replies) targetLead.replies = [];
+                targetLead.replies.push({
                     date: now,
                     content: msgContent,
                     subject: msgSubject,
@@ -389,13 +387,16 @@ const batchSend = async (req, res) => {
                     status: 'sent',
                     read: true
                 });
-                newLead.followUpCount = 1;
+                targetLead.followUpCount = (targetLead.followUpCount || 0) + 1;
+                targetLead.lastContactDate = now;
+                targetLead.status = 'Contacted';
+                await targetLead.save();
                 
                 try {
                     const ChatMessage = require('./ChatMessage');
                     const chatMessage = new ChatMessage({
                         userId: req.userId,
-                        sessionId: newLead._id.toString(),
+                        sessionId: targetLead._id.toString(),
                         role: 'user',
                         content: msgContent,
                         title: msgSubject,
@@ -405,8 +406,6 @@ const batchSend = async (req, res) => {
                 } catch (chatErr) {
                     console.warn(`⚠️ [batchSend] ChatMessage save failed:`, chatErr.message);
                 }
-                
-                await newLead.save();
                 
                 const EmailAccount = require('./EmailAccount');
                 const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
@@ -420,31 +419,123 @@ const batchSend = async (req, res) => {
                 
                 const result = await sendEmail(
                     req.userId,
-                    newLead.email,
+                    targetLead.email,
                     msgSubject,
                     msgContent
                 );
                 
                 if (result.success) {
-                    console.log(`✅ [batchSend] Email sent to ${newLead.email}`);
+                    console.log(`✅ [batchSend] Email sent to ${targetLead.email}`);
                     res.json({ 
                         success: true, 
                         message: 'Email sent successfully.',
-                        leadId: newLead._id.toString()
+                        leadId: targetLead._id.toString()
                     });
                 } else {
-                    const lastReply = newLead.replies[newLead.replies.length - 1];
+                    const lastReply = targetLead.replies[targetLead.replies.length - 1];
                     if (lastReply) lastReply.status = 'failed';
-                    await newLead.save();
+                    await targetLead.save();
                     res.json({ 
                         success: false, 
                         error: result.error,
                         message: 'Failed to send email.'
                     });
                 }
-            } else {
-                res.status(400).json({ message: 'No message content provided.' });
+                
+                return;
             }
+        }
+        
+        // ✅ No existing lead found, or no leadId provided - create new lead
+        console.log(`🆕 [batchSend] Creating new lead (first message)`);
+        
+        const leadData = leads[0];
+        if (!leadData || !leadData.email) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Email is required to create a new conversation.' 
+            });
+        }
+        
+        const now = new Date();
+        const newLead = new Lead({
+            userId: req.userId,
+            name: leadData.name || 'Unknown',
+            email: leadData.email,
+            company: leadData.company || '',
+            status: 'Contacted',
+            lastContactDate: now,
+            followUpCount: 0,
+            replies: []
+        });
+        
+        if (leadData.messages?.length > 0) {
+            const msgContent = leadData.messages[0].body;
+            const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
+            
+            newLead.replies.push({
+                date: now,
+                content: msgContent,
+                subject: msgSubject,
+                from: 'ai',
+                status: 'sent',
+                read: true
+            });
+            newLead.followUpCount = 1;
+            
+            try {
+                const ChatMessage = require('./ChatMessage');
+                const chatMessage = new ChatMessage({
+                    userId: req.userId,
+                    sessionId: newLead._id.toString(),
+                    role: 'user',
+                    content: msgContent,
+                    title: msgSubject,
+                    createdAt: now
+                });
+                await chatMessage.save();
+            } catch (chatErr) {
+                console.warn(`⚠️ [batchSend] ChatMessage save failed:`, chatErr.message);
+            }
+            
+            await newLead.save();
+            
+            const EmailAccount = require('./EmailAccount');
+            const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+            if (!account) {
+                return res.status(401).json({
+                    success: false,
+                    error: 'NYLAS_DISCONNECTED',
+                    message: 'Please connect your email account first.'
+                });
+            }
+            
+            const result = await sendEmail(
+                req.userId,
+                newLead.email,
+                msgSubject,
+                msgContent
+            );
+            
+            if (result.success) {
+                console.log(`✅ [batchSend] Email sent to ${newLead.email}`);
+                res.json({ 
+                    success: true, 
+                    message: 'Email sent successfully.',
+                    leadId: newLead._id.toString()
+                });
+            } else {
+                const lastReply = newLead.replies[newLead.replies.length - 1];
+                if (lastReply) lastReply.status = 'failed';
+                await newLead.save();
+                res.json({ 
+                    success: false, 
+                    error: result.error,
+                    message: 'Failed to send email.'
+                });
+            }
+        } else {
+            res.status(400).json({ message: 'No message content provided.' });
         }
         
     } catch (err) {
