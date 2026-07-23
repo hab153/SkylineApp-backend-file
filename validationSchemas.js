@@ -292,8 +292,9 @@ const batchSendSchema = Joi.object({
         })
 });
 
+// ✅ FIXED: Changed "name" to "newName" to match frontend and leadController
 const renameLeadSchema = Joi.object({
-    name: Joi.string()
+    newName: Joi.string()
         .min(1)
         .max(100)
         .required()
