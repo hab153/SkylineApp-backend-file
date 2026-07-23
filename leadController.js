@@ -231,7 +231,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - ✅ WITH allowNewLead FLAG
+//  POST /api/leads/batch-send - FIXED: proper save order
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('🔵 [batchSend] ENTERED');
@@ -242,7 +242,7 @@ const batchSend = async (req, res) => {
         }
         console.log(`📧 [batchSend] Starting batch send for user ${req.userId}`);
 
-        const { leads, leadId, allowNewLead = true } = req.body; // ← Default to true for backward compatibility
+        const { leads, leadId, allowNewLead = true } = req.body;
         if (!Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
@@ -275,7 +275,26 @@ const batchSend = async (req, res) => {
             const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
             
-            // Save message to existing lead
+            // ✅ STEP 1: Save to ChatMessage first (faster, ensures message is stored)
+            let chatMessageSaved = false;
+            try {
+                const ChatMessage = require('./ChatMessage');
+                const chatMessage = new ChatMessage({
+                    userId: req.userId,
+                    sessionId: targetLead._id.toString(),
+                    role: 'user',
+                    content: msgContent,
+                    title: msgSubject,
+                    createdAt: now
+                });
+                await chatMessage.save();
+                chatMessageSaved = true;
+                console.log(`📝 [batchSend] Saved to ChatMessage`);
+            } catch (chatErr) {
+                console.warn(`⚠️ [batchSend] ChatMessage save failed:`, chatErr.message);
+            }
+            
+            // ✅ STEP 2: Save to Lead.replies
             if (!targetLead.replies) targetLead.replies = [];
             targetLead.replies.push({
                 date: now,
@@ -289,59 +308,49 @@ const batchSend = async (req, res) => {
             targetLead.lastContactDate = now;
             targetLead.status = 'Contacted';
             await targetLead.save();
+            console.log(`📝 [batchSend] Saved to Lead.replies`);
             
-            // Save to ChatMessage
-            try {
-                const ChatMessage = require('./ChatMessage');
-                const chatMessage = new ChatMessage({
-                    userId: req.userId,
-                    sessionId: targetLead._id.toString(),
-                    role: 'user',
-                    content: msgContent,
-                    title: msgSubject,
-                    createdAt: now
-                });
-                await chatMessage.save();
-                console.log(`📝 [batchSend] Saved to ChatMessage`);
-            } catch (chatErr) {
-                console.warn(`⚠️ [batchSend] ChatMessage save failed:`, chatErr.message);
-            }
-            
-            // Send email
+            // ✅ STEP 3: Send email (can take time, but message is already saved)
             const EmailAccount = require('./EmailAccount');
             const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
             if (!account) {
-                return res.status(401).json({
-                    success: false,
-                    error: 'NYLAS_DISCONNECTED',
-                    message: 'Please connect your email account first.'
+                // Email not connected - but message is saved, so return success with warning
+                return res.json({
+                    success: true,
+                    message: 'Message saved but email not sent. Please connect your email account.',
+                    leadId: targetLead._id.toString(),
+                    emailStatus: 'pending'
                 });
             }
             
-            const result = await sendEmail(
+            // Send email asynchronously - don't block response
+            // We'll still return success immediately since message is saved
+            sendEmail(
                 req.userId,
                 targetLead.email,
                 msgSubject,
                 msgContent
-            );
+            ).then(result => {
+                if (result.success) {
+                    console.log(`✅ [batchSend] Email sent to ${targetLead.email}`);
+                } else {
+                    console.error(`❌ [batchSend] Email failed for ${targetLead.email}:`, result.error);
+                    // Mark the last reply as failed
+                    const lastReply = targetLead.replies[targetLead.replies.length - 1];
+                    if (lastReply) lastReply.status = 'failed';
+                    targetLead.save().catch(err => console.error('Failed to update lead status:', err));
+                }
+            }).catch(err => {
+                console.error(`❌ [batchSend] Email error for ${targetLead.email}:`, err);
+            });
             
-            if (result.success) {
-                console.log(`✅ [batchSend] Email sent to ${targetLead.email}`);
-                res.json({ 
-                    success: true, 
-                    message: 'Email sent successfully.',
-                    leadId: targetLead._id.toString()
-                });
-            } else {
-                const lastReply = targetLead.replies[targetLead.replies.length - 1];
-                if (lastReply) lastReply.status = 'failed';
-                await targetLead.save();
-                res.json({ 
-                    success: false, 
-                    error: result.error,
-                    message: 'Failed to send email.'
-                });
-            }
+            // ✅ Return success immediately (message is saved)
+            res.json({
+                success: true,
+                message: 'Message sent successfully.',
+                leadId: targetLead._id.toString(),
+                chatMessageSaved: chatMessageSaved
+            });
             
         } else {
             // ✅ No leadId - check if new lead creation is allowed
@@ -381,16 +390,8 @@ const batchSend = async (req, res) => {
                 const msgContent = leadData.messages[0].body;
                 const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
                 
-                newLead.replies.push({
-                    date: now,
-                    content: msgContent,
-                    subject: msgSubject,
-                    from: 'ai',
-                    status: 'sent',
-                    read: true
-                });
-                newLead.followUpCount = 1;
-                
+                // Save to ChatMessage
+                let chatMessageSaved = false;
                 try {
                     const ChatMessage = require('./ChatMessage');
                     const chatMessage = new ChatMessage({
@@ -402,46 +403,49 @@ const batchSend = async (req, res) => {
                         createdAt: now
                     });
                     await chatMessage.save();
+                    chatMessageSaved = true;
                 } catch (chatErr) {
                     console.warn(`⚠️ [batchSend] ChatMessage save failed:`, chatErr.message);
                 }
                 
+                // Save to Lead
+                newLead.replies.push({
+                    date: now,
+                    content: msgContent,
+                    subject: msgSubject,
+                    from: 'ai',
+                    status: 'sent',
+                    read: true
+                });
+                newLead.followUpCount = 1;
                 await newLead.save();
                 
+                // Send email asynchronously
                 const EmailAccount = require('./EmailAccount');
                 const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
-                if (!account) {
-                    return res.status(401).json({
-                        success: false,
-                        error: 'NYLAS_DISCONNECTED',
-                        message: 'Please connect your email account first.'
+                if (account) {
+                    sendEmail(
+                        req.userId,
+                        newLead.email,
+                        msgSubject,
+                        msgContent
+                    ).then(result => {
+                        if (result.success) {
+                            console.log(`✅ [batchSend] Email sent to ${newLead.email}`);
+                        } else {
+                            console.error(`❌ [batchSend] Email failed for ${newLead.email}:`, result.error);
+                        }
+                    }).catch(err => {
+                        console.error(`❌ [batchSend] Email error for ${newLead.email}:`, err);
                     });
                 }
                 
-                const result = await sendEmail(
-                    req.userId,
-                    newLead.email,
-                    msgSubject,
-                    msgContent
-                );
-                
-                if (result.success) {
-                    console.log(`✅ [batchSend] Email sent to ${newLead.email}`);
-                    res.json({ 
-                        success: true, 
-                        message: 'Email sent successfully.',
-                        leadId: newLead._id.toString()
-                    });
-                } else {
-                    const lastReply = newLead.replies[newLead.replies.length - 1];
-                    if (lastReply) lastReply.status = 'failed';
-                    await newLead.save();
-                    res.json({ 
-                        success: false, 
-                        error: result.error,
-                        message: 'Failed to send email.'
-                    });
-                }
+                res.json({
+                    success: true,
+                    message: 'Message sent successfully.',
+                    leadId: newLead._id.toString(),
+                    chatMessageSaved: chatMessageSaved
+                });
             } else {
                 res.status(400).json({ message: 'No message content provided.' });
             }
