@@ -231,7 +231,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - WITH FULL LOGGING
+//  POST /api/leads/batch-send - WITH FULL LOGGING & FIXES
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -312,22 +312,37 @@ const batchSend = async (req, res) => {
             await targetLead.save();
             console.log(`✅ [BATCH SEND] Saved to Lead.replies (${targetLead.replies.length} total replies)`);
             
-            // ✅ STEP 5: Save to ChatMessage
+            // ✅ STEP 5: Save to ChatMessage (WITH DUPLICATE CHECK)
             console.log('💾 [BATCH SEND] Saving to ChatMessage...');
             let chatMessageSaved = false;
             try {
                 const ChatMessage = require('./ChatMessage');
-                const chatMessage = new ChatMessage({
+                const sessionIdStr = targetLead._id.toString();
+
+                // Check if message already exists to prevent doubling from webhooks/retries
+                const existingMsg = await ChatMessage.findOne({
                     userId: req.userId,
-                    sessionId: targetLead._id.toString(),
-                    role: 'user',
+                    sessionId: sessionIdStr,
                     content: msgContent,
-                    title: msgSubject,
-                    createdAt: now
+                    createdAt: { $gte: new Date(now.getTime() - 5000) } // Check last 5 seconds
                 });
-                await chatMessage.save();
-                chatMessageSaved = true;
-                console.log(`✅ [BATCH SEND] Saved to ChatMessage with sessionId: ${targetLead._id.toString()}`);
+
+                if (!existingMsg) {
+                    const chatMessage = new ChatMessage({
+                        userId: req.userId,
+                        sessionId: sessionIdStr,
+                        role: 'user',
+                        content: msgContent,
+                        title: msgSubject,
+                        createdAt: now
+                    });
+                    await chatMessage.save();
+                    chatMessageSaved = true;
+                    console.log(`✅ [BATCH SEND] Saved to ChatMessage with sessionId: ${sessionIdStr}`);
+                } else {
+                    console.log(`⚠️ [BATCH SEND] Duplicate ChatMessage skipped for lead ${sessionIdStr}`);
+                    chatMessageSaved = true; // Consider it saved since it exists
+                }
             } catch (chatErr) {
                 console.error(`❌ [BATCH SEND] ChatMessage save failed:`, chatErr.message);
             }
