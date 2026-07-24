@@ -206,7 +206,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - WITH TRACE LOGS
+//  POST /api/leads/batch-send - WITH EMAIL SENDING LOGIC
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -242,6 +242,7 @@ const batchSend = async (req, res) => {
             
             const leadData = leads[0];
             const msgContent = leadData.messages[0].body;
+            const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
             
             // Check for duplicate
@@ -256,7 +257,7 @@ const batchSend = async (req, res) => {
                 targetLead.replies.push({
                     date: now,
                     content: msgContent,
-                    subject: leadData.messages[0].subject || 'Re: Conversation',
+                    subject: msgSubject,
                     from: 'ai',
                     status: 'sent',
                     read: true
@@ -268,17 +269,49 @@ const batchSend = async (req, res) => {
                 console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
-            // Send Email Logic (keep your existing email sending code here)
-            // ...
+            // ✅ STEP 6: ACTUAL EMAIL SENDING LOGIC
+            const EmailAccount = require('./EmailAccount');
+            const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
             
-            console.log('📤 [BE-BATCH] Returning SUCCESS with Lead ID:', targetLead._id.toString());
+            let emailSent = false;
+            let emailError = null;
+            
+            if (!account) {
+                console.warn(`⚠️ [BE-BATCH] No email account connected for user ${req.userId}`);
+                emailError = 'No email account connected';
+            } else {
+                try {
+                    console.log(`📧 [BE-BATCH] Attempting to send via Nylas for grant: ${account.nylasGrantId}`);
+                    // We use the sendEmail function from nylasService
+                    const result = await sendEmail(
+                        req.userId,
+                        targetLead.email,
+                        msgSubject,
+                        msgContent
+                    );
+                    
+                    if (result.success) {
+                        emailSent = true;
+                        console.log(`✅ [BE-BATCH] Email sent successfully to ${targetLead.email}`);
+                    } else {
+                        emailError = result.error || 'Email send failed';
+                        console.error(`❌ [BE-BATCH] Email send failed: ${emailError}`);
+                    }
+                } catch (emailErr) {
+                    emailError = emailErr.message;
+                    console.error(`❌ [BE-BATCH] Email error: ${emailError}`);
+                }
+            }
+            
+            console.log('📤 [BE-BATCH] Returning response...');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
             res.json({
                 success: true,
-                message: 'Message sent.',
+                message: emailSent ? 'Email sent successfully.' : 'Message saved but email not sent.',
                 leadId: targetLead._id.toString(),
-                emailSent: true 
+                emailSent: emailSent,
+                emailError: emailError || null
             });
             
         } else {
@@ -287,7 +320,7 @@ const batchSend = async (req, res) => {
                 console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
             }
-            // ... Existing new lead creation code ...
+            // ... (Existing new lead creation code if needed) ...
         }
         
     } catch (err) {
