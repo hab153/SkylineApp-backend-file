@@ -113,4 +113,14 @@ const LeadSchema = new mongoose.Schema({
 LeadSchema.index({ nextActionDate: 1, status: 1 });
 LeadSchema.index({ autoFollowUpEnabled: 1, followUpScheduledDate: 1 });
 
+// Add this before module.exports in Lead.js
+LeadSchema.pre('save', function(next) {
+    if (this.isModified('lastContactDate') || this.isModified('replies')) {
+        console.log('💾 [MODEL-LEAD] Saving Lead:', this._id, 'Name:', this.name);
+        console.log('💾 [MODEL-LEAD] Status:', this.status);
+        console.log('💾 [MODEL-LEAD] Replies Count:', this.replies ? this.replies.length : 0);
+    }
+    next();
+});
+
 module.exports = mongoose.model('Lead', LeadSchema);
