@@ -26,10 +26,10 @@ const MessageSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    // THESE FIELDS ARE MISSING AND NEED TO BE ADDED:
+    // ✅ FIXED: Added notificationType field with proper enum
     notificationType: {
         type: String,
-        enum: ['reply', 'admin'],
+        enum: ['reply', 'admin', 'lead_reply', 'unknown_reply', 'token_expired'],
         default: null
     },
     leadId: {
