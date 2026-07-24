@@ -107,10 +107,7 @@ const getConversationById = async (req, res) => {
             }
         }
         
-        // ✅ FIX: Only use Lead.replies for consistency. 
-        // If you must use ChatMessage, ensure you deduplicate.
-        // For now, let's stick to Lead.replies to avoid the doubling issue.
-        
+        // ✅ FIX: Only use Lead.replies for consistency to avoid doubling.
         let allMessages = lead.replies || [];
         
         // Sort by date just in case
@@ -209,7 +206,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - FIXED TO PREVENT DUPLICATES
+//  POST /api/leads/batch-send - FIXED TO PREVENT DUPLICATES & NEW CHATS
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -235,6 +232,7 @@ const batchSend = async (req, res) => {
 
         // ✅ STEP 3: Handle existing lead (leadId provided)
         if (leadId && isValidObjectId(leadId)) {
+            console.log(`🔍 [BATCH SEND] Using existing leadId: ${leadId}`);
             const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
             
             if (!targetLead) {
@@ -281,7 +279,6 @@ const batchSend = async (req, res) => {
             }
             
             // ✅ STEP 5: DO NOT save to ChatMessage here to avoid doubling.
-            // The webhook will handle ChatMessage if needed, or we rely on Lead.replies.
             
             // ✅ STEP 6: Send email
             const EmailAccount = require('./EmailAccount');
@@ -308,6 +305,7 @@ const batchSend = async (req, res) => {
                 emailError = 'No email account connected';
             }
             
+            // ✅ CRITICAL FIX: Return the SAME leadId we received.
             res.json({
                 success: true,
                 message: emailSent ? 'Email sent successfully.' : 'Message saved but email not sent.',
