@@ -284,10 +284,10 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
 }
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent (FIXED)
+//  HANDLE: Message Sent (WITH TRACE LOGS)
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
-  console.log('📤 [WEBHOOK] Message sent');
+  console.log('📤 [WEBHOOK-SENT] Message sent event triggered');
   
   try {
     const data = eventData.data || {};
@@ -299,12 +299,19 @@ async function handleMessageSent(eventData) {
     const body = message.body || data.body || '';
     const grantId = data.grant_id || message.grant_id || object.grant_id;
     
+    console.log('📩 [WEBHOOK-SENT] To:', toEmail);
+    console.log('📩 [WEBHOOK-SENT] Grant ID:', grantId);
+
     if (!toEmail || !grantId) return;
 
     const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
-    if (!emailAccount) return;
+    if (!emailAccount) {
+        console.log('⚠️ [WEBHOOK-SENT] No email account found for grant:', grantId);
+        return;
+    }
 
     const userId = emailAccount.userId;
+    console.log('👤 [WEBHOOK-SENT] Found User ID:', userId);
 
     // Find the lead
     const lead = await Lead.findOne({ 
@@ -313,7 +320,9 @@ async function handleMessageSent(eventData) {
     });
 
     if (lead) {
-      // ✅ FIX: Check if this message was already added by batchSend to avoid duplicates
+      console.log('✅ [WEBHOOK-SENT] Matched existing lead:', lead.name, '(ID:', lead._id, ')');
+      
+      // ✅ FIX: Check if this message was already added by batchSend
       const lastReply = lead.replies && lead.replies.length > 0 ? lead.replies[lead.replies.length - 1] : null;
       const isDuplicate = lastReply && 
                           lastReply.content === body && 
@@ -325,7 +334,7 @@ async function handleMessageSent(eventData) {
         
         if (!lead.replies) lead.replies = [];
         lead.replies.push({
-          from: 'ai', // ✅ FIX: Changed from 'you' to 'ai' to match Lead.js schema
+          from: 'ai', // ✅ Changed from 'you' to 'ai'
           content: body || '',
           subject: subject,
           date: new Date(),
@@ -333,14 +342,17 @@ async function handleMessageSent(eventData) {
         });
         
         await lead.save();
-        console.log('✅ [WEBHOOK] Lead status updated to Contacted:', lead.name);
+        console.log('💾 [WEBHOOK-SENT] Updated lead status and replies.');
       } else {
-        console.log('⚠️ [WEBHOOK] Duplicate sent message skipped');
+        console.log('⚠️ [WEBHOOK-SENT] Duplicate sent message skipped.');
       }
+    } else {
+        console.log('❌ [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
+        console.log('❌ [WEBHOOK-SENT] This might be creating a "ghost" chat if logic falls through elsewhere.');
     }
 
   } catch (error) {
-    console.error('❌ [WEBHOOK] Error handling message sent:', error.message);
+    console.error('❌ [WEBHOOK-SENT] Error:', error.message);
   }
 }
 
@@ -470,4 +482,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-      }
+    }
