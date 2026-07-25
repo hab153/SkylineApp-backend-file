@@ -2,7 +2,6 @@
 const cron = require('node-cron');
 const Lead = require('./Lead');
 const EmailAccount = require('./EmailAccount');
-const { sendEmail } = require('./nylasService'); // Updated import
 const { generateFollowUpSuggestion } = require('./followUpAI');
 
 /**
@@ -39,6 +38,9 @@ async function processFollowUp(lead, userId) {
 
         // Send the email using Nylas API
         const subject = `Following up | ${lead.company || 'our conversation'}`;
+        
+        // ✅ FIX: Dynamically require nylasService inside the function
+        const { sendEmail } = require('./nylasService');
         const result = await sendEmail(
             userId,
             lead.email,
@@ -46,8 +48,9 @@ async function processFollowUp(lead, userId) {
             followUpMessage
         );
 
-        if (!result.success) {
-            throw new Error(result.error);
+        // ✅ FIX: Check result properly
+        if (!result || !result.success) {
+            throw new Error(result?.error || 'Failed to send email');
         }
 
         // Update lead record
@@ -82,6 +85,14 @@ async function processFollowUp(lead, userId) {
 
     } catch (err) {
         console.error(`❌ [FOLLOW-UP] Error processing ${lead.email}:`, err.message);
+        // Disable auto follow-up on error to prevent loops
+        try {
+            lead.autoFollowUpEnabled = false;
+            lead.followUpScheduledDate = null;
+            await lead.save();
+        } catch (saveErr) {
+            console.error(`❌ [FOLLOW-UP] Failed to disable auto follow-up:`, saveErr.message);
+        }
         return { success: false, error: err.message };
     }
 }
