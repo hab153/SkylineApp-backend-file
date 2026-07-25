@@ -1,3 +1,4 @@
+// dailyLimitMiddleware.js
 const User = require('./User');
 
 // Helper to get chat limit message based on tier
@@ -164,6 +165,7 @@ const checkSuggestFollowUpLimit = async (req, res, next) => {
             return res.status(429).json({ message });
         }
 
+        // ✅ FIX: Store user in req for controller to use
         req.userWithSuggestLimit = user;
         next();
     } catch (err) {
@@ -172,24 +174,27 @@ const checkSuggestFollowUpLimit = async (req, res, next) => {
     }
 };
 
-// Auto follow-up enable limit (Free:0, Go:15, Pro:100)
+// ✅ FIXED: Auto follow-up enable limit (Free:0, Go:15, Pro:100)
 const checkAutoFollowUpLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
         if (!user.usage) user.usage = {};
         if (user.usage.dailyAutoFollowUpCount === undefined) user.usage.dailyAutoFollowUpCount = 0;
         if (!user.usage.lastAutoFollowUpDate) user.usage.lastAutoFollowUpDate = null;
 
-        let limit = 0; // Free
+        let limit = 0; // Free plan
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 15;
         if (tier === 'pro') limit = 100;
 
+        // ✅ FIX: Free users get a helpful message instead of error
         if (limit === 0) {
             return res.status(403).json({
-                message: 'Auto follow-up is not available on the Free plan. Upgrade to Go (15/day) or Pro (100/day).'
+                success: false,
+                message: 'Auto follow-up is not available on the Free plan. Upgrade to Go (15/day) or Pro (100/day).',
+                upgradeNeeded: true
             });
         }
 
@@ -205,18 +210,19 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
             let message = '';
             if (tier === 'go') message = 'Daily auto follow-up limit reached (15/15). Upgrade to Pro for 100/day.';
             else message = 'Daily auto follow-up limit reached (100/100). Please try again tomorrow.';
-            return res.status(429).json({ message });
+            return res.status(429).json({ success: false, message });
         }
 
+        // ✅ FIX: Store user in req for controller to use
         req.userWithAutoLimit = user;
         next();
     } catch (err) {
         console.error('Auto follow-up limit error:', err);
-        res.status(500).json({ message: 'Server error checking limit' });
+        res.status(500).json({ success: false, message: 'Server error checking limit' });
     }
 };
 
-// NEW: Assistant limit middleware (Free:20, Go:70, Pro:200)
+// Assistant limit middleware (Free:20, Go:70, Pro:200)
 const checkAssistantLimit = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
@@ -262,5 +268,5 @@ module.exports = {
     checkAndIncrementSendLimit,
     checkSuggestFollowUpLimit,
     checkAutoFollowUpLimit,
-    checkAssistantLimit  // <-- NEW
+    checkAssistantLimit
 };
