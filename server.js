@@ -56,12 +56,6 @@ const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login 
 // ✅ Import sessionController for session routes
 const sessionController = require('./sessionController');
 
-// ✅ NEW: Import history routes
-const historyRoutes = require('./historyRoutes');
-
-// ✅ NEW: Import usage controller
-const UsageController = require('./UsageController');
-
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -301,9 +295,6 @@ app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ✅ NEW: History Routes (NEW SYSTEM)
-app.use('/api/history', historyRoutes);
-
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -400,24 +391,9 @@ app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletion
 app.use('/api/data', dataExportRoutes);
 
 // ──────────────────────────────────────────────────────────────
-//  LEAD / CONVERSATION ROUTES (WITH DEBUG LOGS)
+//  LEAD / CONVERSATION ROUTES
 // ──────────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
-
-// ✅ DEBUG: Log ALL conversation route requests
-app.use('/api/conversations', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📂 [CONVERSATIONS ROUTE] /api/conversations called');
-    console.log('📝 [CONVERSATIONS ROUTE] Method:', req.method);
-    console.log('📝 [CONVERSATIONS ROUTE] Full URL:', req.originalUrl);
-    console.log('📝 [CONVERSATIONS ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('📝 [CONVERSATIONS ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
-        'content-type': req.headers['content-type'] || 'Not set'
-    });
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
 
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
@@ -433,13 +409,23 @@ app.get('/api/leads', verifyToken, leadController.getAllLeads);
 console.log('✅ [SERVER] All lead routes registered');
 
 // ──────────────────────────────────────────────────────────────
-//  FOLLOW-UP ROUTES
+//  ✅ FOLLOW-UP ROUTES (FIXED)
 // ──────────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering follow-up routes...');
-app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
-app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
+
+// ✅ Get follow-up status first (no body validation needed)
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
+
+// ✅ Suggest follow-up (requires leadId)
+app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
+
+// ✅ Toggle auto follow-up (requires leadId + body)
+app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
+
 console.log('✅ [SERVER] Follow-up routes registered');
+console.log('   📋 GET    /api/leads/:leadId/follow-up-status');
+console.log('   📋 POST   /api/leads/:leadId/suggest-follow-up');
+console.log('   📋 POST   /api/leads/:leadId/auto-follow-up');
 
 // ──────────────────────────────────────────────────────────────
 //  REVENUE TRACKING
@@ -458,33 +444,11 @@ app.get('/api/notifications/count', verifyToken, notificationController.getNotif
 console.log('✅ [SERVER] Notification routes registered');
 
 // ──────────────────────────────────────────────────────────────
-//  CHAT & DREAMS ROUTES WITH DEBUG LOGS
+//  CHAT & DREAMS ROUTES
 // ──────────────────────────────────────────────────────────────
-
-// ✅ DEBUG: Log ALL chat route requests
-app.use('/api/chat', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('💬 [CHAT ROUTE] /api/chat called');
-    console.log('📝 [CHAT ROUTE] Method:', req.method);
-    console.log('📝 [CHAT ROUTE] Body:', req.body ? JSON.stringify(req.body).substring(0, 200) : 'None');
-    console.log('📝 [CHAT ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
 
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
 app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
-
-// ✅ DEBUG: Log ALL session route requests
-app.use('/api/sessions', (req, res, next) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📂 [SESSIONS ROUTE] /api/sessions called');
-    console.log('📝 [SESSIONS ROUTE] Method:', req.method);
-    console.log('📝 [SESSIONS ROUTE] User ID:', req.userId || 'Not authenticated');
-    console.log('📝 [SESSIONS ROUTE] Body:', req.body ? JSON.stringify(req.body).substring(0, 200) : 'None');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    next();
-});
 
 // ✅ FIXED: Use sessionController for session routes
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
@@ -589,11 +553,6 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
-// ════════════════════════════════════════════
-//  USAGE ROUTE (Real-time usage tracking)
-// ════════════════════════════════════════════
-app.get('/api/usage', verifyToken, UsageController.getUsage);
 
 // ════════════════════════════════════════════
 //  START SERVER
