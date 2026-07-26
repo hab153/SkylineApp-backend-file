@@ -511,6 +511,36 @@ app.post('/api/reports', verifyToken, validate(reportSchema), reportController.s
 console.log('✅ [SERVER] Report routes registered');
 
 // ──────────────────────────────────────────────────────────────
+//  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
+// ──────────────────────────────────────────────────────────────
+console.log('🔧 [SERVER] Registering history routes...');
+
+// Alias for /api/sessions (history.html uses /api/history/sessions)
+app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
+
+// Alias for /api/history/:sessionId (history.html uses /api/history/messages/:sessionId)
+app.get('/api/history/messages/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
+
+// Keep original routes for compatibility
+app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
+
+// Rename session (history.html uses /api/history/rename/:sessionId)
+app.put('/api/history/rename/:sessionId', verifyToken, sessionController.renameSession);
+
+// Pin session (history.html uses /api/history/pin/:sessionId)
+app.put('/api/history/pin/:sessionId', verifyToken, sessionController.pinSession);
+
+// Delete session (history.html uses /api/history/delete/:sessionId)
+app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.deleteSession);
+
+console.log('✅ [SERVER] History routes registered');
+console.log('   📋 GET    /api/history/sessions');
+console.log('   📋 GET    /api/history/messages/:sessionId');
+console.log('   📋 PUT    /api/history/rename/:sessionId');
+console.log('   📋 PUT    /api/history/pin/:sessionId');
+console.log('   📋 DELETE /api/history/delete/:sessionId');
+
+// ──────────────────────────────────────────────────────────────
 //  DEBUG ROUTE - Check messages (Remove after fixing)
 // ──────────────────────────────────────────────────────────────
 app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
