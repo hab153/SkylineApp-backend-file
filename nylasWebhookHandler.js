@@ -15,15 +15,12 @@ exports.handleWebhook = async (req, res) => {
   console.log('🔔 [WEBHOOK] URL:', req.url);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  // 1. Handle Nylas Challenge (Verification Step - GET Request)
   if (req.method === 'GET' && req.query.challenge) {
     console.log('🔔 [Nylas Webhook] Received GET challenge, responding...');
     return res.status(200).send(req.query.challenge);
   }
 
-  // 2. Handle Actual Webhook Events (POST Request)
   if (req.method === 'POST') {
-    // Parse event data
     let eventData = req.body;
     if (Buffer.isBuffer(eventData)) {
       try {
@@ -75,7 +72,7 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created / Updated - FIXED EMAIL EXTRACTION
+//  HANDLE: Message Created / Updated
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] Processing message');
@@ -91,11 +88,9 @@ async function handleMessageCreated(eventData) {
     
     const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
     
-    // ✅ FIXED: Extract from object.from (NOT message.from)
+    // ✅ Extract from object.from (where Nylas puts the data)
     let fromEmail = null;
     let fromName = null;
-    
-    // Check object.from (this is where Nylas puts the data)
     if (object.from) {
       if (Array.isArray(object.from) && object.from.length > 0) {
         fromEmail = object.from[0].email || object.from[0].address;
@@ -106,10 +101,8 @@ async function handleMessageCreated(eventData) {
       }
     }
     
-    // ✅ FIXED: Extract from object.to (NOT message.to)
     let toEmail = null;
     let toName = null;
-    
     if (object.to) {
       if (Array.isArray(object.to) && object.to.length > 0) {
         toEmail = object.to[0].email || object.to[0].address;
@@ -128,12 +121,9 @@ async function handleMessageCreated(eventData) {
       } else if (typeof message.from === 'object') {
         fromEmail = message.from.email || message.from.address;
         fromName = message.from.name || '';
-      } else if (typeof message.from === 'string') {
-        fromEmail = message.from;
       }
     }
     
-    // Fallback: Check message.to if object.to didn't work
     if (!toEmail && message.to) {
       if (Array.isArray(message.to) && message.to.length > 0) {
         toEmail = message.to[0]?.email || message.to[0]?.address;
@@ -141,8 +131,6 @@ async function handleMessageCreated(eventData) {
       } else if (typeof message.to === 'object') {
         toEmail = message.to.email || message.to.address;
         toName = message.to.name || '';
-      } else if (typeof message.to === 'string') {
-        toEmail = message.to;
       }
     }
     
@@ -214,12 +202,13 @@ async function handleMessageCreated(eventData) {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD
+//  FIND MATCHING LEAD - FIXED
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log('🔍 [WEBHOOK] Looking for lead...');
+  console.log('🔍 [WEBHOOK] Searching for email:', fromEmail || toEmail);
   
-  // Try fromEmail first (the person who replied)
+  // ✅ Try fromEmail first (the person who replied)
   if (fromEmail) {
     let lead = await Lead.findOne({ 
       userId: userId,
@@ -231,7 +220,7 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
     }
   }
   
-  // Try toEmail (the recipient)
+  // ✅ Try toEmail (the recipient)
   if (toEmail && toEmail !== fromEmail) {
     let lead = await Lead.findOne({ 
       userId: userId,
@@ -255,14 +244,11 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
   console.log('📝 [WEBHOOK] Lead ID:', lead._id);
 
   try {
-    // ✅ Update lead status
     lead.status = 'Replied';
     lead.lastContactDate = new Date();
     
-    // ✅ Initialize replies array if needed
     if (!lead.replies) lead.replies = [];
     
-    // ✅ Add the reply to lead's conversation history
     const replyContent = body || snippet || '(No content)';
     const replySubject = subject || '(no subject)';
     
@@ -278,7 +264,6 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     await lead.save();
     console.log('✅ [WEBHOOK] Reply saved to lead. Total replies:', lead.replies.length);
 
-    // ✅ Save to ChatMessage for frontend
     try {
       const chatMessage = new ChatMessage({
         userId: userId,
@@ -294,7 +279,6 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('⚠️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
     }
 
-    // ✅ Create notification
     try {
       const notification = new Message({
         userId: userId,
@@ -350,7 +334,6 @@ async function handleMessageSent(eventData) {
     const userId = emailAccount.userId;
     console.log('👤 [WEBHOOK-SENT] Found User ID:', userId);
 
-    // Find the lead
     const lead = await Lead.findOne({ 
       userId: userId,
       email: { $regex: new RegExp('^' + toEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
@@ -517,4 +500,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-            }
+      }
