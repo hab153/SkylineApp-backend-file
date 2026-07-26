@@ -95,7 +95,7 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created (Email Received)
+//  HANDLE: Message Created (Email Received) - FIXED
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] New message received');
@@ -132,6 +132,7 @@ async function handleMessageCreated(eventData) {
     
     console.log('📩 [WEBHOOK] From:', fromEmail);
     console.log('📩 [WEBHOOK] Subject:', subject);
+    console.log('📩 [WEBHOOK] Body length:', body?.length || 0);
 
     if (!fromEmail || !grantId) {
       console.log('⚠️ [WEBHOOK] Missing fromEmail or grantId');
@@ -147,6 +148,7 @@ async function handleMessageCreated(eventData) {
     const userId = emailAccount.userId;
     console.log('✅ [WEBHOOK] Found userId:', userId);
 
+    // ✅ Find matching lead
     const lead = await findMatchingLead(userId, fromEmail);
 
     if (!lead) {
@@ -166,97 +168,132 @@ async function handleMessageCreated(eventData) {
           createdAt: new Date()
         });
         await notification.save();
+        console.log('✅ [WEBHOOK] Unknown reply notification created');
       } catch (notifErr) {
         console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
       }
       return;
     }
 
+    // ✅ Process the reply
     await processReply(lead, fromEmail, subject, body, snippet, messageId, userId);
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling message:', error.message);
+    console.error('❌ [WEBHOOK] Error stack:', error.stack);
   }
 }
 
 // ──────────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD
+//  FIND MATCHING LEAD (FIXED - MORE AGGRESSIVE)
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail) {
-  if (!fromEmail) return null;
+  if (!fromEmail) {
+    console.log('⚠️ [WEBHOOK] No fromEmail provided');
+    return null;
+  }
   
-  // Try exact match first
+  console.log('🔍 [WEBHOOK] Looking for lead with email:', fromEmail);
+  
+  // ✅ Try exact match first (case-insensitive)
   let lead = await Lead.findOne({ 
     userId: userId,
     email: { $regex: new RegExp('^' + fromEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
   });
-  if (lead) return lead;
+  if (lead) {
+    console.log('✅ [WEBHOOK] Found lead by exact email match:', lead.name);
+    return lead;
+  }
 
-  // Try domain match
+  // ✅ Try domain match (if user has multiple emails from same domain)
   const domain = fromEmail.split('@')[1];
   if (domain) {
     lead = await Lead.findOne({ 
       userId: userId,
       email: { $regex: new RegExp('@' + domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
     });
-    if (lead) return lead;
+    if (lead) {
+      console.log('✅ [WEBHOOK] Found lead by domain match:', lead.name);
+      return lead;
+    }
   }
 
-  // Try name match
-  const leads = await Lead.find({ userId: userId }).limit(30);
-  const nameParts = fromEmail.split('@')[0].toLowerCase().split(/[._-]/);
+  // ✅ Try name/username match (from email local part)
+  const localPart = fromEmail.split('@')[0].toLowerCase();
+  const nameVariations = localPart.split(/[._-]/);
+  
+  // Get all leads for this user (limited to reduce overhead)
+  const leads = await Lead.find({ userId: userId }).limit(100);
+  
   for (const l of leads) {
     if (l.name) {
       const leadNameLower = l.name.toLowerCase();
-      for (const part of nameParts) {
+      // Check if any part of the email matches the lead name
+      for (const part of nameVariations) {
         if (part.length > 2 && leadNameLower.includes(part)) {
+          console.log('✅ [WEBHOOK] Found lead by name match:', l.name, '(matched:', part, ')');
           return l;
         }
       }
     }
   }
 
+  console.log('❌ [WEBHOOK] No matching lead found for:', fromEmail);
   return null;
 }
 
 // ──────────────────────────────────────────────────────────────
-//  PROCESS REPLY
+//  PROCESS REPLY (FIXED)
 // ──────────────────────────────────────────────────────────────
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   console.log('📝 [WEBHOOK] Processing reply for lead:', lead.name);
+  console.log('📝 [WEBHOOK] Lead ID:', lead._id);
+  console.log('📝 [WEBHOOK] From:', fromEmail);
+  console.log('📝 [WEBHOOK] Subject:', subject);
+  console.log('📝 [WEBHOOK] Body length:', body?.length || 0);
 
   try {
+    // ✅ Update lead status
     lead.status = 'Replied';
     lead.lastContactDate = new Date();
     
+    // ✅ Initialize replies array if needed
     if (!lead.replies) lead.replies = [];
+    
+    // ✅ Add the reply to lead's conversation history
+    const replyContent = body || snippet || '(No content)';
+    const replySubject = subject || '(no subject)';
+    
     lead.replies.push({
       from: 'lead',
-      content: body || snippet || '(No content)',
-      subject: subject || '(no subject)',
+      content: replyContent,
+      subject: replySubject,
       date: new Date(),
-      messageId: messageId,
+      messageId: messageId || null,
       read: false
     });
     
+    // ✅ Save the lead with the new reply
     await lead.save();
+    console.log('✅ [WEBHOOK] Reply saved to lead. Total replies:', lead.replies.length);
 
-    // Save to ChatMessage
+    // ✅ ALSO save to ChatMessage for consistency
     try {
       const chatMessage = new ChatMessage({
         userId: userId,
         sessionId: lead._id.toString(),
-        role: 'user', // In ChatMessage, 'user' means the lead (counter-intuitive but consistent with your frontend mapping)
-        content: body || snippet || '(No content)',
-        title: subject || '(no subject)',
+        role: 'user', // 'user' = lead message (matches frontend mapping)
+        content: replyContent,
+        title: replySubject,
         createdAt: new Date()
       });
       await chatMessage.save();
+      console.log('✅ [WEBHOOK] Reply saved to ChatMessage');
     } catch (chatErr) {
       console.warn('⚠️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
     }
 
-    // Create notification
+    // ✅ Create notification for the frontend
     try {
       const notification = new Message({
         userId: userId,
@@ -270,16 +307,19 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
         createdAt: new Date()
       });
       await notification.save();
+      console.log('✅ [WEBHOOK] Notification created');
     } catch (notifErr) {
       console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
 
+    // ✅ Handle auto-reply if enabled
     if (lead.autoReplyEnabled) {
       await generateAndSendAutoReply(lead, userId);
     }
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error processing reply:', error.message);
+    console.error('❌ [WEBHOOK] Error stack:', error.stack);
   }
 }
 
@@ -334,7 +374,7 @@ async function handleMessageSent(eventData) {
         
         if (!lead.replies) lead.replies = [];
         lead.replies.push({
-          from: 'ai', // ✅ Changed from 'you' to 'ai'
+          from: 'ai',
           content: body || '',
           subject: subject,
           date: new Date(),
@@ -348,7 +388,6 @@ async function handleMessageSent(eventData) {
       }
     } else {
         console.log('❌ [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
-        console.log('❌ [WEBHOOK-SENT] This might be creating a "ghost" chat if logic falls through elsewhere.');
     }
 
   } catch (error) {
@@ -482,4 +521,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-    }
+                   }
