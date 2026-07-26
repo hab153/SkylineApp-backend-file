@@ -1,4 +1,5 @@
 const Lead = require('./Lead');
+const ChatMessage = require('./ChatMessage');
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
@@ -22,7 +23,7 @@ const getConversations = async (req, res) => {
         
         const leads = await Lead.find(query)
             .sort({ lastContactDate: -1 })
-            .limit(50);
+            .limit(100);
             
         console.log(`✅ [getConversations] Found ${leads.length} leads`);
         
@@ -61,7 +62,7 @@ const getConversations = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId
+//  GET /api/conversations/:leadId - FIXED
 // ──────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
@@ -79,7 +80,10 @@ const getConversationById = async (req, res) => {
         
         if (!isValidObjectId(leadId)) {
             console.error('❌ [getConversationById] Invalid leadId format:', leadId);
-            return res.status(400).json({ message: 'Invalid lead ID format' });
+            return res.status(400).json({ 
+                success: false,
+                message: 'Invalid lead ID format' 
+            });
         }
         
         console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
@@ -88,9 +92,12 @@ const getConversationById = async (req, res) => {
         const lead = await Lead.findOne(query);
         if (!lead) {
             console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
-            return res.status(404).json({ message: 'Conversation not found' });
+            return res.status(404).json({ 
+                success: false,
+                message: 'Conversation not found' 
+            });
         }
-        console.log(`✅ [getConversationById] Lead found: ${lead.name}`);
+        console.log(`✅ [getConversationById] Lead found: ${lead.name || lead.email || 'Unknown'}`);
         
         const email = lead.email || '';
         
@@ -107,15 +114,65 @@ const getConversationById = async (req, res) => {
             }
         }
         
-        // ✅ FIX: Only use Lead.replies for consistency to avoid doubling.
+        // ✅ Build messages from lead.replies
         let allMessages = lead.replies || [];
         
-        // Sort by date just in case
-        allMessages.sort((a, b) => {
-            const dateA = a.date ? new Date(a.date) : new Date(0);
-            const dateB = b.date ? new Date(b.date) : new Date(0);
-            return dateA - dateB;
-        });
+        // ✅ Also try to get messages from ChatMessage collection
+        try {
+            const chatMessages = await ChatMessage.find({ 
+                userId: req.userId, 
+                sessionId: lead._id.toString() 
+            }).sort({ createdAt: 1 });
+            
+            // ✅ Merge messages from both sources (avoid duplicates)
+            const existingContents = new Set();
+            const mergedMessages = [];
+            
+            // Add lead.replies first
+            for (const msg of allMessages) {
+                const key = (msg.content || '') + (msg.date || '').toString();
+                if (!existingContents.has(key)) {
+                    existingContents.add(key);
+                    mergedMessages.push({
+                        from: msg.from || 'lead',
+                        content: msg.content || '',
+                        subject: msg.subject || '',
+                        date: msg.date || new Date(),
+                        messageId: msg.messageId || null,
+                        read: msg.read || false
+                    });
+                }
+            }
+            
+            // Add ChatMessage entries (only if not already present)
+            for (const msg of chatMessages) {
+                const key = (msg.content || '') + (msg.createdAt || '').toString();
+                if (!existingContents.has(key)) {
+                    existingContents.add(key);
+                    mergedMessages.push({
+                        from: msg.role === 'user' ? 'lead' : 'ai',
+                        content: msg.content || '',
+                        subject: msg.title || '',
+                        date: msg.createdAt || new Date(),
+                        messageId: msg._id.toString(),
+                        read: true
+                    });
+                }
+            }
+            
+            // Sort by date
+            mergedMessages.sort((a, b) => {
+                const dateA = a.date ? new Date(a.date) : new Date(0);
+                const dateB = b.date ? new Date(b.date) : new Date(0);
+                return dateA - dateB;
+            });
+            
+            allMessages = mergedMessages;
+            console.log(`✅ [getConversationById] Merged ${allMessages.length} messages total`);
+            
+        } catch (chatErr) {
+            console.warn('⚠️ [getConversationById] Failed to fetch ChatMessages:', chatErr.message);
+        }
         
         // Limit to last 50
         if (allMessages.length > 50) {
@@ -123,28 +180,37 @@ const getConversationById = async (req, res) => {
         }
         
         const cleanHistory = allMessages.map(msg => ({
-            ...msg,
-            content: msg.content || ''
+            from: msg.from || 'lead',
+            content: msg.content || '',
+            subject: msg.subject || '',
+            date: msg.date || new Date(),
+            messageId: msg.messageId || null,
+            read: msg.read || false
         }));
         
         console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages`);
         
         res.json({
+            success: true,
             lead: {
                 id: lead._id.toString(),
-                name: lead.name,
+                name: lead.name || lead.email || 'Unknown',
                 email: email,
-                company: lead.company,
-                status: lead.status,
+                company: lead.company || '',
+                status: lead.status || 'New',
                 autoReplyEnabled: lead.autoReplyEnabled || false,
                 autoReplyInstructions: lead.autoReplyInstructions || ''
             },
             messages: cleanHistory
         });
+        
     } catch (err) {
         console.error('❌ [getConversationById] Error:', err);
         console.error('❌ [getConversationById] Error stack:', err.stack);
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ 
+            success: false,
+            message: 'Server Error fetching conversation' 
+        });
     }
 };
 
@@ -206,7 +272,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - WITH EMAIL SENDING LOGIC
+//  POST /api/leads/batch-send
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -224,7 +290,6 @@ const batchSend = async (req, res) => {
             return res.status(400).json({ message: 'Leads array is required' });
         }
 
-        // ✅ STEP 3: Handle existing lead (leadId provided)
         if (leadId) {
             console.log('🔍 [BE-BATCH] Searching for existing lead:', leadId);
             const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
@@ -245,7 +310,6 @@ const batchSend = async (req, res) => {
             const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
             
-            // Check for duplicate
             const lastReply = targetLead.replies && targetLead.replies.length > 0 ? targetLead.replies[targetLead.replies.length - 1] : null;
             const isDuplicate = lastReply && 
                                 lastReply.content === msgContent && 
@@ -269,7 +333,6 @@ const batchSend = async (req, res) => {
                 console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
-            // ✅ STEP 6: ACTUAL EMAIL SENDING LOGIC
             const EmailAccount = require('./EmailAccount');
             const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
             
@@ -282,7 +345,6 @@ const batchSend = async (req, res) => {
             } else {
                 try {
                     console.log(`📧 [BE-BATCH] Attempting to send via Nylas for grant: ${account.nylasGrantId}`);
-                    // We use the sendEmail function from nylasService
                     const result = await sendEmail(
                         req.userId,
                         targetLead.email,
@@ -320,7 +382,6 @@ const batchSend = async (req, res) => {
                 console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
             }
-            // ... (Existing new lead creation code if needed) ...
         }
         
     } catch (err) {
