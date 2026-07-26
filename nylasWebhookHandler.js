@@ -96,7 +96,8 @@ exports.handleWebhook = async (req, res) => {
     try {
       switch (eventData.type) {
         case 'message.created':
-          console.log('✅ [WEBHOOK] Processing message.created');
+        case 'message.updated':  // ✅ ADDED: Handle message.updated events
+          console.log('✅ [WEBHOOK] Processing message.created/updated');
           await handleMessageCreated(eventData);
           break;
         case 'thread.replied':
@@ -132,10 +133,11 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created (Email Received) - FIXED
+//  HANDLE: Message Created / Updated (Email Received) - FIXED
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
-  console.log('📥 [WEBHOOK] New message received');
+  console.log('📥 [WEBHOOK] New message received/updated');
+  console.log('📥 [WEBHOOK] Event type:', eventData.type);
   console.log('📥 [WEBHOOK] Full eventData:', JSON.stringify(eventData, null, 2));
   
   try {
@@ -149,6 +151,21 @@ async function handleMessageCreated(eventData) {
     
     const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
     
+    // ✅ Extract the recipient email (the lead's email)
+    let toEmail = null;
+    if (message.to) {
+      if (Array.isArray(message.to)) {
+        toEmail = message.to[0]?.email || message.to[0]?.address;
+      } else if (typeof message.to === 'object') {
+        toEmail = message.to.email || message.to.address;
+      } else if (typeof message.to === 'string') {
+        toEmail = message.to;
+      }
+    }
+    if (!toEmail) toEmail = data.to?.[0]?.email || data.to?.[0]?.address;
+    if (!toEmail) toEmail = object.to?.[0]?.email || object.to?.[0]?.address;
+    
+    // ✅ Also get the sender email (for reference)
     let fromEmail = null;
     if (message.from) {
       if (Array.isArray(message.from)) {
@@ -169,12 +186,13 @@ async function handleMessageCreated(eventData) {
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
     console.log('📩 [WEBHOOK] From:', fromEmail);
+    console.log('📩 [WEBHOOK] To:', toEmail);
     console.log('📩 [WEBHOOK] Subject:', subject);
     console.log('📩 [WEBHOOK] Body length:', body?.length || 0);
     console.log('📩 [WEBHOOK] Grant ID:', grantId);
 
-    if (!fromEmail || !grantId) {
-      console.log('⚠️ [WEBHOOK] Missing fromEmail or grantId');
+    if (!toEmail || !grantId) {
+      console.log('⚠️ [WEBHOOK] Missing toEmail or grantId');
       return;
     }
 
@@ -187,11 +205,19 @@ async function handleMessageCreated(eventData) {
     const userId = emailAccount.userId;
     console.log('✅ [WEBHOOK] Found userId:', userId);
 
-    // ✅ Find matching lead
-    const lead = await findMatchingLead(userId, fromEmail);
+    // ✅ IMPORTANT: Match against the TO email (the lead's email in your system)
+    const lead = await findMatchingLead(userId, toEmail);
 
     if (!lead) {
-      console.log('📭 [WEBHOOK] No matching lead found for:', fromEmail);
+      console.log('📭 [WEBHOOK] No matching lead found for TO email:', toEmail);
+      
+      // Try to find by FROM email as fallback
+      const leadByFrom = await findMatchingLead(userId, fromEmail);
+      if (leadByFrom) {
+        console.log('✅ [WEBHOOK] Found lead by FROM email instead:', leadByFrom.name);
+        await processReply(leadByFrom, fromEmail, subject, body, snippet, messageId, userId);
+        return;
+      }
       
       // Create notification for unknown reply
       try {
@@ -200,7 +226,7 @@ async function handleMessageCreated(eventData) {
           sessionId: 'unknown-reply-notification',
           role: 'ai',
           title: '📬 Unknown Reply',
-          content: `Unknown reply from ${fromEmail}: ${snippet ? snippet.substring(0, 200) : 'No content'}`,
+          content: `Unknown reply from ${fromEmail} to ${toEmail}: ${snippet ? snippet.substring(0, 200) : 'No content'}`,
           notificationType: 'unknown_reply',
           leadId: null,
           isRead: false,
@@ -230,18 +256,18 @@ async function handleMessageCreated(eventData) {
 // ──────────────────────────────────────────────────────────────
 //  FIND MATCHING LEAD (FIXED - MORE AGGRESSIVE)
 // ──────────────────────────────────────────────────────────────
-async function findMatchingLead(userId, fromEmail) {
-  if (!fromEmail) {
-    console.log('⚠️ [WEBHOOK] No fromEmail provided');
+async function findMatchingLead(userId, searchEmail) {
+  if (!searchEmail) {
+    console.log('⚠️ [WEBHOOK] No searchEmail provided');
     return null;
   }
   
-  console.log('🔍 [WEBHOOK] Looking for lead with email:', fromEmail);
+  console.log('🔍 [WEBHOOK] Looking for lead with email:', searchEmail);
   
   // ✅ Try exact match first (case-insensitive)
   let lead = await Lead.findOne({ 
     userId: userId,
-    email: { $regex: new RegExp('^' + fromEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
+    email: { $regex: new RegExp('^' + searchEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
   });
   if (lead) {
     console.log('✅ [WEBHOOK] Found lead by exact email match:', lead.name);
@@ -249,7 +275,7 @@ async function findMatchingLead(userId, fromEmail) {
   }
 
   // ✅ Try domain match (if user has multiple emails from same domain)
-  const domain = fromEmail.split('@')[1];
+  const domain = searchEmail.split('@')[1];
   if (domain) {
     lead = await Lead.findOne({ 
       userId: userId,
@@ -262,7 +288,7 @@ async function findMatchingLead(userId, fromEmail) {
   }
 
   // ✅ Try name/username match (from email local part)
-  const localPart = fromEmail.split('@')[0].toLowerCase();
+  const localPart = searchEmail.split('@')[0].toLowerCase();
   const nameVariations = localPart.split(/[._-]/);
   
   // Get all leads for this user (limited to reduce overhead)
@@ -281,7 +307,7 @@ async function findMatchingLead(userId, fromEmail) {
     }
   }
 
-  console.log('❌ [WEBHOOK] No matching lead found for:', fromEmail);
+  console.log('❌ [WEBHOOK] No matching lead found for:', searchEmail);
   return null;
 }
 
