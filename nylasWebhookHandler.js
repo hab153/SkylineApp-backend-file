@@ -75,7 +75,7 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created / Updated
+//  HANDLE: Message Created / Updated - FIXED EMAIL EXTRACTION
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] Processing message');
@@ -91,28 +91,58 @@ async function handleMessageCreated(eventData) {
     
     const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
     
-    // Extract emails
-    let toEmail = null;
-    let toName = null;
-    if (message.to) {
-      if (Array.isArray(message.to)) {
-        toEmail = message.to[0]?.email || message.to[0]?.address;
-        toName = message.to[0]?.name || '';
-      } else if (typeof message.to === 'object') {
-        toEmail = message.to.email || message.to.address;
-        toName = message.to.name || '';
+    // ✅ FIXED: Extract from object.from (NOT message.from)
+    let fromEmail = null;
+    let fromName = null;
+    
+    // Check object.from (this is where Nylas puts the data)
+    if (object.from) {
+      if (Array.isArray(object.from) && object.from.length > 0) {
+        fromEmail = object.from[0].email || object.from[0].address;
+        fromName = object.from[0].name || '';
+      } else if (typeof object.from === 'object') {
+        fromEmail = object.from.email || object.from.address;
+        fromName = object.from.name || '';
       }
     }
     
-    let fromEmail = null;
-    let fromName = null;
-    if (message.from) {
-      if (Array.isArray(message.from)) {
+    // ✅ FIXED: Extract from object.to (NOT message.to)
+    let toEmail = null;
+    let toName = null;
+    
+    if (object.to) {
+      if (Array.isArray(object.to) && object.to.length > 0) {
+        toEmail = object.to[0].email || object.to[0].address;
+        toName = object.to[0].name || '';
+      } else if (typeof object.to === 'object') {
+        toEmail = object.to.email || object.to.address;
+        toName = object.to.name || '';
+      }
+    }
+    
+    // Fallback: Check message.from if object.from didn't work
+    if (!fromEmail && message.from) {
+      if (Array.isArray(message.from) && message.from.length > 0) {
         fromEmail = message.from[0]?.email || message.from[0]?.address;
         fromName = message.from[0]?.name || '';
       } else if (typeof message.from === 'object') {
         fromEmail = message.from.email || message.from.address;
         fromName = message.from.name || '';
+      } else if (typeof message.from === 'string') {
+        fromEmail = message.from;
+      }
+    }
+    
+    // Fallback: Check message.to if object.to didn't work
+    if (!toEmail && message.to) {
+      if (Array.isArray(message.to) && message.to.length > 0) {
+        toEmail = message.to[0]?.email || message.to[0]?.address;
+        toName = message.to[0]?.name || '';
+      } else if (typeof message.to === 'object') {
+        toEmail = message.to.email || message.to.address;
+        toName = message.to.name || '';
+      } else if (typeof message.to === 'string') {
+        toEmail = message.to;
       }
     }
     
@@ -145,7 +175,7 @@ async function handleMessageCreated(eventData) {
     // ✅ If no lead found, CREATE ONE
     if (!lead) {
       console.log('📭 [WEBHOOK] No matching lead found, creating new lead...');
-      console.log('📭 [WEBHOOK] Creating lead for email:', fromEmail);
+      console.log('📭 [WEBHOOK] Creating lead for email:', fromEmail || toEmail);
       
       const leadEmail = fromEmail || toEmail || 'unknown@email.com';
       const displayName = fromName || leadEmail.split('@')[0] || 'Unknown Contact';
@@ -487,4 +517,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-}
+            }
