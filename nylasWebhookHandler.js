@@ -6,8 +6,28 @@ const Message = require('./Message');
 const ChatMessage = require('./ChatMessage');
 const { generateAIReply } = require('./aiReplyGenerator');
 
+// ─── DEBUG CONFIG ───
+const DEBUG_WEBHOOK = true;
+
+function debugLog(...args) {
+    if (DEBUG_WEBHOOK) {
+        console.log('🔍 [WEBHOOK-DEBUG]', ...args);
+    }
+}
+
 exports.handleWebhook = async (req, res) => {
   const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET;
+
+  // ─── DEBUG: Log EVERYTHING ───
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🔔 [WEBHOOK] Request received!');
+  console.log('🔔 [WEBHOOK] Method:', req.method);
+  console.log('🔔 [WEBHOOK] URL:', req.url);
+  console.log('🔔 [WEBHOOK] Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('🔔 [WEBHOOK] Query params:', req.query);
+  console.log('🔔 [WEBHOOK] Body type:', typeof req.body);
+  console.log('🔔 [WEBHOOK] Body is Buffer:', Buffer.isBuffer(req.body));
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   // 1. Handle Nylas Challenge (Verification Step - GET Request)
   if (req.method === 'GET' && req.query.challenge) {
@@ -18,6 +38,7 @@ exports.handleWebhook = async (req, res) => {
   // 2. Handle Actual Webhook Events (POST Request)
   if (req.method === 'POST') {
     const signature = req.headers['x-nylas-signature'];
+    console.log('🔔 [WEBHOOK] Signature present:', !!signature);
     
     if (signature && webhookSecret && webhookSecret !== 'your-webhook-secret-here') {
       try {
@@ -35,6 +56,8 @@ exports.handleWebhook = async (req, res) => {
 
         if (signature !== digest) {
           console.warn('⚠️ [Nylas Webhook] Invalid signature detected.');
+        } else {
+          console.log('✅ [WEBHOOK] Signature verified');
         }
       } catch (sigErr) {
         console.warn('⚠️ [Nylas Webhook] Signature verification error:', sigErr.message);
@@ -43,9 +66,12 @@ exports.handleWebhook = async (req, res) => {
 
     // Parse event data
     let eventData = req.body;
+    console.log('🔔 [WEBHOOK] Raw body (first 500 chars):', JSON.stringify(eventData).substring(0, 500));
+    
     if (Buffer.isBuffer(eventData)) {
       try {
         eventData = JSON.parse(eventData.toString('utf8'));
+        console.log('✅ [WEBHOOK] Parsed from buffer');
       } catch (e) {
         console.error('❌ [Nylas Webhook] Failed to parse JSON body');
         return res.status(400).send('Invalid JSON');
@@ -53,6 +79,7 @@ exports.handleWebhook = async (req, res) => {
     } else if (typeof eventData === 'string') {
       try {
         eventData = JSON.parse(eventData);
+        console.log('✅ [WEBHOOK] Parsed from string');
       } catch (e) {
         console.error('❌ [Nylas Webhook] Failed to parse JSON string');
         return res.status(400).send('Invalid JSON');
@@ -62,23 +89,30 @@ exports.handleWebhook = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📨 [NYLAS WEBHOOK] Event received');
     console.log('📨 [NYLAS WEBHOOK] Event type:', eventData.type);
+    console.log('📨 [NYLAS WEBHOOK] Event data keys:', Object.keys(eventData));
+    console.log('📨 [NYLAS WEBHOOK] Full event data:', JSON.stringify(eventData, null, 2));
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     try {
       switch (eventData.type) {
         case 'message.created':
+          console.log('✅ [WEBHOOK] Processing message.created');
           await handleMessageCreated(eventData);
           break;
         case 'thread.replied':
+          console.log('✅ [WEBHOOK] Processing thread.replied');
           await handleMessageCreated(eventData);
           break;
         case 'message.sent':
+          console.log('✅ [WEBHOOK] Processing message.sent');
           await handleMessageSent(eventData);
           break;
         case 'grant.expired':
+          console.log('✅ [WEBHOOK] Processing grant.expired');
           await handleGrantExpired(eventData);
           break;
         case 'grant.refreshed':
+          console.log('✅ [WEBHOOK] Processing grant.refreshed');
           await handleGrantRefreshed(eventData);
           break;
         default:
@@ -86,11 +120,14 @@ exports.handleWebhook = async (req, res) => {
       }
     } catch (error) {
       console.error('❌ [NYLAS WEBHOOK] Error processing event:', error.message);
+      console.error('❌ [NYLAS WEBHOOK] Error stack:', error.stack);
     }
 
+    console.log('✅ [WEBHOOK] Returning 200 OK');
     return res.status(200).send('Webhook received');
   }
 
+  console.log('❌ [WEBHOOK] Method not allowed:', req.method);
   res.status(405).send('Method Not Allowed');
 };
 
@@ -99,6 +136,7 @@ exports.handleWebhook = async (req, res) => {
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] New message received');
+  console.log('📥 [WEBHOOK] Full eventData:', JSON.stringify(eventData, null, 2));
   
   try {
     const data = eventData.data || {};
@@ -133,6 +171,7 @@ async function handleMessageCreated(eventData) {
     console.log('📩 [WEBHOOK] From:', fromEmail);
     console.log('📩 [WEBHOOK] Subject:', subject);
     console.log('📩 [WEBHOOK] Body length:', body?.length || 0);
+    console.log('📩 [WEBHOOK] Grant ID:', grantId);
 
     if (!fromEmail || !grantId) {
       console.log('⚠️ [WEBHOOK] Missing fromEmail or grantId');
@@ -174,6 +213,10 @@ async function handleMessageCreated(eventData) {
       }
       return;
     }
+
+    console.log('✅ [WEBHOOK] Found lead:', lead.name, '(ID:', lead._id, ')');
+    console.log('✅ [WEBHOOK] Lead email:', lead.email);
+    console.log('✅ [WEBHOOK] Lead replies count:', lead.replies?.length || 0);
 
     // ✅ Process the reply
     await processReply(lead, fromEmail, subject, body, snippet, messageId, userId);
@@ -251,6 +294,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
   console.log('📝 [WEBHOOK] From:', fromEmail);
   console.log('📝 [WEBHOOK] Subject:', subject);
   console.log('📝 [WEBHOOK] Body length:', body?.length || 0);
+  console.log('📝 [WEBHOOK] Body preview:', body?.substring(0, 200) || '');
 
   try {
     // ✅ Update lead status
@@ -276,6 +320,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     // ✅ Save the lead with the new reply
     await lead.save();
     console.log('✅ [WEBHOOK] Reply saved to lead. Total replies:', lead.replies.length);
+    console.log('✅ [WEBHOOK] Last reply:', JSON.stringify(lead.replies[lead.replies.length - 1]));
 
     // ✅ ALSO save to ChatMessage for consistency
     try {
@@ -316,6 +361,8 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     if (lead.autoReplyEnabled) {
       await generateAndSendAutoReply(lead, userId);
     }
+
+    console.log('✅ [WEBHOOK] Reply processing complete for:', lead.name);
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error processing reply:', error.message);
@@ -521,4 +568,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-                   }
+      }
