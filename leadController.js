@@ -62,7 +62,7 @@ const getConversations = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId - FIXED
+//  GET /api/conversations/:leadId - SIMPLIFIED FIX
 // ──────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
@@ -70,11 +70,17 @@ const getConversationById = async (req, res) => {
     try {
         if (!req.userId) {
             console.error('❌ [getConversationById] No userId');
-            return res.status(401).json({ message: 'Unauthorized' });
+            return res.status(401).json({ 
+                success: false, 
+                message: 'Unauthorized' 
+            });
         }
         if (!isValidObjectId(req.userId)) {
             console.error('❌ [getConversationById] Invalid userId format');
-            return res.status(400).json({ message: 'Invalid user ID' });
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Invalid user ID' 
+            });
         }
         const { leadId } = req.params;
         
@@ -114,71 +120,18 @@ const getConversationById = async (req, res) => {
             }
         }
         
-        // ✅ Build messages from lead.replies
+        // ✅ SIMPLIFIED: Just use lead.replies directly
         let allMessages = lead.replies || [];
+        console.log(`📡 [getConversationById] Found ${allMessages.length} replies in lead`);
         
-        // ✅ Also try to get messages from ChatMessage collection
-        try {
-            const chatMessages = await ChatMessage.find({ 
-                userId: req.userId, 
-                sessionId: lead._id.toString() 
-            }).sort({ createdAt: 1 });
-            
-            // ✅ Merge messages from both sources (avoid duplicates)
-            const existingContents = new Set();
-            const mergedMessages = [];
-            
-            // Add lead.replies first
-            for (const msg of allMessages) {
-                const key = (msg.content || '') + (msg.date || '').toString();
-                if (!existingContents.has(key)) {
-                    existingContents.add(key);
-                    mergedMessages.push({
-                        from: msg.from || 'lead',
-                        content: msg.content || '',
-                        subject: msg.subject || '',
-                        date: msg.date || new Date(),
-                        messageId: msg.messageId || null,
-                        read: msg.read || false
-                    });
-                }
-            }
-            
-            // Add ChatMessage entries (only if not already present)
-            for (const msg of chatMessages) {
-                const key = (msg.content || '') + (msg.createdAt || '').toString();
-                if (!existingContents.has(key)) {
-                    existingContents.add(key);
-                    mergedMessages.push({
-                        from: msg.role === 'user' ? 'lead' : 'ai',
-                        content: msg.content || '',
-                        subject: msg.title || '',
-                        date: msg.createdAt || new Date(),
-                        messageId: msg._id.toString(),
-                        read: true
-                    });
-                }
-            }
-            
-            // Sort by date
-            mergedMessages.sort((a, b) => {
-                const dateA = a.date ? new Date(a.date) : new Date(0);
-                const dateB = b.date ? new Date(b.date) : new Date(0);
-                return dateA - dateB;
-            });
-            
-            allMessages = mergedMessages;
-            console.log(`✅ [getConversationById] Merged ${allMessages.length} messages total`);
-            
-        } catch (chatErr) {
-            console.warn('⚠️ [getConversationById] Failed to fetch ChatMessages:', chatErr.message);
-        }
+        // Sort by date
+        allMessages.sort((a, b) => {
+            const dateA = a.date ? new Date(a.date) : new Date(0);
+            const dateB = b.date ? new Date(b.date) : new Date(0);
+            return dateA - dateB;
+        });
         
-        // Limit to last 50
-        if (allMessages.length > 50) {
-            allMessages = allMessages.slice(-50);
-        }
-        
+        // Format messages
         const cleanHistory = allMessages.map(msg => ({
             from: msg.from || 'lead',
             content: msg.content || '',
