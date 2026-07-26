@@ -14,28 +14,73 @@ const getJwtSecret = () => {
     return secret;
 };
 
+// ✅ FIXED: Register function with proper error messages
 const register = async (req, res) => {
     let { username, email, password } = req.body;
+    
+    // Store original username for display
+    const originalUsername = username;
     username = sanitizeUsername(username);
     email = sanitizeEmail(email);
+    
     try {
-        const query = sanitizeQuery({ $or: [{ email }, { username }] });
-        let user = await User.findOne(query);
-        if (user) { return res.status(400).json({ message: 'User with this email or username already exists' }); }
+        // ✅ Check email first - give specific error
+        const emailExists = await User.findOne({ email });
+        if (emailExists) {
+            return res.status(400).json({ message: 'Email already registered. Please use a different email or login.' });
+        }
+        
+        // ✅ Check username separately - give specific error
+        const usernameExists = await User.findOne({ username });
+        if (usernameExists) {
+            return res.status(400).json({ message: 'Username already taken. Please choose a different username.' });
+        }
+        
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
-        user = new User({ username, email, password: hashedPassword, tokenVersion: 0 });
+        
+        const user = new User({ 
+            username, 
+            email, 
+            password: hashedPassword, 
+            tokenVersion: 0,
+            fullName: originalUsername // Store original username as fullName
+        });
         await user.save();
+        
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         const secret = getJwtSecret();
+        
         jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
-            if (err) { console.error("JWT Error:", err); return res.status(500).json({ message: 'Token generation failed' }); }
+            if (err) {
+                console.error("JWT Error:", err);
+                return res.status(500).json({ message: 'Token generation failed' });
+            }
             const csrfToken = await generateCsrfToken(user.id);
-            res.json({ token, csrfToken, message: 'Registration successful' });
+            res.json({ 
+                token, 
+                csrfToken, 
+                message: 'Registration successful',
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email
+                }
+            });
         });
     } catch (err) {
         console.error("Registration Error:", err.message);
-        if (err.code === 11000) { return res.status(400).json({ message: 'Duplicate field value entered' }); }
+        if (err.code === 11000) {
+            // Duplicate key error - figure out which field
+            const field = Object.keys(err.keyPattern || {})[0];
+            if (field === 'email') {
+                return res.status(400).json({ message: 'Email already registered. Please use a different email.' });
+            }
+            if (field === 'username') {
+                return res.status(400).json({ message: 'Username already taken. Please choose a different username.' });
+            }
+            return res.status(400).json({ message: 'Duplicate field value entered.' });
+        }
         res.status(500).json({ message: 'Server Error during registration' });
     }
 };
