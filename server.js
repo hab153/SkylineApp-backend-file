@@ -584,6 +584,82 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
     }
 });
 
+// ──────────────────────────────────────────────────────────────
+//  ✅ DEBUG ROUTE - Check Conversation Data
+// ──────────────────────────────────────────────────────────────
+app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
+    try {
+        const ChatMessage = require('./ChatMessage');
+        const Lead = require('./Lead');
+        
+        const lead = await Lead.findOne({ 
+            _id: req.params.leadId, 
+            userId: req.userId 
+        });
+        
+        if (!lead) {
+            return res.json({ 
+                exists: false, 
+                message: 'Lead not found' 
+            });
+        }
+        
+        // Get ChatMessages
+        const chatMessages = await ChatMessage.find({ 
+            userId: req.userId, 
+            sessionId: lead._id.toString() 
+        });
+        
+        res.json({
+            lead: {
+                id: lead._id,
+                name: lead.name,
+                email: lead.email,
+                status: lead.status,
+                repliesCount: lead.replies?.length || 0,
+                replies: lead.replies || []
+            },
+            chatMessages: chatMessages.map(m => ({
+                id: m._id,
+                role: m.role,
+                content: m.content,
+                title: m.title,
+                createdAt: m.createdAt
+            })),
+            totalMessages: (lead.replies?.length || 0) + chatMessages.length
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message, stack: error.stack });
+    }
+});
+
+// ──────────────────────────────────────────────────────────────
+//  ✅ DEBUG ROUTE - Check All Leads
+// ──────────────────────────────────────────────────────────────
+app.get('/api/debug/leads', verifyToken, async (req, res) => {
+    try {
+        const leads = await Lead.find({ userId: req.userId })
+            .select('name email status replies lastContactDate createdAt')
+            .sort({ lastContactDate: -1 })
+            .limit(20);
+        
+        res.json({
+            count: leads.length,
+            leads: leads.map(l => ({
+                id: l._id,
+                name: l.name,
+                email: l.email,
+                status: l.status,
+                repliesCount: l.replies?.length || 0,
+                lastContactDate: l.lastContactDate,
+                createdAt: l.createdAt
+            }))
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ════════════════════════════════════════════
 //  START SERVER
 // ════════════════════════════════════════════
