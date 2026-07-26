@@ -500,4 +500,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-      }
+          }
