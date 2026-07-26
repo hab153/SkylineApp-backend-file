@@ -35,14 +35,15 @@ function sanitizeEmail(email) {
 }
 
 /**
- * Sanitize username
+ * Sanitize username - ✅ FIXED: Preserves original username format, only removes dangerous characters
  * @param {string} username - The username to sanitize
  * @returns {string} - Sanitized username
  */
 function sanitizeUsername(username) {
     if (!username || typeof username !== 'string') return username;
-    // Remove any special characters except letters, numbers, underscore
-    return username.trim().replace(/[^a-zA-Z0-9_]/g, '');
+    // ✅ Only remove dangerous characters, but keep letters, numbers, underscores, and dots
+    // This allows usernames like "john.doe" or "john_doe"
+    return username.trim().replace(/[^a-zA-Z0-9_.]/g, '');
 }
 
 /**
