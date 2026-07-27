@@ -225,7 +225,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send
+//  POST /api/leads/batch-send - WITH THREAD ID SAVING
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -281,16 +281,17 @@ const batchSend = async (req, res) => {
                 });
                 targetLead.lastContactDate = now;
                 targetLead.status = 'Contacted';
-                await targetLead.save();
             } else {
                 console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
+            // ─── SEND EMAIL ───
             const EmailAccount = require('./EmailAccount');
             const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
             
             let emailSent = false;
             let emailError = null;
+            let threadId = null;
             
             if (!account) {
                 console.warn(`⚠️ [BE-BATCH] No email account connected for user ${req.userId}`);
@@ -298,6 +299,8 @@ const batchSend = async (req, res) => {
             } else {
                 try {
                     console.log(`📧 [BE-BATCH] Attempting to send via Nylas for grant: ${account.nylasGrantId}`);
+                    
+                    // ✅ Send email and capture thread_id
                     const result = await sendEmail(
                         req.userId,
                         targetLead.email,
@@ -307,7 +310,15 @@ const batchSend = async (req, res) => {
                     
                     if (result.success) {
                         emailSent = true;
+                        threadId = result.threadId;
                         console.log(`✅ [BE-BATCH] Email sent successfully to ${targetLead.email}`);
+                        console.log(`✅ [BE-BATCH] Thread ID: ${threadId}`);
+                        
+                        // ✅ SAVE THREAD ID TO LEAD
+                        if (threadId) {
+                            targetLead.threadId = threadId;
+                            console.log(`💾 [BE-BATCH] Saved threadId to lead: ${threadId}`);
+                        }
                     } else {
                         emailError = result.error || 'Email send failed';
                         console.error(`❌ [BE-BATCH] Email send failed: ${emailError}`);
@@ -318,6 +329,9 @@ const batchSend = async (req, res) => {
                 }
             }
             
+            // ✅ Save lead (with threadId if available)
+            await targetLead.save();
+            
             console.log('📤 [BE-BATCH] Returning response...');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
@@ -326,7 +340,8 @@ const batchSend = async (req, res) => {
                 message: emailSent ? 'Email sent successfully.' : 'Message saved but email not sent.',
                 leadId: targetLead._id.toString(),
                 emailSent: emailSent,
-                emailError: emailError || null
+                emailError: emailError || null,
+                threadId: threadId || null
             });
             
         } else {
