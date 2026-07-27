@@ -18,9 +18,8 @@ const getConversations = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
+        console.log(` [getConversations] Fetching leads for userId: ${req.userId}`);
         
-        // ✅ FIX: Direct filter - bypass sanitizeQuery that might be stripping userId
         const leads = await Lead.find({ userId: req.userId })
             .sort({ lastContactDate: -1 })
             .limit(100);
@@ -70,48 +69,31 @@ const getConversationById = async (req, res) => {
     try {
         if (!req.userId) {
             console.error('❌ [getConversationById] No userId');
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Unauthorized' 
-            });
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
         if (!isValidObjectId(req.userId)) {
             console.error('❌ [getConversationById] Invalid userId format');
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid user ID' 
-            });
+            return res.status(400).json({ success: false, message: 'Invalid user ID' });
         }
         const { leadId } = req.params;
         
         if (!isValidObjectId(leadId)) {
             console.error('❌ [getConversationById] Invalid leadId format:', leadId);
-            return res.status(400).json({ 
-                success: false,
-                message: 'Invalid lead ID format' 
-            });
+            return res.status(400).json({ success: false, message: 'Invalid lead ID format' });
         }
         
-        console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
+        console.log(` [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
         
-        // ✅ FIX: Direct filter - BOTH userId AND leadId
-        const lead = await Lead.findOne({ 
-            _id: leadId, 
-            userId: req.userId 
-        });
+        const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
         
         if (!lead) {
             console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
-            return res.status(404).json({ 
-                success: false,
-                message: 'Conversation not found' 
-            });
+            return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
         console.log(`✅ [getConversationById] Lead found: ${lead.name || lead.email || 'Unknown'}`);
         
         const email = lead.email || '';
         
-        // Mark replies as read
         if (lead.replies && lead.replies.length > 0) {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
@@ -124,18 +106,15 @@ const getConversationById = async (req, res) => {
             }
         }
         
-        // ✅ SIMPLIFIED: Just use lead.replies directly
         let allMessages = lead.replies || [];
         console.log(`📡 [getConversationById] Found ${allMessages.length} replies in lead`);
         
-        // Sort by date
         allMessages.sort((a, b) => {
             const dateA = a.date ? new Date(a.date) : new Date(0);
             const dateB = b.date ? new Date(b.date) : new Date(0);
             return dateA - dateB;
         });
         
-        // Format messages
         const cleanHistory = allMessages.map(msg => ({
             from: msg.from || 'lead',
             content: msg.content || '',
@@ -145,7 +124,7 @@ const getConversationById = async (req, res) => {
             read: msg.read || false
         }));
         
-        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages for lead ${leadId}`);
+        console.log(` [getConversationById] Returning ${cleanHistory.length} messages for lead ${leadId}`);
         
         res.json({
             success: true,
@@ -164,10 +143,7 @@ const getConversationById = async (req, res) => {
     } catch (err) {
         console.error('❌ [getConversationById] Error:', err);
         console.error('❌ [getConversationById] Error stack:', err.stack);
-        res.status(500).json({ 
-            success: false,
-            message: 'Server Error fetching conversation' 
-        });
+        res.status(500).json({ success: false, message: 'Server Error fetching conversation' });
     }
 };
 
@@ -187,11 +163,7 @@ const renameLead = async (req, res) => {
         }
         const sanitizedNewName = newName.trim().slice(0, 100);
         
-        // ✅ FIX: Must filter by userId AND leadId
-        const lead = await Lead.findOne({ 
-            _id: req.params.leadId, 
-            userId: req.userId 
-        });
+        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.name = sanitizedNewName;
         await lead.save();
@@ -219,11 +191,7 @@ const updateAutoReply = async (req, res) => {
         }
         const sanitizedInstructions = instructions ? instructions.trim().slice(0, 2000) : '';
         
-        // ✅ FIX: Must filter by userId AND leadId
-        const lead = await Lead.findOne({ 
-            _id: req.params.leadId, 
-            userId: req.userId 
-        });
+        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
@@ -237,14 +205,14 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - WITH THREAD ID SAVING
+//  POST /api/leads/batch-send - COMPLETE FIX FOR PAGE.HTML
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📨 [BE-BATCH] Request received');
     console.log('👤 [BE-BATCH] User ID:', req.userId);
     console.log('🆔 [BE-BATCH] Received Lead ID:', req.body.leadId);
-    console.log('🚫 [BE-BATCH] Allow New Lead:', req.body.allowNewLead);
+    console.log(' [BE-BATCH] Allow New Lead:', req.body.allowNewLead);
     
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
@@ -255,14 +223,11 @@ const batchSend = async (req, res) => {
             return res.status(400).json({ message: 'Leads array is required' });
         }
 
+        // ✅ CASE 1: Sending to an EXISTING lead (from notifications.html)
         if (leadId) {
             console.log('🔍 [BE-BATCH] Searching for existing lead:', leadId);
             
-            // ✅ FIX: Must filter by userId AND leadId
-            const targetLead = await Lead.findOne({ 
-                _id: leadId, 
-                userId: req.userId 
-            });
+            const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
             
             if (!targetLead) {
                 console.error('❌ [BE-BATCH] Lead NOT FOUND for ID:', leadId);
@@ -302,7 +267,7 @@ const batchSend = async (req, res) => {
                 console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
-            // ─── SEND EMAIL ───
+            // ── SEND EMAIL ───
             const EmailAccount = require('./EmailAccount');
             const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
             
@@ -317,7 +282,6 @@ const batchSend = async (req, res) => {
                 try {
                     console.log(`📧 [BE-BATCH] Attempting to send via Nylas for grant: ${account.nylasGrantId}`);
                     
-                    // ✅ Send email and capture thread_id
                     const result = await sendEmail(
                         req.userId,
                         targetLead.email,
@@ -329,12 +293,10 @@ const batchSend = async (req, res) => {
                         emailSent = true;
                         threadId = result.threadId;
                         console.log(`✅ [BE-BATCH] Email sent successfully to ${targetLead.email}`);
-                        console.log(`✅ [BE-BATCH] Thread ID: ${threadId}`);
                         
-                        // ✅ SAVE THREAD ID TO LEAD
                         if (threadId) {
                             targetLead.threadId = threadId;
-                            console.log(`💾 [BE-BATCH] Saved threadId to lead: ${threadId}`);
+                            console.log(` [BE-BATCH] Saved threadId to lead: ${threadId}`);
                         }
                     } else {
                         emailError = result.error || 'Email send failed';
@@ -346,7 +308,6 @@ const batchSend = async (req, res) => {
                 }
             }
             
-            // ✅ Save lead (with threadId if available)
             await targetLead.save();
             
             console.log('📤 [BE-BATCH] Returning response...');
@@ -361,12 +322,94 @@ const batchSend = async (req, res) => {
                 threadId: threadId || null
             });
             
+        // ✅ CASE 2: Creating NEW leads and sending (from page.html)
         } else {
-            console.log('🆕 [BE-BATCH] No Lead ID provided. Checking allowNewLead...');
+            console.log(' [BE-BATCH] No Lead ID provided. Creating new leads...');
             if (allowNewLead === false) {
                 console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
             }
+
+            const EmailAccount = require('./EmailAccount');
+            const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+            
+            let results = [];
+            let anyFailed = false;
+
+            // Loop through all leads sent from page.html
+            for (const leadData of leads) {
+                const now = new Date();
+                
+                // 1. Create the Lead in DB
+                const newLead = new Lead({
+                    userId: req.userId,
+                    name: leadData.name || leadData.company || 'Unknown',
+                    email: leadData.email,
+                    company: leadData.company || '',
+                    status: 'Contacted',
+                    lastContactDate: now,
+                    replies: []
+                });
+
+                const msgContent = leadData.messages?.[0]?.body || '';
+                const msgSubject = leadData.messages?.[0]?.subject || 'Hello from Skyline';
+
+                // 2. Add initial reply record
+                newLead.replies.push({
+                    date: now,
+                    content: msgContent,
+                    subject: msgSubject,
+                    from: 'ai',
+                    status: 'sent',
+                    read: true
+                });
+
+                // 3. Send Email via Nylas
+                let emailSent = false;
+                let emailError = null;
+
+                if (account && leadData.email) {
+                    try {
+                        const result = await sendEmail(
+                            req.userId,
+                            leadData.email,
+                            msgSubject,
+                            msgContent
+                        );
+                        if (result.success) {
+                            emailSent = true;
+                            if (result.threadId) newLead.threadId = result.threadId;
+                        } else {
+                            emailError = result.error;
+                            anyFailed = true;
+                        }
+                    } catch (err) {
+                        emailError = err.message;
+                        anyFailed = true;
+                    }
+                } else {
+                    emailError = 'No email account or missing lead email';
+                    anyFailed = true;
+                }
+
+                // 4. Save Lead
+                await newLead.save();
+                
+                results.push({
+                    leadId: newLead._id,
+                    email: leadData.email,
+                    sent: emailSent,
+                    error: emailError
+                });
+            }
+
+            console.log(`📤 [BE-BATCH] Batch complete. Sent ${results.filter(r=>r.sent).length}/${results.length}`);
+            
+            res.json({
+                success: !anyFailed,
+                message: anyFailed ? 'Some emails failed to send.' : 'All emails sent successfully.',
+                results: results
+            });
         }
         
     } catch (err) {
@@ -396,11 +439,7 @@ const reconnectAndSend = async (req, res) => {
             });
         }
 
-        // ✅ FIX: Must filter by userId
-        const leadsWithPending = await Lead.find({ 
-            userId: req.userId, 
-            'replies.status': 'pending' 
-        });
+        const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
         let sentCount = 0;
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
@@ -442,14 +481,13 @@ const getAllLeads = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        // ✅ FIX: Direct filter
         const leads = await Lead.find({ userId: req.userId })
             .sort({ createdAt: -1 });
             
         console.log(`✅ [getAllLeads] Found ${leads.length} leads for user ${req.userId}`);
         res.json(leads);
     } catch (err) {
-        console.error('❌ [getAllLeads] Error:', err);
+        console.error(' [getAllLeads] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
