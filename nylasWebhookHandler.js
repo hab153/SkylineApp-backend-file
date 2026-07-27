@@ -202,33 +202,40 @@ async function handleMessageCreated(eventData) {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD - FIXED
+//  FIND MATCHING LEAD - FIXED (Handles encrypted emails)
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log('🔍 [WEBHOOK] Looking for lead...');
-  console.log('🔍 [WEBHOOK] Searching for email:', fromEmail || toEmail);
+  console.log('🔍 [WEBHOOK] Searching by FROM email:', fromEmail);
+  console.log('🔍 [WEBHOOK] Searching by TO email:', toEmail);
   
   // ✅ Try fromEmail first (the person who replied)
   if (fromEmail) {
-    let lead = await Lead.findOne({ 
-      userId: userId,
-      email: { $regex: new RegExp('^' + fromEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
-    });
-    if (lead) {
-      console.log('✅ [WEBHOOK] Found lead by FROM email:', lead.name);
-      return lead;
+    // Search ALL leads for this user and decrypt emails in memory
+    const allLeads = await Lead.find({ userId: userId });
+    console.log(`🔍 [WEBHOOK] Checking ${allLeads.length} leads for matching email`);
+    
+    for (const lead of allLeads) {
+      // Get the decrypted email (mongoose getter handles this)
+      const leadEmail = lead.email;
+      console.log(`🔍 [WEBHOOK] Comparing: "${leadEmail}" with "${fromEmail}"`);
+      
+      if (leadEmail && leadEmail.toLowerCase() === fromEmail.toLowerCase()) {
+        console.log('✅ [WEBHOOK] Found lead by FROM email match:', lead.name);
+        return lead;
+      }
     }
   }
   
   // ✅ Try toEmail (the recipient)
   if (toEmail && toEmail !== fromEmail) {
-    let lead = await Lead.findOne({ 
-      userId: userId,
-      email: { $regex: new RegExp('^' + toEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
-    });
-    if (lead) {
-      console.log('✅ [WEBHOOK] Found lead by TO email:', lead.name);
-      return lead;
+    const allLeads = await Lead.find({ userId: userId });
+    for (const lead of allLeads) {
+      const leadEmail = lead.email;
+      if (leadEmail && leadEmail.toLowerCase() === toEmail.toLowerCase()) {
+        console.log('✅ [WEBHOOK] Found lead by TO email match:', lead.name);
+        return lead;
+      }
     }
   }
 
@@ -500,4 +507,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-          }
+    }
