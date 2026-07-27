@@ -92,7 +92,6 @@ exports.sendEmail = async (userId, to, subject, body) => {
         console.log('📧 [Nylas Send] Body length:', body?.length || 0);
 
         // ✅ CORRECT v8 SDK syntax - Use the send method with proper params
-        // Option 1: Using grant ID in the URL
         const sentMessage = await nylas.messages.send({
             identifier: account.nylasGrantId,
             requestBody: {
@@ -103,7 +102,14 @@ exports.sendEmail = async (userId, to, subject, body) => {
         });
 
         console.log('✅ [Nylas Send] Email sent successfully. Message ID:', sentMessage?.id || 'unknown');
-        return { success: true, messageId: sentMessage?.id };
+        console.log('✅ [Nylas Send] Thread ID:', sentMessage?.thread_id || 'unknown');
+        
+        // ✅ Return thread_id for tracking
+        return { 
+            success: true, 
+            messageId: sentMessage?.id,
+            threadId: sentMessage?.thread_id || null
+        };
 
     } catch (error) {
         console.error('❌ [Nylas Send] Error:', error.message);
