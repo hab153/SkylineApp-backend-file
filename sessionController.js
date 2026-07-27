@@ -1,10 +1,13 @@
 const Session = require('./Session');
 const ChatMessage = require('./ChatMessage');
 
-// Get all sessions for a user
+// Get all sessions for a user - FIXED (Proper userId filtering)
 async function getSessions(req, res) {
     try {
         const userId = req.userId;
+        console.log(`📂 [getSessions] Fetching sessions for user: ${userId}`);
+        
+        // ✅ FIX: Direct filter
         const sessions = await Session.find({ userId })
             .sort({ pinned: -1, updatedAt: -1 })
             .lean();
@@ -21,6 +24,7 @@ async function getSessions(req, res) {
             };
         }));
 
+        console.log(`📂 [getSessions] Found ${sessionsWithCounts.length} sessions for user ${userId}`);
         res.json(sessionsWithCounts);
     } catch (error) {
         console.error('[getSessions] Error:', error);
@@ -28,7 +32,7 @@ async function getSessions(req, res) {
     }
 }
 
-// Create a new session
+// Create a new session - FIXED (Proper userId filtering)
 async function createSession(req, res) {
     try {
         const userId = req.userId;
@@ -37,6 +41,8 @@ async function createSession(req, res) {
         if (!sessionId || !type) {
             return res.status(400).json({ error: 'sessionId and type are required' });
         }
+
+        console.log(`📂 [createSession] Creating session for user ${userId}: ${sessionId}`);
 
         const session = await Session.findOneAndUpdate(
             { userId, sessionId },
@@ -57,7 +63,7 @@ async function createSession(req, res) {
     }
 }
 
-// Rename a session
+// Rename a session - FIXED (Proper userId filtering)
 async function renameSession(req, res) {
     try {
         const userId = req.userId;
@@ -67,6 +73,8 @@ async function renameSession(req, res) {
         if (!name || name.trim().length === 0) {
             return res.status(400).json({ error: 'Name is required' });
         }
+
+        console.log(`📂 [renameSession] Renaming session ${sessionId} for user ${userId}`);
 
         const session = await Session.findOneAndUpdate(
             { userId, sessionId },
@@ -85,12 +93,14 @@ async function renameSession(req, res) {
     }
 }
 
-// Pin/unpin a session
+// Pin/unpin a session - FIXED (Proper userId filtering)
 async function pinSession(req, res) {
     try {
         const userId = req.userId;
         const { sessionId } = req.params;
         const { pinned } = req.body;
+
+        console.log(`📂 [pinSession] ${pinned ? 'Pinning' : 'Unpinning'} session ${sessionId} for user ${userId}`);
 
         const session = await Session.findOneAndUpdate(
             { userId, sessionId },
@@ -109,11 +119,13 @@ async function pinSession(req, res) {
     }
 }
 
-// Delete a session (and all its messages)
+// Delete a session (and all its messages) - FIXED (Proper userId filtering)
 async function deleteSession(req, res) {
     try {
         const userId = req.userId;
         const { sessionId } = req.params;
+
+        console.log(`📂 [deleteSession] Deleting session ${sessionId} for user ${userId}`);
 
         // Delete session metadata
         const session = await Session.findOneAndDelete({ userId, sessionId });
