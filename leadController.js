@@ -4,7 +4,7 @@ const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations
+//  GET /api/conversations - FIXED (Proper userId filtering)
 // ──────────────────────────────────────────────────────────────
 const getConversations = async (req, res) => {
     console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
@@ -19,13 +19,13 @@ const getConversations = async (req, res) => {
         }
         
         console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
-        const query = sanitizeQuery({ userId: req.userId });
         
-        const leads = await Lead.find(query)
+        // ✅ FIX: Direct filter - bypass sanitizeQuery that might be stripping userId
+        const leads = await Lead.find({ userId: req.userId })
             .sort({ lastContactDate: -1 })
             .limit(100);
             
-        console.log(`✅ [getConversations] Found ${leads.length} leads`);
+        console.log(`✅ [getConversations] Found ${leads.length} leads for user ${req.userId}`);
         
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
@@ -52,7 +52,7 @@ const getConversations = async (req, res) => {
             };
         });
         
-        console.log(`📤 [getConversations] Returning ${conversations.length} conversations`);
+        console.log(`📤 [getConversations] Returning ${conversations.length} conversations for user ${req.userId}`);
         res.json(conversations);
     } catch (err) {
         console.error('❌ [getConversations] Error:', err);
@@ -62,7 +62,7 @@ const getConversations = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId - SIMPLIFIED FIX
+//  GET /api/conversations/:leadId - FIXED
 // ──────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
@@ -93,9 +93,13 @@ const getConversationById = async (req, res) => {
         }
         
         console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
-        const query = sanitizeQuery({ _id: leadId, userId: req.userId });
         
-        const lead = await Lead.findOne(query);
+        // ✅ FIX: Direct filter - BOTH userId AND leadId
+        const lead = await Lead.findOne({ 
+            _id: leadId, 
+            userId: req.userId 
+        });
+        
         if (!lead) {
             console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
             return res.status(404).json({ 
@@ -112,7 +116,7 @@ const getConversationById = async (req, res) => {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
                 await Lead.updateOne(
-                    { _id: leadId },
+                    { _id: leadId, userId: req.userId },
                     { $set: { 'replies.$[elem].read': true } },
                     { arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }] }
                 );
@@ -141,7 +145,7 @@ const getConversationById = async (req, res) => {
             read: msg.read || false
         }));
         
-        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages`);
+        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages for lead ${leadId}`);
         
         res.json({
             success: true,
@@ -182,8 +186,12 @@ const renameLead = async (req, res) => {
             return res.status(400).json({ message: 'New name is required' });
         }
         const sanitizedNewName = newName.trim().slice(0, 100);
-        const query = sanitizeQuery({ _id: req.params.leadId, userId: req.userId });
-        const lead = await Lead.findOne(query);
+        
+        // ✅ FIX: Must filter by userId AND leadId
+        const lead = await Lead.findOne({ 
+            _id: req.params.leadId, 
+            userId: req.userId 
+        });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.name = sanitizedNewName;
         await lead.save();
@@ -210,8 +218,12 @@ const updateAutoReply = async (req, res) => {
             return res.status(400).json({ message: 'Enabled must be a boolean' });
         }
         const sanitizedInstructions = instructions ? instructions.trim().slice(0, 2000) : '';
-        const query = sanitizeQuery({ _id: req.params.leadId, userId: req.userId });
-        const lead = await Lead.findOne(query);
+        
+        // ✅ FIX: Must filter by userId AND leadId
+        const lead = await Lead.findOne({ 
+            _id: req.params.leadId, 
+            userId: req.userId 
+        });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
@@ -245,7 +257,12 @@ const batchSend = async (req, res) => {
 
         if (leadId) {
             console.log('🔍 [BE-BATCH] Searching for existing lead:', leadId);
-            const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
+            
+            // ✅ FIX: Must filter by userId AND leadId
+            const targetLead = await Lead.findOne({ 
+                _id: leadId, 
+                userId: req.userId 
+            });
             
             if (!targetLead) {
                 console.error('❌ [BE-BATCH] Lead NOT FOUND for ID:', leadId);
@@ -379,7 +396,11 @@ const reconnectAndSend = async (req, res) => {
             });
         }
 
-        const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
+        // ✅ FIX: Must filter by userId
+        const leadsWithPending = await Lead.find({ 
+            userId: req.userId, 
+            'replies.status': 'pending' 
+        });
         let sentCount = 0;
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
@@ -411,7 +432,7 @@ const reconnectAndSend = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/leads
+//  GET /api/leads - FIXED (Proper userId filtering)
 // ──────────────────────────────────────────────────────────────
 const getAllLeads = async (req, res) => {
     console.log('🔵 [getAllLeads] ENTERED - userId:', req.userId);
@@ -420,9 +441,12 @@ const getAllLeads = async (req, res) => {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        const query = sanitizeQuery({ userId: req.userId });
-        const leads = await Lead.find(query).sort({ createdAt: -1 });
-        console.log(`✅ [getAllLeads] Found ${leads.length} leads`);
+        
+        // ✅ FIX: Direct filter
+        const leads = await Lead.find({ userId: req.userId })
+            .sort({ createdAt: -1 });
+            
+        console.log(`✅ [getAllLeads] Found ${leads.length} leads for user ${req.userId}`);
         res.json(leads);
     } catch (err) {
         console.error('❌ [getAllLeads] Error:', err);
