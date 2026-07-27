@@ -58,6 +58,13 @@ const LeadSchema = new mongoose.Schema({
         emailId: String
     }],
 
+    // ✅ THREAD ID - For tracking email conversations
+    threadId: {
+        type: String,
+        default: null,
+        index: true
+    },
+
     // AUTO-REPLY SETTINGS
     autoReplyEnabled: {
         type: Boolean,
@@ -112,6 +119,7 @@ const LeadSchema = new mongoose.Schema({
 
 LeadSchema.index({ nextActionDate: 1, status: 1 });
 LeadSchema.index({ autoFollowUpEnabled: 1, followUpScheduledDate: 1 });
+LeadSchema.index({ threadId: 1 }); // ✅ Index for fast lookups
 
 // Add this before module.exports in Lead.js
 LeadSchema.pre('save', function(next) {
