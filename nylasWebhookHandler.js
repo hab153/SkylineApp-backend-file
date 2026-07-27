@@ -72,7 +72,7 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  HANDLE: Message Created / Updated
+//  HANDLE: Message Created / Updated - WITH THREAD ID
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log('📥 [WEBHOOK] Processing message');
@@ -87,6 +87,10 @@ async function handleMessageCreated(eventData) {
     }
     
     const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
+    
+    // ✅ Extract thread_id from message
+    const threadId = message.thread_id || data.thread_id || object.thread_id || null;
+    console.log('📩 [WEBHOOK] Thread ID:', threadId);
     
     // ✅ Extract from object.from (where Nylas puts the data)
     let fromEmail = null;
@@ -157,10 +161,28 @@ async function handleMessageCreated(eventData) {
     const userId = emailAccount.userId;
     console.log('✅ [WEBHOOK] Found userId:', userId);
 
-    // ✅ Try to find existing lead
-    let lead = await findMatchingLead(userId, fromEmail, toEmail);
+    // ✅ STEP 1: Try to find lead by thread_id (MOST ACCURATE)
+    let lead = null;
+    if (threadId) {
+      lead = await Lead.findOne({ 
+        userId: userId,
+        threadId: threadId
+      });
+      if (lead) {
+        console.log('✅ [WEBHOOK] Found lead by thread_id:', lead.name);
+        console.log('✅ [WEBHOOK] Lead ID:', lead._id);
+      } else {
+        console.log('⚠️ [WEBHOOK] No lead found with thread_id:', threadId);
+      }
+    }
 
-    // ✅ If no lead found, CREATE ONE
+    // ✅ STEP 2: If not found by thread_id, try email match (fallback)
+    if (!lead) {
+      console.log('🔍 [WEBHOOK] Thread ID not found, trying email match...');
+      lead = await findMatchingLead(userId, fromEmail, toEmail);
+    }
+
+    // ✅ STEP 3: If no lead found, CREATE ONE
     if (!lead) {
       console.log('📭 [WEBHOOK] No matching lead found, creating new lead...');
       console.log('📭 [WEBHOOK] Creating lead for email:', fromEmail || toEmail);
@@ -174,6 +196,8 @@ async function handleMessageCreated(eventData) {
         email: leadEmail,
         company: '',
         status: 'New',
+        // ✅ Save thread_id if available
+        threadId: threadId || null,
         replies: [{
           from: 'lead',
           content: body || snippet || '(No content)',
@@ -190,6 +214,9 @@ async function handleMessageCreated(eventData) {
       console.log('✅ [WEBHOOK] Created new lead with ID:', lead._id);
       console.log('✅ [WEBHOOK] Lead name:', lead.name);
       console.log('✅ [WEBHOOK] Lead email:', lead.email);
+      if (threadId) {
+        console.log('✅ [WEBHOOK] Thread ID saved:', threadId);
+      }
     }
 
     // ✅ Process the reply
@@ -507,4 +534,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-      }
+              }
