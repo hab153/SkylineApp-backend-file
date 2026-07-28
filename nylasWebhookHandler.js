@@ -154,7 +154,7 @@ async function handleMessageCreated(eventData) {
 
     const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
     if (!emailAccount) {
-      console.log('⚠️ [WEBHOOK] No email account found for grantId:', grantId);
+      console.log('️ [WEBHOOK] No email account found for grantId:', grantId);
       return;
     }
 
@@ -184,8 +184,8 @@ async function handleMessageCreated(eventData) {
 
     // ✅ STEP 3: If no lead found, CREATE ONE
     if (!lead) {
-      console.log('📭 [WEBHOOK] No matching lead found, creating new lead...');
-      console.log('📭 [WEBHOOK] Creating lead for email:', fromEmail || toEmail);
+      console.log(' [WEBHOOK] No matching lead found, creating new lead...');
+      console.log(' [WEBHOOK] Creating lead for email:', fromEmail || toEmail);
       
       const leadEmail = fromEmail || toEmail || 'unknown@email.com';
       const displayName = fromName || leadEmail.split('@')[0] || 'Unknown Contact';
@@ -228,13 +228,13 @@ async function handleMessageCreated(eventData) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  FIND MATCHING LEAD - OPTIMIZED & FIXED
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log('🔍 [WEBHOOK] Looking for lead...');
   console.log('🔍 [WEBHOOK] Searching by FROM email:', fromEmail);
-  console.log('🔍 [WEBHOOK] Searching by TO email:', toEmail);
+  console.log(' [WEBHOOK] Searching by TO email:', toEmail);
   
   // Normalize search emails
   const normalizedFrom = fromEmail?.toLowerCase()?.trim();
@@ -350,7 +350,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
   }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  HANDLE: Message Sent
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
@@ -366,7 +366,7 @@ async function handleMessageSent(eventData) {
     const body = message.body || data.body || '';
     const grantId = data.grant_id || message.grant_id || object.grant_id;
     
-    console.log('📩 [WEBHOOK-SENT] To:', toEmail);
+    console.log(' [WEBHOOK-SENT] To:', toEmail);
     console.log('📩 [WEBHOOK-SENT] Grant ID:', grantId);
 
     if (!toEmail || !grantId) return;
@@ -378,7 +378,7 @@ async function handleMessageSent(eventData) {
     }
 
     const userId = emailAccount.userId;
-    console.log('👤 [WEBHOOK-SENT] Found User ID:', userId);
+    console.log(' [WEBHOOK-SENT] Found User ID:', userId);
 
     // ✅ Use optimized findMatchingLead instead of regex on encrypted field
     const lead = await findMatchingLead(userId, null, toEmail);
@@ -410,7 +410,7 @@ async function handleMessageSent(eventData) {
         console.log('⚠️ [WEBHOOK-SENT] Duplicate sent message skipped.');
       }
     } else {
-        console.log('❌ [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
+        console.log(' [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
     }
 
   } catch (error) {
