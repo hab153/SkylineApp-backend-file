@@ -18,7 +18,7 @@ const getConversations = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        console.log(` [getConversations] Fetching leads for userId: ${req.userId}`);
+        console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
         
         const leads = await Lead.find({ userId: req.userId })
             .sort({ lastContactDate: -1 })
@@ -61,8 +61,8 @@ const getConversations = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId - FIXED
-// ──────────────────────────────────────────────────────────────
+//  GET /api/conversations/:leadId - FIXED ARRAY FILTER ERROR
+// ─────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
     
@@ -82,7 +82,7 @@ const getConversationById = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid lead ID format' });
         }
         
-        console.log(` [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
+        console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
         
         const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
         
@@ -94,13 +94,18 @@ const getConversationById = async (req, res) => {
         
         const email = lead.email || '';
         
+        // ✅ FIX: Mark replies as read WITHOUT triggering schema validation on arrayFilters
         if (lead.replies && lead.replies.length > 0) {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
+                // ✅ Added { strict: false } to bypass schema validation for arrayFilters
                 await Lead.updateOne(
                     { _id: leadId, userId: req.userId },
                     { $set: { 'replies.$[elem].read': true } },
-                    { arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }] }
+                    { 
+                        arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }],
+                        strict: false  // ← THIS IS THE FIX
+                    }
                 );
                 console.log(`📖 [getConversationById] Marked ${unreadReplies.length} replies as read`);
             }
@@ -124,7 +129,7 @@ const getConversationById = async (req, res) => {
             read: msg.read || false
         }));
         
-        console.log(` [getConversationById] Returning ${cleanHistory.length} messages for lead ${leadId}`);
+        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages for lead ${leadId}`);
         
         res.json({
             success: true,
@@ -141,13 +146,13 @@ const getConversationById = async (req, res) => {
         });
         
     } catch (err) {
-        console.error('❌ [getConversationById] Error:', err);
+        console.error(' [getConversationById] Error:', err);
         console.error('❌ [getConversationById] Error stack:', err.stack);
         res.status(500).json({ success: false, message: 'Server Error fetching conversation' });
     }
 };
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  PUT /api/leads/:leadId/rename
 // ──────────────────────────────────────────────────────────────
 const renameLead = async (req, res) => {
@@ -196,7 +201,7 @@ const updateAutoReply = async (req, res) => {
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
         await lead.save();
-        console.log(`🤖 [updateAutoReply] Lead ${lead._id} auto-reply enabled=${enabled}`);
+        console.log(` [updateAutoReply] Lead ${lead._id} auto-reply enabled=${enabled}`);
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
         console.error('❌ [updateAutoReply] Error:', err);
@@ -212,7 +217,7 @@ const batchSend = async (req, res) => {
     console.log('📨 [BE-BATCH] Request received');
     console.log('👤 [BE-BATCH] User ID:', req.userId);
     console.log('🆔 [BE-BATCH] Received Lead ID:', req.body.leadId);
-    console.log(' [BE-BATCH] Allow New Lead:', req.body.allowNewLead);
+    console.log('🚫 [BE-BATCH] Allow New Lead:', req.body.allowNewLead);
     
     try {
         if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
@@ -264,7 +269,7 @@ const batchSend = async (req, res) => {
                 targetLead.lastContactDate = now;
                 targetLead.status = 'Contacted';
             } else {
-                console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
+                console.log('️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
             // ── SEND EMAIL ───
@@ -296,7 +301,7 @@ const batchSend = async (req, res) => {
                         
                         if (threadId) {
                             targetLead.threadId = threadId;
-                            console.log(` [BE-BATCH] Saved threadId to lead: ${threadId}`);
+                            console.log(`💾 [BE-BATCH] Saved threadId to lead: ${threadId}`);
                         }
                     } else {
                         emailError = result.error || 'Email send failed';
@@ -310,7 +315,7 @@ const batchSend = async (req, res) => {
             
             await targetLead.save();
             
-            console.log('📤 [BE-BATCH] Returning response...');
+            console.log(' [BE-BATCH] Returning response...');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
             res.json({
@@ -324,7 +329,7 @@ const batchSend = async (req, res) => {
             
         // ✅ CASE 2: Creating NEW leads and sending (from page.html)
         } else {
-            console.log(' [BE-BATCH] No Lead ID provided. Creating new leads...');
+            console.log('🆕 [BE-BATCH] No Lead ID provided. Creating new leads...');
             if (allowNewLead === false) {
                 console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
@@ -465,7 +470,7 @@ const reconnectAndSend = async (req, res) => {
         }
         res.json({ success: true, sentCount });
     } catch (err) {
-        console.error('❌ [reconnectAndSend] Error:', err);
+        console.error(' [reconnectAndSend] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -487,7 +492,7 @@ const getAllLeads = async (req, res) => {
         console.log(`✅ [getAllLeads] Found ${leads.length} leads for user ${req.userId}`);
         res.json(leads);
     } catch (err) {
-        console.error(' [getAllLeads] Error:', err);
+        console.error('❌ [getAllLeads] Error:', err);
         res.status(500).json({ message: 'Server Error' });
     }
 };
