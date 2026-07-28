@@ -11,7 +11,7 @@ exports.handleWebhook = async (req, res) => {
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🔔 [WEBHOOK] Request received!');
-  console.log('🔔 [WEBHOOK] Method:', req.method);
+  console.log(' [WEBHOOK] Method:', req.method);
   console.log('🔔 [WEBHOOK] URL:', req.url);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
@@ -62,7 +62,7 @@ exports.handleWebhook = async (req, res) => {
           console.log('ℹ️ [NYLAS WEBHOOK] Unhandled event type:', eventData.type);
       }
     } catch (error) {
-      console.error('❌ [NYLAS WEBHOOK] Error processing event:', error.message);
+      console.error(' [NYLAS WEBHOOK] Error processing event:', error.message);
     }
 
     return res.status(200).send('Webhook received');
@@ -145,10 +145,10 @@ async function handleMessageCreated(eventData) {
     
     console.log('📩 [WEBHOOK] From:', fromEmail, fromName ? `(${fromName})` : '');
     console.log('📩 [WEBHOOK] To:', toEmail, toName ? `(${toName})` : '');
-    console.log('📩 [WEBHOOK] Subject:', subject);
+    console.log(' [WEBHOOK] Subject:', subject);
 
     if (!grantId) {
-      console.log('⚠️ [WEBHOOK] Missing grantId');
+      console.log('️ [WEBHOOK] Missing grantId');
       return;
     }
 
@@ -172,12 +172,12 @@ async function handleMessageCreated(eventData) {
         console.log('✅ [WEBHOOK] Found lead by thread_id:', lead.name);
         console.log('✅ [WEBHOOK] Lead ID:', lead._id);
       } else {
-        console.log('⚠️ [WEBHOOK] No lead found with thread_id:', threadId);
+        console.log('️ [WEBHOOK] No lead found with thread_id:', threadId);
       }
     }
 
     // ✅ STEP 2: If not found by thread_id, try email match (fallback)
-    if (!lead) {
+    if (!lead && (fromEmail || toEmail)) {
       console.log('🔍 [WEBHOOK] Thread ID not found, trying email match...');
       lead = await findMatchingLead(userId, fromEmail, toEmail);
     }
@@ -229,44 +229,56 @@ async function handleMessageCreated(eventData) {
 }
 
 // ──────────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD - FIXED (Handles encrypted emails)
+//  FIND MATCHING LEAD - OPTIMIZED & FIXED
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log('🔍 [WEBHOOK] Looking for lead...');
   console.log('🔍 [WEBHOOK] Searching by FROM email:', fromEmail);
   console.log('🔍 [WEBHOOK] Searching by TO email:', toEmail);
   
-  // ✅ Try fromEmail first (the person who replied)
-  if (fromEmail) {
-    // Search ALL leads for this user and decrypt emails in memory
-    const allLeads = await Lead.find({ userId: userId });
-    console.log(`🔍 [WEBHOOK] Checking ${allLeads.length} leads for matching email`);
-    
-    for (const lead of allLeads) {
-      // Get the decrypted email (mongoose getter handles this)
-      const leadEmail = lead.email;
-      console.log(`🔍 [WEBHOOK] Comparing: "${leadEmail}" with "${fromEmail}"`);
-      
-      if (leadEmail && leadEmail.toLowerCase() === fromEmail.toLowerCase()) {
-        console.log('✅ [WEBHOOK] Found lead by FROM email match:', lead.name);
-        return lead;
-      }
-    }
-  }
+  // Normalize search emails
+  const normalizedFrom = fromEmail?.toLowerCase()?.trim();
+  const normalizedTo = toEmail?.toLowerCase()?.trim();
   
-  // ✅ Try toEmail (the recipient)
-  if (toEmail && toEmail !== fromEmail) {
-    const allLeads = await Lead.find({ userId: userId });
-    for (const lead of allLeads) {
-      const leadEmail = lead.email;
-      if (leadEmail && leadEmail.toLowerCase() === toEmail.toLowerCase()) {
-        console.log('✅ [WEBHOOK] Found lead by TO email match:', lead.name);
+  if (!normalizedFrom && !normalizedTo) {
+    console.log('❌ [WEBHOOK] No valid email to search for');
+    return null;
+  }
+
+  // ✅ FIX: Fetch ALL leads once and compare decrypted emails in memory
+  // This avoids multiple DB queries and handles encryption correctly
+  const allLeads = await Lead.find({ userId: userId });
+  console.log(`🔍 [WEBHOOK] Checking ${allLeads.length} leads for matching email`);
+  
+  for (const lead of allLeads) {
+    // Mongoose getter automatically decrypts lead.email
+    const decryptedEmail = lead.email?.toLowerCase()?.trim();
+    
+    if (!decryptedEmail) continue;
+    
+    // Exact match check
+    if (normalizedFrom && decryptedEmail === normalizedFrom) {
+      console.log('✅ [WEBHOOK] Found lead by exact FROM email match:', lead.name);
+      return lead;
+    }
+    
+    if (normalizedTo && decryptedEmail === normalizedTo) {
+      console.log('✅ [WEBHOOK] Found lead by exact TO email match:', lead.name);
+      return lead;
+    }
+    
+    // Domain fallback match (if exact fails)
+    if (normalizedFrom?.includes('@') && decryptedEmail.includes('@')) {
+      const fromDomain = normalizedFrom.split('@')[1];
+      const leadDomain = decryptedEmail.split('@')[1];
+      if (fromDomain === leadDomain) {
+        console.log('✅ [WEBHOOK] Found lead by domain match:', lead.name);
         return lead;
       }
     }
   }
 
-  console.log('❌ [WEBHOOK] No matching lead found');
+  console.log('❌ [WEBHOOK] No matching lead found after checking all leads');
   return null;
 }
 
@@ -275,7 +287,7 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
 // ──────────────────────────────────────────────────────────────
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   console.log('📝 [WEBHOOK] Processing reply for lead:', lead.name);
-  console.log('📝 [WEBHOOK] Lead ID:', lead._id);
+  console.log(' [WEBHOOK] Lead ID:', lead._id);
 
   try {
     lead.status = 'Replied';
@@ -310,7 +322,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       await chatMessage.save();
       console.log('✅ [WEBHOOK] Reply saved to ChatMessage');
     } catch (chatErr) {
-      console.warn('⚠️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
+      console.warn('️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
     }
 
     try {
@@ -342,7 +354,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
 //  HANDLE: Message Sent
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
-  console.log('📤 [WEBHOOK-SENT] Message sent event triggered');
+  console.log(' [WEBHOOK-SENT] Message sent event triggered');
   
   try {
     const data = eventData.data || {};
@@ -368,10 +380,8 @@ async function handleMessageSent(eventData) {
     const userId = emailAccount.userId;
     console.log('👤 [WEBHOOK-SENT] Found User ID:', userId);
 
-    const lead = await Lead.findOne({ 
-      userId: userId,
-      email: { $regex: new RegExp('^' + toEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i') }
-    });
+    // ✅ Use optimized findMatchingLead instead of regex on encrypted field
+    const lead = await findMatchingLead(userId, null, toEmail);
 
     if (lead) {
       console.log('✅ [WEBHOOK-SENT] Matched existing lead:', lead.name, '(ID:', lead._id, ')');
@@ -440,7 +450,7 @@ async function handleGrantExpired(eventData) {
         });
         await notification.save();
       } catch (notifErr) {
-        console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
+        console.error(' [WEBHOOK] Failed to create notification:', notifErr.message);
       }
     }
 
@@ -534,4 +544,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-              }
+}
