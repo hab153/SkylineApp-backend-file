@@ -35,7 +35,7 @@ exports.handleWebhook = async (req, res) => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   if (req.method === 'GET' && req.query.challenge) {
-    console.log('🔔 [Nylas Webhook] Received GET challenge, responding...');
+    console.log(' [Nylas Webhook] Received GET challenge, responding...');
     return res.status(200).send(req.query.challenge);
   }
 
@@ -45,14 +45,14 @@ exports.handleWebhook = async (req, res) => {
       try {
         eventData = JSON.parse(eventData.toString('utf8'));
       } catch (e) {
-        console.error('❌ [Nylas Webhook] Failed to parse JSON body');
+        console.error(' [Nylas Webhook] Failed to parse JSON body');
         return res.status(400).send('Invalid JSON');
       }
     } else if (typeof eventData === 'string') {
       try {
         eventData = JSON.parse(eventData);
       } catch (e) {
-        console.error('❌ [Nylas Webhook] Failed to parse JSON string');
+        console.error(' [Nylas Webhook] Failed to parse JSON string');
         return res.status(400).send('Invalid JSON');
       }
     }
@@ -90,7 +90,7 @@ exports.handleWebhook = async (req, res) => {
   res.status(405).send('Method Not Allowed');
 };
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  HANDLE: Message Created / Updated - WITH THREAD ID
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
@@ -201,7 +201,7 @@ async function handleMessageCreated(eventData) {
 
     // ✅ STEP 2: If not found by thread_id, try email match (fallback)
     if (!lead && (fromEmail || toEmail)) {
-      console.log('🔍 [WEBHOOK] Thread ID not found, trying email match...');
+      console.log(' [WEBHOOK] Thread ID not found, trying email match...');
       lead = await findMatchingLead(userId, fromEmail, toEmail);
     }
 
@@ -335,7 +335,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     const replySubject = subject || '(no subject)';
     
     lead.replies.push({
-      from: 'lead',
+      from: 'ai', // ✅ CUSTOMER REPLY = LEFT SIDE
       content: replyContent,
       subject: replySubject,
       date: new Date(),
@@ -583,4 +583,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-}
+    }
