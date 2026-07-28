@@ -31,7 +31,7 @@ exports.handleWebhook = async (req, res) => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🔔 [WEBHOOK] Request received!');
   console.log(' [WEBHOOK] Method:', req.method);
-  console.log('🔔 [WEBHOOK] URL:', req.url);
+  console.log(' [WEBHOOK] URL:', req.url);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
   if (req.method === 'GET' && req.query.challenge) {
@@ -254,7 +254,7 @@ async function handleMessageCreated(eventData) {
 
 // ────────────────────────────────────────────────────────────
 //  FIND MATCHING LEAD - FIXED ENCRYPTION HANDLING
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log(' [WEBHOOK] Looking for lead...');
   console.log(' [WEBHOOK] Searching by FROM email:', fromEmail);
@@ -409,7 +409,7 @@ async function handleMessageSent(eventData) {
 
     const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
     if (!emailAccount) {
-        console.log('⚠️ [WEBHOOK-SENT] No email account found for grant:', grantId);
+        console.log('️ [WEBHOOK-SENT] No email account found for grant:', grantId);
         return;
     }
 
@@ -422,10 +422,13 @@ async function handleMessageSent(eventData) {
     if (lead) {
       console.log('✅ [WEBHOOK-SENT] Matched existing lead:', lead.name, '(ID:', lead._id, ')');
       
-      const lastReply = lead.replies && lead.replies.length > 0 ? lead.replies[lead.replies.length - 1] : null;
-      const isDuplicate = lastReply && 
-                          lastReply.content === body && 
-                          (new Date() - new Date(lastReply.date)) < 5000;
+      // ✅ ROBUST DUPLICATE CHECK: Check last 3 messages and wider time window
+      const recentReplies = lead.replies.slice(-3);
+      const isDuplicate = recentReplies.some(r => 
+        r.from === 'lead' && 
+        r.content === body && 
+        (new Date() - new Date(r.date)) < 30000 // 30 second window
+      );
 
       if (!isDuplicate) {
         lead.status = 'Contacted';
@@ -433,7 +436,7 @@ async function handleMessageSent(eventData) {
         
         if (!lead.replies) lead.replies = [];
         lead.replies.push({
-          from: 'lead', // ✅ CHANGED FROM 'ai' TO 'lead'
+          from: 'lead', // ✅ USER SENT MESSAGE = RIGHT SIDE
           content: body || '',
           subject: subject,
           date: new Date(),
@@ -565,7 +568,7 @@ async function generateAndSendAutoReply(lead, userId) {
     if (result && result.success) {
       if (!lead.replies) lead.replies = [];
       lead.replies.push({
-        from: 'ai', // ✅ AUTO-REPLIES REMAIN 'ai' (Customer/Left side)
+        from: 'lead', // ✅ AUTO-REPLIES ARE USER-SIDE = RIGHT ALIGNMENT
         content: aiResponse,
         subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
         date: new Date(),
@@ -580,4 +583,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-    }
+}
