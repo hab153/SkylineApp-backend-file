@@ -5,6 +5,8 @@ const User = require('./User');
 const Message = require('./Message'); 
 const ChatMessage = require('./ChatMessage');
 const { generateAIReply } = require('./aiReplyGenerator');
+// ✅ IMPORT ENCRYPTION MODULE TO MANUALLY DECRYPT
+const { decrypt } = require('./encryption'); 
 
 exports.handleWebhook = async (req, res) => {
   const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET;
@@ -143,7 +145,7 @@ async function handleMessageCreated(eventData) {
     const snippet = message.snippet || data.snippet || object.snippet || '';
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
-    console.log('📩 [WEBHOOK] From:', fromEmail, fromName ? `(${fromName})` : '');
+    console.log(' [WEBHOOK] From:', fromEmail, fromName ? `(${fromName})` : '');
     console.log('📩 [WEBHOOK] To:', toEmail, toName ? `(${toName})` : '');
     console.log(' [WEBHOOK] Subject:', subject);
 
@@ -188,6 +190,7 @@ async function handleMessageCreated(eventData) {
       console.log(' [WEBHOOK] Creating lead for email:', fromEmail || toEmail);
       
       const leadEmail = fromEmail || toEmail || 'unknown@email.com';
+      // ✅ FIX: Use fromName if available, otherwise use local part of email
       const displayName = fromName || leadEmail.split('@')[0] || 'Unknown Contact';
       
       lead = new Lead({
@@ -229,10 +232,10 @@ async function handleMessageCreated(eventData) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD - OPTIMIZED & FIXED
+//  FIND MATCHING LEAD - FIXED ENCRYPTION HANDLING
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
-  console.log('🔍 [WEBHOOK] Looking for lead...');
+  console.log(' [WEBHOOK] Looking for lead...');
   console.log('🔍 [WEBHOOK] Searching by FROM email:', fromEmail);
   console.log(' [WEBHOOK] Searching by TO email:', toEmail);
   
@@ -251,26 +254,38 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log(`🔍 [WEBHOOK] Checking ${allLeads.length} leads for matching email`);
   
   for (const lead of allLeads) {
-    // Mongoose getter automatically decrypts lead.email
-    const decryptedEmail = lead.email?.toLowerCase()?.trim();
+    // ✅ CRITICAL FIX: Manually decrypt the email since Mongoose getters 
+    // don't fire on raw document properties in loops
+    let decryptedEmail = lead.email;
+    try {
+      // Check if it looks encrypted (base64 format)
+      if (decryptedEmail && /^[A-Za-z0-9+/=]{20,}$/.test(decryptedEmail)) {
+        decryptedEmail = decrypt(decryptedEmail);
+      }
+    } catch (err) {
+      console.warn('⚠️ [WEBHOOK] Failed to decrypt email for lead:', lead._id);
+      continue;
+    }
     
-    if (!decryptedEmail) continue;
+    const cleanEmail = decryptedEmail?.toLowerCase()?.trim();
+    
+    if (!cleanEmail) continue;
     
     // Exact match check
-    if (normalizedFrom && decryptedEmail === normalizedFrom) {
+    if (normalizedFrom && cleanEmail === normalizedFrom) {
       console.log('✅ [WEBHOOK] Found lead by exact FROM email match:', lead.name);
       return lead;
     }
     
-    if (normalizedTo && decryptedEmail === normalizedTo) {
+    if (normalizedTo && cleanEmail === normalizedTo) {
       console.log('✅ [WEBHOOK] Found lead by exact TO email match:', lead.name);
       return lead;
     }
     
     // Domain fallback match (if exact fails)
-    if (normalizedFrom?.includes('@') && decryptedEmail.includes('@')) {
+    if (normalizedFrom?.includes('@') && cleanEmail.includes('@')) {
       const fromDomain = normalizedFrom.split('@')[1];
-      const leadDomain = decryptedEmail.split('@')[1];
+      const leadDomain = cleanEmail.split('@')[1];
       if (fromDomain === leadDomain) {
         console.log('✅ [WEBHOOK] Found lead by domain match:', lead.name);
         return lead;
@@ -350,7 +365,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 //  HANDLE: Message Sent
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
@@ -407,7 +422,7 @@ async function handleMessageSent(eventData) {
         await lead.save();
         console.log('💾 [WEBHOOK-SENT] Updated lead status and replies.');
       } else {
-        console.log('⚠️ [WEBHOOK-SENT] Duplicate sent message skipped.');
+        console.log('️ [WEBHOOK-SENT] Duplicate sent message skipped.');
       }
     } else {
         console.log(' [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
@@ -544,4 +559,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-}
+      }
