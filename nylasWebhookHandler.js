@@ -58,7 +58,7 @@ exports.handleWebhook = async (req, res) => {
     }
     
     console.log('📨 [NYLAS WEBHOOK] Event received');
-    console.log('📨 [NYLAS WEBHOOK] Event type:', eventData.type);
+    console.log(' [NYLAS WEBHOOK] Event type:', eventData.type);
 
     try {
       switch (eventData.type) {
@@ -109,7 +109,7 @@ async function handleMessageCreated(eventData) {
     
     // ✅ Extract thread_id from message
     const threadId = message.thread_id || data.thread_id || object.thread_id || null;
-    console.log('📩 [WEBHOOK] Thread ID:', threadId);
+    console.log(' [WEBHOOK] Thread ID:', threadId);
     
     // ✅ Extract from object.from (where Nylas puts the data)
     let fromEmail = null;
@@ -167,7 +167,7 @@ async function handleMessageCreated(eventData) {
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
     console.log(' [WEBHOOK] From:', fromEmail, fromName ? `(${fromName})` : '');
-    console.log('📩 [WEBHOOK] To:', toEmail, toName ? `(${toName})` : '');
+    console.log(' [WEBHOOK] To:', toEmail, toName ? `(${toName})` : '');
     console.log(' [WEBHOOK] Subject:', subject);
 
     if (!grantId) {
@@ -252,7 +252,7 @@ async function handleMessageCreated(eventData) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 //  FIND MATCHING LEAD - FIXED ENCRYPTION HANDLING
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
@@ -265,7 +265,7 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   const normalizedTo = toEmail?.toLowerCase()?.trim();
   
   if (!normalizedFrom && !normalizedTo) {
-    console.log('❌ [WEBHOOK] No valid email to search for');
+    console.log(' [WEBHOOK] No valid email to search for');
     return null;
   }
 
@@ -433,7 +433,7 @@ async function handleMessageSent(eventData) {
         
         if (!lead.replies) lead.replies = [];
         lead.replies.push({
-          from: 'ai',
+          from: 'lead', // ✅ CHANGED FROM 'ai' TO 'lead'
           content: body || '',
           subject: subject,
           date: new Date(),
@@ -497,7 +497,7 @@ async function handleGrantExpired(eventData) {
 
 // ──────────────────────────────────────────────────────────────
 //  HANDLE: Grant Refreshed
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 async function handleGrantRefreshed(eventData) {
   console.log('🔄 [WEBHOOK] Grant refreshed');
   
@@ -520,12 +520,12 @@ async function handleGrantRefreshed(eventData) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  HELPER: Generate and Send Auto-Reply
 // ─────────────────────────────────────────────────────────────
 async function generateAndSendAutoReply(lead, userId) {
   try {
-    console.log('🤖 [AUTO-REPLY] Generating reply for:', lead.email);
+    console.log(' [AUTO-REPLY] Generating reply for:', lead.email);
     
     const user = await User.findById(userId);
     if (!user) return;
@@ -565,7 +565,7 @@ async function generateAndSendAutoReply(lead, userId) {
     if (result && result.success) {
       if (!lead.replies) lead.replies = [];
       lead.replies.push({
-        from: 'ai',
+        from: 'ai', // ✅ AUTO-REPLIES REMAIN 'ai' (Customer/Left side)
         content: aiResponse,
         subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
         date: new Date(),
@@ -578,6 +578,6 @@ async function generateAndSendAutoReply(lead, userId) {
     }
 
   } catch (error) {
-    console.error('❌ [AUTO-REPLY] Error:', error.message);
+    console.error(' [AUTO-REPLY] Error:', error.message);
   }
-  }
+    }
