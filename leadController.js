@@ -62,7 +62,7 @@ const getConversations = async (req, res) => {
 
 // ──────────────────────────────────────────────────────────────
 //  GET /api/conversations/:leadId - FIXED ARRAY FILTER ERROR
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
     console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
     
@@ -154,7 +154,7 @@ const getConversationById = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 //  PUT /api/leads/:leadId/rename
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 const renameLead = async (req, res) => {
     console.log('🔵 [renameLead] ENTERED - leadId:', req.params.leadId);
     try {
@@ -262,7 +262,7 @@ const batchSend = async (req, res) => {
                     date: now,
                     content: msgContent,
                     subject: msgSubject,
-                    from: 'ai',
+                    from: 'lead', // ✅ CHANGED FROM 'ai' TO 'lead'
                     status: 'sent',
                     read: true
                 });
@@ -272,7 +272,7 @@ const batchSend = async (req, res) => {
                 console.log('️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
-            // ── SEND EMAIL ───
+            // ── SEND EMAIL ──
             const EmailAccount = require('./EmailAccount');
             const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
             
@@ -281,7 +281,7 @@ const batchSend = async (req, res) => {
             let threadId = null;
             
             if (!account) {
-                console.warn(`⚠️ [BE-BATCH] No email account connected for user ${req.userId}`);
+                console.warn(`️ [BE-BATCH] No email account connected for user ${req.userId}`);
                 emailError = 'No email account connected';
             } else {
                 try {
@@ -329,7 +329,7 @@ const batchSend = async (req, res) => {
             
         // ✅ CASE 2: Creating NEW leads and sending (from page.html)
         } else {
-            console.log('🆕 [BE-BATCH] No Lead ID provided. Creating new leads...');
+            console.log(' [BE-BATCH] No Lead ID provided. Creating new leads...');
             if (allowNewLead === false) {
                 console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
@@ -364,7 +364,7 @@ const batchSend = async (req, res) => {
                     date: now,
                     content: msgContent,
                     subject: msgSubject,
-                    from: 'ai',
+                    from: 'lead', // ✅ CHANGED FROM 'ai' TO 'lead'
                     status: 'sent',
                     read: true
                 });
@@ -477,7 +477,7 @@ const reconnectAndSend = async (req, res) => {
 
 // ──────────────────────────────────────────────────────────────
 //  GET /api/leads - FIXED (Proper userId filtering)
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 const getAllLeads = async (req, res) => {
     console.log('🔵 [getAllLeads] ENTERED - userId:', req.userId);
     try {
