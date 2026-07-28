@@ -92,7 +92,7 @@ exports.handleWebhook = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 //  HANDLE: Message Created / Updated - WITH THREAD ID
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log(' [WEBHOOK] Processing message');
   
@@ -387,7 +387,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
 }
 
 // ────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent
+//  HANDLE: Message Sent - FIXED DUPLICATE PREVENTION
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
   console.log(' [WEBHOOK-SENT] Message sent event triggered');
@@ -422,12 +422,14 @@ async function handleMessageSent(eventData) {
     if (lead) {
       console.log('✅ [WEBHOOK-SENT] Matched existing lead:', lead.name, '(ID:', lead._id, ')');
       
-      // ✅ ROBUST DUPLICATE CHECK: Check last 3 messages and wider time window
-      const recentReplies = lead.replies.slice(-3);
+      // ✅ ROBUST DUPLICATE CHECK: 
+      // Check last 5 messages for identical content within 60 seconds
+      // This prevents double-saving when batchSend already saved it
+      const recentReplies = lead.replies.slice(-5);
       const isDuplicate = recentReplies.some(r => 
         r.from === 'lead' && 
-        r.content === body && 
-        (new Date() - new Date(r.date)) < 30000 // 30 second window
+        r.content.trim() === body.trim() && 
+        Math.abs(new Date() - new Date(r.date)) < 60000 // 60 second window
       );
 
       if (!isDuplicate) {
@@ -446,7 +448,7 @@ async function handleMessageSent(eventData) {
         await lead.save();
         console.log('💾 [WEBHOOK-SENT] Updated lead status and replies.');
       } else {
-        console.log('️ [WEBHOOK-SENT] Duplicate sent message skipped.');
+        console.log('️ [WEBHOOK-SENT] Duplicate sent message skipped (already saved by batchSend).');
       }
     } else {
         console.log(' [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
@@ -583,4 +585,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-    }
+               }
