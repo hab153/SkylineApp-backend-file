@@ -98,7 +98,7 @@ console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
 // ════════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
@@ -157,13 +157,24 @@ app.use(cors());
 console.log('✅ [SERVER] Security middleware applied');
 
 // ════════════════════════════════════════════
+//  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
+// ════════════════════════════════════════════
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// ════════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
 // ════════════════════════════════════════════
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
-console.log('✅ [SERVER] Webhook routes registered');
+console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 
 // ════════════════════════════════════════════
 //  JSON PARSER & STATIC FILES
@@ -228,9 +239,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ════════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
-        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
+        console.log(' [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log('📋 [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log(' [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
@@ -240,7 +251,7 @@ async function verifyWebhookRegistration() {
     }
 }
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
@@ -425,7 +436,7 @@ app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimi
 console.log('✅ [SERVER] Follow-up routes registered');
 console.log('   📋 GET    /api/leads/:leadId/follow-up-status');
 console.log('   📋 POST   /api/leads/:leadId/suggest-follow-up');
-console.log('   📋 POST   /api/leads/:leadId/auto-follow-up');
+console.log('    POST   /api/leads/:leadId/auto-follow-up');
 
 // ──────────────────────────────────────────────────────────────
 //  REVENUE TRACKING
@@ -571,7 +582,7 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
                 messageCount: messages.length,
                 messages: messages.map(m => ({
                     role: m.role,
-                    content: m.content ? m.content.substring(0, 100) : '⚠️ EMPTY',
+                    content: m.content ? m.content.substring(0, 100) : '️ EMPTY',
                     contentLength: m.content ? m.content.length : 0,
                     hasContent: !!m.content
                 }))
@@ -660,7 +671,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
     }
 });
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  START SERVER
 // ════════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
