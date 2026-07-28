@@ -8,6 +8,22 @@ const { generateAIReply } = require('./aiReplyGenerator');
 // ✅ IMPORT ENCRYPTION MODULE TO MANUALLY DECRYPT
 const { decrypt } = require('./encryption'); 
 
+// ✅ HELPER: Strip HTML tags and decode entities BEFORE saving to DB
+function sanitizeEmailBody(html) {
+  if (!html) return '';
+  // Decode common HTML entities first
+  let decoded = html
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+  
+  // Strip ALL HTML tags completely
+  return decoded.replace(/<[^>]*>/g, '').trim();
+}
+
 exports.handleWebhook = async (req, res) => {
   // ✅ FIXED: Match your Render environment variable name EXACTLY
   const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET_SKYLINE;
@@ -142,7 +158,11 @@ async function handleMessageCreated(eventData) {
     }
     
     const subject = message.subject || data.subject || object.subject || '(no subject)';
-    const body = message.body || message.text || message.snippet || data.body || data.snippet || object.body || '';
+    
+    // ✅ FIX: Sanitize body BEFORE saving to prevent HTML pollution in DB
+    const rawBody = message.body || message.text || message.snippet || data.body || data.snippet || object.body || '';
+    const body = sanitizeEmailBody(rawBody); 
+    
     const snippet = message.snippet || data.snippet || object.snippet || '';
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
@@ -237,7 +257,7 @@ async function handleMessageCreated(eventData) {
 // ──────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log(' [WEBHOOK] Looking for lead...');
-  console.log('🔍 [WEBHOOK] Searching by FROM email:', fromEmail);
+  console.log(' [WEBHOOK] Searching by FROM email:', fromEmail);
   console.log(' [WEBHOOK] Searching by TO email:', toEmail);
   
   // Normalize search emails
@@ -434,11 +454,11 @@ async function handleMessageSent(eventData) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  HANDLE: Grant Expired
 // ─────────────────────────────────────────────────────────────
 async function handleGrantExpired(eventData) {
-  console.log('⏰ [WEBHOOK] Grant expired');
+  console.log(' [WEBHOOK] Grant expired');
   
   try {
     const data = eventData.data || {};
@@ -560,4 +580,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error('❌ [AUTO-REPLY] Error:', error.message);
   }
-      }
+  }
