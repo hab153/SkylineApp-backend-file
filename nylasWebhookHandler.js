@@ -9,7 +9,8 @@ const { generateAIReply } = require('./aiReplyGenerator');
 const { decrypt } = require('./encryption'); 
 
 exports.handleWebhook = async (req, res) => {
-  const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET;
+  // ✅ FIXED: Match your Render environment variable name EXACTLY
+  const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET_SKYLINE;
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🔔 [WEBHOOK] Request received!');
@@ -77,7 +78,7 @@ exports.handleWebhook = async (req, res) => {
 //  HANDLE: Message Created / Updated - WITH THREAD ID
 // ──────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
-  console.log('📥 [WEBHOOK] Processing message');
+  console.log(' [WEBHOOK] Processing message');
   
   try {
     const data = eventData.data || {};
@@ -345,7 +346,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
         userId: userId,
         sessionId: 'lead-reply-notification',
         role: 'ai',
-        title: `📨 ${lead.name} replied!`,
+        title: ` ${lead.name} replied!`,
         content: `"${snippet ? snippet.substring(0, 200) : 'New reply from lead'}"`,
         notificationType: 'lead_reply',
         leadId: lead._id,
@@ -435,7 +436,7 @@ async function handleMessageSent(eventData) {
 
 // ──────────────────────────────────────────────────────────────
 //  HANDLE: Grant Expired
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 async function handleGrantExpired(eventData) {
   console.log('⏰ [WEBHOOK] Grant expired');
   
@@ -456,7 +457,7 @@ async function handleGrantExpired(eventData) {
           userId: emailAccount.userId,
           sessionId: 'system-notification',
           role: 'ai',
-          title: '⚠️ Email Connection Expired',
+          title: '️ Email Connection Expired',
           content: 'Your email connection has expired. Please reconnect to continue sending emails.',
           notificationType: 'token_expired',
           leadId: null,
@@ -476,7 +477,7 @@ async function handleGrantExpired(eventData) {
 
 // ──────────────────────────────────────────────────────────────
 //  HANDLE: Grant Refreshed
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 async function handleGrantRefreshed(eventData) {
   console.log('🔄 [WEBHOOK] Grant refreshed');
   
@@ -501,7 +502,7 @@ async function handleGrantRefreshed(eventData) {
 
 // ──────────────────────────────────────────────────────────────
 //  HELPER: Generate and Send Auto-Reply
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 async function generateAndSendAutoReply(lead, userId) {
   try {
     console.log('🤖 [AUTO-REPLY] Generating reply for:', lead.email);
