@@ -181,6 +181,14 @@ async function handleMessageCreated(eventData) {
       return;
     }
 
+    // ✅ CRITICAL FIX: Skip processing if this message was sent FROM our own email
+    // This prevents your sent messages from being processed as incoming customer replies
+    if (fromEmail && emailAccount.emailAddress && 
+        fromEmail.toLowerCase() === emailAccount.emailAddress.toLowerCase()) {
+      console.log('️ [WEBHOOK] Skipping - this is OUR sent message, not a customer reply');
+      return;
+    }
+
     const userId = emailAccount.userId;
     console.log('✅ [WEBHOOK] Found userId:', userId);
 
@@ -223,7 +231,7 @@ async function handleMessageCreated(eventData) {
         // ✅ Save thread_id if available
         threadId: threadId || null,
         replies: [{
-          from: 'ai', // ✅ FIXED: Customer messages = LEFT SIDE (was incorrectly 'lead')
+          from: 'ai', // ✅ FIXED: Customer messages = LEFT SIDE
           content: body || snippet || '(No content)',
           subject: subject || '(no subject)',
           date: new Date(),
@@ -252,7 +260,7 @@ async function handleMessageCreated(eventData) {
   }
 }
 
-// ────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────
 //  FIND MATCHING LEAD - FIXED ENCRYPTION HANDLING
 // ────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
@@ -459,7 +467,7 @@ async function handleMessageSent(eventData) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 //  HANDLE: Grant Expired
 // ─────────────────────────────────────────────────────────────
 async function handleGrantExpired(eventData) {
@@ -502,7 +510,7 @@ async function handleGrantExpired(eventData) {
 
 // ──────────────────────────────────────────────────────────────
 //  HANDLE: Grant Refreshed
-// ───────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────
 async function handleGrantRefreshed(eventData) {
   console.log('🔄 [WEBHOOK] Grant refreshed');
   
@@ -585,4 +593,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-          }
+                      }
