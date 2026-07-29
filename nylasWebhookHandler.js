@@ -92,7 +92,7 @@ exports.handleWebhook = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────
 //  HANDLE: Message Created / Updated - WITH THREAD ID
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log(' [WEBHOOK] Processing message');
   
@@ -223,7 +223,7 @@ async function handleMessageCreated(eventData) {
         // ✅ Save thread_id if available
         threadId: threadId || null,
         replies: [{
-          from: 'lead',
+          from: 'ai', // ✅ FIXED: Customer messages = LEFT SIDE (was incorrectly 'lead')
           content: body || snippet || '(No content)',
           subject: subject || '(no subject)',
           date: new Date(),
@@ -254,7 +254,7 @@ async function handleMessageCreated(eventData) {
 
 // ────────────────────────────────────────────────────────────
 //  FIND MATCHING LEAD - FIXED ENCRYPTION HANDLING
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   console.log(' [WEBHOOK] Looking for lead...');
   console.log(' [WEBHOOK] Searching by FROM email:', fromEmail);
@@ -502,7 +502,7 @@ async function handleGrantExpired(eventData) {
 
 // ──────────────────────────────────────────────────────────────
 //  HANDLE: Grant Refreshed
-// ────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────
 async function handleGrantRefreshed(eventData) {
   console.log('🔄 [WEBHOOK] Grant refreshed');
   
@@ -585,4 +585,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-               }
+          }
