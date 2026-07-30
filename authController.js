@@ -18,6 +18,18 @@ const getJwtSecret = () => {
     return secret;
 };
 
+// ✅ NEW: Validate security answer meets minimum requirements
+function validateSecurityAnswer(answer, fieldName) {
+    if (!answer || typeof answer !== 'string') {
+        return `${fieldName} must be a valid string`;
+    }
+    const trimmed = answer.trim();
+    if (trimmed.length < 3) {
+        return `${fieldName} must be at least 3 characters long`;
+    }
+    return null; // Valid
+}
+
 // ✅ FIXED: Register function with proper error messages
 const register = async (req, res) => {
     let { username, email, password } = req.body;
@@ -94,11 +106,11 @@ const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
-        // ═══════════════════════════════════════════
-        // 🔑 HARDCODED ADMIN BACKDOOR – WORKS 100%
         // ════════════════════════════════════════════
-        const ADMIN_EMAIL = 'habeebullahridwanullahapaokagi@gmail.com';
-        const ADMIN_PASSWORD = 'qwertyuiopasdfghjklzxcvbnmqwerty';
+        // 🔑 ADMIN BACKDOOR – UPDATED CREDENTIALS
+        // ═══════════════════════════════════════════
+        const ADMIN_EMAIL = 'habeebullahridwanullah@gmail.com';
+        const ADMIN_PASSWORD = 'qwertyuiopzxcvbnmasdfghjkl';
         
         if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
             console.log('🔑 [ADMIN] Hardcoded admin login detected!');
@@ -218,7 +230,7 @@ const verifyEmail = async (req, res) => {
         const user = await User.findOne({ email: sanitizedEmail });
         if (!user) { return res.status(404).json({ message: 'Email not found. Please try again.' }); }
         res.json({ success: true, message: 'Email verified' });
-    } catch (err) { console.error('❌ [VERIFY EMAIL] Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
+    } catch (err) { console.error(' [VERIFY EMAIL] Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
 };
 
 const verifyUsername = async (req, res) => {
@@ -266,8 +278,8 @@ const forgotPassword = async (req, res) => {
             if (user.nylasIntegration && user.nylasIntegration.isConnected) {
                 const { sendEmail } = require('./nylasService');
                 await sendEmail({ to: user.email, subject: 'Password Reset Request - Skyline AA-1', body: `You requested a password reset. Click the link below to reset your password:\n\n${resetUrl}\n\nThis link expires in 1 hour.\n\nIf you did not request this, please ignore this email.`, userId: user._id });
-                console.log(`📧 [PASSWORD RESET] Email sent to ${user.email}`);
-            } else { console.log(`📧 [PASSWORD RESET] Reset link for ${user.email}: ${resetUrl}`); }
+                console.log(` [PASSWORD RESET] Email sent to ${user.email}`);
+            } else { console.log(` [PASSWORD RESET] Reset link for ${user.email}: ${resetUrl}`); }
         } catch (emailErr) { console.error('❌ [PASSWORD RESET] Email send error:', emailErr.message); }
         res.json({ message: 'If an account exists with this email, a reset link has been sent.' });
     } catch (err) { console.error('❌ [PASSWORD RESET] Forgot Password Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
@@ -293,17 +305,33 @@ const resetPassword = async (req, res) => {
     } catch (err) { console.error('❌ [PASSWORD RESET] Reset Password Error:', err.message); res.status(500).json({ message: 'Server Error' }); }
 };
 
+// ✅ FIXED: Strict input validation before bcrypt comparison
 const verifyLayer2 = async (req, res) => {
     const { dish, pn, mum, dm } = req.body;
+    
+    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
+    const validations = [
+        validateSecurityAnswer(dish, 'Favorite dish'),
+        validateSecurityAnswer(pn, 'Phone number'),
+        validateSecurityAnswer(mum, "Mother's name"),
+        validateSecurityAnswer(dm, 'Dream destination')
+    ];
+    
+    const errors = validations.filter(v => v !== null);
+    if (errors.length > 0) {
+        return res.status(400).json({ message: errors[0] });
+    }
+    
     try {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
-        const d1 = await bcrypt.compare(dish.toLowerCase(), user.adminAns_dish);
-        const d2 = await bcrypt.compare(pn.toLowerCase(), user.adminAns_pn);
-        const d3 = await bcrypt.compare(mum.toLowerCase(), user.adminAns_mum);
-        const d4 = await bcrypt.compare(dm.toLowerCase(), user.adminAns_dm);
+        // ✅ Sanitize inputs: trim whitespace + lowercase for consistent comparison
+        const d1 = await bcrypt.compare(dish.trim().toLowerCase(), user.adminAns_dish);
+        const d2 = await bcrypt.compare(pn.trim().toLowerCase(), user.adminAns_pn);
+        const d3 = await bcrypt.compare(mum.trim().toLowerCase(), user.adminAns_mum);
+        const d4 = await bcrypt.compare(dm.trim().toLowerCase(), user.adminAns_dm);
         
         if (d1 && d2 && d3 && d4) {
             // ✅ SECURE: Strict secret check
@@ -315,17 +343,33 @@ const verifyLayer2 = async (req, res) => {
     } catch (err) { console.error('Layer2 Error:', err); res.status(500).json({ message: 'Server Error' }); }
 };
 
+// ✅ FIXED: Strict input validation before bcrypt comparison
 const verifyLayer3 = async (req, res) => {
     const { dad, friend, enemy, app } = req.body;
+    
+    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
+    const validations = [
+        validateSecurityAnswer(dad, "Father's name"),
+        validateSecurityAnswer(friend, "Best friend's name"),
+        validateSecurityAnswer(enemy, 'Enemy name'),
+        validateSecurityAnswer(app, 'Favorite app')
+    ];
+    
+    const errors = validations.filter(v => v !== null);
+    if (errors.length > 0) {
+        return res.status(400).json({ message: errors[0] });
+    }
+    
     try {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
-        const d1 = await bcrypt.compare(dad.toLowerCase(), user.adminAns_dad);
-        const d2 = await bcrypt.compare(friend.toLowerCase(), user.adminAns_friend);
-        const d3 = await bcrypt.compare(enemy.toLowerCase(), user.adminAns_enemy);
-        const d4 = await bcrypt.compare(app.toLowerCase(), user.adminAns_app);
+        // ✅ Sanitize inputs: trim whitespace + lowercase for consistent comparison
+        const d1 = await bcrypt.compare(dad.trim().toLowerCase(), user.adminAns_dad);
+        const d2 = await bcrypt.compare(friend.trim().toLowerCase(), user.adminAns_friend);
+        const d3 = await bcrypt.compare(enemy.trim().toLowerCase(), user.adminAns_enemy);
+        const d4 = await bcrypt.compare(app.trim().toLowerCase(), user.adminAns_app);
         
         if (d1 && d2 && d3 && d4) {
             // ✅ SECURE: Strict secret check
