@@ -130,13 +130,13 @@ try {
             }
         }
     } else {
-        console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
+        console.warn('️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
     }
 } catch (err) {
     console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
 }
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  SECURITY MIDDLEWARE
 // ════════════════════════════════════════════
 app.use(helmet());
@@ -303,6 +303,7 @@ console.log('✅ [SERVER] Auth routes registered');
 app.post('/api/auth/logout', verifyToken, logout);
 app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 
+// ✅ Assistant and Session routes handled via routers
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
@@ -404,7 +405,7 @@ app.use('/api/data', dataExportRoutes);
 // ──────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
 // ──────────────────────────────────────────────────────────────
-console.log('🔧 [SERVER] Registering lead/conversation routes...');
+console.log(' [SERVER] Registering lead/conversation routes...');
 
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
@@ -497,9 +498,9 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 console.log('✅ [SERVER] AI suggestion route registered');
 
 // ──────────────────────────────────────────────────────────────
-//  ASSISTANT ROUTE
+//  ASSISTANT ROUTE (Handled by assistantRoutes.js)
+//  NOTE: Inline definition removed to prevent startup crash
 // ──────────────────────────────────────────────────────────────
-app.post('/api/assistant', verifyToken, checkAssistantLimit, validate(assistantSchema), require('./assistantController').assistantChat);
 
 // ──────────────────────────────────────────────────────────────
 //  ADMIN ROUTES
@@ -524,7 +525,7 @@ console.log('✅ [SERVER] Report routes registered');
 // ──────────────────────────────────────────────────────────────
 //  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
 // ──────────────────────────────────────────────────────────────
-console.log('🔧 [SERVER] Registering history routes...');
+console.log(' [SERVER] Registering history routes...');
 
 // Alias for /api/sessions (history.html uses /api/history/sessions)
 app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
@@ -673,7 +674,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
 
 // ═══════════════════════════════════════════
 //  START SERVER
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
     console.log(`🚀 Server running on port ${PORT}`); 
