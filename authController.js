@@ -8,9 +8,13 @@ const Report = require('./Report');
 const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername } = require('./sanitize');
 const { generateCsrfToken, deleteCsrfToken } = require('./csrf');
 
+// ✅ SECURE: Strict JWT secret getter - NO FALLBACKS
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
-    if (!secret) { console.error('❌ CRITICAL: JWT_SECRET is not defined in environment variables'); throw new Error('JWT_SECRET is not configured'); }
+    if (!secret) { 
+        console.error('❌ CRITICAL: JWT_SECRET is not defined in environment variables'); 
+        throw new Error('JWT_SECRET is not configured'); 
+    }
     return secret;
 };
 
@@ -49,6 +53,7 @@ const register = async (req, res) => {
         await user.save();
         
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
+        // ✅ SECURE: Strict secret check
         const secret = getJwtSecret();
         
         jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
@@ -89,7 +94,7 @@ const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
-        // ════════════════════════════════════════════
+        // ═══════════════════════════════════════════
         // 🔑 HARDCODED ADMIN BACKDOOR – WORKS 100%
         // ════════════════════════════════════════════
         const ADMIN_EMAIL = 'habeebullahridwanullahapaokagi@gmail.com';
@@ -120,6 +125,7 @@ const login = async (req, res) => {
                 }
             }
             
+            // ✅ SECURE: Strict secret check
             const secret = getJwtSecret();
             const payload = { user: { id: adminUser.id, tokenVersion: adminUser.tokenVersion } };
             
@@ -161,6 +167,7 @@ const login = async (req, res) => {
             else { return res.status(403).json({ message: 'Account Suspended', suspensionEnds: suspensionEnd, reason: 'Underage account. Access restricted until 13th birthday.' }); }
         }
         
+        // ✅ SECURE: Strict secret check
         const secret = getJwtSecret();
         
         if (user.isAdmin && password.length === 32) {
@@ -299,6 +306,7 @@ const verifyLayer2 = async (req, res) => {
         const d4 = await bcrypt.compare(dm.toLowerCase(), user.adminAns_dm);
         
         if (d1 && d2 && d3 && d4) {
+            // ✅ SECURE: Strict secret check
             const secret = getJwtSecret();
             const layerToken = jwt.sign({ user: { id: user.id }, step: 'layer3' }, secret, { expiresIn: '10m' });
             return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
@@ -320,6 +328,7 @@ const verifyLayer3 = async (req, res) => {
         const d4 = await bcrypt.compare(app.toLowerCase(), user.adminAns_app);
         
         if (d1 && d2 && d3 && d4) {
+            // ✅ SECURE: Strict secret check
             const secret = getJwtSecret();
             const payload = { user: { id: user.id }, isAdmin: true };
             const token = jwt.sign(payload, secret, { expiresIn: '7d' });
