@@ -56,6 +56,10 @@ const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login 
 // ✅ Import sessionController for session routes
 const sessionController = require('./sessionController');
 
+// ✅ NEW: Admin Portal Controllers
+const { setupAdmin } = require('./registerAdmin');
+const { authenticateAdmin } = require('./adminAuthController');
+
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -167,7 +171,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
 // ════════════════════════════════════════════
@@ -316,7 +320,7 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
         authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
-    console.log('📝 [NYLAS ROUTE] Method:', req.method);
+    console.log(' [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 }, nylasAuthController.getAuthUrl);
@@ -344,7 +348,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('✅ [TEST] Callback test route hit!');
     console.log('📥 [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
-    console.log('📥 [TEST] Headers:', {
+    console.log(' [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
     });
@@ -467,7 +471,7 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController
 app.post('/api/sessions', verifyToken, sessionController.createSession);
 console.log('✅ [SERVER] Session routes registered');
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  DREAMS ROUTES
 // ──────────────────────────────────────────────────────────────
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
@@ -503,7 +507,40 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // ──────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────
-//  ADMIN ROUTES
+//  ✅ SECURE ADMIN PORTAL ROUTES
+// ──────────────────────────────────────────────────────────────
+const ADMIN_PORTAL_PATH = 'habeebullahTheownerofskyline-therichestmanintheworld-allahuakbar-2010';
+
+// Serve admin portal at secret URL
+app.get(`/${ADMIN_PORTAL_PATH}`, (req, res) => {
+    console.log(`[ADMIN] Portal accessed from IP: ${req.ip}`);
+    res.sendFile(path.join(__dirname, 'admin-portal.html'));
+});
+
+// Check if admin exists (for frontend state detection)
+app.get('/api/admin/portal-state', async (req, res) => {
+    try {
+        const adminExists = await User.exists({ isAdmin: true });
+        res.json({ adminExists });
+    } catch (err) {
+        res.status(500).json({ adminExists: false });
+    }
+});
+
+// One-time setup endpoint
+app.post('/api/admin/setup', setupAdmin);
+
+// Authentication endpoint
+app.post('/api/admin/authenticate', authenticateAdmin);
+
+// Honeypot: Block all other /admin* paths with 404
+app.use(/^\/admin/i, (req, res) => {
+    console.warn(`[SECURITY] Suspicious scan from ${req.ip}: ${req.originalUrl}`);
+    res.status(404).send('Not Found');
+});
+
+// ──────────────────────────────────────────────────────────────
+//  LEGACY ADMIN ROUTES (Protected by verifyToken)
 // ──────────────────────────────────────────────────────────────
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
@@ -524,7 +561,7 @@ console.log('✅ [SERVER] Report routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 console.log(' [SERVER] Registering history routes...');
 
 // Alias for /api/sessions (history.html uses /api/history/sessions)
@@ -547,9 +584,9 @@ app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.dele
 
 console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
-console.log('   📋 GET    /api/history/messages/:sessionId');
+console.log('    GET    /api/history/messages/:sessionId');
 console.log('   📋 PUT    /api/history/rename/:sessionId');
-console.log('   📋 PUT    /api/history/pin/:sessionId');
+console.log('    PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
@@ -674,7 +711,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
 
 // ═══════════════════════════════════════════
 //  START SERVER
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
     console.log(`🚀 Server running on port ${PORT}`); 
