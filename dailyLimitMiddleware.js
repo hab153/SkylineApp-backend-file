@@ -29,34 +29,65 @@ function getAssistantLimitMessage(tier, limit) {
     return `Daily assistant limit reached (200/200). Please try again tomorrow.`;
 }
 
+// ✅ ATOMIC HELPER: Reset counter if date changed
+async function atomicResetIfNeeded(userId, countField, dateField) {
+    const todayStr = new Date().toDateString();
+    
+    // Atomically reset ONLY if the stored date doesn't match today
+    // This prevents race conditions during midnight rollover
+    await User.updateOne(
+        { 
+            _id: userId,
+            $expr: { 
+                $ne: [
+                    { $dateToString: { format: "%Y-%m-%d", date: `$${dateField}` } },
+                    todayStr
+                ]
+            }
+        },
+        { 
+            $set: { 
+                [countField]: 0,
+                [dateField]: new Date()
+            }
+        }
+    );
+}
+
 // Daily limit for chat/dreams (Free:10, Go:50, Pro:150)
 const checkDailyLimit = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
-        if (!user.usage) user.usage = { dailyCallCount: 0, lastCallDate: new Date() };
+        const userId = req.userId;
         
-        let limit = 10; // Free plan
+        // Get user tier first (read-only, safe)
+        const user = await User.findById(userId).select('subscriptionTier');
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        
+        let limit = 10;
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 50;
         if (tier === 'pro') limit = 150;
         
-        const todayStr = new Date().toDateString();
-        const lastStr = user.usage.lastCallDate ? new Date(user.usage.lastCallDate).toDateString() : '';
+        // ✅ ATOMIC: Reset counter if needed
+        await atomicResetIfNeeded(userId, 'usage.dailyCallCount', 'usage.lastCallDate');
         
-        if (lastStr !== todayStr) {
-            user.usage.dailyCallCount = 0;
-            user.usage.lastCallDate = new Date();
-            await user.save();
-        }
+        // ✅ ATOMIC: Check limit AND increment in ONE operation
+        const updatedUser = await User.findOneAndUpdate(
+            { 
+                _id: userId,
+                'usage.dailyCallCount': { $lt: limit }
+            },
+            { $inc: { 'usage.dailyCallCount': 1 } },
+            { new: true, select: 'usage.dailyCallCount subscriptionTier' }
+        );
         
-        if (user.usage.dailyCallCount >= limit) {
-            const message = getChatLimitMessage(tier, limit);
+        if (!updatedUser) {
+            // Either user doesn't exist OR they've hit their limit
+            const currentUser = await User.findById(userId).select('subscriptionTier usage.dailyCallCount');
+            const message = getChatLimitMessage(currentUser?.subscriptionTier || 'free', limit);
             return res.status(429).json({ message });
         }
         
-        user.usage.dailyCallCount += 1;
-        await user.save();
         next();
     } catch (err) {
         console.error('Error checking daily limit:', err);
@@ -67,35 +98,36 @@ const checkDailyLimit = async (req, res, next) => {
 // Hint limit middleware (Free:3, Go:15, Pro:70)
 const checkHintLimit = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId);
+        const userId = req.userId;
+        
+        const user = await User.findById(userId).select('subscriptionTier');
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        if (!user.usage) user.usage = {};
-        if (user.usage.dailyHintCount === undefined) user.usage.dailyHintCount = 0;
-        if (!user.usage.lastHintDate) user.usage.lastHintDate = null;
-
-        let limit = 3; // Free plan
+        let limit = 3;
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 15;
         if (tier === 'pro') limit = 70;
 
-        const today = new Date().toDateString();
-        const lastHintDateStr = user.usage.lastHintDate ? new Date(user.usage.lastHintDate).toDateString() : null;
-        if (lastHintDateStr !== today) {
-            user.usage.dailyHintCount = 0;
-            user.usage.lastHintDate = new Date();
-            await user.save();
-        }
+        // ✅ ATOMIC: Reset counter if needed
+        await atomicResetIfNeeded(userId, 'usage.dailyHintCount', 'usage.lastHintDate');
 
-        if (user.usage.dailyHintCount >= limit) {
-            const message = getHintLimitMessage(tier, limit);
+        // ✅ ATOMIC: Check limit AND increment
+        const updatedUser = await User.findOneAndUpdate(
+            { 
+                _id: userId,
+                'usage.dailyHintCount': { $lt: limit }
+            },
+            { $inc: { 'usage.dailyHintCount': 1 } },
+            { new: true, select: 'usage.dailyHintCount subscriptionTier' }
+        );
+
+        if (!updatedUser) {
+            const currentUser = await User.findById(userId).select('subscriptionTier usage.dailyHintCount');
+            const message = getHintLimitMessage(currentUser?.subscriptionTier || 'free', limit);
             return res.status(403).json({ message, redirect: '/dashboard' });
         }
 
-        user.usage.dailyHintCount += 1;
-        await user.save();
-
-        req.remainingHints = limit - user.usage.dailyHintCount;
+        req.remainingHints = limit - updatedUser.usage.dailyHintCount;
         next();
     } catch (err) {
         console.error('Hint limit error:', err);
@@ -105,68 +137,73 @@ const checkHintLimit = async (req, res, next) => {
 
 // Helper to check and increment daily email send limit (Free:5, Go:200, Pro:1000)
 const checkAndIncrementSendLimit = async (userId) => {
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).select('subscriptionTier');
     if (!user) throw new Error('User not found');
-    if (!user.usage) user.usage = {};
-    if (user.usage.dailySentCount === undefined) user.usage.dailySentCount = 0;
-    if (!user.usage.lastSentDate) user.usage.lastSentDate = null;
 
-    let limit = 5; // Free
+    let limit = 5;
     const tier = user.subscriptionTier;
     if (tier === 'go') limit = 200;
     if (tier === 'pro') limit = 1000;
 
-    const today = new Date().toDateString();
-    const lastSentStr = user.usage.lastSentDate ? new Date(user.usage.lastSentDate).toDateString() : null;
-    if (lastSentStr !== today) {
-        user.usage.dailySentCount = 0;
-        user.usage.lastSentDate = new Date();
-        await user.save();
-    }
+    // ✅ ATOMIC: Reset counter if needed
+    await atomicResetIfNeeded(userId, 'usage.dailySentCount', 'usage.lastSentDate');
 
-    if (user.usage.dailySentCount >= limit) {
-        const message = getSendLimitMessage(tier, limit);
+    // ✅ ATOMIC: Check limit AND increment
+    const updatedUser = await User.findOneAndUpdate(
+        { 
+            _id: userId,
+            'usage.dailySentCount': { $lt: limit }
+        },
+        { $inc: { 'usage.dailySentCount': 1 } },
+        { new: true, select: 'usage.dailySentCount subscriptionTier' }
+    );
+
+    if (!updatedUser) {
+        const currentUser = await User.findById(userId).select('subscriptionTier usage.dailySentCount');
+        const message = getSendLimitMessage(currentUser?.subscriptionTier || 'free', limit);
         throw new Error(message);
     }
 
-    user.usage.dailySentCount += 1;
-    await user.save();
-    return { remaining: limit - user.usage.dailySentCount };
+    return { remaining: limit - updatedUser.usage.dailySentCount };
 };
 
 // Suggest follow-up limit (Free:5, Go:30, Pro:200)
 const checkSuggestFollowUpLimit = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId);
+        const userId = req.userId;
+        
+        const user = await User.findById(userId).select('subscriptionTier');
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        if (!user.usage) user.usage = {};
-        if (user.usage.dailySuggestFollowUpCount === undefined) user.usage.dailySuggestFollowUpCount = 0;
-        if (!user.usage.lastSuggestFollowUpDate) user.usage.lastSuggestFollowUpDate = null;
-
-        let limit = 5; // Free
+        let limit = 5;
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 30;
         if (tier === 'pro') limit = 200;
 
-        const today = new Date().toDateString();
-        const lastDateStr = user.usage.lastSuggestFollowUpDate ? new Date(user.usage.lastSuggestFollowUpDate).toDateString() : null;
-        if (lastDateStr !== today) {
-            user.usage.dailySuggestFollowUpCount = 0;
-            user.usage.lastSuggestFollowUpDate = new Date();
-            await user.save();
-        }
+        // ✅ ATOMIC: Reset counter if needed
+        await atomicResetIfNeeded(userId, 'usage.dailySuggestFollowUpCount', 'usage.lastSuggestFollowUpDate');
 
-        if (user.usage.dailySuggestFollowUpCount >= limit) {
+        // ✅ ATOMIC: Check limit AND increment
+        const updatedUser = await User.findOneAndUpdate(
+            { 
+                _id: userId,
+                'usage.dailySuggestFollowUpCount': { $lt: limit }
+            },
+            { $inc: { 'usage.dailySuggestFollowUpCount': 1 } },
+            { new: true, select: 'usage.dailySuggestFollowUpCount subscriptionTier' }
+        );
+
+        if (!updatedUser) {
+            const currentUser = await User.findById(userId).select('subscriptionTier usage.dailySuggestFollowUpCount');
             let message = '';
-            if (tier === 'free') message = 'Daily suggest follow-up limit reached (5/5). Upgrade to Go (30/day) or Pro (200/day) for more.';
-            else if (tier === 'go') message = 'Daily suggest follow-up limit reached (30/30). Upgrade to Pro for 200/day.';
+            const t = currentUser?.subscriptionTier || 'free';
+            if (t === 'free') message = 'Daily suggest follow-up limit reached (5/5). Upgrade to Go (30/day) or Pro (200/day) for more.';
+            else if (t === 'go') message = 'Daily suggest follow-up limit reached (30/30). Upgrade to Pro for 200/day.';
             else message = 'Daily suggest follow-up limit reached (200/200). Please try again tomorrow.';
             return res.status(429).json({ message });
         }
 
-        // ✅ FIX: Store user in req for controller to use
-        req.userWithSuggestLimit = user;
+        req.userWithSuggestLimit = updatedUser;
         next();
     } catch (err) {
         console.error('Suggest follow-up limit error:', err);
@@ -177,14 +214,12 @@ const checkSuggestFollowUpLimit = async (req, res, next) => {
 // ✅ FIXED: Auto follow-up enable limit (Free:0, Go:15, Pro:100)
 const checkAutoFollowUpLimit = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId);
+        const userId = req.userId;
+        
+        const user = await User.findById(userId).select('subscriptionTier');
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-        if (!user.usage) user.usage = {};
-        if (user.usage.dailyAutoFollowUpCount === undefined) user.usage.dailyAutoFollowUpCount = 0;
-        if (!user.usage.lastAutoFollowUpDate) user.usage.lastAutoFollowUpDate = null;
-
-        let limit = 0; // Free plan
+        let limit = 0;
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 15;
         if (tier === 'pro') limit = 100;
@@ -198,23 +233,29 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
             });
         }
 
-        const today = new Date().toDateString();
-        const lastDateStr = user.usage.lastAutoFollowUpDate ? new Date(user.usage.lastAutoFollowUpDate).toDateString() : null;
-        if (lastDateStr !== today) {
-            user.usage.dailyAutoFollowUpCount = 0;
-            user.usage.lastAutoFollowUpDate = new Date();
-            await user.save();
-        }
+        // ✅ ATOMIC: Reset counter if needed
+        await atomicResetIfNeeded(userId, 'usage.dailyAutoFollowUpCount', 'usage.lastAutoFollowUpDate');
 
-        if (user.usage.dailyAutoFollowUpCount >= limit) {
+        // ✅ ATOMIC: Check limit AND increment
+        const updatedUser = await User.findOneAndUpdate(
+            { 
+                _id: userId,
+                'usage.dailyAutoFollowUpCount': { $lt: limit }
+            },
+            { $inc: { 'usage.dailyAutoFollowUpCount': 1 } },
+            { new: true, select: 'usage.dailyAutoFollowUpCount subscriptionTier' }
+        );
+
+        if (!updatedUser) {
+            const currentUser = await User.findById(userId).select('subscriptionTier usage.dailyAutoFollowUpCount');
             let message = '';
-            if (tier === 'go') message = 'Daily auto follow-up limit reached (15/15). Upgrade to Pro for 100/day.';
+            const t = currentUser?.subscriptionTier || 'go';
+            if (t === 'go') message = 'Daily auto follow-up limit reached (15/15). Upgrade to Pro for 100/day.';
             else message = 'Daily auto follow-up limit reached (100/100). Please try again tomorrow.';
             return res.status(429).json({ success: false, message });
         }
 
-        // ✅ FIX: Store user in req for controller to use
-        req.userWithAutoLimit = user;
+        req.userWithAutoLimit = updatedUser;
         next();
     } catch (err) {
         console.error('Auto follow-up limit error:', err);
@@ -225,35 +266,38 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
 // Assistant limit middleware (Free:20, Go:70, Pro:200)
 const checkAssistantLimit = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId);
+        const userId = req.userId;
+        
+        const user = await User.findById(userId).select('subscriptionTier');
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        if (!user.usage) user.usage = {};
-        if (user.usage.assistantCount === undefined) user.usage.assistantCount = 0;
-        if (!user.usage.assistantLastDate) user.usage.assistantLastDate = null;
-
-        let limit = 20; // Free plan
+        let limit = 20;
         const tier = user.subscriptionTier;
         if (tier === 'go') limit = 70;
         if (tier === 'pro') limit = 200;
 
-        const today = new Date().toDateString();
-        const lastDateStr = user.usage.assistantLastDate ? new Date(user.usage.assistantLastDate).toDateString() : null;
-        if (lastDateStr !== today) {
-            user.usage.assistantCount = 0;
-            user.usage.assistantLastDate = new Date();
-            await user.save();
-        }
+        // ✅ ATOMIC: Reset counter if needed
+        await atomicResetIfNeeded(userId, 'usage.assistantCount', 'usage.assistantLastDate');
 
-        if (user.usage.assistantCount >= limit) {
-            const message = getAssistantLimitMessage(tier, limit);
+        // ✅ ATOMIC: Check limit AND increment
+        const updatedUser = await User.findOneAndUpdate(
+            { 
+                _id: userId,
+                'usage.assistantCount': { $lt: limit }
+            },
+            { $inc: { 'usage.assistantCount': 1 } },
+            { new: true, select: 'usage.assistantCount subscriptionTier' }
+        );
+
+        if (!updatedUser) {
+            const currentUser = await User.findById(userId).select('subscriptionTier usage.assistantCount');
+            const message = getAssistantLimitMessage(currentUser?.subscriptionTier || 'free', limit);
             return res.status(429).json({ message });
         }
 
-        // Store user and remaining count in req for later use
-        req.userDoc = user;
+        req.userDoc = updatedUser;
         req.assistantLimit = limit;
-        req.assistantRemaining = limit - user.usage.assistantCount;
+        req.assistantRemaining = limit - updatedUser.usage.assistantCount;
 
         next();
     } catch (err) {
