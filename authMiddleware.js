@@ -1,14 +1,13 @@
 const jwt = require('jsonwebtoken');
 const User = require('./User');
 
-// Helper to get JWT secret
+// Helper to get JWT secret - STRICT CHECK ONLY
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
-        console.error('❌ CRITICAL: JWT_SECRET is not defined in environment variables');
+        console.error(' CRITICAL: JWT_SECRET is not defined in environment variables');
         throw new Error('JWT_SECRET is not configured');
     }
-    console.log('🔐 [AUTH] JWT_SECRET is configured');
     return secret;
 };
 
@@ -18,7 +17,7 @@ const verifyToken = async (req, res, next) => {
     console.log('🔐 [AUTH] Request method:', req.method);
     
     const authHeader = req.headers['authorization'];
-    console.log('🔐 [AUTH] Authorization header:', authHeader ? 'present' : 'missing');
+    console.log(' [AUTH] Authorization header:', authHeader ? 'present' : 'missing');
     
     if (authHeader) {
         console.log('🔐 [AUTH] Header value (first 30 chars):', authHeader.substring(0, 30) + '...');
@@ -33,6 +32,7 @@ const verifyToken = async (req, res, next) => {
     console.log('🔐 [AUTH] Token received (first 20 chars):', token.substring(0, 20) + '...');
     
     try {
+        // ✅ SECURE: Strict check, no fallback
         const secret = getJwtSecret();
         console.log('🔐 [AUTH] Verifying token...');
         const decoded = jwt.verify(token, secret);
@@ -60,7 +60,7 @@ const verifyToken = async (req, res, next) => {
         }
         
         // Normal token: verify tokenVersion matches user's current version
-        console.log('🔐 [AUTH] Fetching user from database to verify tokenVersion...');
+        console.log(' [AUTH] Fetching user from database to verify tokenVersion...');
         const user = await User.findById(userId).select('tokenVersion');
         if (!user) {
             console.error('❌ [AUTH] User not found for ID:', userId);
@@ -69,7 +69,7 @@ const verifyToken = async (req, res, next) => {
         
         console.log('🔐 [AUTH] User found. tokenVersion from DB:', user.tokenVersion);
         const tokenVersion = decoded.user.tokenVersion;
-        console.log('🔐 [AUTH] tokenVersion from token:', tokenVersion);
+        console.log(' [AUTH] tokenVersion from token:', tokenVersion);
         
         if (tokenVersion !== user.tokenVersion) {
             console.error('❌ [AUTH] Token revoked - version mismatch',
@@ -82,6 +82,11 @@ const verifyToken = async (req, res, next) => {
         console.log('✅ [AUTH] Token fully verified, userId =', userId);
         next();
     } catch (err) {
+        // ✅ Handle missing secret gracefully per-request instead of crashing server
+        if (err.message === 'JWT_SECRET is not configured') {
+            console.error('❌ [AUTH] Server misconfiguration: JWT_SECRET missing');
+            return res.status(500).json({ message: 'Server configuration error' });
+        }
         console.error('❌ [AUTH] Invalid token:', err.message);
         console.error('❌ [AUTH] Error details:', err);
         return res.status(401).json({ message: 'Invalid token' });
