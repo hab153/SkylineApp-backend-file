@@ -576,6 +576,63 @@ app.use(/^\/admin/i, (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────
+//  ✅ REAL-TIME STATS BROADCASTER (SSE)
+// ──────────────────────────────────────────────────────────────
+const adminClients = new Set();
+
+// Endpoint for admins to listen to live updates
+app.get('/api/admin/live-stats', verifyAdminToken, (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    // Add client to the list
+    adminClients.add(res);
+    
+    // Send initial stats immediately
+    sendStatsUpdate(res);
+
+    // Keep connection alive with a comment every 30s
+    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 30000);
+
+    // Remove client when they disconnect
+    req.on('close', () => {
+        adminClients.delete(res);
+        clearInterval(keepAlive);
+    });
+});
+
+// Helper to calculate and send stats to a specific client
+async function sendStatsUpdate(clientRes) {
+    try {
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        
+        // Quick count for daily (most important for real-time)
+        const dailyCount = await Lead.countDocuments({ createdAt: { $gte: startOfDay } });
+        
+        const data = `data: ${JSON.stringify({ daily: dailyCount })}\n\n`;
+        if (clientRes && !clientRes.writableEnded) {
+            clientRes.write(data);
+        }
+    } catch (err) {
+        console.error('[SSE ERROR]', err);
+    }
+}
+
+// ✅ GLOBAL FUNCTION TO BROADCAST UPDATES
+// Call this function inside your Lead creation logic!
+global.broadcastLeadUpdate = async () => {
+    for (const client of adminClients) {
+        if (!client.writableEnded) {
+            sendStatsUpdate(client);
+        } else {
+            adminClients.delete(client);
+        }
+    }
+};
+
+// ──────────────────────────────────────────────────────────────
 //  ✅ GET ALL USERS ENDPOINT (Direct & Unfiltered)
 //  ✅ NOW USES verifyAdminToken INSTEAD OF verifyToken
 // ──────────────────────────────────────────────────────────────
