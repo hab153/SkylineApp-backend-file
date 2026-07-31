@@ -57,8 +57,8 @@ const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login 
 const sessionController = require('./sessionController');
 
 // ✅ Admin Auth Controller (API ONLY - No HTML serving)
-const { setupAdmin } = require('./registerAdmin');
-const { authenticateAdmin } = require('./adminAuthController');
+const { setupAdmin } = require('./RegisterAdmin');
+const { authenticateAdmin } = require('./AdminAuthController');
 
 // Validation imports
 const { validate } = require('./validationMiddleware');
@@ -98,16 +98,16 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
-console.log(' [SERVER] Starting server...');
+console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
+    console.error('️ Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
@@ -128,7 +128,7 @@ try {
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
             if (days > 7) {
-                console.warn(`️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
             } else {
                 console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
             }
@@ -148,7 +148,6 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
 // ✅ CORS CONFIGURED FOR FRONTEND/BACKEND SEPARATION
-// Replace with your actual Vercel frontend URL
 const ALLOWED_ORIGINS = [
     'https://skylineai-app.vercel.app', 
     'http://localhost:3000'
@@ -193,7 +192,7 @@ app.get('/api/health', (req, res) => {
 // ═══════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
@@ -212,10 +211,10 @@ app.use(express.json());
 app.use(xssProtection);
 app.use(xssOutputProtection);
 
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 //  MONGODB CONNECTION & INDEX CREATION
 // ════════════════════════════════════════════
-console.log(' [SERVER] Connecting to MongoDB...');
+console.log('🔗 [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
     serverSelectionTimeoutMS: 5000
@@ -263,9 +262,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ════════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
-        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
+        console.log(' [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log('🔗 [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log(' [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
@@ -337,7 +336,7 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
+        authorization: req.headers.authorization ? '✅ Present' : ' Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
     console.log('📝 [NYLAS ROUTE] Method:', req.method);
@@ -367,7 +366,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
     console.log('📥 [TEST] Full URL:', req.originalUrl);
-    console.log('📥 [TEST] Query params:', req.query);
+    console.log(' [TEST] Query params:', req.query);
     console.log('📥 [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
@@ -408,7 +407,7 @@ app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userCon
 
 // ──────────────────────────────────────────────────────────────
 //  USER PROFILE ROUTES
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
@@ -429,7 +428,7 @@ app.use('/api/data', dataExportRoutes);
 // ──────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
 // ──────────────────────────────────────────────────────────────
-console.log(' [SERVER] Registering lead/conversation routes...');
+console.log('🔧 [SERVER] Registering lead/conversation routes...');
 
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
@@ -447,7 +446,7 @@ console.log('✅ [SERVER] All lead routes registered');
 // ─────────────────────────────────────────────────────────────
 //  ✅ FOLLOW-UP ROUTES (FIXED)
 // ──────────────────────────────────────────────────────────────
-console.log('🔧 [SERVER] Registering follow-up routes...');
+console.log(' [SERVER] Registering follow-up routes...');
 
 // ✅ Get follow-up status first (no body validation needed)
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
@@ -461,7 +460,7 @@ app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimi
 console.log('✅ [SERVER] Follow-up routes registered');
 console.log('   📋 GET    /api/leads/:leadId/follow-up-status');
 console.log('   📋 POST   /api/leads/:leadId/suggest-follow-up');
-console.log('    POST   /api/leads/:leadId/auto-follow-up');
+console.log('   📋 POST   /api/leads/:leadId/auto-follow-up');
 
 // ──────────────────────────────────────────────────────────────
 //  REVENUE TRACKING
@@ -600,7 +599,7 @@ console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
 console.log('   📋 PUT    /api/history/rename/:sessionId');
-console.log'   📋 PUT    /api/history/pin/:sessionId');
+console.log('   📋 PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
@@ -723,7 +722,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
     }
 });
 
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 //  START SERVER
 // ════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
