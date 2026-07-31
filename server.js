@@ -174,7 +174,7 @@ app.use(globalLimiter);
 
 console.log('✅ [SERVER] Security middleware applied');
 
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 //  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
 // ═══════════════════════════════════════════
 app.get('/api/health', (req, res) => {
@@ -293,7 +293,7 @@ async function startTokenRefreshJob() {
             });
             
             if (expiringAccounts.length > 0) {
-                console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
+                console.log(` [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
             }
             
             for (const account of expiringAccounts) {
@@ -307,7 +307,7 @@ async function startTokenRefreshJob() {
             }
             
         } catch (error) {
-            console.error('❌ [TOKEN REFRESH] Job error:', error.message);
+            console.error(' [TOKEN REFRESH] Job error:', error.message);
         }
     }, 5 * 60 * 1000); // Run every 5 minutes
 }
@@ -362,7 +362,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
     console.log(' [TEST] Full URL:', req.originalUrl);
-    console.log('📥 [TEST] Query params:', req.query);
+    console.log(' [TEST] Query params:', req.query);
     console.log(' [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
@@ -442,7 +442,7 @@ console.log('✅ [SERVER] All lead routes registered');
 // ─────────────────────────────────────────────────────────────
 //  ✅ FOLLOW-UP ROUTES (FIXED)
 // ──────────────────────────────────────────────────────────────
-console.log('🔧 [SERVER] Registering follow-up routes...');
+console.log(' [SERVER] Registering follow-up routes...');
 
 // ✅ Get follow-up status first (no body validation needed)
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
@@ -458,7 +458,7 @@ console.log('   📋 GET    /api/leads/:leadId/follow-up-status');
 console.log('   📋 POST   /api/leads/:leadId/suggest-follow-up');
 console.log('   📋 POST   /api/leads/:leadId/auto-follow-up');
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  REVENUE TRACKING
 // ──────────────────────────────────────────────────────────────
 if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
@@ -468,7 +468,7 @@ if (typeof revenueController !== 'undefined' && revenueController.getRevenueTrac
 
 // ──────────────────────────────────────────────────────────────
 //  NOTIFICATIONS
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
@@ -486,7 +486,7 @@ app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController
 app.post('/api/sessions', verifyToken, sessionController.createSession);
 console.log('✅ [SERVER] Session routes registered');
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 //  DREAMS ROUTES
 // ──────────────────────────────────────────────────────────────
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
@@ -519,7 +519,7 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // ──────────────────────────────────────────────────────────────
 //  ASSISTANT ROUTE (Handled by assistantRoutes.js)
 //  NOTE: Inline definition removed to prevent startup crash
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
 //  ✅ DIRECT ADMIN LOGIN (NO LAYER 2)
@@ -575,11 +575,22 @@ app.use(/^\/admin/i, (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────
-//  LEGACY ADMIN ROUTES (Protected by verifyToken)
+//  ✅ GET ALL USERS ENDPOINT (Direct & Unfiltered)
 // ──────────────────────────────────────────────────────────────
+app.get('/api/admin/users', verifyToken, async (req, res) => {
+    try {
+        // Fetch all users, selecting only necessary fields for security
+        const users = await User.find({}).select('email username isAdmin createdAt _id');
+        res.json(users);
+    } catch (err) {
+        console.error('[ADMIN] Failed to fetch users:', err);
+        res.status(500).json({ error: 'Failed to retrieve user list' });
+    }
+});
+
+// Remaining legacy admin routes...
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
-app.get('/api/admin/users', verifyToken, adminController.getAllUsers);
 app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
 app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
 app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
@@ -620,13 +631,13 @@ app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.dele
 console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
-console.log('   📋 PUT    /api/history/rename/:sessionId');
+console.log('    PUT    /api/history/rename/:sessionId');
 console.log('    PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
 //  DEBUG ROUTE - Check messages (Remove after fixing)
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
@@ -717,7 +728,7 @@ app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
     }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 //  ✅ DEBUG ROUTE - Check All Leads
 // ─────────────────────────────────────────────────────────────
 app.get('/api/debug/leads', verifyToken, async (req, res) => {
