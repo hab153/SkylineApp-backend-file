@@ -184,6 +184,7 @@ console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 //  JSON PARSER & STATIC FILES
 // ════════════════════════════════════════════
 app.use(express.json());
+// ✅ Serve static files (like admin-portal.html) from the root directory
 app.use(express.static(path.join(__dirname)));
 
 // ════════════════════════════════════════════
