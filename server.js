@@ -638,12 +638,66 @@ global.broadcastLeadUpdate = async () => {
 // ──────────────────────────────────────────────────────────────
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     try {
-        // Fetch all users, selecting only necessary fields for security
-        const users = await User.find({}).select('email username isAdmin createdAt _id');
+        // Fetch all users, selecting necessary fields including isSuspended
+        const users = await User.find({}).select('email username isAdmin isSuspended createdAt _id');
         res.json(users);
     } catch (err) {
         console.error('[ADMIN] Failed to fetch users:', err);
         res.status(500).json({ error: 'Failed to retrieve user list' });
+    }
+});
+
+// ──────────────────────────────────────────────────────────────
+//  ✅ USER MANAGEMENT: SUSPEND / UNSUSPEND / DELETE
+// ──────────────────────────────────────────────────────────────
+
+// Suspend User
+app.put('/api/admin/users/:id/suspend', verifyAdminToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.isAdmin) return res.status(403).json({ error: 'Cannot suspend an admin' });
+
+        user.isSuspended = true;
+        user.tokenVersion += 1; // Kick them out of current sessions
+        await user.save();
+        
+        console.log(`[ADMIN] User ${user.email} suspended by Admin ${req.userId}`);
+        res.json({ success: true, message: 'User suspended successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to suspend user' });
+    }
+});
+
+// Unsuspend User
+app.put('/api/admin/users/:id/unsuspend', verifyAdminToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        user.isSuspended = false;
+        await user.save();
+        
+        console.log(`[ADMIN] User ${user.email} unsuspended by Admin ${req.userId}`);
+        res.json({ success: true, message: 'User unsuspended successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to unsuspend user' });
+    }
+});
+
+// Delete User
+app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (user.isAdmin) return res.status(403).json({ error: 'Cannot delete an admin' });
+
+        await User.findByIdAndDelete(req.params.id);
+        
+        console.log(`[ADMIN] User ${user.email} deleted by Admin ${req.userId}`);
+        res.json({ success: true, message: 'User deleted successfully' });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to delete user' });
     }
 });
 
@@ -706,8 +760,6 @@ app.get('/api/admin/stats/leads', verifyAdminToken, async (req, res) => {
 // ✅ ALL UPDATED TO USE verifyAdminToken
 app.post('/api/admin/verify-layer-2', verifyAdminToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyAdminToken, adminController.adminVerifyLayer3);
-app.put('/api/admin/users/:id/suspend', verifyAdminToken, adminController.suspendUser);
-app.delete('/api/admin/users/:id', verifyAdminToken, adminController.deleteUser);
 app.get('/api/admin/users/:id/details', verifyAdminToken, adminController.getUserDetails);
 app.get('/api/admin/users/:id/chat-view', verifyAdminToken, adminController.getUserChatView);
 app.post('/api/admin/users/:id/message', verifyAdminToken, validate(adminMessageSchema), adminController.sendUserMessage);
