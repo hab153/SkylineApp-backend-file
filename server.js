@@ -56,10 +56,6 @@ const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login 
 // ✅ Import sessionController for session routes
 const sessionController = require('./sessionController');
 
-// ✅ Admin Auth Controller (API ONLY - No HTML serving)
-const { setupAdmin } = require('./RegisterAdmin');
-const { authenticateAdmin } = require('./AdminAuthController');
-
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
@@ -98,21 +94,21 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
-console.log('🚀 [SERVER] Starting server...');
+console.log(' [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
-console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
+console.log(' [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
 // ══════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('️ Please set JWT_SECRET in your .env file and restart the server.');
+    console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  BACKUP CHECK
 // ════════════════════════════════════════════
 const fs = require('fs-extra');
@@ -128,7 +124,7 @@ try {
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
             if (days > 7) {
-                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+                console.warn(`️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
             } else {
                 console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
             }
@@ -178,7 +174,7 @@ app.use(globalLimiter);
 
 console.log('✅ [SERVER] Security middleware applied');
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
 // ════════════════════════════════════════════
 app.get('/api/health', (req, res) => {
@@ -211,7 +207,7 @@ app.use(express.json());
 app.use(xssProtection);
 app.use(xssOutputProtection);
 
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 //  MONGODB CONNECTION & INDEX CREATION
 // ════════════════════════════════════════════
 console.log('🔗 [SERVER] Connecting to MongoDB...');
@@ -366,7 +362,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
     console.log('📥 [TEST] Full URL:', req.originalUrl);
-    console.log(' [TEST] Query params:', req.query);
+    console.log('📥 [TEST] Query params:', req.query);
     console.log('📥 [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
@@ -407,14 +403,14 @@ app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userCon
 
 // ──────────────────────────────────────────────────────────────
 //  USER PROFILE ROUTES
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
 
 // ──────────────────────────────────────────────────────────────
 //  ACCOUNT DELETION ROUTES (Right to Be Forgotten – GDPR)
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserAccount);
 app.post('/api/users/me/restore', verifyToken, userController.restoreUserAccount);
@@ -425,9 +421,9 @@ app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletion
 // ──────────────────────────────────────────────────────────────
 app.use('/api/data', dataExportRoutes);
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
 
 app.get('/api/conversations', verifyToken, leadController.getConversations);
@@ -446,7 +442,7 @@ console.log('✅ [SERVER] All lead routes registered');
 // ─────────────────────────────────────────────────────────────
 //  ✅ FOLLOW-UP ROUTES (FIXED)
 // ──────────────────────────────────────────────────────────────
-console.log(' [SERVER] Registering follow-up routes...');
+console.log('🔧 [SERVER] Registering follow-up routes...');
 
 // ✅ Get follow-up status first (no body validation needed)
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
@@ -526,25 +522,44 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // ──────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
-//  ✅ ADMIN API ROUTES (NO HTML SERVING)
-//  Frontend accesses these via fetch() from Vercel
+//  ✅ SIMPLE ADMIN CREATION ROUTE
+//  Creates admin exactly like a user, but forces isAdmin: true
 // ─────────────────────────────────────────────────────────────
-
-// Check if admin exists (for frontend state detection)
-app.get('/api/admin/portal-state', async (req, res) => {
+app.post('/api/admin/create', async (req, res) => {
     try {
-        const adminExists = await User.exists({ isAdmin: true });
-        res.json({ adminExists });
+        const { email, password } = req.body;
+        
+        if (!email || !password || password.length < 8) {
+            return res.status(400).json({ error: 'Valid email and password (min 8 chars) required' });
+        }
+
+        // Check if user already exists
+        const existing = await User.findOne({ email: email.toLowerCase().trim() });
+        if (existing) {
+            return res.status(400).json({ error: 'Email already registered' });
+        }
+
+        // Hash password and create admin
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        const admin = new User({
+            username: 'admin',
+            email: email.toLowerCase().trim(),
+            password: hashedPassword,
+            isAdmin: true, // ✅ THIS IS THE ONLY DIFFERENCE FROM USER SIGNUP
+            tokenVersion: 0
+        });
+
+        await admin.save();
+        console.log(`[ADMIN CREATE] New admin created: ${email}`);
+        
+        res.json({ success: true, message: 'Admin account created' });
     } catch (err) {
-        res.status(500).json({ adminExists: false });
+        console.error('[ADMIN CREATE ERROR]', err);
+        res.status(500).json({ error: 'Server error during admin creation' });
     }
 });
-
-// One-time setup endpoint
-app.post('/api/admin/setup', setupAdmin);
-
-// Authentication endpoint
-app.post('/api/admin/authenticate', authenticateAdmin);
 
 // Honeypot: Block all other /admin* paths with 404
 app.use(/^\/admin/i, (req, res) => {
@@ -574,7 +589,7 @@ console.log('✅ [SERVER] Report routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
-// ────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering history routes...');
 
 // Alias for /api/sessions (history.html uses /api/history/sessions)
@@ -599,7 +614,7 @@ console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
 console.log('   📋 PUT    /api/history/rename/:sessionId');
-console.log('   📋 PUT    /api/history/pin/:sessionId');
+console.log('    PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
