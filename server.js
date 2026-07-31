@@ -102,12 +102,12 @@ console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('❌ Please set JWT_SECRET in your .env file and restart the server.');
+    console.error(' Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
@@ -189,9 +189,19 @@ app.use(express.static(path.join(__dirname)));
 
 // ════════════════════════════════════════════
 //  XSS PROTECTION MIDDLEWARE
+//  ✅ UPDATED: Skip output protection for Admin Portal to prevent blank screens
 // ════════════════════════════════════════════
-app.use(xssProtection);
-app.use(xssOutputProtection);
+const ADMIN_PORTAL_PATH = 'habeebullahTheownerofskyline-therichestmanintheworld-allahuakbar-2010';
+
+app.use((req, res, next) => {
+    // If requesting the admin portal, skip XSS output protection
+    if (req.path === `/${ADMIN_PORTAL_PATH}`) {
+        return xssProtection(req, res, next); // Only apply input protection
+    }
+    // Apply both input and output protection for all other routes
+    xssProtection(req, res, next);
+    xssOutputProtection(req, res, next);
+});
 
 // ════════════════════════════════════════════
 //  MONGODB CONNECTION & INDEX CREATION
@@ -221,7 +231,7 @@ mongoose.connect(process.env.MONGODB_URI, {
             
             console.log('✅ [SERVER] All database indexes created');
         } catch (indexErr) {
-            console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message);
+            console.warn('️ [SERVER] Index creation warning:', indexErr.message);
         }
         
         startExpiryJob();
@@ -260,7 +270,7 @@ async function verifyWebhookRegistration() {
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
-    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
+    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
     
     // Run every 5 minutes
     setInterval(async () => {
@@ -315,7 +325,7 @@ app.use('/api', sessionRoutes);
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
+    console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
@@ -371,7 +381,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     `);
 });
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  PAYMENT ROUTE
 // ──────────────────────────────────────────────────────────────
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
@@ -483,7 +493,7 @@ console.log('✅ [SERVER] Dreams routes registered');
 //  AI SUGGESTION ROUTE
 // ──────────────────────────────────────────────────────────────
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
-    console.log('💡 [AI SUGGEST] Request received');
+    console.log(' [AI SUGGEST] Request received');
     try {
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
@@ -507,10 +517,9 @@ console.log('✅ [SERVER] AI suggestion route registered');
 //  NOTE: Inline definition removed to prevent startup crash
 // ──────────────────────────────────────────────────────────────
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  ✅ SECURE ADMIN PORTAL ROUTES
-// ──────────────────────────────────────────────────────────────
-const ADMIN_PORTAL_PATH = 'habeebullahTheownerofskyline-therichestmanintheworld-allahuakbar-2010';
+// ─────────────────────────────────────────────────────────────
 
 // Serve admin portal at secret URL
 app.get(`/${ADMIN_PORTAL_PATH}`, (req, res) => {
@@ -715,7 +724,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
 // ══════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
-    console.log(`🚀 Server running on port ${PORT}`); 
+    console.log(` Server running on port ${PORT}`); 
     console.log(`✅ [SERVER] All routes registered successfully`);
 });
 server.timeout = 300000;
