@@ -94,7 +94,7 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
-console.log(' [SERVER] Starting server...');
+console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
@@ -176,7 +176,7 @@ console.log('✅ [SERVER] Security middleware applied');
 
 // ═══════════════════════════════════════════
 //  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 app.get('/api/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
@@ -255,7 +255,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // ════════════════════════════════════════════
 //  WEBHOOK VERIFICATION FUNCTION
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
         console.log('🔍 [WEBHOOK] Verifying webhook registration...');
@@ -274,7 +274,7 @@ async function verifyWebhookRegistration() {
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
-    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
+    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
     
     // Run every 5 minutes
     setInterval(async () => {
@@ -329,13 +329,13 @@ app.use('/api', sessionRoutes);
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
+    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : ' Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
-    console.log(' [NYLAS ROUTE] Method:', req.method);
+    console.log('📝 [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 }, nylasAuthController.getAuthUrl);
@@ -363,7 +363,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('✅ [TEST] Callback test route hit!');
     console.log('📥 [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
-    console.log(' [TEST] Headers:', {
+    console.log('📥 [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
     });
@@ -522,43 +522,70 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // ──────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
-//  ✅ SIMPLE ADMIN CREATION ROUTE
-//  Creates admin exactly like a user, but forces isAdmin: true
+//  ✅ ADMIN LAYER 1: PASSWORD LOGIN (Issues Temp Token)
 // ─────────────────────────────────────────────────────────────
-app.post('/api/admin/create', async (req, res) => {
+app.post('/api/admin/login-step1', async (req, res) => {
     try {
         const { email, password } = req.body;
+        const admin = await User.findOne({ email: email.toLowerCase().trim(), isAdmin: true });
         
-        if (!email || !password || password.length < 8) {
-            return res.status(400).json({ error: 'Valid email and password (min 8 chars) required' });
+        if (!admin || !(await bcrypt.compare(password, admin.password))) {
+            return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        // Check if user already exists
-        const existing = await User.findOne({ email: email.toLowerCase().trim() });
-        if (existing) {
-            return res.status(400).json({ error: 'Email already registered' });
-        }
-
-        // Hash password and create admin
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
+        // Issue a short-lived temp token valid only for KBA verification
+        const tempToken = jwt.sign({ id: admin._id, step: 'kba' }, process.env.JWT_SECRET, { expiresIn: '2m' });
         
-        // ✅ FIX: Use email as username to avoid duplicate key errors
-        const admin = new User({
-            username: email.toLowerCase().trim(), 
-            email: email.toLowerCase().trim(),
-            password: hashedPassword,
-            isAdmin: true, 
-            tokenVersion: 0
-        });
-
-        await admin.save();
-        console.log(`[ADMIN CREATE] New admin created: ${email}`);
-        
-        res.json({ success: true, message: 'Admin account created' });
+        res.json({ tempToken });
     } catch (err) {
-        console.error('[ADMIN CREATE ERROR]', err);
-        res.status(500).json({ error: 'Server error during admin creation' });
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// ─────────────────────────────────────────────────────────────
+//  ✅ ADMIN LAYER 2: KNOWLEDGE-BASED AUTHENTICATION (KBA)
+// ─────────────────────────────────────────────────────────────
+app.post('/api/admin/verify-kba', verifyToken, async (req, res) => {
+    try {
+        const { answers } = req.body;
+        if (!answers || !Array.isArray(answers) || answers.length !== 5) {
+            return res.status(400).json({ error: 'All 5 answers required' });
+        }
+
+        // Verify temp token is in correct state
+        let decoded;
+        try { decoded = jwt.verify(req.headers.authorization.split(' ')[1], process.env.JWT_SECRET); } 
+        catch { return res.status(401).json({ error: 'Session expired. Please login again.' }); }
+        
+        if (decoded.step !== 'kba') return res.status(401).json({ error: 'Invalid session state' });
+
+        const admin = await User.findById(decoded.id);
+        if (!admin || !admin.isAdmin || !admin.kbaHashes) {
+            return res.status(401).json({ error: 'KBA not configured for this account' });
+        }
+
+        // Verify each answer against stored hash (case-insensitive)
+        const allCorrect = answers.every((answer, index) => 
+            bcrypt.compareSync(answer.toLowerCase().trim(), admin.kbaHashes[index])
+        );
+
+        if (!allCorrect) {
+            console.warn(`[KBA FAILED] Admin ID: ${decoded.id}, IP: ${req.ip}`);
+            return res.status(401).json({ error: 'Incorrect answers' });
+        }
+
+        // Issue final admin session token
+        const finalToken = jwt.sign({ 
+            id: admin._id, 
+            role: 'admin', 
+            permissions: admin.permissions 
+        }, process.env.ADMIN_JWT_SECRET, { expiresIn: '30m' });
+
+        console.log(`[KBA SUCCESS] Admin verified: ${admin.email}`);
+        res.json({ success: true, token: finalToken });
+    } catch (err) {
+        console.error('[KBA VERIFY ERROR]', err);
+        res.status(500).json({ error: 'Verification failed' });
     }
 });
 
@@ -615,7 +642,7 @@ console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
 console.log('   📋 PUT    /api/history/rename/:sessionId');
-console.log('   📋 PUT    /api/history/pin/:sessionId');
+console.log('    PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
