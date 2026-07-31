@@ -56,7 +56,7 @@ const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login 
 // ✅ Import sessionController for session routes
 const sessionController = require('./sessionController');
 
-// ✅ NEW: Admin Portal Controllers
+// ✅ Admin Auth Controller (API ONLY - No HTML serving)
 const { setupAdmin } = require('./registerAdmin');
 const { authenticateAdmin } = require('./adminAuthController');
 
@@ -100,14 +100,14 @@ const app = express();
 
 console.log(' [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
-console.log(' [SERVER] PORT:', process.env.PORT || 5001);
+console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
 // ═══════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error(' Please set JWT_SECRET in your .env file and restart the server.');
+    console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
@@ -128,16 +128,16 @@ try {
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
             if (days > 7) {
-                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+                console.warn(`️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
             } else {
                 console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
             }
         }
     } else {
-        console.warn('️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
+        console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
     }
 } catch (err) {
-    console.warn('️ [BACKUP] Could not check backup status:', err.message);
+    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
 }
 
 // ═══════════════════════════════════════════
@@ -146,6 +146,26 @@ try {
 app.use(helmet());
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+
+// ✅ CORS CONFIGURED FOR FRONTEND/BACKEND SEPARATION
+// Replace with your actual Vercel frontend URL
+const ALLOWED_ORIGINS = [
+    'https://skylineai-app.vercel.app', 
+    'http://localhost:3000'
+];
+
+app.use(cors({
+    origin: function(origin, callback) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (ALLOWED_ORIGINS.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true
+}));
 
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -156,7 +176,6 @@ const globalLimiter = rateLimit({
     legacyHeaders: false,
 });
 app.use(globalLimiter);
-app.use(cors());
 
 console.log('✅ [SERVER] Security middleware applied');
 
@@ -174,39 +193,29 @@ app.get('/api/health', (req, res) => {
 // ═══════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 
 // ════════════════════════════════════════════
-//  JSON PARSER & STATIC FILES
+//  JSON PARSER
+//  NOTE: Static file serving REMOVED - Frontend is now separate on Vercel
 // ════════════════════════════════════════════
 app.use(express.json());
-// ✅ Serve static files (like admin-portal.html) from the root directory
-app.use(express.static(path.join(__dirname)));
 
 // ═══════════════════════════════════════════
 //  XSS PROTECTION MIDDLEWARE
-//  ✅ UPDATED: Completely disabled for Admin Portal to prevent blank screens
+//  ✅ Applied globally since no HTML is served from backend
 // ════════════════════════════════════════════
-const ADMIN_PORTAL_PATH = 'habeebullahTheownerofskyline-therichestmanintheworld-allahuakbar-2010';
-
-app.use((req, res, next) => {
-    // Skip ALL XSS protection for the admin portal and its APIs
-    if (req.path === `/${ADMIN_PORTAL_PATH}` || req.path.startsWith('/api/admin/')) {
-        return next(); 
-    }
-    // Apply full protection for all other routes
-    xssProtection(req, res, next);
-    xssOutputProtection(req, res, next);
-});
+app.use(xssProtection);
+app.use(xssOutputProtection);
 
 // ═══════════════════════════════════════════
 //  MONGODB CONNECTION & INDEX CREATION
 // ════════════════════════════════════════════
-console.log('🔗 [SERVER] Connecting to MongoDB...');
+console.log(' [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
     serverSelectionTimeoutMS: 5000
@@ -231,7 +240,7 @@ mongoose.connect(process.env.MONGODB_URI, {
             
             console.log('✅ [SERVER] All database indexes created');
         } catch (indexErr) {
-            console.warn('️ [SERVER] Index creation warning:', indexErr.message);
+            console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message);
         }
         
         startExpiryJob();
@@ -254,9 +263,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ════════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
-        console.log(' [WEBHOOK] Verifying webhook registration...');
+        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log(' [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log('🔗 [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
@@ -270,7 +279,7 @@ async function verifyWebhookRegistration() {
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
-    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
+    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
     
     // Run every 5 minutes
     setInterval(async () => {
@@ -289,7 +298,7 @@ async function startTokenRefreshJob() {
             });
             
             if (expiringAccounts.length > 0) {
-                console.log(` [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
+                console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
             }
             
             for (const account of expiringAccounts) {
@@ -303,7 +312,7 @@ async function startTokenRefreshJob() {
             }
             
         } catch (error) {
-            console.error(' [TOKEN REFRESH] Job error:', error.message);
+            console.error('❌ [TOKEN REFRESH] Job error:', error.message);
         }
     }, 5 * 60 * 1000); // Run every 5 minutes
 }
@@ -325,13 +334,13 @@ app.use('/api', sessionRoutes);
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
-    console.log(' [NYLAS ROUTE] User ID:', req.userId);
+    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
+    console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
-    console.log(' [NYLAS ROUTE] Method:', req.method);
+    console.log('📝 [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 }, nylasAuthController.getAuthUrl);
@@ -357,9 +366,9 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
-    console.log(' [TEST] Full URL:', req.originalUrl);
+    console.log('📥 [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
-    console.log(' [TEST] Headers:', {
+    console.log('📥 [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
     });
@@ -435,7 +444,7 @@ app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 console.log('✅ [SERVER] All lead routes registered');
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  ✅ FOLLOW-UP ROUTES (FIXED)
 // ──────────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering follow-up routes...');
@@ -493,7 +502,7 @@ console.log('✅ [SERVER] Dreams routes registered');
 //  AI SUGGESTION ROUTE
 // ──────────────────────────────────────────────────────────────
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
-    console.log(' [AI SUGGEST] Request received');
+    console.log('💡 [AI SUGGEST] Request received');
     try {
         const { messages } = req.body;
         if (!messages || !Array.isArray(messages)) {
@@ -518,16 +527,9 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // ──────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
-//  ✅ SECURE ADMIN PORTAL ROUTES
+//  ✅ ADMIN API ROUTES (NO HTML SERVING)
+//  Frontend accesses these via fetch() from Vercel
 // ─────────────────────────────────────────────────────────────
-
-// Serve admin portal at secret URL
-app.get(`/${ADMIN_PORTAL_PATH}`, (req, res) => {
-    console.log(`[ADMIN] Portal accessed from IP: ${req.ip}`);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.sendFile(path.join(__dirname, 'admin-portal.html'));
-});
 
 // Check if admin exists (for frontend state detection)
 app.get('/api/admin/portal-state', async (req, res) => {
@@ -548,7 +550,7 @@ app.post('/api/admin/authenticate', authenticateAdmin);
 // Honeypot: Block all other /admin* paths with 404
 app.use(/^\/admin/i, (req, res) => {
     console.warn(`[SECURITY] Suspicious scan from ${req.ip}: ${req.originalUrl}`);
-    res.status(404).send('Not Found');
+    res.status(404).json({ error: 'Not Found' });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -574,7 +576,7 @@ console.log('✅ [SERVER] Report routes registered');
 // ──────────────────────────────────────────────────────────────
 //  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
 // ────────────────────────────────────────────────────────────
-console.log(' [SERVER] Registering history routes...');
+console.log('🔧 [SERVER] Registering history routes...');
 
 // Alias for /api/sessions (history.html uses /api/history/sessions)
 app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
@@ -596,9 +598,9 @@ app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.dele
 
 console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
-console.log('    GET    /api/history/messages/:sessionId');
-console.log('    PUT    /api/history/rename/:sessionId');
-console.log('    PUT    /api/history/pin/:sessionId');
+console.log('   📋 GET    /api/history/messages/:sessionId');
+console.log('   📋 PUT    /api/history/rename/:sessionId');
+console.log'   📋 PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
@@ -723,10 +725,10 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
 
 // ═══════════════════════════════════════════
 //  START SERVER
-// ═════════════════════════════════════════
+// ════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
-    console.log(` Server running on port ${PORT}`); 
+    console.log(`🚀 Server running on port ${PORT}`); 
     console.log(`✅ [SERVER] All routes registered successfully`);
 });
 server.timeout = 300000;
