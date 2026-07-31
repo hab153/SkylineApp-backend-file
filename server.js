@@ -100,10 +100,10 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
+    console.error('️ Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
@@ -124,7 +124,7 @@ try {
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
             if (days > 7) {
-                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+                console.warn(`️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
             } else {
                 console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
             }
@@ -258,9 +258,9 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ══════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
-        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
+        console.log(' [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log('🔗 [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log(' [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
@@ -274,7 +274,7 @@ async function verifyWebhookRegistration() {
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
-    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
+    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
     
     // Run every 5 minutes
     setInterval(async () => {
@@ -329,13 +329,13 @@ app.use('/api', sessionRoutes);
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
-    console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
+    console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
+    console.log(' [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : ' Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
-    console.log('📝 [NYLAS ROUTE] Method:', req.method);
+    console.log(' [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 }, nylasAuthController.getAuthUrl);
@@ -361,9 +361,9 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
-    console.log('📥 [TEST] Full URL:', req.originalUrl);
+    console.log(' [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
-    console.log('📥 [TEST] Headers:', {
+    console.log(' [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
     });
@@ -522,70 +522,49 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // ──────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
-//  ✅ ADMIN LAYER 1: PASSWORD LOGIN (Issues Temp Token)
-// ─────────────────────────────────────────────────────────────
-app.post('/api/admin/login-step1', async (req, res) => {
+//  ✅ DIRECT ADMIN LOGIN (NO LAYER 2)
+// ────────────────────────────────────────────────────────────
+app.post('/api/admin/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        const admin = await User.findOne({ email: email.toLowerCase().trim(), isAdmin: true });
         
-        if (!admin || !(await bcrypt.compare(password, admin.password))) {
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password required' });
+        }
+
+        const admin = await User.findOne({ 
+            email: email.toLowerCase().trim(), 
+            isAdmin: true 
+        });
+
+        // SECURITY: Always run bcrypt even if user not found to prevent timing attacks
+        const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+        const validPassword = admin 
+            ? await bcrypt.compare(password, admin.password)
+            : await bcrypt.compare(password, dummyHash);
+
+        if (!admin || !validPassword) {
+            console.warn(`[ADMIN AUTH FAILED] Email: ${email}, IP: ${req.ip}`);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        // Issue a short-lived temp token valid only for KBA verification
-        const tempToken = jwt.sign({ id: admin._id, step: 'kba' }, process.env.JWT_SECRET, { expiresIn: '2m' });
-        
-        res.json({ tempToken });
-    } catch (err) {
-        res.status(500).json({ error: 'Server error' });
-    }
-});
-
-// ─────────────────────────────────────────────────────────────
-//  ✅ ADMIN LAYER 2: KNOWLEDGE-BASED AUTHENTICATION (KBA)
-// ─────────────────────────────────────────────────────────────
-app.post('/api/admin/verify-kba', verifyToken, async (req, res) => {
-    try {
-        const { answers } = req.body;
-        if (!answers || !Array.isArray(answers) || answers.length !== 5) {
-            return res.status(400).json({ error: 'All 5 answers required' });
-        }
-
-        // Verify temp token is in correct state
-        let decoded;
-        try { decoded = jwt.verify(req.headers.authorization.split(' ')[1], process.env.JWT_SECRET); } 
-        catch { return res.status(401).json({ error: 'Session expired. Please login again.' }); }
-        
-        if (decoded.step !== 'kba') return res.status(401).json({ error: 'Invalid session state' });
-
-        const admin = await User.findById(decoded.id);
-        if (!admin || !admin.isAdmin || !admin.kbaHashes) {
-            return res.status(401).json({ error: 'KBA not configured for this account' });
-        }
-
-        // Verify each answer against stored hash (case-insensitive)
-        const allCorrect = answers.every((answer, index) => 
-            bcrypt.compareSync(answer.toLowerCase().trim(), admin.kbaHashes[index])
+        // Issue final admin session token directly
+        const adminToken = jwt.sign(
+            { 
+                id: admin._id, 
+                role: 'admin',
+                permissions: admin.permissions || ['all']
+            },
+            process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET,
+            { expiresIn: '30m' }
         );
 
-        if (!allCorrect) {
-            console.warn(`[KBA FAILED] Admin ID: ${decoded.id}, IP: ${req.ip}`);
-            return res.status(401).json({ error: 'Incorrect answers' });
-        }
+        console.log(`[ADMIN AUTH SUCCESS] User: ${admin.email}, IP: ${req.ip}`);
+        res.json({ success: true, token: adminToken });
 
-        // Issue final admin session token
-        const finalToken = jwt.sign({ 
-            id: admin._id, 
-            role: 'admin', 
-            permissions: admin.permissions 
-        }, process.env.ADMIN_JWT_SECRET, { expiresIn: '30m' });
-
-        console.log(`[KBA SUCCESS] Admin verified: ${admin.email}`);
-        res.json({ success: true, token: finalToken });
     } catch (err) {
-        console.error('[KBA VERIFY ERROR]', err);
-        res.status(500).json({ error: 'Verification failed' });
+        console.error('[ADMIN AUTH ERROR]', err);
+        res.status(500).json({ error: 'Authentication service unavailable' });
     }
 });
 
@@ -738,9 +717,9 @@ app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
     }
 });
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  ✅ DEBUG ROUTE - Check All Leads
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 app.get('/api/debug/leads', verifyToken, async (req, res) => {
     try {
         const leads = await Lead.find({ userId: req.userId })
