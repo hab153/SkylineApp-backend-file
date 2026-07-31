@@ -96,7 +96,7 @@ const app = express();
 
 console.log(' [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
-console.log(' [SERVER] PORT:', process.env.PORT || 5001);
+console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
@@ -108,7 +108,7 @@ if (!process.env.JWT_SECRET) {
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
 
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 //  BACKUP CHECK
 // ════════════════════════════════════════════
 const fs = require('fs-extra');
@@ -124,7 +124,7 @@ try {
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
             if (days > 7) {
-                console.warn(`️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
             } else {
                 console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
             }
@@ -188,7 +188,7 @@ app.get('/api/health', (req, res) => {
 // ═══════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
-// ═════════════════════════════════════════
+// ════════════════════════════════════════
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
@@ -235,7 +235,7 @@ mongoose.connect(process.env.MONGODB_URI, {
             
             console.log('✅ [SERVER] All database indexes created');
         } catch (indexErr) {
-            console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message);
+            console.warn('️ [SERVER] Index creation warning:', indexErr.message);
         }
         
         startExpiryJob();
@@ -255,12 +255,12 @@ mongoose.connect(process.env.MONGODB_URI, {
 
 // ════════════════════════════════════════════
 //  WEBHOOK VERIFICATION FUNCTION
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
-        console.log(' [WEBHOOK] Verifying webhook registration...');
+        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log(' [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log('🔗 [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
@@ -274,7 +274,7 @@ async function verifyWebhookRegistration() {
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
-    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
+    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
     
     // Run every 5 minutes
     setInterval(async () => {
@@ -329,13 +329,13 @@ app.use('/api', sessionRoutes);
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
+    console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : ' Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
-    console.log('📝 [NYLAS ROUTE] Method:', req.method);
+    console.log(' [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 }, nylasAuthController.getAuthUrl);
@@ -363,7 +363,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('✅ [TEST] Callback test route hit!');
     console.log('📥 [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
-    console.log('📥 [TEST] Headers:', {
+    console.log(' [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
     });
@@ -401,7 +401,7 @@ app.post('/api/auth/forgot-password', validate(forgotPasswordSchema), forgotPass
 app.post('/api/auth/reset-password', validate(resetPasswordSchema), resetPassword);
 app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  USER PROFILE ROUTES
 // ────────────────────────────────────────────────────────────
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
@@ -543,11 +543,12 @@ app.post('/api/admin/create', async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
         
+        // ✅ FIX: Use email as username to avoid duplicate key errors
         const admin = new User({
-            username: 'admin',
+            username: email.toLowerCase().trim(), 
             email: email.toLowerCase().trim(),
             password: hashedPassword,
-            isAdmin: true, // ✅ THIS IS THE ONLY DIFFERENCE FROM USER SIGNUP
+            isAdmin: true, 
             tokenVersion: 0
         });
 
@@ -587,7 +588,7 @@ console.log('✅ [SERVER] Admin routes registered');
 app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
 console.log('✅ [SERVER] Report routes registered');
 
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
 // ───────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering history routes...');
@@ -614,7 +615,7 @@ console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
 console.log('   📋 PUT    /api/history/rename/:sessionId');
-console.log('    PUT    /api/history/pin/:sessionId');
+console.log('   📋 PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
@@ -648,7 +649,7 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
                 messageCount: messages.length,
                 messages: messages.map(m => ({
                     role: m.role,
-                    content: m.content ? m.content.substring(0, 100) : '️ EMPTY',
+                    content: m.content ? m.content.substring(0, 100) : ' EMPTY',
                     contentLength: m.content ? m.content.length : 0,
                     hasContent: !!m.content
                 }))
@@ -737,7 +738,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
     }
 });
 
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 //  START SERVER
 // ════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
