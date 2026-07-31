@@ -100,7 +100,7 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
-// ═════════════════════════════════════════
+// ════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
     console.error('️ Please set JWT_SECRET in your .env file and restart the server.');
@@ -108,7 +108,7 @@ if (!process.env.JWT_SECRET) {
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
 
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 //  BACKUP CHECK
 // ════════════════════════════════════════════
 const fs = require('fs-extra');
@@ -133,7 +133,7 @@ try {
         console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
     }
 } catch (err) {
-    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
+    console.warn('️ [BACKUP] Could not check backup status:', err.message);
 }
 
 // ═══════════════════════════════════════════
@@ -176,7 +176,7 @@ console.log('✅ [SERVER] Security middleware applied');
 
 // ══════════════════════════════════════════
 //  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
-// ═══════════════════════════════════════════
+// ══════════════════════════════════════════
 app.get('/api/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
@@ -266,7 +266,7 @@ async function verifyWebhookRegistration() {
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
         console.log('   → Triggers: message.created, message.sent, grant.expired, grant.refreshed');
     } catch (error) {
-        console.error('❌ [WEBHOOK] Verification error:', error.message);
+        console.error(' [WEBHOOK] Verification error:', error.message);
     }
 }
 
@@ -588,6 +588,38 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
     }
 });
 
+// ──────────────────────────────────────────────────────────────
+//  ✅ LEAD STATISTICS ENDPOINT
+// ──────────────────────────────────────────────────────────────
+app.get('/api/admin/stats/leads', verifyToken, async (req, res) => {
+    try {
+        const now = new Date();
+        
+        // Calculate precise date boundaries
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - now.getDay()); // Sunday as start of week
+        startOfWeek.setHours(0, 0, 0, 0);
+        
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        const startOfYear = new Date(now.getFullYear(), 0, 1);
+
+        // Execute all 4 queries in parallel for maximum performance
+        const [daily, weekly, monthly, yearly] = await Promise.all([
+            Lead.countDocuments({ createdAt: { $gte: startOfDay } }),
+            Lead.countDocuments({ createdAt: { $gte: startOfWeek } }),
+            Lead.countDocuments({ createdAt: { $gte: startOfMonth } }),
+            Lead.countDocuments({ createdAt: { $gte: startOfYear } })
+        ]);
+
+        res.json({ daily, weekly, monthly, yearly });
+    } catch (err) {
+        console.error('[STATS ERROR]', err);
+        res.status(500).json({ error: 'Failed to fetch lead statistics' });
+    }
+});
+
 // Remaining legacy admin routes...
 app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
@@ -633,7 +665,7 @@ console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
 console.log('    PUT    /api/history/rename/:sessionId');
 console.log('    PUT    /api/history/pin/:sessionId');
-console.log('   📋 DELETE /api/history/delete/:sessionId');
+console.log('    DELETE /api/history/delete/:sessionId');
 
 // ──────────────────────────────────────────────────────────────
 //  DEBUG ROUTE - Check messages (Remove after fixing)
