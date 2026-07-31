@@ -13,6 +13,7 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
+const { verifyAdminToken } = require('./adminAuthMiddleware'); // ✅ NEW ADMIN MIDDLEWARE
 const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 
@@ -94,7 +95,7 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
-console.log('🚀 [SERVER] Starting server...');
+console.log(' [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
@@ -102,7 +103,7 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 //  CRITICAL STARTUP CHECKS
 // ════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
-    console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
+    console.error(' CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
     console.error('️ Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
@@ -176,7 +177,7 @@ console.log('✅ [SERVER] Security middleware applied');
 
 // ══════════════════════════════════════════
 //  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 app.get('/api/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
@@ -299,7 +300,7 @@ async function startTokenRefreshJob() {
             for (const account of expiringAccounts) {
                 try {
                     const { refreshNylasToken } = require('./nylasService');
-                    console.log(`🔄 [TOKEN REFRESH] Refreshing token for user: ${account.userId}`);
+                    console.log(` [TOKEN REFRESH] Refreshing token for user: ${account.userId}`);
                     await refreshNylasToken(account.userId);
                 } catch (err) {
                     console.error(`❌ [TOKEN REFRESH] Failed to refresh for user ${account.userId}:`, err.message);
@@ -418,10 +419,10 @@ app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletion
 
 // ──────────────────────────────────────────────────────────────
 //  DATA EXPORT ROUTES (Right to Data Portability – GDPR)
-// ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 app.use('/api/data', dataExportRoutes);
 
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 //  LEAD / CONVERSATION ROUTES
 // ─────────────────────────────────────────────────────────────
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
@@ -576,8 +577,9 @@ app.use(/^\/admin/i, (req, res) => {
 
 // ──────────────────────────────────────────────────────────────
 //  ✅ GET ALL USERS ENDPOINT (Direct & Unfiltered)
+//  ✅ NOW USES verifyAdminToken INSTEAD OF verifyToken
 // ──────────────────────────────────────────────────────────────
-app.get('/api/admin/users', verifyToken, async (req, res) => {
+app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     try {
         // Fetch all users, selecting only necessary fields for security
         const users = await User.find({}).select('email username isAdmin createdAt _id');
@@ -590,8 +592,9 @@ app.get('/api/admin/users', verifyToken, async (req, res) => {
 
 // ──────────────────────────────────────────────────────────────
 //  ✅ LEAD STATISTICS ENDPOINT
+//  ✅ NOW USES verifyAdminToken INSTEAD OF verifyToken
 // ──────────────────────────────────────────────────────────────
-app.get('/api/admin/stats/leads', verifyToken, async (req, res) => {
+app.get('/api/admin/stats/leads', verifyAdminToken, async (req, res) => {
     try {
         const now = new Date();
         
@@ -621,14 +624,15 @@ app.get('/api/admin/stats/leads', verifyToken, async (req, res) => {
 });
 
 // Remaining legacy admin routes...
-app.post('/api/admin/verify-layer-2', verifyToken, adminController.adminVerifyLayer2);
-app.post('/api/admin/verify-layer-3', verifyToken, adminController.adminVerifyLayer3);
-app.put('/api/admin/users/:id/suspend', verifyToken, adminController.suspendUser);
-app.delete('/api/admin/users/:id', verifyToken, adminController.deleteUser);
-app.get('/api/admin/users/:id/details', verifyToken, adminController.getUserDetails);
-app.get('/api/admin/users/:id/chat-view', verifyToken, adminController.getUserChatView);
-app.post('/api/admin/users/:id/message', verifyToken, validate(adminMessageSchema), adminController.sendUserMessage);
-app.get('/api/admin/reports', verifyToken, adminController.getAllReports);
+// ✅ ALL UPDATED TO USE verifyAdminToken
+app.post('/api/admin/verify-layer-2', verifyAdminToken, adminController.adminVerifyLayer2);
+app.post('/api/admin/verify-layer-3', verifyAdminToken, adminController.adminVerifyLayer3);
+app.put('/api/admin/users/:id/suspend', verifyAdminToken, adminController.suspendUser);
+app.delete('/api/admin/users/:id', verifyAdminToken, adminController.deleteUser);
+app.get('/api/admin/users/:id/details', verifyAdminToken, adminController.getUserDetails);
+app.get('/api/admin/users/:id/chat-view', verifyAdminToken, adminController.getUserChatView);
+app.post('/api/admin/users/:id/message', verifyAdminToken, validate(adminMessageSchema), adminController.sendUserMessage);
+app.get('/api/admin/reports', verifyAdminToken, adminController.getAllReports);
 console.log('✅ [SERVER] Admin routes registered');
 
 // ──────────────────────────────────────────────────────────────
