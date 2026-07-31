@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skyline Admin Portal</title>
+    <style>
+        body { background: #0a0a0a; color: #f5f5f5; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .container { background: #1a1a1a; padding: 40px; border-radius: 12px; width: 100%; max-width: 420px; border: 1px solid rgba(255,255,255,0.08); }
+        h1 { font-size: 20px; margin-bottom: 8px; text-align: center; }
+        p { color: #707070; font-size: 13px; margin-bottom: 24px; text-align: center; line-height: 1.5; }
+        label { display: block; font-size: 11px; color: #b0b0b0; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+        input { width: 100%; background: #121212; border: 1px solid rgba(255,255,255,0.1); color: #f5f5f5; padding: 12px; border-radius: 8px; margin-bottom: 16px; box-sizing: border-box; font-size: 14px; }
+        input:focus { outline: none; border-color: #66dd99; }
+        button { width: 100%; background: #66dd99; color: #000; border: none; padding: 12px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 14px; transition: opacity 0.2s; }
+        button:hover:not(:disabled) { opacity: 0.9; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .error { color: #ff5555; font-size: 12px; margin-top: 12px; text-align: center; display: none; }
+        .success { color: #66dd99; font-size: 12px; margin-top: 12px; text-align: center; display: none; }
+        .warning { background: rgba(255,187,68,0.1); border: 1px solid rgba(255,187,68,0.2); color: #ffbb44; font-size: 11px; padding: 10px; border-radius: 6px; margin-bottom: 20px; text-align: center; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- REGISTRATION VIEW -->
+        <div id="registerView" class="hidden">
+            <h1> Skyline Admin Setup</h1>
+            <p>Create the first administrator account.<br>This portal will convert to login-only after registration.</p>
+            <div class="warning">⚠️ ONE-TIME SETUP. Save credentials securely.</div>
+            <form id="setupForm">
+                <label>Setup Key (Temporary)</label>
+                <input type="text" id="setupKey" placeholder="Enter temporary setup key" required autocomplete="off">
+                <label>Admin Email</label>
+                <input type="email" id="regEmail" placeholder="admin@skyline.com" required autocomplete="off">
+                <label>Password</label>
+                <input type="password" id="regPassword" placeholder="Min 8 characters" required minlength="8" autocomplete="new-password">
+                <button type="submit" id="setupBtn">Create Admin Account</button>
+                <div class="error" id="setupError"></div>
+                <div class="success" id="setupSuccess"></div>
+            </form>
+        </div>
+
+        <!-- LOGIN VIEW -->
+        <div id="loginView" class="hidden">
+            <h1>🛡️ Skyline Admin Portal</h1>
+            <p>Authorized personnel only. All access is logged.</p>
+            <form id="loginForm">
+                <label>Email</label>
+                <input type="email" id="loginEmail" placeholder="admin@skyline.com" required autocomplete="off">
+                <label>Password</label>
+                <input type="password" id="loginPassword" placeholder="Password" required autocomplete="current-password">
+                <button type="submit" id="loginBtn">Authenticate</button>
+                <div class="error" id="loginError"></div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Check portal state on load
+        async function checkPortalState() {
+            try {
+                const res = await fetch('/api/admin/portal-state');
+                const data = await res.json();
+                
+                if (data.adminExists) {
+                    document.getElementById('loginView').classList.remove('hidden');
+                } else {
+                    document.getElementById('registerView').classList.remove('hidden');
+                }
+            } catch (err) {
+                // Default to login view on error for security
+                document.getElementById('loginView').classList.remove('hidden');
+            }
+        }
+
+        // Registration handler
+        document.getElementById('setupForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('setupBtn');
+            const errDiv = document.getElementById('setupError');
+            const sucDiv = document.getElementById('setupSuccess');
+            
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+            errDiv.style.display = 'none';
+            sucDiv.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/admin/setup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        setupKey: document.getElementById('setupKey').value,
+                        email: document.getElementById('regEmail').value,
+                        password: document.getElementById('regPassword').value
+                    })
+                });
+
+                const data = await res.json();
+                
+                if (res.ok && data.success) {
+                    sucDiv.textContent = '✅ Admin account created! Redirecting...';
+                    sucDiv.style.display = 'block';
+                    setTimeout(() => window.location.reload(), 2000);
+                } else {
+                    errDiv.textContent = data.error || 'Setup failed';
+                    errDiv.style.display = 'block';
+                }
+            } catch (err) {
+                errDiv.textContent = 'Connection error. Please try again.';
+                errDiv.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Create Admin Account';
+            }
+        });
+
+        // Login handler
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const errDiv = document.getElementById('loginError');
+            
+            btn.disabled = true;
+            btn.textContent = 'Verifying...';
+            errDiv.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/admin/authenticate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        email: document.getElementById('loginEmail').value,
+                        password: document.getElementById('loginPassword').value
+                    })
+                });
+
+                const data = await res.json();
+                
+                if (res.ok && data.success) {
+                    window.location.href = data.redirectUrl || '/admin/dashboard';
+                } else {
+                    errDiv.textContent = data.error || 'Authentication failed';
+                    errDiv.style.display = 'block';
+                }
+            } catch (err) {
+                errDiv.textContent = 'Connection error. Please try again.';
+                errDiv.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Authenticate';
+            }
+        });
+
+        // Initialize
+        checkPortalState();
+    </script>
+</body>
+                  </html>
