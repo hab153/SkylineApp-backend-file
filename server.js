@@ -98,9 +98,9 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
-console.log('🚀 [SERVER] Starting server...');
+console.log(' [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
-console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
+console.log(' [SERVER] PORT:', process.env.PORT || 5001);
 
 // ══════════════════════════════════════════
 //  CRITICAL STARTUP CHECKS
@@ -137,7 +137,7 @@ try {
         console.warn('️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
     }
 } catch (err) {
-    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
+    console.warn('️ [BACKUP] Could not check backup status:', err.message);
 }
 
 // ═══════════════════════════════════════════
@@ -174,7 +174,7 @@ app.get('/api/health', (req, res) => {
 // ═══════════════════════════════════════════
 //  WEBHOOKS (EXEMPT FROM XSS)
 //  NOTE: These must be BEFORE express.json() to handle raw payloads
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
@@ -187,23 +187,23 @@ app.use(express.json());
 // ✅ Serve static files (like admin-portal.html) from the root directory
 app.use(express.static(path.join(__dirname)));
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  XSS PROTECTION MIDDLEWARE
-//  ✅ UPDATED: Skip output protection for Admin Portal to prevent blank screens
+//  ✅ UPDATED: Completely disabled for Admin Portal to prevent blank screens
 // ════════════════════════════════════════════
 const ADMIN_PORTAL_PATH = 'habeebullahTheownerofskyline-therichestmanintheworld-allahuakbar-2010';
 
 app.use((req, res, next) => {
-    // If requesting the admin portal, skip XSS output protection
-    if (req.path === `/${ADMIN_PORTAL_PATH}`) {
-        return xssProtection(req, res, next); // Only apply input protection
+    // Skip ALL XSS protection for the admin portal and its APIs
+    if (req.path === `/${ADMIN_PORTAL_PATH}` || req.path.startsWith('/api/admin/')) {
+        return next(); 
     }
-    // Apply both input and output protection for all other routes
+    // Apply full protection for all other routes
     xssProtection(req, res, next);
     xssOutputProtection(req, res, next);
 });
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  MONGODB CONNECTION & INDEX CREATION
 // ════════════════════════════════════════════
 console.log('🔗 [SERVER] Connecting to MongoDB...');
@@ -289,7 +289,7 @@ async function startTokenRefreshJob() {
             });
             
             if (expiringAccounts.length > 0) {
-                console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
+                console.log(` [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
             }
             
             for (const account of expiringAccounts) {
@@ -303,7 +303,7 @@ async function startTokenRefreshJob() {
             }
             
         } catch (error) {
-            console.error('❌ [TOKEN REFRESH] Job error:', error.message);
+            console.error(' [TOKEN REFRESH] Job error:', error.message);
         }
     }, 5 * 60 * 1000); // Run every 5 minutes
 }
@@ -326,7 +326,7 @@ app.use('/api', sessionRoutes);
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
-    console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
+    console.log(' [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : '❌ Missing',
         'content-type': req.headers['content-type'] || 'Not set'
@@ -357,7 +357,7 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
-    console.log('📥 [TEST] Full URL:', req.originalUrl);
+    console.log(' [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
     console.log(' [TEST] Headers:', {
         host: req.headers.host,
@@ -524,6 +524,8 @@ console.log('✅ [SERVER] AI suggestion route registered');
 // Serve admin portal at secret URL
 app.get(`/${ADMIN_PORTAL_PATH}`, (req, res) => {
     console.log(`[ADMIN] Portal accessed from IP: ${req.ip}`);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'admin-portal.html'));
 });
 
@@ -571,7 +573,7 @@ console.log('✅ [SERVER] Report routes registered');
 
 // ──────────────────────────────────────────────────────────────
 //  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
 console.log(' [SERVER] Registering history routes...');
 
 // Alias for /api/sessions (history.html uses /api/history/sessions)
@@ -595,7 +597,7 @@ app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.dele
 console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('    GET    /api/history/messages/:sessionId');
-console.log('   📋 PUT    /api/history/rename/:sessionId');
+console.log('    PUT    /api/history/rename/:sessionId');
 console.log('    PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
@@ -721,7 +723,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
 
 // ═══════════════════════════════════════════
 //  START SERVER
-// ══════════════════════════════════════════
+// ═════════════════════════════════════════
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
     console.log(` Server running on port ${PORT}`); 
