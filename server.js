@@ -95,7 +95,7 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 dotenv.config();
 const app = express();
 
-console.log(' [SERVER] Starting server...');
+console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
@@ -103,8 +103,8 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 //  CRITICAL STARTUP CHECKS
 // ════════════════════════════════════════
 if (!process.env.JWT_SECRET) {
-    console.error(' CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('️ Please set JWT_SECRET in your .env file and restart the server.');
+    console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
+    console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
     process.exit(1);
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
@@ -125,7 +125,7 @@ try {
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
             if (days > 7) {
-                console.warn(`️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
             } else {
                 console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
             }
@@ -134,7 +134,7 @@ try {
         console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
     }
 } catch (err) {
-    console.warn('️ [BACKUP] Could not check backup status:', err.message);
+    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
 }
 
 // ═══════════════════════════════════════════
@@ -236,7 +236,7 @@ mongoose.connect(process.env.MONGODB_URI, {
             
             console.log('✅ [SERVER] All database indexes created');
         } catch (indexErr) {
-            console.warn('️ [SERVER] Index creation warning:', indexErr.message);
+            console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message);
         }
         
         startExpiryJob();
@@ -259,15 +259,15 @@ mongoose.connect(process.env.MONGODB_URI, {
 // ══════════════════════════════════════════
 async function verifyWebhookRegistration() {
     try {
-        console.log(' [WEBHOOK] Verifying webhook registration...');
+        console.log('🔍 [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
-        console.log(' [WEBHOOK] Please register this URL in Nylas Dashboard:');
+        console.log('🔗 [WEBHOOK] Please register this URL in Nylas Dashboard:');
         console.log('   → https://dashboard.nylas.com');
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
         console.log('   → Triggers: message.created, message.sent, grant.expired, grant.refreshed');
     } catch (error) {
-        console.error(' [WEBHOOK] Verification error:', error.message);
+        console.error('❌ [WEBHOOK] Verification error:', error.message);
     }
 }
 
@@ -275,7 +275,7 @@ async function verifyWebhookRegistration() {
 //  TOKEN REFRESH JOB
 // ════════════════════════════════════════════
 async function startTokenRefreshJob() {
-    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
+    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
     
     // Run every 5 minutes
     setInterval(async () => {
@@ -294,13 +294,13 @@ async function startTokenRefreshJob() {
             });
             
             if (expiringAccounts.length > 0) {
-                console.log(` [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
+                console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
             }
             
             for (const account of expiringAccounts) {
                 try {
                     const { refreshNylasToken } = require('./nylasService');
-                    console.log(` [TOKEN REFRESH] Refreshing token for user: ${account.userId}`);
+                    console.log(`🔄 [TOKEN REFRESH] Refreshing token for user: ${account.userId}`);
                     await refreshNylasToken(account.userId);
                 } catch (err) {
                     console.error(`❌ [TOKEN REFRESH] Failed to refresh for user ${account.userId}:`, err.message);
@@ -308,7 +308,7 @@ async function startTokenRefreshJob() {
             }
             
         } catch (error) {
-            console.error(' [TOKEN REFRESH] Job error:', error.message);
+            console.error('❌ [TOKEN REFRESH] Job error:', error.message);
         }
     }, 5 * 60 * 1000); // Run every 5 minutes
 }
@@ -330,13 +330,13 @@ app.use('/api', sessionRoutes);
 // ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(' [NYLAS ROUTE] /api/auth/nylas/connect called');
-    console.log(' [NYLAS ROUTE] User ID:', req.userId);
+    console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
+    console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
     console.log('📝 [NYLAS ROUTE] Headers:', {
         authorization: req.headers.authorization ? '✅ Present' : ' Missing',
         'content-type': req.headers['content-type'] || 'Not set'
     });
-    console.log(' [NYLAS ROUTE] Method:', req.method);
+    console.log('📝 [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
 }, nylasAuthController.getAuthUrl);
@@ -362,9 +362,9 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
-    console.log(' [TEST] Full URL:', req.originalUrl);
-    console.log(' [TEST] Query params:', req.query);
-    console.log(' [TEST] Headers:', {
+    console.log('📥 [TEST] Full URL:', req.originalUrl);
+    console.log('📥 [TEST] Query params:', req.query);
+    console.log('📥 [TEST] Headers:', {
         host: req.headers.host,
         'user-agent': req.headers['user-agent']
     });
@@ -443,7 +443,7 @@ console.log('✅ [SERVER] All lead routes registered');
 // ─────────────────────────────────────────────────────────────
 //  ✅ FOLLOW-UP ROUTES (FIXED)
 // ──────────────────────────────────────────────────────────────
-console.log(' [SERVER] Registering follow-up routes...');
+console.log('🔧 [SERVER] Registering follow-up routes...');
 
 // ✅ Get follow-up status first (no body validation needed)
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
@@ -591,35 +591,57 @@ app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
 });
 
 // ──────────────────────────────────────────────────────────────
-//  ✅ LEAD STATISTICS ENDPOINT
+//  ✅ REAL-TIME LEAD STATISTICS (AGGREGATION PIPELINE)
 //  ✅ NOW USES verifyAdminToken INSTEAD OF verifyToken
 // ──────────────────────────────────────────────────────────────
 app.get('/api/admin/stats/leads', verifyAdminToken, async (req, res) => {
     try {
         const now = new Date();
         
-        // Calculate precise date boundaries
+        // Define boundaries based on server time (ensure your server TZ is correct)
         const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        
         const startOfWeek = new Date(now);
-        startOfWeek.setDate(now.getDate() - now.getDay()); // Sunday as start of week
+        startOfWeek.setDate(now.getDate() - now.getDay()); 
         startOfWeek.setHours(0, 0, 0, 0);
-        
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const startOfYear = new Date(now.getFullYear(), 0, 1);
 
-        // Execute all 4 queries in parallel for maximum performance
-        const [daily, weekly, monthly, yearly] = await Promise.all([
-            Lead.countDocuments({ createdAt: { $gte: startOfDay } }),
-            Lead.countDocuments({ createdAt: { $gte: startOfWeek } }),
-            Lead.countDocuments({ createdAt: { $gte: startOfMonth } }),
-            Lead.countDocuments({ createdAt: { $gte: startOfYear } })
+        // Single Aggregation Pipeline for Maximum Performance
+        const stats = await Lead.aggregate([
+            {
+                $facet: {
+                    daily: [
+                        { $match: { createdAt: { $gte: startOfDay } } },
+                        { $count: "total" }
+                    ],
+                    weekly: [
+                        { $match: { createdAt: { $gte: startOfWeek } } },
+                        { $count: "total" }
+                    ],
+                    monthly: [
+                        { $match: { createdAt: { $gte: startOfMonth } } },
+                        { $count: "total" }
+                    ],
+                    yearly: [
+                        { $match: { createdAt: { $gte: startOfYear } } },
+                        { $count: "total" }
+                    ]
+                }
+            }
         ]);
 
-        res.json({ daily, weekly, monthly, yearly });
+        // Extract counts from the facet result (default to 0 if empty)
+        const result = {
+            daily: stats[0].daily[0]?.total || 0,
+            weekly: stats[0].weekly[0]?.total || 0,
+            monthly: stats[0].monthly[0]?.total || 0,
+            yearly: stats[0].yearly[0]?.total || 0
+        };
+
+        res.json(result);
     } catch (err) {
-        console.error('[STATS ERROR]', err);
-        res.status(500).json({ error: 'Failed to fetch lead statistics' });
+        console.error('[STATS AGGREGATION ERROR]', err);
+        res.status(500).json({ error: 'Failed to calculate lead statistics' });
     }
 });
 
