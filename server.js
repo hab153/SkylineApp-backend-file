@@ -99,13 +99,38 @@ console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
-// ─── CRITICAL STARTUP CHECKS ───
-if (!process.env.JWT_SECRET) {
-    console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
-    console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
+// ─── ✅ CRITICAL: Validate all required environment variables ───
+const requiredEnvVars = [
+    'JWT_SECRET',
+    'NYLAS_CLIENT_ID',
+    'NYLAS_CLIENT_SECRET',
+    'NYLAS_API_KEY',
+    'FLUTTERWAVE_SECRET_KEY',
+    'FLUTTERWAVE_SECRET_HASH',
+    'MONGODB_URI'
+];
+
+const missingEnvVars = requiredEnvVars.filter(varName => {
+    const value = process.env[varName];
+    return !value || value.trim() === '';
+});
+
+if (missingEnvVars.length > 0) {
+    console.error('❌ CRITICAL ERROR: Missing required environment variables:');
+    missingEnvVars.forEach(varName => {
+        console.error(`   ⚠️ ${varName} is not defined or empty`);
+    });
+    console.error('');
+    console.error('⚠️ Please set all required environment variables in your .env file or Render dashboard.');
+    console.error('⚠️ The server will not start until all required variables are configured.');
     process.exit(1);
 }
-console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
+
+console.log('✅ All required environment variables are configured');
+console.log(`   📋 JWT_SECRET: ${process.env.JWT_SECRET ? '✅ Set' : '❌ Missing'}`);
+console.log(`   📋 NYLAS_CLIENT_ID: ${process.env.NYLAS_CLIENT_ID ? '✅ Set' : '❌ Missing'}`);
+console.log(`   📋 NYLAS_API_KEY: ${process.env.NYLAS_API_KEY ? '✅ Set' : '❌ Missing'}`);
+console.log(`   📋 FLUTTERWAVE_SECRET_KEY: ${process.env.FLUTTERWAVE_SECRET_KEY ? '✅ Set' : '❌ Missing'}`);
 
 // ─── BACKUP CHECK ───
 const fs = require('fs-extra');
