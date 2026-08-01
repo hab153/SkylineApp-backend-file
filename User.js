@@ -62,10 +62,18 @@ const UserSchema = new mongoose.Schema({
     },
     // ============================================================
 
-    // --- ADMIN SECURITY FIELDS ---
+    // ─── ✅ ADMIN SECURITY FIELDS (UPDATED) ───
     isAdmin: {
         type: Boolean,
         default: false
+    },
+    securitySetupComplete: {
+        type: Boolean,
+        default: false
+    },
+    securitySetupDate: {
+        type: Date,
+        default: null
     },
     adminAns_dish: { type: String, default: null },
     adminAns_pn:   { type: String, default: null },
@@ -140,7 +148,7 @@ const UserSchema = new mongoose.Schema({
         subscriptionEndDate: { type: Date }
     }],
 
-    // ✅ REPLACED: Nylas Integration (instead of Gmail)
+    // ✅ Nylas Integration
     nylasIntegration: {
         accessToken: {
             type: String,
