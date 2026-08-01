@@ -233,7 +233,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - COMPLETE FIX WITH IDEMPOTENCY
+//  POST /api/leads/batch-send - COMPLETE FIX WITH IDEMPOTENCY + BATCH SIZE LIMIT
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -247,9 +247,34 @@ const batchSend = async (req, res) => {
         
         const { leads, leadId, allowNewLead = true } = req.body;
         
-        if (!Array.isArray(leads) || leads.length === 0) {
-            return res.status(400).json({ message: 'Leads array is required' });
+        // ─── ✅ BATCH SIZE VALIDATION ───
+        const MAX_BATCH_SIZE = 100;
+        const MIN_BATCH_SIZE = 1;
+        
+        if (!Array.isArray(leads)) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Leads must be an array' 
+            });
         }
+        
+        if (leads.length === 0) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'At least one lead is required' 
+            });
+        }
+        
+        if (leads.length > MAX_BATCH_SIZE) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `Batch size exceeds maximum limit of ${MAX_BATCH_SIZE} leads. You sent ${leads.length}.`,
+                maxAllowed: MAX_BATCH_SIZE,
+                sentCount: leads.length
+            });
+        }
+        
+        console.log(`📊 [BE-BATCH] Processing ${leads.length} leads (max: ${MAX_BATCH_SIZE})`);
 
         // ─── CHECK EMAIL LIMIT FIRST ───
         try {
@@ -398,7 +423,7 @@ const batchSend = async (req, res) => {
             let results = [];
             let anyFailed = false;
 
-            // Loop through all leads sent from page.html
+            // ─── PROCESS LEADS (with batch size already validated) ───
             for (const leadData of leads) {
                 const now = new Date();
                 const leadEmail = sanitizeEmail(leadData.email);
