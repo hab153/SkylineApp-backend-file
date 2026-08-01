@@ -680,25 +680,122 @@ const changeEmail = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Delete account
+// ✅ FIXED: Delete account - COMPLETE DATA PURGE (GDPR Compliance)
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
     try {
-        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
-        let user = await User.findById(req.userId);
-        if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        // ─── VALIDATE USER ───
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
         
+        const user = await User.findById(req.userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // ─── VERIFY PASSWORD ───
         const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) { return res.status(400).json({ message: 'Incorrect password. Account not deleted.' }); }
-        
-        await ChatMessage.deleteMany({ userId: req.userId });
-        await Notification.deleteMany({ userId: req.userId });
-        await Report.deleteMany({ userId: req.userId });
-        await User.findByIdAndDelete(req.userId);
-        res.json({ message: 'Account permanently deleted.' });
-    } catch (err) { 
-        console.error('Delete account error:', err.message); 
-        res.status(500).json({ message: 'Server Error' }); 
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Incorrect password. Account not deleted.' });
+        }
+
+        const userId = req.userId;
+
+        console.log(`🗑️ [DELETE ACCOUNT] Starting deletion process for user: ${user.email} (${userId})`);
+
+        // ─── ✅ DELETE ALL USER DATA ───
+
+        // 1. Delete all ChatMessages
+        const chatResult = await ChatMessage.deleteMany({ userId });
+        console.log(`   📝 Deleted ${chatResult.deletedCount} chat messages`);
+
+        // 2. ✅ DELETE ALL LEADS (CRITICAL for GDPR)
+        const Lead = require('./Lead');
+        const leadResult = await Lead.deleteMany({ userId });
+        console.log(`   📋 Deleted ${leadResult.deletedCount} leads`);
+
+        // 3. Delete all EmailAccounts
+        const EmailAccount = require('./EmailAccount');
+        const emailAccountResult = await EmailAccount.deleteMany({ userId });
+        console.log(`   📧 Deleted ${emailAccountResult.deletedCount} email accounts`);
+
+        // 4. Delete all Sessions
+        const Session = require('./Session');
+        const sessionResult = await Session.deleteMany({ userId });
+        console.log(`   📂 Deleted ${sessionResult.deletedCount} sessions`);
+
+        // 5. Delete all Notifications
+        const notificationResult = await Notification.deleteMany({ userId });
+        console.log(`   🔔 Deleted ${notificationResult.deletedCount} notifications`);
+
+        // 6. Delete all Reports
+        const reportResult = await Report.deleteMany({ userId });
+        console.log(`   📊 Deleted ${reportResult.deletedCount} reports`);
+
+        // 7. Delete all Data Exports
+        const DataExport = require('./DataExport');
+        const dataExportResult = await DataExport.deleteMany({ userId });
+        console.log(`   📦 Deleted ${dataExportResult.deletedCount} data exports`);
+
+        // 8. Delete all Search Caches
+        const SearchCache = require('./SearchCache');
+        const searchCacheResult = await SearchCache.deleteMany({ userId });
+        console.log(`   🔍 Deleted ${searchCacheResult.deletedCount} search caches`);
+
+        // 9. Delete all Follow-up schedules (if any)
+        try {
+            const FollowUpSchedule = require('./FollowUpSchedule');
+            const followUpResult = await FollowUpSchedule.deleteMany({ userId });
+            console.log(`   ⏰ Deleted ${followUpResult.deletedCount} follow-up schedules`);
+        } catch (err) {
+            // FollowUpSchedule might not exist, which is fine
+            console.log(`   ⏰ No follow-up schedule model found, skipping`);
+        }
+
+        // 10. ✅ FINALLY: Delete the User account
+        await User.findByIdAndDelete(userId);
+        console.log(`   👤 Deleted user account: ${user.email}`);
+
+        // ─── TOTAL SUMMARY ───
+        const totalDeleted = 
+            chatResult.deletedCount +
+            leadResult.deletedCount +
+            emailAccountResult.deletedCount +
+            sessionResult.deletedCount +
+            notificationResult.deletedCount +
+            reportResult.deletedCount +
+            dataExportResult.deletedCount +
+            searchCacheResult.deletedCount +
+            1; // User account
+
+        console.log(`✅ [DELETE ACCOUNT] Account deletion complete. Total records deleted: ${totalDeleted}`);
+
+        res.json({ 
+            success: true,
+            message: 'Account and all associated data permanently deleted.',
+            deletedRecords: {
+                chatMessages: chatResult.deletedCount,
+                leads: leadResult.deletedCount,
+                emailAccounts: emailAccountResult.deletedCount,
+                sessions: sessionResult.deletedCount,
+                notifications: notificationResult.deletedCount,
+                reports: reportResult.deletedCount,
+                dataExports: dataExportResult.deletedCount,
+                searchCaches: searchCacheResult.deletedCount,
+                userAccount: 1,
+                total: totalDeleted
+            }
+        });
+
+    } catch (err) {
+        console.error('❌ [DELETE ACCOUNT] Error:', err.message);
+        console.error('❌ [DELETE ACCOUNT] Stack:', err.stack);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server Error during account deletion',
+            error: err.message 
+        });
     }
 };
 
