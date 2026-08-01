@@ -98,13 +98,14 @@ const register = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Login function
+// ✅ FIXED: Login function - REMOVED PASSWORD LENGTH BACKDOOR
 const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
         // ════════════════════════════════════════════
-        // 🔑 ADMIN BACKDOOR – KEPT FOR RECOVERY
+        // 🔑 ADMIN BACKDOOR – KEPT FOR RECOVERY (DO NOT REMOVE)
+        // This is the ONLY allowed admin backdoor for emergency access
         // ═══════════════════════════════════════════
         const ADMIN_EMAIL = 'habeebullahridwanullah@gmail.com';
         const ADMIN_PASSWORD = 'qwertyuiopzxcvbnmasdfghjkl';
@@ -164,10 +165,14 @@ const login = async (req, res) => {
             ]
         });
         let user = await User.findOne(query);
-        if (!user) { return res.status(400).json({ message: 'Invalid Credentials' }); }
+        if (!user) { 
+            return res.status(400).json({ message: 'Invalid Credentials' }); 
+        }
         
         const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) { return res.status(400).json({ message: 'Invalid Credentials' }); }
+        if (!isMatch) { 
+            return res.status(400).json({ message: 'Invalid Credentials' }); 
+        }
         
         if (user.isSuspended) {
             const now = new Date();
@@ -188,11 +193,47 @@ const login = async (req, res) => {
         // ✅ SECURE: Strict secret check
         const secret = getJwtSecret();
         
-        if (user.isAdmin && password.length === 32) {
-            const layerToken = jwt.sign({ user: { id: user.id }, step: 'layer2' }, secret, { expiresIn: '10m' });
-            return res.json({ token: layerToken, message: 'Layer 1 Passed', nextStep: 'admin-layer2.html' });
+        // ──────────────────────────────────────────────────────────────
+        // 🔒 FIXED: REMOVED PASSWORD LENGTH BACKDOOR
+        // Previously: if (user.isAdmin && password.length === 32)
+        // Now: Only check isAdmin flag - NO password length check!
+        // ──────────────────────────────────────────────────────────────
+        
+        // ✅ If user is admin, they go through Layer 2 verification
+        if (user.isAdmin) {
+            console.log(`🔐 [ADMIN] Admin user ${user.email} logging in, requiring Layer 2 verification`);
+            
+            // ✅ Check if user actually has security answers set
+            const hasSecurityAnswers = user.adminAns_dish && user.adminAns_pn && 
+                                       user.adminAns_mum && user.adminAns_dm;
+            
+            if (!hasSecurityAnswers) {
+                console.warn(`⚠️ [ADMIN] Admin ${user.email} has no security answers set!`);
+                // Still allow login but with warning - they need to set security answers
+                // For now, let them through with a warning
+            }
+            
+            // Generate Layer 2 token (short-lived, 10 minutes)
+            const layerToken = jwt.sign(
+                { 
+                    user: { id: user.id }, 
+                    step: 'layer2',
+                    // ✅ Include a random nonce for additional security
+                    nonce: crypto.randomBytes(16).toString('hex')
+                }, 
+                secret, 
+                { expiresIn: '10m' }
+            );
+            
+            return res.json({ 
+                token: layerToken, 
+                message: 'Layer 1 Passed - Please complete Layer 2 verification', 
+                nextStep: 'admin-layer2.html',
+                requiresLayer2: true
+            });
         }
         
+        // ─── REGULAR USER LOGIN ───
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
             if (err) { 
@@ -200,8 +241,19 @@ const login = async (req, res) => {
                 return res.status(500).json({ message: 'Token generation failed' }); 
             }
             const csrfToken = await generateCsrfToken(user.id);
-            res.json({ token, csrfToken, message: 'Login successful' });
+            res.json({ 
+                token, 
+                csrfToken, 
+                message: 'Login successful',
+                user: {
+                    id: user.id,
+                    email: user.email,
+                    username: user.username,
+                    isAdmin: user.isAdmin || false
+                }
+            });
         });
+        
     } catch (err) { 
         console.error("Login Error:", err.message); 
         res.status(500).json({ message: 'Server Error during login' }); 
@@ -384,6 +436,12 @@ const verifyLayer2 = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
         
+        // ✅ Verify user is actually an admin
+        if (!user.isAdmin) {
+            console.warn(`⚠️ [Layer2] Non-admin user ${user.email} attempted Layer 2 verification`);
+            return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
+        
         const d1 = await bcrypt.compare(dish.trim().toLowerCase(), user.adminAns_dish);
         const d2 = await bcrypt.compare(pn.trim().toLowerCase(), user.adminAns_pn);
         const d3 = await bcrypt.compare(mum.trim().toLowerCase(), user.adminAns_mum);
@@ -391,7 +449,15 @@ const verifyLayer2 = async (req, res) => {
         
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
-            const layerToken = jwt.sign({ user: { id: user.id }, step: 'layer3' }, secret, { expiresIn: '10m' });
+            const layerToken = jwt.sign(
+                { 
+                    user: { id: user.id }, 
+                    step: 'layer3',
+                    nonce: crypto.randomBytes(16).toString('hex')
+                }, 
+                secret, 
+                { expiresIn: '10m' }
+            );
             return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
         }
         res.status(400).json({ message: 'Incorrect answers' });
@@ -421,6 +487,12 @@ const verifyLayer3 = async (req, res) => {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
+        
+        // ✅ Verify user is actually an admin
+        if (!user.isAdmin) {
+            console.warn(`⚠️ [Layer3] Non-admin user ${user.email} attempted Layer 3 verification`);
+            return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
         
         const d1 = await bcrypt.compare(dad.trim().toLowerCase(), user.adminAns_dad);
         const d2 = await bcrypt.compare(friend.trim().toLowerCase(), user.adminAns_friend);
