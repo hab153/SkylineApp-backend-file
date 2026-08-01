@@ -2,6 +2,30 @@ const Lead = require('./Lead');
 const ChatMessage = require('./ChatMessage');
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
+const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
+
+// ─── IDEMPOTENCY CACHE ───
+// Store recently processed requests to prevent duplicates
+const idempotencyCache = new Map();
+const IDEMPOTENCY_TTL = 5 * 60 * 1000; // 5 minutes
+
+// ─── HELPER: Generate idempotency key ───
+function generateIdempotencyKey(userId, leadId, action, email) {
+    return `${userId}:${leadId || email}:${action}`;
+}
+
+// ─── HELPER: Clean up expired idempotency keys ───
+function cleanupIdempotencyCache() {
+    const now = Date.now();
+    for (const [key, value] of idempotencyCache.entries()) {
+        if (now - value.timestamp > IDEMPOTENCY_TTL) {
+            idempotencyCache.delete(key);
+        }
+    }
+}
+
+// Run cleanup every minute
+setInterval(cleanupIdempotencyCache, 60 * 1000);
 
 // ──────────────────────────────────────────────────────────────
 //  GET /api/conversations - FIXED (Proper userId filtering)
@@ -98,13 +122,12 @@ const getConversationById = async (req, res) => {
         if (lead.replies && lead.replies.length > 0) {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
-                // ✅ Added { strict: false } to bypass schema validation for arrayFilters
                 await Lead.updateOne(
                     { _id: leadId, userId: req.userId },
                     { $set: { 'replies.$[elem].read': true } },
                     { 
                         arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }],
-                        strict: false  // ← THIS IS THE FIX
+                        strict: false
                     }
                 );
                 console.log(`📖 [getConversationById] Marked ${unreadReplies.length} replies as read`);
@@ -210,7 +233,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - COMPLETE FIX FOR PAGE.HTML
+//  POST /api/leads/batch-send - COMPLETE FIX WITH IDEMPOTENCY
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -228,9 +251,33 @@ const batchSend = async (req, res) => {
             return res.status(400).json({ message: 'Leads array is required' });
         }
 
+        // ─── CHECK EMAIL LIMIT FIRST ───
+        try {
+            await checkAndIncrementSendLimit(req.userId);
+        } catch (limitError) {
+            return res.status(429).json({ 
+                success: false, 
+                message: limitError.message,
+                limitReached: true 
+            });
+        }
+
         // ✅ CASE 1: Sending to an EXISTING lead (from notifications.html)
         if (leadId) {
             console.log('🔍 [BE-BATCH] Searching for existing lead:', leadId);
+            
+            // ─── CHECK IDEMPOTENCY ───
+            const idempotencyKey = generateIdempotencyKey(req.userId, leadId, 'batchSend', null);
+            const cached = idempotencyCache.get(idempotencyKey);
+            if (cached) {
+                console.log(`⏭️ [BE-BATCH] Skipping duplicate request for lead ${leadId}`);
+                return res.json({
+                    success: true,
+                    alreadyProcessed: true,
+                    message: 'Email was already sent',
+                    leadId: leadId
+                });
+            }
             
             const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
             
@@ -250,6 +297,7 @@ const batchSend = async (req, res) => {
             const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
             
+            // ─── CHECK FOR DUPLICATE MESSAGES ───
             const lastReply = targetLead.replies && targetLead.replies.length > 0 ? targetLead.replies[targetLead.replies.length - 1] : null;
             const isDuplicate = lastReply && 
                                 lastReply.content === msgContent && 
@@ -262,14 +310,14 @@ const batchSend = async (req, res) => {
                     date: now,
                     content: msgContent,
                     subject: msgSubject,
-                    from: 'lead', // ✅ CHANGED FROM 'ai' TO 'lead'
+                    from: 'lead',
                     status: 'sent',
                     read: true
                 });
                 targetLead.lastContactDate = now;
                 targetLead.status = 'Contacted';
             } else {
-                console.log('️ [BE-BATCH] Duplicate detected. Skipping save.');
+                console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
             // ── SEND EMAIL ──
@@ -281,7 +329,7 @@ const batchSend = async (req, res) => {
             let threadId = null;
             
             if (!account) {
-                console.warn(`️ [BE-BATCH] No email account connected for user ${req.userId}`);
+                console.warn(`⚠️ [BE-BATCH] No email account connected for user ${req.userId}`);
                 emailError = 'No email account connected';
             } else {
                 try {
@@ -315,7 +363,16 @@ const batchSend = async (req, res) => {
             
             await targetLead.save();
             
-            console.log(' [BE-BATCH] Returning response...');
+            // ─── STORE IN IDEMPOTENCY CACHE ───
+            if (emailSent) {
+                idempotencyCache.set(idempotencyKey, {
+                    timestamp: Date.now(),
+                    leadId: targetLead._id,
+                    success: true
+                });
+            }
+            
+            console.log('📤 [BE-BATCH] Returning response...');
             console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
             
             res.json({
@@ -329,7 +386,7 @@ const batchSend = async (req, res) => {
             
         // ✅ CASE 2: Creating NEW leads and sending (from page.html)
         } else {
-            console.log(' [BE-BATCH] No Lead ID provided. Creating new leads...');
+            console.log('📝 [BE-BATCH] No Lead ID provided. Creating new leads...');
             if (allowNewLead === false) {
                 console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
@@ -344,46 +401,101 @@ const batchSend = async (req, res) => {
             // Loop through all leads sent from page.html
             for (const leadData of leads) {
                 const now = new Date();
+                const leadEmail = sanitizeEmail(leadData.email);
                 
-                // 1. Create the Lead in DB
-                const newLead = new Lead({
-                    userId: req.userId,
-                    name: leadData.name || leadData.company || 'Unknown',
-                    email: leadData.email,
-                    company: leadData.company || '',
-                    status: 'Contacted',
-                    lastContactDate: now,
-                    replies: []
-                });
+                // ─── CHECK IDEMPOTENCY ───
+                const idempotencyKey = generateIdempotencyKey(req.userId, null, 'createSend', leadEmail);
+                const cached = idempotencyCache.get(idempotencyKey);
+                if (cached) {
+                    console.log(`⏭️ [BE-BATCH] Skipping duplicate lead creation for ${leadEmail}`);
+                    results.push({
+                        email: leadEmail,
+                        name: leadData.name,
+                        success: true,
+                        alreadyProcessed: true,
+                        message: 'Email was already sent'
+                    });
+                    continue;
+                }
+                
+                // ─── FIND OR CREATE LEAD WITH LOCK ───
+                let lead = await Lead.findOne({ userId: req.userId, email: leadEmail });
+                
+                if (lead) {
+                    console.log(`📋 [BE-BATCH] Lead already exists for ${leadEmail}, updating...`);
+                    
+                    // Check if this exact message was already sent
+                    const lastReply = lead.replies?.[lead.replies.length - 1];
+                    if (lastReply && lastReply.content === leadData.messages[0].body) {
+                        console.log(`⏭️ [BE-BATCH] Duplicate message detected for ${leadEmail}`);
+                        results.push({
+                            email: leadEmail,
+                            name: leadData.name,
+                            success: true,
+                            alreadyProcessed: true,
+                            message: 'Email already sent'
+                        });
+                        continue;
+                    }
+                    
+                    // ✅ ATOMIC: Update lead status
+                    await Lead.findOneAndUpdate(
+                        { _id: lead._id, userId: req.userId },
+                        { 
+                            $set: { 
+                                status: 'Contacted',
+                                lastContactDate: now
+                            },
+                            $push: {
+                                replies: {
+                                    date: now,
+                                    content: leadData.messages[0].body,
+                                    subject: leadData.messages[0].subject || 'Hello from Skyline',
+                                    from: 'lead',
+                                    status: 'sent',
+                                    read: true
+                                }
+                            }
+                        }
+                    );
+                    
+                } else {
+                    console.log(`🆕 [BE-BATCH] Creating new lead for ${leadEmail}`);
+                    
+                    // ✅ ATOMIC: Create new lead
+                    lead = new Lead({
+                        userId: req.userId,
+                        name: leadData.name || leadData.company || 'Unknown',
+                        email: leadEmail,
+                        company: leadData.company || '',
+                        status: 'Contacted',
+                        lastContactDate: now,
+                        replies: [{
+                            date: now,
+                            content: leadData.messages[0].body,
+                            subject: leadData.messages[0].subject || 'Hello from Skyline',
+                            from: 'lead',
+                            status: 'sent',
+                            read: true
+                        }]
+                    });
+                }
 
-                const msgContent = leadData.messages?.[0]?.body || '';
-                const msgSubject = leadData.messages?.[0]?.subject || 'Hello from Skyline';
-
-                // 2. Add initial reply record
-                newLead.replies.push({
-                    date: now,
-                    content: msgContent,
-                    subject: msgSubject,
-                    from: 'lead', // ✅ CHANGED FROM 'ai' TO 'lead'
-                    status: 'sent',
-                    read: true
-                });
-
-                // 3. Send Email via Nylas
+                // ─── SEND EMAIL ───
                 let emailSent = false;
                 let emailError = null;
 
-                if (account && leadData.email) {
+                if (account && leadEmail) {
                     try {
                         const result = await sendEmail(
                             req.userId,
-                            leadData.email,
-                            msgSubject,
-                            msgContent
+                            leadEmail,
+                            leadData.messages[0].subject || 'Hello from Skyline',
+                            leadData.messages[0].body
                         );
                         if (result.success) {
                             emailSent = true;
-                            if (result.threadId) newLead.threadId = result.threadId;
+                            if (result.threadId) lead.threadId = result.threadId;
                         } else {
                             emailError = result.error;
                             anyFailed = true;
@@ -397,12 +509,21 @@ const batchSend = async (req, res) => {
                     anyFailed = true;
                 }
 
-                // 4. Save Lead
-                await newLead.save();
+                // ─── SAVE LEAD ───
+                await lead.save();
+                
+                // ─── STORE IN IDEMPOTENCY CACHE ───
+                if (emailSent) {
+                    idempotencyCache.set(idempotencyKey, {
+                        timestamp: Date.now(),
+                        leadId: lead._id,
+                        success: true
+                    });
+                }
                 
                 results.push({
-                    leadId: newLead._id,
-                    email: leadData.email,
+                    leadId: lead._id,
+                    email: leadEmail,
                     sent: emailSent,
                     error: emailError
                 });
@@ -449,6 +570,14 @@ const reconnectAndSend = async (req, res) => {
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
             for (const msg of pendingMessages) {
+                // ─── CHECK IDEMPOTENCY ───
+                const idempotencyKey = generateIdempotencyKey(req.userId, lead._id, 'reconnectSend', null);
+                const cached = idempotencyCache.get(idempotencyKey);
+                if (cached) {
+                    console.log(`⏭️ [reconnectAndSend] Skipping duplicate for lead ${lead._id}`);
+                    continue;
+                }
+                
                 try {
                     const result = await sendEmail(
                         req.userId,
@@ -459,6 +588,11 @@ const reconnectAndSend = async (req, res) => {
                     if (result.success) {
                         msg.status = 'sent';
                         sentCount++;
+                        idempotencyCache.set(idempotencyKey, {
+                            timestamp: Date.now(),
+                            leadId: lead._id,
+                            success: true
+                        });
                     } else {
                         msg.status = 'failed';
                     }
