@@ -4,8 +4,73 @@ const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
+// ─── ✅ EMAIL SANITIZATION FUNCTIONS ───
+
+/**
+ * Sanitize email subject - Remove CRLF to prevent header injection
+ */
+function sanitizeEmailSubject(subject) {
+    if (!subject) return '';
+    return String(subject)
+        .replace(/[\r\n]/g, ' ')
+        .replace(/\t/g, ' ')
+        .replace(/\0/g, '')
+        .trim()
+        .substring(0, 200);
+}
+
+/**
+ * Sanitize email body - Keep newlines but remove carriage returns
+ */
+function sanitizeEmailBody(body) {
+    if (!body) return '';
+    return String(body)
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\0/g, '')
+        .trim();
+}
+
+/**
+ * Sanitize email address - Basic validation and sanitization
+ */
+function sanitizeEmailAddress(email) {
+    if (!email) return '';
+    return String(email)
+        .replace(/[\r\n]/g, ' ')
+        .replace(/[<>]/g, '')
+        .trim()
+        .toLowerCase();
+}
+
+/**
+ * Sanitize name for email - Remove control characters
+ */
+function sanitizeEmailName(name) {
+    if (!name) return '';
+    return String(name)
+        .replace(/[\r\n]/g, ' ')
+        .replace(/\0/g, '')
+        .trim()
+        .substring(0, 100);
+}
+
+/**
+ * Sanitize lead data for email sending
+ */
+function sanitizeLeadForEmail(leadData) {
+    return {
+        name: sanitizeEmailName(leadData.name),
+        email: sanitizeEmailAddress(leadData.email),
+        company: sanitizeEmailName(leadData.company || ''),
+        messages: (leadData.messages || []).map(msg => ({
+            subject: sanitizeEmailSubject(msg.subject || ''),
+            body: sanitizeEmailBody(msg.body || '')
+        }))
+    };
+}
+
 // ─── IDEMPOTENCY CACHE ───
-// Store recently processed requests to prevent duplicates
 const idempotencyCache = new Map();
 const IDEMPOTENCY_TTL = 5 * 60 * 1000; // 5 minutes
 
@@ -233,7 +298,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - COMPLETE FIX WITH TOKEN RETRY
+//  POST /api/leads/batch-send - COMPLETE FIX WITH TOKEN RETRY + SANITIZATION
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -274,6 +339,10 @@ const batchSend = async (req, res) => {
         }
         
         console.log(`📊 [BE-BATCH] Processing ${leads.length} leads (max: ${MAX_BATCH_SIZE})`);
+
+        // ─── ✅ SANITIZE ALL LEAD DATA FOR EMAIL ───
+        const sanitizedLeads = leads.map(lead => sanitizeLeadForEmail(lead));
+        console.log('✅ [BE-BATCH] All lead data sanitized for email');
 
         // ─── CHECK EMAIL LIMIT FIRST ───
         try {
@@ -397,7 +466,8 @@ const batchSend = async (req, res) => {
             
             console.log('✅ [BE-BATCH] Lead FOUND:', targetLead.name, '(ID:', targetLead._id, ')');
             
-            const leadData = leads[0];
+            // ✅ USE SANITIZED LEAD DATA
+            const leadData = sanitizedLeads[0];
             const msgContent = leadData.messages[0].body;
             const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
@@ -445,6 +515,7 @@ const batchSend = async (req, res) => {
                         // ✅ Use the updated account for each attempt
                         const freshAccount = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
                         
+                        // ✅ sendEmail now sanitizes internally too
                         const result = await sendEmail(
                             req.userId,
                             targetLead.email,
@@ -519,9 +590,10 @@ const batchSend = async (req, res) => {
             let anyFailed = false;
 
             // ─── PROCESS LEADS (with batch size already validated) ───
-            for (const leadData of leads) {
+            // ✅ Use sanitized leads
+            for (const leadData of sanitizedLeads) {
                 const now = new Date();
-                const leadEmail = sanitizeEmail(leadData.email);
+                const leadEmail = leadData.email;
                 
                 // ─── CHECK IDEMPOTENCY ───
                 const idempotencyKey = generateIdempotencyKey(req.userId, null, 'createSend', leadEmail);
@@ -618,6 +690,7 @@ const batchSend = async (req, res) => {
                             // ✅ Use fresh account for each attempt
                             const freshAccount = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
                             
+                            // ✅ sendEmail now sanitizes internally too
                             const result = await sendEmail(
                                 req.userId,
                                 leadEmail,
@@ -725,11 +798,15 @@ const reconnectAndSend = async (req, res) => {
                 }
                 
                 try {
+                    // ✅ Sanitize before sending
+                    const sanitizedSubject = sanitizeEmailSubject(msg.subject || 'Re: Conversation');
+                    const sanitizedBody = sanitizeEmailBody(msg.content || '');
+                    
                     const result = await sendEmail(
                         req.userId,
                         lead.email,
-                        msg.subject || 'Re: Conversation',
-                        msg.content
+                        sanitizedSubject,
+                        sanitizedBody
                     );
                     if (result.success) {
                         msg.status = 'sent';
