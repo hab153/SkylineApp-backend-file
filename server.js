@@ -104,7 +104,7 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 const requiredEnvVars = [
     'JWT_SECRET',
     'NYLAS_CLIENT_ID',
-    'NYLAS_API_KEY',        // ← This is the client secret in V3
+    'NYLAS_API_KEY',
     'FLUTTERWAVE_SECRET_KEY',
     'FLUTTERWAVE_SECRET_HASH',
     'MONGODB_URI'
