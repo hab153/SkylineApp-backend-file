@@ -2,7 +2,36 @@ const EmailAccount = require('./EmailAccount');
 const User = require('./User');
 const crypto = require('crypto');
 
+// ─── ✅ VALIDATE NYLAS CONFIG ───
+function validateNylasConfig() {
+    const required = ['NYLAS_CLIENT_ID', 'NYLAS_CLIENT_SECRET', 'NYLAS_API_KEY'];
+    const missing = required.filter(key => {
+        const value = process.env[key];
+        return !value || value.trim() === '';
+    });
+    
+    if (missing.length > 0) {
+        console.error('❌ [NYLAS AUTH] Missing required Nylas configuration:');
+        missing.forEach(key => console.error(`   ⚠️ ${key}`));
+        return false;
+    }
+    
+    console.log('✅ [NYLAS AUTH] Nylas configuration validated');
+    return true;
+}
+
+const NYLAS_CONFIG_VALID = validateNylasConfig();
+
 exports.getAuthUrl = async (req, res) => {
+  // ✅ Check Nylas config first
+  if (!NYLAS_CONFIG_VALID) {
+    console.error('❌ [NYLAS AUTH] Cannot generate auth URL: Nylas not configured');
+    return res.status(503).json({
+      error: 'Email service not configured. Please contact support.',
+      configMissing: true
+    });
+  }
+
   try {
     const userId = req.userId;
     
@@ -52,6 +81,15 @@ exports.getAuthUrl = async (req, res) => {
 };
 
 exports.handleCallback = async (req, res) => {
+  // ✅ Check Nylas config first
+  if (!NYLAS_CONFIG_VALID) {
+    console.error('❌ [NYLAS AUTH] Cannot process callback: Nylas not configured');
+    return res.status(503).send(`
+      <h1>Email Service Not Configured</h1>
+      <p>The email service is not configured properly. Please contact support.</p>
+    `);
+  }
+
   try {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📥 [NYLAS CALLBACK] Received callback');
