@@ -1,6 +1,45 @@
 const nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 
+// ─── ✅ EMAIL SANITIZATION FUNCTIONS ───
+
+/**
+ * Sanitize email subject - Remove CRLF to prevent header injection
+ */
+function sanitizeEmailSubject(subject) {
+    if (!subject) return '';
+    return String(subject)
+        .replace(/[\r\n]/g, ' ')
+        .replace(/\t/g, ' ')
+        .replace(/\0/g, '')
+        .trim()
+        .substring(0, 200); // Limit length to prevent overflow
+}
+
+/**
+ * Sanitize email body - Keep newlines but remove carriage returns
+ */
+function sanitizeEmailBody(body) {
+    if (!body) return '';
+    return String(body)
+        .replace(/\r\n/g, '\n')  // Normalize CRLF to LF
+        .replace(/\r/g, '\n')    // Remove standalone CR
+        .replace(/\0/g, '')      // Remove null bytes
+        .trim();
+}
+
+/**
+ * Sanitize email address - Basic validation and sanitization
+ */
+function sanitizeEmailAddress(email) {
+    if (!email) return '';
+    return String(email)
+        .replace(/[\r\n]/g, ' ')
+        .replace(/[<>]/g, '')    // Remove angle brackets
+        .trim()
+        .toLowerCase();
+}
+
 // ─── ✅ VALIDATE NYLAS CONFIG AT LOAD ───
 function validateNylasConfig() {
     // In Nylas V3, NYLAS_API_KEY serves as the client secret
@@ -49,7 +88,7 @@ async function refreshNylasToken(userId) {
         // ✅ Use the refresh method
         const response = await nylas.auth.refreshAccessToken({
             clientId: process.env.NYLAS_CLIENT_ID,
-            clientSecret: process.env.NYLAS_API_KEY, // ← NYLAS_API_KEY is the client secret in V3
+            clientSecret: process.env.NYLAS_API_KEY,
             refreshToken: account.refreshToken,
         });
 
@@ -80,7 +119,7 @@ async function refreshNylasToken(userId) {
     }
 }
 
-// ── Send Email with Auto-Refresh and Retry ──
+// ── Send Email with Auto-Refresh, Retry, and Sanitization ──
 exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
     // ✅ Check Nylas config first
     if (!NYLAS_CONFIG_VALID) {
@@ -89,6 +128,21 @@ exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
             success: false, 
             error: 'Email service not configured. Please contact support.',
             configMissing: true
+        };
+    }
+
+    // ✅ SANITIZE: Prevent header injection
+    const sanitizedTo = sanitizeEmailAddress(to);
+    const sanitizedSubject = sanitizeEmailSubject(subject);
+    const sanitizedBody = sanitizeEmailBody(body);
+
+    // ✅ Validate email address after sanitization
+    if (!sanitizedTo || !sanitizedTo.includes('@')) {
+        console.error('❌ [Nylas Send] Invalid email address after sanitization:', sanitizedTo);
+        return { 
+            success: false, 
+            error: 'Invalid email address',
+            invalidEmail: true
         };
     }
 
@@ -114,7 +168,6 @@ exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
                 account = refreshed;
                 console.log('✅ [Nylas] Token refreshed successfully');
             } else {
-                // ✅ Don't fail immediately - try with stale token first
                 console.warn('⚠️ [Nylas] Token refresh failed, attempting with stale token...');
             }
         }
@@ -124,25 +177,24 @@ exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
             return { success: false, error: 'Grant ID not found.' };
         }
 
-        console.log('📧 [Nylas Send] Sending email to:', to);
+        console.log('📧 [Nylas Send] Sending email to:', sanitizedTo);
         console.log('📧 [Nylas Send] Using grant ID:', account.nylasGrantId);
-        console.log('📧 [Nylas Send] Subject:', subject);
-        console.log('📧 [Nylas Send] Body length:', body?.length || 0);
+        console.log('📧 [Nylas Send] Subject:', sanitizedSubject);
+        console.log('📧 [Nylas Send] Body length:', sanitizedBody?.length || 0);
 
-        // ✅ CORRECT v8 SDK syntax - Use the send method with proper params
+        // ✅ CORRECT v8 SDK syntax
         const sentMessage = await nylas.messages.send({
             identifier: account.nylasGrantId,
             requestBody: {
-                to: [{ email: to }],
-                subject: subject,
-                body: body,
+                to: [{ email: sanitizedTo }],
+                subject: sanitizedSubject,
+                body: sanitizedBody,
             },
         });
 
         console.log('✅ [Nylas Send] Email sent successfully. Message ID:', sentMessage?.id || 'unknown');
         console.log('✅ [Nylas Send] Thread ID:', sentMessage?.thread_id || 'unknown');
         
-        // ✅ Return thread_id for tracking
         return { 
             success: true, 
             messageId: sentMessage?.id,
@@ -161,7 +213,7 @@ exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
             const refreshed = await refreshNylasToken(userId);
             if (refreshed) {
                 // Retry with fresh token
-                return exports.sendEmail(userId, to, subject, body, retryCount + 1);
+                return exports.sendEmail(userId, sanitizedTo, sanitizedSubject, sanitizedBody, retryCount + 1);
             }
         }
         
@@ -174,7 +226,7 @@ exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
             console.log(`⏳ [Nylas] Waiting ${waitTime}ms before retry...`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             
-            return exports.sendEmail(userId, to, subject, body, retryCount + 1);
+            return exports.sendEmail(userId, sanitizedTo, sanitizedSubject, sanitizedBody, retryCount + 1);
         }
         
         return { 
