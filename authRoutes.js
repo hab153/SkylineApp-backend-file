@@ -6,16 +6,18 @@ const {
     login,
     logout,
     revokeAllTokens,
-    verifyEmail,                  // ✅ NEW
-    verifyUsername,               // ✅ NEW
-    resetPasswordEmailUsername,   // ✅ NEW
+    verifyEmail,
+    verifyUsername,
+    resetPasswordEmailUsername,
     forgotPassword,
     resetPassword,
     verifyAge,
     changeEmail,
     verifyLayer2,
     verifyLayer3,
-    deleteAccount
+    deleteAccount,
+    setupAdminSecurity,      // ✅ NEW
+    checkAdminSecurityStatus // ✅ NEW
 } = require('./authController');
 
 // ──────────────────────────────
@@ -27,12 +29,9 @@ router.post('/login', login);
 // ──────────────────────────────
 // PASSWORD RESET ROUTES
 // ──────────────────────────────
-// ✅ NEW: Email + Username verification (no email required)
 router.post('/verify-email', verifyEmail);
 router.post('/verify-username', verifyUsername);
 router.post('/reset-password-email-username', resetPasswordEmailUsername);
-
-// Kept for backward compatibility (email-based reset)
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPassword);
 
@@ -46,5 +45,14 @@ router.put('/verify-age', verifyToken, verifyAge);
 router.post('/verify-layer-2', verifyToken, verifyLayer2);
 router.post('/verify-layer-3', verifyToken, verifyLayer3);
 router.delete('/delete-account', verifyToken, deleteAccount);
+
+// ──────────────────────────────
+// ✅ ADMIN SECURITY SETUP ROUTES
+// ──────────────────────────────
+// Check if admin has completed security setup
+router.get('/admin/security-status', verifyToken, checkAdminSecurityStatus);
+
+// Setup admin security questions (only for admins)
+router.post('/admin/setup-security', verifyToken, setupAdminSecurity);
 
 module.exports = router;
