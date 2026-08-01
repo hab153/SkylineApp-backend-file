@@ -31,7 +31,6 @@ const TIER_LIMITS = {
 
 // ─── HELPER: Get limit message ───
 function getLimitMessage(tier, limit, type) {
-    const tierName = tier.charAt(0).toUpperCase() + tier.slice(1);
     const messages = {
         chat: `Daily chat limit reached (${limit}/${limit}). Upgrade to Go (50/day) or Pro (150/day).`,
         hint: `Daily hint limit reached (${limit}/${limit}). Upgrade to Go (15/day) or Pro (70/day).`,
@@ -48,13 +47,12 @@ async function atomicIncrement(userId, countField, dateField, limit) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    // ✅ ATOMIC: Single MongoDB operation with aggregation pipeline
+    // ✅ FIXED: Correct MongoDB update with aggregation pipeline
     const result = await User.findOneAndUpdate(
         { _id: userId },
         [
             {
                 $set: {
-                    // Reset counter if last date is not today
                     [countField]: {
                         $cond: [
                             { $ne: [`$${dateField}`, today] },
@@ -62,12 +60,13 @@ async function atomicIncrement(userId, countField, dateField, limit) {
                             `$${countField}`
                         ]
                     },
-                    // Always set last date to today
                     [dateField]: today
                 }
             },
             {
-                $inc: { [countField]: 1 }
+                $set: {
+                    [countField]: { $add: [`$${countField}`, 1] }
+                }
             }
         ],
         {
@@ -85,7 +84,10 @@ async function atomicCheckAndIncrement(userId, countField, dateField, limit) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     
-    // ✅ ATOMIC: Check limit AND increment in one operation
+    // ✅ FIXED: Correct MongoDB update with aggregation pipeline
+    // Step 1: Reset counter if date changed
+    // Step 2: Check if under limit
+    // Step 3: Increment
     const result = await User.findOneAndUpdate(
         {
             _id: userId,
@@ -108,7 +110,9 @@ async function atomicCheckAndIncrement(userId, countField, dateField, limit) {
                 }
             },
             {
-                $inc: { [countField]: 1 }
+                $set: {
+                    [countField]: { $add: [`$${countField}`, 1] }
+                }
             }
         ],
         {
@@ -129,7 +133,6 @@ const checkDailyLimit = async (req, res, next) => {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        // Get user tier
         const user = await User.findById(userId).select('subscriptionTier isSuspended');
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
@@ -145,7 +148,6 @@ const checkDailyLimit = async (req, res, next) => {
         const tier = user.subscriptionTier || 'free';
         const limit = TIER_LIMITS[tier].chat;
 
-        // ✅ ATOMIC: Check and increment in one operation
         const updatedUser = await atomicCheckAndIncrement(
             userId,
             'usage.dailyCallCount',
@@ -154,7 +156,6 @@ const checkDailyLimit = async (req, res, next) => {
         );
 
         if (!updatedUser) {
-            // User hit their limit
             return res.status(429).json({ 
                 message: getLimitMessage(tier, limit, 'chat'),
                 limit: limit,
@@ -200,7 +201,6 @@ const checkHintLimit = async (req, res, next) => {
         const tier = user.subscriptionTier || 'free';
         const limit = TIER_LIMITS[tier].hint;
 
-        // ✅ ATOMIC: Check and increment in one operation
         const updatedUser = await atomicCheckAndIncrement(
             userId,
             'usage.dailyHintCount',
@@ -253,7 +253,6 @@ const checkSuggestFollowUpLimit = async (req, res, next) => {
         const tier = user.subscriptionTier || 'free';
         const limit = TIER_LIMITS[tier].suggestFollowUp;
 
-        // ✅ ATOMIC: Check and increment in one operation
         const updatedUser = await atomicCheckAndIncrement(
             userId,
             'usage.dailySuggestFollowUpCount',
@@ -305,7 +304,6 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
         const tier = user.subscriptionTier || 'free';
         const limit = TIER_LIMITS[tier].autoFollowUp;
 
-        // Free users: auto follow-up not available
         if (limit === 0) {
             return res.status(403).json({
                 success: false,
@@ -314,7 +312,6 @@ const checkAutoFollowUpLimit = async (req, res, next) => {
             });
         }
 
-        // ✅ ATOMIC: Check and increment in one operation
         const updatedUser = await atomicCheckAndIncrement(
             userId,
             'usage.dailyAutoFollowUpCount',
@@ -367,7 +364,6 @@ const checkAssistantLimit = async (req, res, next) => {
         const tier = user.subscriptionTier || 'free';
         const limit = TIER_LIMITS[tier].assistant;
 
-        // ✅ ATOMIC: Check and increment in one operation
         const updatedUser = await atomicCheckAndIncrement(
             userId,
             'usage.dailyAssistantCount',
@@ -411,7 +407,6 @@ const checkAndIncrementSendLimit = async (userId) => {
         const tier = user.subscriptionTier || 'free';
         const limit = TIER_LIMITS[tier].send;
 
-        // ✅ ATOMIC: Check and increment in one operation
         const updatedUser = await atomicCheckAndIncrement(
             userId,
             'usage.dailySentCount',
