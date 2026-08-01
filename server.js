@@ -13,11 +13,11 @@ const crypto = require('crypto');
 
 // MIDDLEWARE & UTILITIES
 const { verifyToken } = require('./authMiddleware');
-const { verifyAdminToken } = require('./adminAuthMiddleware'); // ✅ NEW ADMIN MIDDLEWARE
+const { verifyAdminToken } = require('./adminAuthMiddleware');
 const { checkDailyLimit, checkHintLimit, checkSuggestFollowUpLimit, checkAutoFollowUpLimit, checkAssistantLimit } = require('./dailyLimitMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 
-// ✅ NEW: Nylas imports
+// Nylas imports
 const nylasAuthController = require('./nylasAuthController');
 const { handleWebhook } = require('./nylasWebhookHandler');
 
@@ -54,7 +54,7 @@ const requestQueue = require('./requestQueue');
 // Import auth controller functions
 const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login } = require('./authController');
 
-// ✅ Import sessionController for session routes
+// Import sessionController for session routes
 const sessionController = require('./sessionController');
 
 // Validation imports
@@ -99,9 +99,7 @@ console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
-// ══════════════════════════════════════════
-//  CRITICAL STARTUP CHECKS
-// ════════════════════════════════════════
+// ─── CRITICAL STARTUP CHECKS ───
 if (!process.env.JWT_SECRET) {
     console.error('❌ CRITICAL ERROR: JWT_SECRET is not defined in environment variables.');
     console.error('⚠️ Please set JWT_SECRET in your .env file and restart the server.');
@@ -109,9 +107,7 @@ if (!process.env.JWT_SECRET) {
 }
 console.log('✅ JWT_SECRET is configured (length: ' + process.env.JWT_SECRET.length + ' characters)');
 
-// ═════════════════════════════════════════
-//  BACKUP CHECK
-// ════════════════════════════════════════════
+// ─── BACKUP CHECK ───
 const fs = require('fs-extra');
 const backupDir = process.env.BACKUP_DIR || './backups';
 
@@ -137,14 +133,11 @@ try {
     console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
 }
 
-// ═══════════════════════════════════════════
-//  SECURITY MIDDLEWARE
-// ════════════════════════════════════════════
+// ─── SECURITY MIDDLEWARE ───
 app.use(helmet());
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
-// ✅ CORS CONFIGURED FOR FRONTEND/BACKEND SEPARATION
 const ALLOWED_ORIGINS = [
     'https://skylineai-app.vercel.app', 
     'http://localhost:3000'
@@ -152,7 +145,6 @@ const ALLOWED_ORIGINS = [
 
 app.use(cors({
     origin: function(origin, callback) {
-        // Allow requests with no origin (like mobile apps or curl requests)
         if (!origin) return callback(null, true);
         if (ALLOWED_ORIGINS.indexOf(origin) !== -1) {
             callback(null, true);
@@ -175,9 +167,7 @@ app.use(globalLimiter);
 
 console.log('✅ [SERVER] Security middleware applied');
 
-// ══════════════════════════════════════════
-//  ✅ HEALTH CHECK ENDPOINT (FOR UPTIME MONITORING)
-// ═════════════════════════════════════════
+// ─── HEALTH CHECK ───
 app.get('/api/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
@@ -186,31 +176,20 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ═══════════════════════════════════════════
-//  WEBHOOKS (EXEMPT FROM XSS)
-//  NOTE: These must be BEFORE express.json() to handle raw payloads
-// ════════════════════════════════════════
+// ─── WEBHOOKS ───
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 
-// ════════════════════════════════════════════
-//  JSON PARSER
-//  NOTE: Static file serving REMOVED - Frontend is now separate on Vercel
-// ════════════════════════════════════════════
+// ─── JSON PARSER ───
 app.use(express.json());
 
-// ═══════════════════════════════════════════
-//  XSS PROTECTION MIDDLEWARE
-//  ✅ Applied globally since no HTML is served from backend
-// ════════════════════════════════════════════
+// ─── XSS PROTECTION ───
 app.use(xssProtection);
 app.use(xssOutputProtection);
 
-// ═════════════════════════════════════════
-//  MONGODB CONNECTION & INDEX CREATION
-// ════════════════════════════════════════════
+// ─── MONGODB CONNECTION ───
 console.log('🔗 [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
@@ -219,17 +198,14 @@ mongoose.connect(process.env.MONGODB_URI, {
     .then(async () => {
         console.log('✅ MongoDB Connected');
         
-        // ✅ SPEED: Create indexes for faster queries
         try {
             console.log('🔧 [SERVER] Creating database indexes...');
             
-            // ChatMessage indexes
             const ChatMessage = require('./ChatMessage');
             await ChatMessage.collection.createIndex({ userId: 1, sessionId: 1 });
             await ChatMessage.collection.createIndex({ userId: 1, createdAt: -1 });
             console.log('✅ [SERVER] ChatMessage indexes created');
             
-            // Lead indexes
             await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
             await Lead.collection.createIndex({ userId: 1, email: 1 });
             console.log('✅ [SERVER] Lead indexes created');
@@ -245,18 +221,12 @@ mongoose.connect(process.env.MONGODB_URI, {
             startBackupJob();
         }
         startDataExportCleanupJob();
-
-        // ✅ START WEBHOOK VERIFICATION
         verifyWebhookRegistration();
-
-        // ✅ START TOKEN REFRESH JOB
         startTokenRefreshJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
-// ════════════════════════════════════════════
-//  WEBHOOK VERIFICATION FUNCTION
-// ══════════════════════════════════════════
+// ─── WEBHOOK VERIFICATION ───
 async function verifyWebhookRegistration() {
     try {
         console.log('🔍 [WEBHOOK] Verifying webhook registration...');
@@ -271,20 +241,16 @@ async function verifyWebhookRegistration() {
     }
 }
 
-// ═══════════════════════════════════════════
-//  TOKEN REFRESH JOB
-// ════════════════════════════════════════════
+// ─── TOKEN REFRESH JOB ───
 async function startTokenRefreshJob() {
     console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
     
-    // Run every 5 minutes
     setInterval(async () => {
         try {
             const EmailAccount = require('./EmailAccount');
             const now = new Date();
             const fiveMinutesFromNow = new Date(now.getTime() + 5 * 60 * 1000);
             
-            // Find accounts with tokens expiring in the next 5 minutes
             const expiringAccounts = await EmailAccount.find({
                 isConnected: true,
                 tokenExpiry: { 
@@ -310,24 +276,23 @@ async function startTokenRefreshJob() {
         } catch (error) {
             console.error('❌ [TOKEN REFRESH] Job error:', error.message);
         }
-    }, 5 * 60 * 1000); // Run every 5 minutes
+    }, 5 * 60 * 1000);
 }
 
 // ════════════════════════════════════════════
 //  ROUTES
 // ════════════════════════════════════════════
+
 app.use('/api/auth', authRoutes);
 console.log('✅ [SERVER] Auth routes registered');
 
-// Logout & Revoke routes
 app.post('/api/auth/logout', verifyToken, logout);
 app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 
-// ✅ Assistant and Session routes handled via routers
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ✅ NEW: Nylas Auth Routes WITH DEBUG LOGS
+// ─── NYLAS AUTH ROUTES ───
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
@@ -343,7 +308,6 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
 
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
-// ✅ CHECK NYLAS CONNECTION STATUS (with auto-refresh)
 app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
   try {
     const { checkConnection } = require('./nylasService');
@@ -358,7 +322,6 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
   }
 });
 
-// ✅ TEST ROUTE: Check if callback route is reachable
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('✅ [TEST] Callback test route hit!');
@@ -386,15 +349,11 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     `);
 });
 
-// ─────────────────────────────────────────────────────────────
-//  PAYMENT ROUTE
-// ──────────────────────────────────────────────────────────────
+// ─── PAYMENT ROUTE ───
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 console.log('✅ [SERVER] Payment route registered');
 
-// ──────────────────────────────────────────────────────────────
-//  AUTH ROUTES
-// ──────────────────────────────────────────────────────────────
+// ─── AUTH ROUTES ───
 app.post('/api/auth/register', validate(registerSchema), register);
 app.post('/api/auth/login', validate(loginSchema), login);
 app.put('/api/auth/change-email', verifyToken, validate(changeEmailSchema), userController.changeEmail);
@@ -402,29 +361,21 @@ app.post('/api/auth/forgot-password', validate(forgotPasswordSchema), forgotPass
 app.post('/api/auth/reset-password', validate(resetPasswordSchema), resetPassword);
 app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
 
-// ─────────────────────────────────────────────────────────────
-//  USER PROFILE ROUTES
-// ────────────────────────────────────────────────────────────
+// ─── USER PROFILE ROUTES ───
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
 
-// ──────────────────────────────────────────────────────────────
-//  ACCOUNT DELETION ROUTES (Right to Be Forgotten – GDPR)
-// ─────────────────────────────────────────────────────────────
+// ─── GDPR ACCOUNT DELETION ROUTES ───
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserAccount);
 app.post('/api/users/me/restore', verifyToken, userController.restoreUserAccount);
 app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletionStatus);
 
-// ──────────────────────────────────────────────────────────────
-//  DATA EXPORT ROUTES (Right to Data Portability – GDPR)
-// ─────────────────────────────────────────────────────────────
+// ─── DATA EXPORT ROUTES ───
 app.use('/api/data', dataExportRoutes);
 
-// ────────────────────────────────────────────────────────────
-//  LEAD / CONVERSATION ROUTES
-// ─────────────────────────────────────────────────────────────
+// ─── LEAD / CONVERSATION ROUTES ───
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
 
 app.get('/api/conversations', verifyToken, leadController.getConversations);
@@ -440,18 +391,11 @@ app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 console.log('✅ [SERVER] All lead routes registered');
 
-// ─────────────────────────────────────────────────────────────
-//  ✅ FOLLOW-UP ROUTES (FIXED)
-// ──────────────────────────────────────────────────────────────
+// ─── FOLLOW-UP ROUTES ───
 console.log('🔧 [SERVER] Registering follow-up routes...');
 
-// ✅ Get follow-up status first (no body validation needed)
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
-
-// ✅ Suggest follow-up (requires leadId)
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
-
-// ✅ Toggle auto follow-up (requires leadId + body)
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
 
 console.log('✅ [SERVER] Follow-up routes registered');
@@ -459,44 +403,31 @@ console.log('   📋 GET    /api/leads/:leadId/follow-up-status');
 console.log('   📋 POST   /api/leads/:leadId/suggest-follow-up');
 console.log('   📋 POST   /api/leads/:leadId/auto-follow-up');
 
-// ─────────────────────────────────────────────────────────────
-//  REVENUE TRACKING
-// ──────────────────────────────────────────────────────────────
+// ─── REVENUE TRACKING ───
 if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
     app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
     console.log('✅ [SERVER] Revenue tracking route registered');
 }
 
-// ──────────────────────────────────────────────────────────────
-//  NOTIFICATIONS
-// ─────────────────────────────────────────────────────────────
+// ─── NOTIFICATIONS ───
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
 console.log('✅ [SERVER] Notification routes registered');
 
-// ──────────────────────────────────────────────────────────────
-//  CHAT & DREAMS ROUTES
-// ──────────────────────────────────────────────────────────────
-
+// ─── CHAT & DREAMS ROUTES ───
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
 app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
 
-// ✅ FIXED: Use sessionController for session routes
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.post('/api/sessions', verifyToken, sessionController.createSession);
 console.log('✅ [SERVER] Session routes registered');
 
-// ────────────────────────────────────────────────────────────
-//  DREAMS ROUTES
-// ──────────────────────────────────────────────────────────────
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 console.log('✅ [SERVER] Dreams routes registered');
 
-// ──────────────────────────────────────────────────────────────
-//  AI SUGGESTION ROUTE
-// ──────────────────────────────────────────────────────────────
+// ─── AI SUGGESTION ROUTE ───
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     console.log('💡 [AI SUGGEST] Request received');
     try {
@@ -517,14 +448,9 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 });
 console.log('✅ [SERVER] AI suggestion route registered');
 
-// ──────────────────────────────────────────────────────────────
-//  ASSISTANT ROUTE (Handled by assistantRoutes.js)
-//  NOTE: Inline definition removed to prevent startup crash
-// ─────────────────────────────────────────────────────────────
+// ─── ADMIN ROUTES ───
 
-// ─────────────────────────────────────────────────────────────
-//  ✅ DIRECT ADMIN LOGIN (NO LAYER 2)
-// ────────────────────────────────────────────────────────────
+// ✅ DIRECT ADMIN LOGIN (NO LAYER 2)
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -538,7 +464,6 @@ app.post('/api/admin/login', async (req, res) => {
             isAdmin: true 
         });
 
-        // SECURITY: Always run bcrypt even if user not found to prevent timing attacks
         const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
         const validPassword = admin 
             ? await bcrypt.compare(password, admin.password)
@@ -549,7 +474,6 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        // Issue final admin session token directly
         const adminToken = jwt.sign(
             { 
                 id: admin._id, 
@@ -575,70 +499,9 @@ app.use(/^\/admin/i, (req, res) => {
     res.status(404).json({ error: 'Not Found' });
 });
 
-// ──────────────────────────────────────────────────────────────
-//  ✅ REAL-TIME STATS BROADCASTER (SSE)
-// ──────────────────────────────────────────────────────────────
-const adminClients = new Set();
-
-// Endpoint for admins to listen to live updates
-app.get('/api/admin/live-stats', verifyAdminToken, (req, res) => {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    
-    // Add client to the list
-    adminClients.add(res);
-    
-    // Send initial stats immediately
-    sendStatsUpdate(res);
-
-    // Keep connection alive with a comment every 30s
-    const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 30000);
-
-    // Remove client when they disconnect
-    req.on('close', () => {
-        adminClients.delete(res);
-        clearInterval(keepAlive);
-    });
-});
-
-// Helper to calculate and send stats to a specific client
-async function sendStatsUpdate(clientRes) {
-    try {
-        const now = new Date();
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        
-        // Quick count for daily (most important for real-time)
-        const dailyCount = await Lead.countDocuments({ createdAt: { $gte: startOfDay } });
-        
-        const data = `data: ${JSON.stringify({ daily: dailyCount })}\n\n`;
-        if (clientRes && !clientRes.writableEnded) {
-            clientRes.write(data);
-        }
-    } catch (err) {
-        console.error('[SSE ERROR]', err);
-    }
-}
-
-// ✅ GLOBAL FUNCTION TO BROADCAST UPDATES
-// Call this function inside your Lead creation logic!
-global.broadcastLeadUpdate = async () => {
-    for (const client of adminClients) {
-        if (!client.writableEnded) {
-            sendStatsUpdate(client);
-        } else {
-            adminClients.delete(client);
-        }
-    }
-};
-
-// ──────────────────────────────────────────────────────────────
-//  ✅ GET ALL USERS ENDPOINT (Direct & Unfiltered)
-//  ✅ NOW USES verifyAdminToken INSTEAD OF verifyToken
-// ──────────────────────────────────────────────────────────────
+// ✅ GET ALL USERS (KEPT - needed for admin dashboard)
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     try {
-        // Fetch all users, selecting necessary fields including isSuspended
         const users = await User.find({}).select('email username isAdmin isSuspended createdAt _id');
         res.json(users);
     } catch (err) {
@@ -647,117 +510,7 @@ app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  ✅ USER MANAGEMENT: SUSPEND / UNSUSPEND / DELETE
-// ──────────────────────────────────────────────────────────────
-
-// Suspend User
-app.put('/api/admin/users/:id/suspend', verifyAdminToken, async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        if (user.isAdmin) return res.status(403).json({ error: 'Cannot suspend an admin' });
-
-        user.isSuspended = true;
-        user.tokenVersion += 1; // Kick them out of current sessions
-        await user.save();
-        
-        console.log(`[ADMIN] User ${user.email} suspended by Admin ${req.userId}`);
-        res.json({ success: true, message: 'User suspended successfully' });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to suspend user' });
-    }
-});
-
-// Unsuspend User
-app.put('/api/admin/users/:id/unsuspend', verifyAdminToken, async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-
-        user.isSuspended = false;
-        await user.save();
-        
-        console.log(`[ADMIN] User ${user.email} unsuspended by Admin ${req.userId}`);
-        res.json({ success: true, message: 'User unsuspended successfully' });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to unsuspend user' });
-    }
-});
-
-// Delete User
-app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        if (user.isAdmin) return res.status(403).json({ error: 'Cannot delete an admin' });
-
-        await User.findByIdAndDelete(req.params.id);
-        
-        console.log(`[ADMIN] User ${user.email} deleted by Admin ${req.userId}`);
-        res.json({ success: true, message: 'User deleted successfully' });
-    } catch (err) {
-        res.status(500).json({ error: 'Failed to delete user' });
-    }
-});
-
-// ──────────────────────────────────────────────────────────────
-//  ✅ REAL-TIME LEAD STATISTICS (AGGREGATION PIPELINE)
-//  ✅ NOW USES verifyAdminToken INSTEAD OF verifyToken
-// ──────────────────────────────────────────────────────────────
-app.get('/api/admin/stats/leads', verifyAdminToken, async (req, res) => {
-    try {
-        const now = new Date();
-        
-        // Define boundaries based on server time (ensure your server TZ is correct)
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const startOfWeek = new Date(now);
-        startOfWeek.setDate(now.getDate() - now.getDay()); 
-        startOfWeek.setHours(0, 0, 0, 0);
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-        const startOfYear = new Date(now.getFullYear(), 0, 1);
-
-        // Single Aggregation Pipeline for Maximum Performance
-        const stats = await Lead.aggregate([
-            {
-                $facet: {
-                    daily: [
-                        { $match: { createdAt: { $gte: startOfDay } } },
-                        { $count: "total" }
-                    ],
-                    weekly: [
-                        { $match: { createdAt: { $gte: startOfWeek } } },
-                        { $count: "total" }
-                    ],
-                    monthly: [
-                        { $match: { createdAt: { $gte: startOfMonth } } },
-                        { $count: "total" }
-                    ],
-                    yearly: [
-                        { $match: { createdAt: { $gte: startOfYear } } },
-                        { $count: "total" }
-                    ]
-                }
-            }
-        ]);
-
-        // Extract counts from the facet result (default to 0 if empty)
-        const result = {
-            daily: stats[0].daily[0]?.total || 0,
-            weekly: stats[0].weekly[0]?.total || 0,
-            monthly: stats[0].monthly[0]?.total || 0,
-            yearly: stats[0].yearly[0]?.total || 0
-        };
-
-        res.json(result);
-    } catch (err) {
-        console.error('[STATS AGGREGATION ERROR]', err);
-        res.status(500).json({ error: 'Failed to calculate lead statistics' });
-    }
-});
-
-// Remaining legacy admin routes...
-// ✅ ALL UPDATED TO USE verifyAdminToken
+// ✅ LEGACY ADMIN ROUTES (Kept for compatibility)
 app.post('/api/admin/verify-layer-2', verifyAdminToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyAdminToken, adminController.adminVerifyLayer3);
 app.get('/api/admin/users/:id/details', verifyAdminToken, adminController.getUserDetails);
@@ -766,53 +519,34 @@ app.post('/api/admin/users/:id/message', verifyAdminToken, validate(adminMessage
 app.get('/api/admin/reports', verifyAdminToken, adminController.getAllReports);
 console.log('✅ [SERVER] Admin routes registered');
 
-// ──────────────────────────────────────────────────────────────
-//  REPORTS
-// ──────────────────────────────────────────────────────────────
+// ─── REPORTS ───
 app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
 console.log('✅ [SERVER] Report routes registered');
 
-// ─────────────────────────────────────────────────────────────
-//  ✅ NEW: HISTORY ROUTES (Aliases for history.html)
-// ───────────────────────────────────────────────────────────
+// ─── HISTORY ROUTES ───
 console.log('🔧 [SERVER] Registering history routes...');
 
-// Alias for /api/sessions (history.html uses /api/history/sessions)
 app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
-
-// Alias for /api/history/:sessionId (history.html uses /api/history/messages/:sessionId)
 app.get('/api/history/messages/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
-
-// Keep original routes for compatibility
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
-
-// Rename session (history.html uses /api/history/rename/:sessionId)
 app.put('/api/history/rename/:sessionId', verifyToken, sessionController.renameSession);
-
-// Pin session (history.html uses /api/history/pin/:sessionId)
 app.put('/api/history/pin/:sessionId', verifyToken, sessionController.pinSession);
-
-// Delete session (history.html uses /api/history/delete/:sessionId)
 app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.deleteSession);
 
 console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
-console.log('    PUT    /api/history/rename/:sessionId');
-console.log('    PUT    /api/history/pin/:sessionId');
-console.log('    DELETE /api/history/delete/:sessionId');
+console.log('   📋 PUT    /api/history/rename/:sessionId');
+console.log('   📋 PUT    /api/history/pin/:sessionId');
+console.log('   📋 DELETE /api/history/delete/:sessionId');
 
-// ──────────────────────────────────────────────────────────────
-//  DEBUG ROUTE - Check messages (Remove after fixing)
-// ─────────────────────────────────────────────────────────────
+// ─── DEBUG ROUTES ───
 app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
         const Session = require('./Session');
         
         const userId = req.userId;
-        
-        // Get sessions
         const sessions = await Session.find({ userId }).sort({ updatedAt: -1 }).limit(5);
         
         let result = {
@@ -846,9 +580,6 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
     }
 });
 
-// ──────────────────────────────────────────────────────────────
-//  ✅ DEBUG ROUTE - Check Conversation Data
-// ──────────────────────────────────────────────────────────────
 app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
@@ -866,7 +597,6 @@ app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
             });
         }
         
-        // Get ChatMessages
         const chatMessages = await ChatMessage.find({ 
             userId: req.userId, 
             sessionId: lead._id.toString() 
@@ -895,9 +625,6 @@ app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
     }
 });
 
-// ────────────────────────────────────────────────────────────
-//  ✅ DEBUG ROUTE - Check All Leads
-// ─────────────────────────────────────────────────────────────
 app.get('/api/debug/leads', verifyToken, async (req, res) => {
     try {
         const leads = await Lead.find({ userId: req.userId })
@@ -922,9 +649,7 @@ app.get('/api/debug/leads', verifyToken, async (req, res) => {
     }
 });
 
-// ═════════════════════════════════════════
-//  START SERVER
-// ════════════════════════════════════════
+// ─── START SERVER ───
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
     console.log(`🚀 Server running on port ${PORT}`); 
