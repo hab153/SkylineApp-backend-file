@@ -233,7 +233,7 @@ const updateAutoReply = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - COMPLETE FIX WITH IDEMPOTENCY + BATCH SIZE LIMIT
+//  POST /api/leads/batch-send - COMPLETE FIX WITH TOKEN RETRY
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -249,7 +249,6 @@ const batchSend = async (req, res) => {
         
         // ─── ✅ BATCH SIZE VALIDATION ───
         const MAX_BATCH_SIZE = 100;
-        const MIN_BATCH_SIZE = 1;
         
         if (!Array.isArray(leads)) {
             return res.status(400).json({ 
@@ -285,6 +284,87 @@ const batchSend = async (req, res) => {
                 message: limitError.message,
                 limitReached: true 
             });
+        }
+
+        // ─── GET EMAIL ACCOUNT WITH TOKEN HANDLING ───
+        const EmailAccount = require('./EmailAccount');
+        let account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+        
+        // ✅ Check if Nylas is connected
+        if (!account) {
+            return res.status(401).json({
+                success: false,
+                error: 'NYLAS_DISCONNECTED',
+                message: 'Please connect your email account first.'
+            });
+        }
+
+        // ✅ FIX: Handle token refresh with retry logic
+        let tokenValid = true;
+        let tokenError = null;
+        
+        try {
+            // Check if token is expired
+            const now = new Date();
+            const tokenExpiry = new Date(account.tokenExpiry);
+            const timeUntilExpiry = (tokenExpiry - now) / 1000; // seconds
+            
+            console.log(`🔐 [BE-BATCH] Token expires in ${timeUntilExpiry} seconds`);
+            
+            // If token expires in less than 5 minutes, refresh it
+            if (timeUntilExpiry < 300) {
+                console.log('🔄 [BE-BATCH] Token expiring soon, refreshing...');
+                
+                // ✅ RETRY LOGIC: Try up to 3 times
+                let refreshAttempts = 0;
+                const MAX_REFRESH_ATTEMPTS = 3;
+                let refreshed = false;
+                
+                while (refreshAttempts < MAX_REFRESH_ATTEMPTS && !refreshed) {
+                    try {
+                        refreshAttempts++;
+                        console.log(`🔄 [BE-BATCH] Refresh attempt ${refreshAttempts}/${MAX_REFRESH_ATTEMPTS}`);
+                        
+                        const { refreshNylasToken } = require('./nylasService');
+                        const newToken = await refreshNylasToken(req.userId);
+                        
+                        if (newToken && newToken.accessToken) {
+                            refreshed = true;
+                            tokenValid = true;
+                            console.log('✅ [BE-BATCH] Token refreshed successfully');
+                            
+                            // Update account with new token
+                            account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+                        }
+                    } catch (refreshErr) {
+                        console.error(`❌ [BE-BATCH] Refresh attempt ${refreshAttempts} failed:`, refreshErr.message);
+                        tokenError = refreshErr.message;
+                        
+                        if (refreshAttempts < MAX_REFRESH_ATTEMPTS) {
+                            // Wait before retry (exponential backoff)
+                            const waitTime = Math.min(1000 * Math.pow(2, refreshAttempts - 1), 5000);
+                            console.log(`⏳ [BE-BATCH] Waiting ${waitTime}ms before retry...`);
+                            await new Promise(resolve => setTimeout(resolve, waitTime));
+                        }
+                    }
+                }
+                
+                // If all refresh attempts failed
+                if (!refreshed) {
+                    console.error(`❌ [BE-BATCH] All ${MAX_REFRESH_ATTEMPTS} refresh attempts failed`);
+                    tokenValid = false;
+                    
+                    // ✅ Fallback: Try to continue with stale token
+                    console.warn('⚠️ [BE-BATCH] Continuing with stale token - individual sends may fail');
+                }
+            } else {
+                console.log('✅ [BE-BATCH] Token is valid');
+            }
+        } catch (err) {
+            console.error('❌ [BE-BATCH] Token refresh error:', err);
+            tokenValid = false;
+            tokenError = err.message;
+            // Continue with stale token
         }
 
         // ✅ CASE 1: Sending to an EXISTING lead (from notifications.html)
@@ -345,44 +425,61 @@ const batchSend = async (req, res) => {
                 console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
             
-            // ── SEND EMAIL ──
-            const EmailAccount = require('./EmailAccount');
-            const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
-            
+            // ── SEND EMAIL WITH RETRY ──
             let emailSent = false;
             let emailError = null;
             let threadId = null;
             
             if (!account) {
-                console.warn(`⚠️ [BE-BATCH] No email account connected for user ${req.userId}`);
                 emailError = 'No email account connected';
             } else {
-                try {
-                    console.log(`📧 [BE-BATCH] Attempting to send via Nylas for grant: ${account.nylasGrantId}`);
-                    
-                    const result = await sendEmail(
-                        req.userId,
-                        targetLead.email,
-                        msgSubject,
-                        msgContent
-                    );
-                    
-                    if (result.success) {
-                        emailSent = true;
-                        threadId = result.threadId;
-                        console.log(`✅ [BE-BATCH] Email sent successfully to ${targetLead.email}`);
+                // ✅ RETRY LOGIC: Try up to 2 times per email
+                let sendAttempts = 0;
+                const MAX_SEND_ATTEMPTS = 2;
+                
+                while (sendAttempts < MAX_SEND_ATTEMPTS && !emailSent) {
+                    try {
+                        sendAttempts++;
+                        console.log(`📧 [BE-BATCH] Send attempt ${sendAttempts}/${MAX_SEND_ATTEMPTS} to ${targetLead.email}`);
                         
-                        if (threadId) {
-                            targetLead.threadId = threadId;
-                            console.log(`💾 [BE-BATCH] Saved threadId to lead: ${threadId}`);
+                        // ✅ Use the updated account for each attempt
+                        const freshAccount = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+                        
+                        const result = await sendEmail(
+                            req.userId,
+                            targetLead.email,
+                            msgSubject,
+                            msgContent
+                        );
+                        
+                        if (result.success) {
+                            emailSent = true;
+                            threadId = result.threadId;
+                            console.log(`✅ [BE-BATCH] Email sent successfully to ${targetLead.email}`);
+                            
+                            if (threadId) {
+                                targetLead.threadId = threadId;
+                                console.log(`💾 [BE-BATCH] Saved threadId to lead: ${threadId}`);
+                            }
+                        } else {
+                            emailError = result.error || 'Email send failed';
+                            console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} failed: ${emailError}`);
+                            
+                            if (sendAttempts < MAX_SEND_ATTEMPTS) {
+                                const waitTime = 1000 * sendAttempts;
+                                console.log(`⏳ [BE-BATCH] Waiting ${waitTime}ms before retry...`);
+                                await new Promise(resolve => setTimeout(resolve, waitTime));
+                            }
                         }
-                    } else {
-                        emailError = result.error || 'Email send failed';
-                        console.error(`❌ [BE-BATCH] Email send failed: ${emailError}`);
+                    } catch (sendErr) {
+                        emailError = sendErr.message;
+                        console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} error: ${emailError}`);
+                        
+                        if (sendAttempts < MAX_SEND_ATTEMPTS) {
+                            const waitTime = 1000 * sendAttempts;
+                            await new Promise(resolve => setTimeout(resolve, waitTime));
+                        }
                     }
-                } catch (emailErr) {
-                    emailError = emailErr.message;
-                    console.error(`❌ [BE-BATCH] Email error: ${emailError}`);
                 }
             }
             
@@ -406,7 +503,8 @@ const batchSend = async (req, res) => {
                 leadId: targetLead._id.toString(),
                 emailSent: emailSent,
                 emailError: emailError || null,
-                threadId: threadId || null
+                threadId: threadId || null,
+                tokenRefreshed: tokenValid
             });
             
         // ✅ CASE 2: Creating NEW leads and sending (from page.html)
@@ -417,9 +515,6 @@ const batchSend = async (req, res) => {
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
             }
 
-            const EmailAccount = require('./EmailAccount');
-            const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
-            
             let results = [];
             let anyFailed = false;
 
@@ -506,28 +601,53 @@ const batchSend = async (req, res) => {
                     });
                 }
 
-                // ─── SEND EMAIL ───
+                // ─── SEND EMAIL WITH RETRY ───
                 let emailSent = false;
                 let emailError = null;
 
                 if (account && leadEmail) {
-                    try {
-                        const result = await sendEmail(
-                            req.userId,
-                            leadEmail,
-                            leadData.messages[0].subject || 'Hello from Skyline',
-                            leadData.messages[0].body
-                        );
-                        if (result.success) {
-                            emailSent = true;
-                            if (result.threadId) lead.threadId = result.threadId;
-                        } else {
-                            emailError = result.error;
-                            anyFailed = true;
+                    // ✅ RETRY LOGIC: Try up to 2 times per email
+                    let sendAttempts = 0;
+                    const MAX_SEND_ATTEMPTS = 2;
+                    
+                    while (sendAttempts < MAX_SEND_ATTEMPTS && !emailSent) {
+                        try {
+                            sendAttempts++;
+                            console.log(`📧 [BE-BATCH] Send attempt ${sendAttempts}/${MAX_SEND_ATTEMPTS} to ${leadEmail}`);
+                            
+                            // ✅ Use fresh account for each attempt
+                            const freshAccount = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+                            
+                            const result = await sendEmail(
+                                req.userId,
+                                leadEmail,
+                                leadData.messages[0].subject || 'Hello from Skyline',
+                                leadData.messages[0].body
+                            );
+                            
+                            if (result.success) {
+                                emailSent = true;
+                                if (result.threadId) lead.threadId = result.threadId;
+                                console.log(`✅ [BE-BATCH] Email sent successfully to ${leadEmail}`);
+                            } else {
+                                emailError = result.error || 'Email send failed';
+                                console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} failed: ${emailError}`);
+                                
+                                if (sendAttempts < MAX_SEND_ATTEMPTS) {
+                                    const waitTime = 1000 * sendAttempts;
+                                    console.log(`⏳ [BE-BATCH] Waiting ${waitTime}ms before retry...`);
+                                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                                }
+                            }
+                        } catch (sendErr) {
+                            emailError = sendErr.message;
+                            console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} error: ${emailError}`);
+                            
+                            if (sendAttempts < MAX_SEND_ATTEMPTS) {
+                                const waitTime = 1000 * sendAttempts;
+                                await new Promise(resolve => setTimeout(resolve, waitTime));
+                            }
                         }
-                    } catch (err) {
-                        emailError = err.message;
-                        anyFailed = true;
                     }
                 } else {
                     emailError = 'No email account or missing lead email';
@@ -559,7 +679,8 @@ const batchSend = async (req, res) => {
             res.json({
                 success: !anyFailed,
                 message: anyFailed ? 'Some emails failed to send.' : 'All emails sent successfully.',
-                results: results
+                results: results,
+                tokenRefreshed: tokenValid
             });
         }
         
