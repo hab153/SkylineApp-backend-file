@@ -51,8 +51,9 @@ async function refreshNylasToken(userId) {
     }
 }
 
-// ── Send Email with Auto-Refresh ──
-exports.sendEmail = async (userId, to, subject, body) => {
+// ── Send Email with Auto-Refresh and Retry ──
+exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
+    const MAX_RETRIES = 2;
     try {
         // ✅ Get account
         let account = await EmailAccount.findOne({ userId });
@@ -72,12 +73,10 @@ exports.sendEmail = async (userId, to, subject, body) => {
             const refreshed = await refreshNylasToken(userId);
             if (refreshed) {
                 account = refreshed;
+                console.log('✅ [Nylas] Token refreshed successfully');
             } else {
-                return { 
-                    success: false, 
-                    error: 'Token expired. Please reconnect your email.',
-                    needsReconnect: true 
-                };
+                // ✅ Don't fail immediately - try with stale token first
+                console.warn('⚠️ [Nylas] Token refresh failed, attempting with stale token...');
             }
         }
 
@@ -112,19 +111,39 @@ exports.sendEmail = async (userId, to, subject, body) => {
         };
 
     } catch (error) {
-        console.error('❌ [Nylas Send] Error:', error.message);
+        console.error(`❌ [Nylas Send] Error (attempt ${retryCount + 1}):`, error.message);
         console.error('❌ [Nylas Send] Error details:', error.response?.data || error);
         
-        // If error is token-related, try refresh once more
-        if (error.message.includes('token') || error.message.includes('401') || error.message.includes('403')) {
-            console.log('🔄 [Nylas] Token error, attempting one more refresh...');
+        // ✅ If this is a token-related error and we haven't exceeded retries
+        if ((error.message.includes('token') || error.message.includes('401') || error.message.includes('403')) && retryCount < MAX_RETRIES) {
+            console.log(`🔄 [Nylas] Token error, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
+            
+            // Try to refresh the token
             const refreshed = await refreshNylasToken(userId);
             if (refreshed) {
-                return exports.sendEmail(userId, to, subject, body);
+                // Retry with fresh token
+                return exports.sendEmail(userId, to, subject, body, retryCount + 1);
             }
         }
         
-        return { success: false, error: error.message, details: error.response?.data };
+        // ✅ If this is a network error and we haven't exceeded retries
+        if ((error.message.includes('timeout') || error.message.includes('network') || error.message.includes('ECONNREFUSED')) && retryCount < MAX_RETRIES) {
+            console.log(`🔄 [Nylas] Network error, retrying (${retryCount + 1}/${MAX_RETRIES})...`);
+            
+            // Wait before retry (exponential backoff)
+            const waitTime = 1000 * Math.pow(2, retryCount);
+            console.log(`⏳ [Nylas] Waiting ${waitTime}ms before retry...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            
+            return exports.sendEmail(userId, to, subject, body, retryCount + 1);
+        }
+        
+        return { 
+            success: false, 
+            error: error.message, 
+            details: error.response?.data,
+            attemptedRetries: retryCount
+        };
     }
 };
 
@@ -186,3 +205,6 @@ exports.getThreads = async (userId, limit = 10) => {
         return [];
     }
 };
+
+// ── Export refresh function ──
+exports.refreshNylasToken = refreshNylasToken;
