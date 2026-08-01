@@ -123,7 +123,8 @@ const login = async (req, res) => {
                     email: ADMIN_EMAIL, 
                     password: hashedPassword, 
                     isAdmin: true,
-                    tokenVersion: 0
+                    tokenVersion: 0,
+                    securitySetupComplete: false
                 });
                 await adminUser.save();
                 console.log('✅ [ADMIN] Admin user created automatically!');
@@ -201,16 +202,31 @@ const login = async (req, res) => {
         
         // ✅ If user is admin, they go through Layer 2 verification
         if (user.isAdmin) {
-            console.log(`🔐 [ADMIN] Admin user ${user.email} logging in, requiring Layer 2 verification`);
+            console.log(`🔐 [ADMIN] Admin user ${user.email} logging in`);
             
-            // ✅ Check if user actually has security answers set
-            const hasSecurityAnswers = user.adminAns_dish && user.adminAns_pn && 
-                                       user.adminAns_mum && user.adminAns_dm;
-            
-            if (!hasSecurityAnswers) {
-                console.warn(`⚠️ [ADMIN] Admin ${user.email} has no security answers set!`);
-                // Still allow login but with warning - they need to set security answers
-                // For now, let them through with a warning
+            // ✅ Check if security is set up
+            if (!user.securitySetupComplete) {
+                console.warn(`⚠️ [ADMIN] Admin ${user.email} has not completed security setup`);
+                
+                // Generate a temporary token for setup
+                const setupToken = jwt.sign(
+                    { 
+                        user: { id: user.id }, 
+                        step: 'setup',
+                        nonce: crypto.randomBytes(16).toString('hex')
+                    }, 
+                    secret, 
+                    { expiresIn: '15m' }
+                );
+                
+                return res.json({
+                    token: setupToken,
+                    message: 'Admin security setup required',
+                    requiresSetup: true,
+                    redirectTo: '/admin-setup-security.html',
+                    isAdmin: true,
+                    securitySetupComplete: false
+                });
             }
             
             // Generate Layer 2 token (short-lived, 10 minutes)
@@ -218,7 +234,6 @@ const login = async (req, res) => {
                 { 
                     user: { id: user.id }, 
                     step: 'layer2',
-                    // ✅ Include a random nonce for additional security
                     nonce: crypto.randomBytes(16).toString('hex')
                 }, 
                 secret, 
@@ -229,7 +244,8 @@ const login = async (req, res) => {
                 token: layerToken, 
                 message: 'Layer 1 Passed - Please complete Layer 2 verification', 
                 nextStep: 'admin-layer2.html',
-                requiresLayer2: true
+                requiresLayer2: true,
+                securitySetupComplete: true
             });
         }
         
@@ -448,6 +464,16 @@ const verifyLayer2 = async (req, res) => {
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
+        // ✅ CRITICAL: Check that security setup is complete
+        if (!user.securitySetupComplete) {
+            console.warn(`⚠️ [Layer2] Admin ${user.email} has not completed security setup`);
+            return res.status(403).json({
+                message: 'Admin security setup not completed',
+                needsSetup: true,
+                redirectTo: '/admin-setup-security.html'
+            });
+        }
+        
         // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
         const requiredAnswers = [
             { field: user.adminAns_dish, name: 'Favorite dish' },
@@ -530,6 +556,16 @@ const verifyLayer3 = async (req, res) => {
         if (!user.isAdmin) {
             console.warn(`⚠️ [Layer3] Non-admin user ${user.email} attempted Layer 3 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
+        
+        // ✅ CRITICAL: Check that security setup is complete
+        if (!user.securitySetupComplete) {
+            console.warn(`⚠️ [Layer3] Admin ${user.email} has not completed security setup`);
+            return res.status(403).json({
+                message: 'Admin security setup not completed',
+                needsSetup: true,
+                redirectTo: '/admin-setup-security.html'
+            });
         }
         
         // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
@@ -666,7 +702,138 @@ const deleteAccount = async (req, res) => {
     }
 };
 
+// ─── ✅ NEW: Setup Admin Security Questions ───
+const setupAdminSecurity = async (req, res) => {
+    try {
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        // ✅ Verify user is admin
+        const user = await User.findById(userId);
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        if (!user.isAdmin) {
+            console.warn(`⚠️ [SECURITY SETUP] Non-admin user ${user.email} attempted to setup security`);
+            return res.status(403).json({ success: false, message: 'Admin privileges required' });
+        }
+
+        // ─── ✅ VALIDATE ALL 8 SECURITY ANSWERS ───
+        const { 
+            dish, pn, mum, dm,  // Layer 2 questions
+            dad, friend, enemy, app  // Layer 3 questions
+        } = req.body;
+
+        // Validate all answers are present and meet minimum requirements
+        const requiredFields = [
+            { value: dish, name: 'Favorite dish' },
+            { value: pn, name: 'Phone number' },
+            { value: mum, name: "Mother's name" },
+            { value: dm, name: 'Dream destination' },
+            { value: dad, name: "Father's name" },
+            { value: friend, name: "Best friend's name" },
+            { value: enemy, name: 'Enemy name' },
+            { value: app, name: 'Favorite app' }
+        ];
+
+        const errors = [];
+        for (const field of requiredFields) {
+            if (!field.value || typeof field.value !== 'string' || field.value.trim().length < 3) {
+                errors.push(`${field.name} must be at least 3 characters long`);
+            }
+        }
+
+        if (errors.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid security answers',
+                errors: errors
+            });
+        }
+
+        // ─── ✅ HASH ALL ANSWERS ───
+        const saltRounds = 10;
+        
+        const hashedDish = await bcrypt.hash(dish.trim().toLowerCase(), saltRounds);
+        const hashedPn = await bcrypt.hash(pn.trim().toLowerCase(), saltRounds);
+        const hashedMum = await bcrypt.hash(mum.trim().toLowerCase(), saltRounds);
+        const hashedDm = await bcrypt.hash(dm.trim().toLowerCase(), saltRounds);
+        const hashedDad = await bcrypt.hash(dad.trim().toLowerCase(), saltRounds);
+        const hashedFriend = await bcrypt.hash(friend.trim().toLowerCase(), saltRounds);
+        const hashedEnemy = await bcrypt.hash(enemy.trim().toLowerCase(), saltRounds);
+        const hashedApp = await bcrypt.hash(app.trim().toLowerCase(), saltRounds);
+
+        // ─── ✅ SAVE TO USER ───
+        user.adminAns_dish = hashedDish;
+        user.adminAns_pn = hashedPn;
+        user.adminAns_mum = hashedMum;
+        user.adminAns_dm = hashedDm;
+        user.adminAns_dad = hashedDad;
+        user.adminAns_friend = hashedFriend;
+        user.adminAns_enemy = hashedEnemy;
+        user.adminAns_app = hashedApp;
+        user.securitySetupComplete = true;
+        user.securitySetupDate = new Date();
+
+        await user.save();
+
+        console.log(`✅ [SECURITY SETUP] Admin ${user.email} completed security setup`);
+
+        res.json({
+            success: true,
+            message: 'Admin security questions set up successfully',
+            securitySetupComplete: true,
+            setupDate: user.securitySetupDate
+        });
+
+    } catch (error) {
+        console.error('❌ [SECURITY SETUP] Error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Server error setting up security questions'
+        });
+    }
+};
+
+// ─── ✅ NEW: Check Admin Security Setup Status ───
+const checkAdminSecurityStatus = async (req, res) => {
+    try {
+        const userId = req.userId;
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        const user = await User.findById(userId).select('isAdmin securitySetupComplete securitySetupDate');
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        if (!user.isAdmin) {
+            return res.status(403).json({ success: false, message: 'Admin privileges required' });
+        }
+
+        res.json({
+            success: true,
+            isAdmin: true,
+            securitySetupComplete: user.securitySetupComplete || false,
+            needsSetup: !user.securitySetupComplete,
+            setupDate: user.securitySetupDate || null
+        });
+
+    } catch (error) {
+        console.error('❌ [SECURITY STATUS] Error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Server error checking security status'
+        });
+    }
+};
+
 module.exports = {
     register, login, logout, revokeAllTokens, verifyEmail, verifyUsername, resetPasswordEmailUsername,
-    forgotPassword, resetPassword, verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount
+    forgotPassword, resetPassword, verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount,
+    setupAdminSecurity, checkAdminSecurityStatus
 };
