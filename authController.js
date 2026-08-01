@@ -27,7 +27,7 @@ function validateSecurityAnswer(answer, fieldName) {
     if (trimmed.length < 3) {
         return `${fieldName} must be at least 3 characters long`;
     }
-    return null;
+    return null; // Valid
 }
 
 // ✅ FIXED: Register function
@@ -415,10 +415,11 @@ const resetPassword = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Verify Layer 2
+// ✅ FIXED: Verify Layer 2 - WITH SECURITY ANSWERS VALIDATION
 const verifyLayer2 = async (req, res) => {
     const { dish, pn, mum, dm } = req.body;
     
+    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
     const validations = [
         validateSecurityAnswer(dish, 'Favorite dish'),
         validateSecurityAnswer(pn, 'Phone number'),
@@ -432,16 +433,39 @@ const verifyLayer2 = async (req, res) => {
     }
     
     try {
-        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (!isValidObjectId(req.userId)) { 
+            return res.status(400).json({ message: 'Invalid user ID' }); 
+        }
         
-        // ✅ Verify user is actually an admin
+        const user = await User.findById(req.userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // ✅ CRITICAL: Verify user is actually an admin
         if (!user.isAdmin) {
             console.warn(`⚠️ [Layer2] Non-admin user ${user.email} attempted Layer 2 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
+        // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
+        const requiredAnswers = [
+            { field: user.adminAns_dish, name: 'Favorite dish' },
+            { field: user.adminAns_pn, name: 'Phone number' },
+            { field: user.adminAns_mum, name: "Mother's name" },
+            { field: user.adminAns_dm, name: 'Dream destination' }
+        ];
+        
+        const missingAnswers = requiredAnswers.filter(a => !a.field || a.field.length < 3);
+        if (missingAnswers.length > 0) {
+            const missingNames = missingAnswers.map(a => a.name).join(', ');
+            console.error(`❌ [Layer2] Admin ${user.email} has missing or short security answers: ${missingNames}`);
+            return res.status(500).json({ 
+                message: 'Admin security answers not configured. Please contact support.' 
+            });
+        }
+        
+        // ✅ Compare answers (all already validated as non-empty above)
         const d1 = await bcrypt.compare(dish.trim().toLowerCase(), user.adminAns_dish);
         const d2 = await bcrypt.compare(pn.trim().toLowerCase(), user.adminAns_pn);
         const d3 = await bcrypt.compare(mum.trim().toLowerCase(), user.adminAns_mum);
@@ -458,19 +482,28 @@ const verifyLayer2 = async (req, res) => {
                 secret, 
                 { expiresIn: '10m' }
             );
-            return res.json({ token: layerToken, nextStep: 'admin-layer3.html' });
+            return res.json({ 
+                token: layerToken, 
+                nextStep: 'admin-layer3.html',
+                message: 'Layer 2 verification passed' 
+            });
         }
+        
+        // ✅ Log failed attempts for security monitoring
+        console.warn(`⚠️ [Layer2] Failed verification attempt for admin ${user.email}`);
         res.status(400).json({ message: 'Incorrect answers' });
+        
     } catch (err) { 
-        console.error('Layer2 Error:', err); 
+        console.error('❌ Layer2 Error:', err); 
         res.status(500).json({ message: 'Server Error' }); 
     }
 };
 
-// ✅ FIXED: Verify Layer 3
+// ✅ FIXED: Verify Layer 3 - WITH SECURITY ANSWERS VALIDATION
 const verifyLayer3 = async (req, res) => {
     const { dad, friend, enemy, app } = req.body;
     
+    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
     const validations = [
         validateSecurityAnswer(dad, "Father's name"),
         validateSecurityAnswer(friend, "Best friend's name"),
@@ -484,16 +517,39 @@ const verifyLayer3 = async (req, res) => {
     }
     
     try {
-        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
-        const user = await User.findById(req.userId);
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        if (!isValidObjectId(req.userId)) { 
+            return res.status(400).json({ message: 'Invalid user ID' }); 
+        }
         
-        // ✅ Verify user is actually an admin
+        const user = await User.findById(req.userId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // ✅ CRITICAL: Verify user is actually an admin
         if (!user.isAdmin) {
             console.warn(`⚠️ [Layer3] Non-admin user ${user.email} attempted Layer 3 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
+        // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
+        const requiredAnswers = [
+            { field: user.adminAns_dad, name: "Father's name" },
+            { field: user.adminAns_friend, name: "Best friend's name" },
+            { field: user.adminAns_enemy, name: 'Enemy name' },
+            { field: user.adminAns_app, name: 'Favorite app' }
+        ];
+        
+        const missingAnswers = requiredAnswers.filter(a => !a.field || a.field.length < 3);
+        if (missingAnswers.length > 0) {
+            const missingNames = missingAnswers.map(a => a.name).join(', ');
+            console.error(`❌ [Layer3] Admin ${user.email} has missing or short security answers: ${missingNames}`);
+            return res.status(500).json({ 
+                message: 'Admin security answers not configured. Please contact support.' 
+            });
+        }
+        
+        // ✅ Compare answers (all already validated as non-empty above)
         const d1 = await bcrypt.compare(dad.trim().toLowerCase(), user.adminAns_dad);
         const d2 = await bcrypt.compare(friend.trim().toLowerCase(), user.adminAns_friend);
         const d3 = await bcrypt.compare(enemy.trim().toLowerCase(), user.adminAns_enemy);
@@ -501,13 +557,25 @@ const verifyLayer3 = async (req, res) => {
         
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
-            const payload = { user: { id: user.id }, isAdmin: true };
+            const payload = { 
+                user: { id: user.id }, 
+                isAdmin: true,
+                nonce: crypto.randomBytes(16).toString('hex')
+            };
             const token = jwt.sign(payload, secret, { expiresIn: '7d' });
-            return res.json({ token, message: 'Admin Access Granted', nextStep: 'admin-dashboard.html' });
+            return res.json({ 
+                token, 
+                message: 'Admin Access Granted', 
+                nextStep: 'admin-dashboard.html' 
+            });
         }
+        
+        // ✅ Log failed attempts for security monitoring
+        console.warn(`⚠️ [Layer3] Failed verification attempt for admin ${user.email}`);
         res.status(400).json({ message: 'Incorrect answers' });
+        
     } catch (err) { 
-        console.error('Layer3 Error:', err); 
+        console.error('❌ Layer3 Error:', err); 
         res.status(500).json({ message: 'Server Error' }); 
     }
 };
