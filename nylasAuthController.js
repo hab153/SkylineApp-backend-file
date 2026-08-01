@@ -4,7 +4,8 @@ const crypto = require('crypto');
 
 // ─── ✅ VALIDATE NYLAS CONFIG ───
 function validateNylasConfig() {
-    const required = ['NYLAS_CLIENT_ID', 'NYLAS_CLIENT_SECRET', 'NYLAS_API_KEY'];
+    // In Nylas V3, NYLAS_API_KEY serves as the client secret
+    const required = ['NYLAS_CLIENT_ID', 'NYLAS_API_KEY'];
     const missing = required.filter(key => {
         const value = process.env[key];
         return !value || value.trim() === '';
@@ -17,6 +18,8 @@ function validateNylasConfig() {
     }
     
     console.log('✅ [NYLAS AUTH] Nylas configuration validated');
+    console.log(`   📋 Client ID: ${process.env.NYLAS_CLIENT_ID ? '✅ Set' : '❌ Missing'}`);
+    console.log(`   📋 API Key: ${process.env.NYLAS_API_KEY ? '✅ Set' : '❌ Missing'}`);
     return true;
 }
 
@@ -158,14 +161,14 @@ exports.handleCallback = async (req, res) => {
     
     console.log('🔍 [NYLAS CALLBACK] Exchange request params:', {
       clientId: process.env.NYLAS_CLIENT_ID ? '✅' : '❌',
-      clientSecret: process.env.NYLAS_API_KEY ? '✅' : '❌',
+      clientSecret: process.env.NYLAS_API_KEY ? '✅' : '❌', // ← NYLAS_API_KEY is the client secret in V3
       redirectUri: process.env.NYLAS_REDIRECT_URI ? '✅' : '❌',
       code: code.substring(0, 10) + '...'
     });
 
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_API_KEY,
+      clientSecret: process.env.NYLAS_API_KEY, // ← NYLAS_API_KEY is the client secret in V3
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
