@@ -1,95 +1,101 @@
+// authMiddleware.js
 const jwt = require('jsonwebtoken');
 const User = require('./User');
 
-// Helper to get JWT secret - STRICT CHECK ONLY
+// ✅ SECURE: Strict JWT secret getter - NO FALLBACKS, NO DEFAULTS
 const getJwtSecret = () => {
     const secret = process.env.JWT_SECRET;
     if (!secret) {
-        console.error(' CRITICAL: JWT_SECRET is not defined in environment variables');
+        console.error('❌ CRITICAL: JWT_SECRET is not defined in environment variables');
         throw new Error('JWT_SECRET is not configured');
     }
     return secret;
 };
 
 const verifyToken = async (req, res, next) => {
-    console.log('🔐 [AUTH] verifyToken called');
-    console.log('🔐 [AUTH] Request path:', req.path);
-    console.log('🔐 [AUTH] Request method:', req.method);
-    
-    const authHeader = req.headers['authorization'];
-    console.log(' [AUTH] Authorization header:', authHeader ? 'present' : 'missing');
-    
-    if (authHeader) {
-        console.log('🔐 [AUTH] Header value (first 30 chars):', authHeader.substring(0, 30) + '...');
-    }
-    
-    const token = authHeader && authHeader.split(' ')[1];
-    if (!token) {
-        console.error('❌ [AUTH] No token provided');
-        return res.status(403).json({ message: 'No token provided' });
-    }
-    
-    console.log('🔐 [AUTH] Token received (first 20 chars):', token.substring(0, 20) + '...');
-    
     try {
-        // ✅ SECURE: Strict check, no fallback
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ message: 'Unauthorized: No token provided' });
+        }
+
+        const token = authHeader.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ message: 'Unauthorized: Invalid token format' });
+        }
+
+        // ✅ SECURE: Get secret with strict check
         const secret = getJwtSecret();
-        console.log('🔐 [AUTH] Verifying token...');
-        const decoded = jwt.verify(token, secret);
-        console.log('✅ [AUTH] Token decoded successfully');
-        console.log('✅ [AUTH] Decoded payload:', JSON.stringify(decoded, null, 2));
+        let decoded;
         
-        const userId = decoded.user.id;
-        console.log('✅ [AUTH] User ID from token:', userId);
-        
-        // ✅ Check if this is a special token (layer token or admin token)
+        try {
+            decoded = jwt.verify(token, secret);
+        } catch (err) {
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ message: 'Unauthorized: Token expired' });
+            }
+            if (err.name === 'JsonWebTokenError') {
+                return res.status(401).json({ message: 'Unauthorized: Invalid token' });
+            }
+            console.error('❌ [AUTH] JWT verification error:', err.message);
+            return res.status(401).json({ message: 'Unauthorized: Token verification failed' });
+        }
+
+        // Extract user ID from token
+        const userId = decoded.user?.id || decoded.id;
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized: Invalid token payload' });
+        }
+
+        // Check for special tokens (layer tokens)
         const isLayerToken = decoded.step && ['layer2', 'layer3'].includes(decoded.step);
         const isAdminToken = decoded.isAdmin === true;
-        
-        if (isLayerToken || isAdminToken) {
-            // Special tokens: skip tokenVersion check
-            if (isLayerToken) {
-                console.log('🔑 [AUTH] Layer token verified (step:', decoded.step, ')');
-                req.layerStep = decoded.step;
-            } else {
-                console.log('🔑 [AUTH] Admin token verified (isAdmin: true)');
+
+        // Fetch user from database
+        let user;
+        try {
+            user = await User.findById(userId).select('tokenVersion isSuspended suspensionEnds');
+        } catch (dbErr) {
+            console.error('❌ [AUTH] Database error:', dbErr.message);
+            return res.status(500).json({ message: 'Server error during authentication' });
+        }
+
+        if (!user) {
+            return res.status(401).json({ message: 'Unauthorized: User not found' });
+        }
+
+        // Check if user is suspended
+        if (user.isSuspended) {
+            const now = new Date();
+            if (user.suspensionEnds && now < user.suspensionEnds) {
+                return res.status(403).json({ 
+                    message: 'Account suspended', 
+                    suspensionEnds: user.suspensionEnds 
+                });
             }
+        }
+
+        // ✅ Special tokens: skip tokenVersion check
+        if (isLayerToken || isAdminToken) {
             req.userId = userId;
-            console.log('✅ [AUTH] Special token accepted, userId:', userId);
+            if (isLayerToken) req.layerStep = decoded.step;
             return next();
         }
-        
-        // Normal token: verify tokenVersion matches user's current version
-        console.log(' [AUTH] Fetching user from database to verify tokenVersion...');
-        const user = await User.findById(userId).select('tokenVersion');
-        if (!user) {
-            console.error('❌ [AUTH] User not found for ID:', userId);
-            return res.status(401).json({ message: 'User not found' });
+
+        // ✅ Normal token: verify tokenVersion matches user's current version
+        const tokenVersion = decoded.user?.tokenVersion;
+        if (tokenVersion === undefined || tokenVersion !== user.tokenVersion) {
+            return res.status(401).json({ message: 'Unauthorized: Token revoked' });
         }
-        
-        console.log('🔐 [AUTH] User found. tokenVersion from DB:', user.tokenVersion);
-        const tokenVersion = decoded.user.tokenVersion;
-        console.log(' [AUTH] tokenVersion from token:', tokenVersion);
-        
-        if (tokenVersion !== user.tokenVersion) {
-            console.error('❌ [AUTH] Token revoked - version mismatch',
-                'token:', tokenVersion,
-                'user:', user.tokenVersion);
-            return res.status(401).json({ message: 'Token revoked. Please log in again.' });
-        }
-        
+
+        // ✅ Attach user to request
         req.userId = userId;
-        console.log('✅ [AUTH] Token fully verified, userId =', userId);
+        req.user = user;
         next();
-    } catch (err) {
-        // ✅ Handle missing secret gracefully per-request instead of crashing server
-        if (err.message === 'JWT_SECRET is not configured') {
-            console.error('❌ [AUTH] Server misconfiguration: JWT_SECRET missing');
-            return res.status(500).json({ message: 'Server configuration error' });
-        }
-        console.error('❌ [AUTH] Invalid token:', err.message);
-        console.error('❌ [AUTH] Error details:', err);
-        return res.status(401).json({ message: 'Invalid token' });
+
+    } catch (error) {
+        console.error('❌ [AUTH] Unexpected error:', error.message);
+        return res.status(500).json({ message: 'Authentication error' });
     }
 };
 
