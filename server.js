@@ -100,11 +100,11 @@ console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ─── ✅ CRITICAL: Validate all required environment variables ───
+// In Nylas V3, NYLAS_API_KEY serves as the client secret
 const requiredEnvVars = [
     'JWT_SECRET',
     'NYLAS_CLIENT_ID',
-    'NYLAS_CLIENT_SECRET',
-    'NYLAS_API_KEY',
+    'NYLAS_API_KEY',        // ← This is the client secret in V3
     'FLUTTERWAVE_SECRET_KEY',
     'FLUTTERWAVE_SECRET_HASH',
     'MONGODB_URI'
