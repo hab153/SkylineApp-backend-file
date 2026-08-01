@@ -1,8 +1,34 @@
 const nylas = require('./nylasClient');
 const EmailAccount = require('./EmailAccount');
 
+// ─── ✅ VALIDATE NYLAS CONFIG AT LOAD ───
+function validateNylasConfig() {
+    const required = ['NYLAS_CLIENT_ID', 'NYLAS_CLIENT_SECRET', 'NYLAS_API_KEY'];
+    const missing = required.filter(key => {
+        const value = process.env[key];
+        return !value || value.trim() === '';
+    });
+    
+    if (missing.length > 0) {
+        console.error('❌ [NYLAS] Missing required Nylas configuration:');
+        missing.forEach(key => console.error(`   ⚠️ ${key}`));
+        console.error('⚠️ [NYLAS] Email integration will not work until these are configured.');
+        return false;
+    }
+    
+    console.log('✅ [NYLAS] Nylas configuration validated');
+    return true;
+}
+
+const NYLAS_CONFIG_VALID = validateNylasConfig();
+
 // ── Refresh Token Function ──
 async function refreshNylasToken(userId) {
+    if (!NYLAS_CONFIG_VALID) {
+        console.error('❌ [Nylas] Cannot refresh token: Nylas not configured');
+        return null;
+    }
+
     try {
         console.log('🔄 [Nylas] Refreshing token for user:', userId);
         
@@ -53,6 +79,16 @@ async function refreshNylasToken(userId) {
 
 // ── Send Email with Auto-Refresh and Retry ──
 exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
+    // ✅ Check Nylas config first
+    if (!NYLAS_CONFIG_VALID) {
+        console.error('❌ [Nylas Send] Cannot send email: Nylas not configured');
+        return { 
+            success: false, 
+            error: 'Email service not configured. Please contact support.',
+            configMissing: true
+        };
+    }
+
     const MAX_RETRIES = 2;
     try {
         // ✅ Get account
@@ -149,6 +185,16 @@ exports.sendEmail = async (userId, to, subject, body, retryCount = 0) => {
 
 // ── Check Connection Status ──
 exports.checkConnection = async (userId) => {
+    // ✅ Check Nylas config first
+    if (!NYLAS_CONFIG_VALID) {
+        console.error('❌ [Nylas] Cannot check connection: Nylas not configured');
+        return { 
+            connected: false, 
+            error: 'Email service not configured. Please contact support.',
+            configMissing: true
+        };
+    }
+
     try {
         const account = await EmailAccount.findOne({ userId });
         if (!account) {
@@ -183,6 +229,12 @@ exports.checkConnection = async (userId) => {
 
 // ── Get Threads ──
 exports.getThreads = async (userId, limit = 10) => {
+    // ✅ Check Nylas config first
+    if (!NYLAS_CONFIG_VALID) {
+        console.error('❌ [Nylas Threads] Cannot get threads: Nylas not configured');
+        return [];
+    }
+
     try {
         const account = await EmailAccount.findOne({ userId, isConnected: true });
         if (!account) {
@@ -208,3 +260,4 @@ exports.getThreads = async (userId, limit = 10) => {
 
 // ── Export refresh function ──
 exports.refreshNylasToken = refreshNylasToken;
+exports.NYLAS_CONFIG_VALID = NYLAS_CONFIG_VALID;
