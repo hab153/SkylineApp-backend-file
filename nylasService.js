@@ -3,7 +3,8 @@ const EmailAccount = require('./EmailAccount');
 
 // ─── ✅ VALIDATE NYLAS CONFIG AT LOAD ───
 function validateNylasConfig() {
-    const required = ['NYLAS_CLIENT_ID', 'NYLAS_CLIENT_SECRET', 'NYLAS_API_KEY'];
+    // In Nylas V3, NYLAS_API_KEY serves as the client secret
+    const required = ['NYLAS_CLIENT_ID', 'NYLAS_API_KEY'];
     const missing = required.filter(key => {
         const value = process.env[key];
         return !value || value.trim() === '';
@@ -17,6 +18,8 @@ function validateNylasConfig() {
     }
     
     console.log('✅ [NYLAS] Nylas configuration validated');
+    console.log(`   📋 Client ID: ${process.env.NYLAS_CLIENT_ID ? '✅ Set' : '❌ Missing'}`);
+    console.log(`   📋 API Key: ${process.env.NYLAS_API_KEY ? '✅ Set' : '❌ Missing'}`);
     return true;
 }
 
@@ -46,7 +49,7 @@ async function refreshNylasToken(userId) {
         // ✅ Use the refresh method
         const response = await nylas.auth.refreshAccessToken({
             clientId: process.env.NYLAS_CLIENT_ID,
-            clientSecret: process.env.NYLAS_API_KEY,
+            clientSecret: process.env.NYLAS_API_KEY, // ← NYLAS_API_KEY is the client secret in V3
             refreshToken: account.refreshToken,
         });
 
