@@ -3,6 +3,16 @@ const jwt = require('jsonwebtoken');
 const User = require('./User');
 const bcrypt = require('bcryptjs');
 
+// ✅ SECURE: Strict JWT secret getter - NO FALLBACKS
+const getAdminJwtSecret = () => {
+    const secret = process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
+    if (!secret) {
+        console.error('❌ CRITICAL: ADMIN_JWT_SECRET is not defined in environment variables');
+        throw new Error('ADMIN_JWT_SECRET is not configured');
+    }
+    return secret;
+};
+
 /**
  * POST /api/admin/authenticate
  * Validates admin credentials and issues short-lived session
@@ -32,6 +42,9 @@ async function authenticateAdmin(req, res) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        // ✅ SECURE: Strict secret check
+        const secret = getAdminJwtSecret();
+
         // Issue SHORT-LIVED admin token (30 minutes max)
         const adminToken = jwt.sign(
             { 
@@ -39,15 +52,15 @@ async function authenticateAdmin(req, res) {
                 role: 'admin',
                 permissions: admin.permissions || ['all']
             },
-            process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET,
+            secret,
             { expiresIn: '30m' }
         );
 
         // Set HTTP-only cookie (more secure than localStorage)
         res.cookie('admin_session', adminToken, {
             httpOnly: true,
-            secure: true,      // HTTPS only on Render
-            sameSite: 'strict', // Prevent CSRF
+            secure: true,
+            sameSite: 'strict',
             maxAge: 30 * 60 * 1000
         });
 
