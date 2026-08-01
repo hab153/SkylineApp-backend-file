@@ -1,8 +1,30 @@
 // flutterwaveWebhook.js
 const User = require('./User');
 
+// ─── PRICING CONFIG ───
+const PRICING = {
+    go: 9,    // $9 USD per month
+    pro: 20   // $20 USD per month
+};
+
+// ─── IDEMPOTENCY CACHE ───
+const processedTransactions = new Map();
+const TRANSACTION_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// ─── HELPER: Clean up expired transaction records ───
+function cleanupProcessedTransactions() {
+    const now = Date.now();
+    for (const [key, value] of processedTransactions.entries()) {
+        if (now - value.timestamp > TRANSACTION_TTL) {
+            processedTransactions.delete(key);
+        }
+    }
+}
+
+setInterval(cleanupProcessedTransactions, 60 * 60 * 1000);
+
 /**
- * ✅ FIXED: Handle Flutterwave webhook with proper signature validation
+ * ✅ FIXED: Handle Flutterwave webhook with amount verification
  */
 module.exports = async (req, res) => {
     console.log('🔔 [FLUTTERWAVE WEBHOOK] Received webhook notification');
@@ -11,10 +33,8 @@ module.exports = async (req, res) => {
         // ─── ✅ CRITICAL: Get and validate secret hash ───
         const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
         
-        // ✅ If secret hash is not configured, REJECT the webhook
         if (!secretHash || secretHash.trim() === '') {
             console.error('❌ [FLUTTERWAVE WEBHOOK] FATAL: FLUTTERWAVE_SECRET_HASH is not configured');
-            console.error('⚠️ [FLUTTERWAVE WEBHOOK] Please set FLUTTERWAVE_SECRET_HASH in environment variables');
             return res.status(500).send('Webhook not configured. Please contact support.');
         }
 
@@ -27,7 +47,7 @@ module.exports = async (req, res) => {
         }
 
         if (signature !== secretHash) {
-            console.error(`❌ [FLUTTERWAVE WEBHOOK] Invalid signature. Expected: ${secretHash.substring(0, 10)}..., Received: ${signature.substring(0, 10)}...`);
+            console.error(`❌ [FLUTTERWAVE WEBHOOK] Invalid signature`);
             return res.status(401).send('Unauthorized: Invalid signature');
         }
 
@@ -36,7 +56,6 @@ module.exports = async (req, res) => {
         // ─── ✅ PARSE PAYLOAD ───
         let payload;
         try {
-            // Handle both Buffer and string
             const rawBody = req.body ? req.body.toString('utf-8') : '';
             payload = JSON.parse(rawBody);
         } catch (e) {
@@ -49,24 +68,20 @@ module.exports = async (req, res) => {
         // ─── ✅ EXTRACT PAYMENT DATA ───
         let txRef, status, planType, amount, currency;
         
-        // Handle different webhook formats
         if (payload.event === 'charge.completed') {
             const data = payload.data || {};
             status = data.status;
             txRef = data.tx_ref || data.txRef;
             planType = data.meta?.plan || data.plan;
-            amount = data.amount;
-            currency = data.currency;
+            amount = parseFloat(data.amount);
+            currency = data.currency || 'USD';
         } else if (payload.status) {
-            // Legacy format
             status = payload.status;
             txRef = payload.txRef || payload.tx_ref;
             planType = payload.meta?.plan || payload.plan;
-            amount = payload.amount;
-            currency = payload.currency;
+            amount = parseFloat(payload.amount);
+            currency = payload.currency || 'USD';
         }
-
-        console.log(`📊 [FLUTTERWAVE WEBHOOK] Status: ${status}, TxRef: ${txRef}, Plan: ${planType}`);
 
         // ─── ✅ VERIFY PAYMENT STATUS ───
         if (status !== 'successful') {
@@ -74,11 +89,27 @@ module.exports = async (req, res) => {
             return res.status(200).send('Payment not successful');
         }
 
-        // ─── ✅ VERIFY REQUIRED FIELDS ───
         if (!txRef) {
-            console.error('❌ [FLUTTERWAVE WEBHOOK] Missing txRef in webhook');
+            console.error('❌ [FLUTTERWAVE WEBHOOK] Missing txRef');
             return res.status(400).send('Missing transaction reference');
         }
+
+        // ─── ✅ IDEMPOTENCY CHECK ───
+        const cacheKey = txRef;
+        const cached = processedTransactions.get(cacheKey);
+        
+        if (cached) {
+            console.log(`⏭️ [FLUTTERWAVE WEBHOOK] Transaction ${txRef} already processed at ${new Date(cached.timestamp).toISOString()}`);
+            return res.status(200).json({
+                success: true,
+                alreadyProcessed: true,
+                message: 'Transaction already processed',
+                processedAt: cached.timestamp,
+                userId: cached.userId
+            });
+        }
+
+        console.log(`🔍 [FLUTTERWAVE WEBHOOK] Processing new transaction: ${txRef}`);
 
         // ─── ✅ DETERMINE PLAN TYPE ───
         if (!planType) {
@@ -87,7 +118,6 @@ module.exports = async (req, res) => {
             } else if (txRef.includes('_pro_') || txRef.includes('_pro')) {
                 planType = 'pro';
             } else {
-                // Fallback: try to extract from meta or default to go
                 console.warn(`⚠️ [FLUTTERWAVE WEBHOOK] Could not determine plan from txRef: ${txRef}, defaulting to 'go'`);
                 planType = 'go';
             }
@@ -96,16 +126,18 @@ module.exports = async (req, res) => {
         // ─── ✅ FIND USER ───
         let user;
         try {
-            // Try multiple ways to find the user
             user = await User.findOne({ lastTxRef: txRef });
             
-            // If not found by txRef, try extracting userId from txRef
             if (!user) {
                 const txRefParts = txRef.split('_');
                 const userId = txRefParts[0];
                 if (userId && userId.length === 24) {
                     user = await User.findById(userId);
                 }
+            }
+            
+            if (!user) {
+                user = await User.findOne({ 'paymentHistory.txRef': txRef });
             }
         } catch (dbErr) {
             console.error('❌ [FLUTTERWAVE WEBHOOK] Database error:', dbErr.message);
@@ -114,70 +146,135 @@ module.exports = async (req, res) => {
 
         if (!user) {
             console.error(`❌ [FLUTTERWAVE WEBHOOK] User not found for txRef: ${txRef}`);
+            processedTransactions.set(cacheKey, {
+                timestamp: Date.now(),
+                userId: 'unknown',
+                status: 'failed_user_not_found'
+            });
             return res.status(404).send('User not found');
         }
 
         console.log(`👤 [FLUTTERWAVE WEBHOOK] Found user: ${user.email} (${user._id})`);
 
-        // ─── ✅ VERIFY PAYMENT AMOUNT (Optional but recommended) ───
-        if (amount) {
-            const expectedAmount = planType === 'pro' ? 20 : 9;
-            const actualAmount = parseFloat(amount);
-            
-            if (actualAmount !== expectedAmount) {
-                console.warn(`⚠️ [FLUTTERWAVE WEBHOOK] Payment amount mismatch. Expected: ${expectedAmount}, Actual: ${actualAmount}`);
-                // Don't reject, just warn - sometimes Flutterwave includes fees
-            }
+        // ─── ✅ CRITICAL: VERIFY PAYMENT AMOUNT ───
+        const expectedAmount = PRICING[planType] || 9;
+        
+        if (isNaN(amount) || amount <= 0) {
+            console.error(`❌ [FLUTTERWAVE WEBHOOK] Invalid amount: ${amount}`);
+            return res.status(400).send('Invalid payment amount');
         }
+
+        // ✅ Check if amount matches expected price
+        if (amount < expectedAmount) {
+            console.error(`❌ [FLUTTERWAVE WEBHOOK] ⚠️ FRAUD DETECTED: Payment amount mismatch for user ${user.email}`);
+            console.error(`❌ [FLUTTERWAVE WEBHOOK] Expected: ${expectedAmount}, Actual: ${amount}, Plan: ${planType}`);
+            
+            // ✅ Log fraud attempt for monitoring
+            try {
+                const Report = require('./Report');
+                await Report.create({
+                    userId: user._id,
+                    subject: `FRAUD ALERT: Payment amount mismatch - ${planType}`,
+                    message: `Fraudulent payment detected for user ${user.email} (${user._id}).\nExpected: ${expectedAmount}\nActual: ${amount}\nPlan: ${planType}\nTxRef: ${txRef}`,
+                    type: 'fraud'
+                });
+                console.log(`📊 [FLUTTERWAVE WEBHOOK] Fraud report created for user ${user.email}`);
+            } catch (reportErr) {
+                console.warn('⚠️ [FLUTTERWAVE WEBHOOK] Failed to create fraud report:', reportErr.message);
+            }
+
+            // ✅ Still store to prevent retry spam
+            processedTransactions.set(cacheKey, {
+                timestamp: Date.now(),
+                userId: user._id.toString(),
+                status: 'failed_amount_mismatch'
+            });
+
+            return res.status(400).json({
+                success: false,
+                message: `Payment amount mismatch. Expected: ${expectedAmount}, Received: ${amount}`,
+                expected: expectedAmount,
+                received: amount
+            });
+        }
+
+        // ✅ If amount is more than expected (overpayment), still upgrade but log it
+        if (amount > expectedAmount) {
+            console.warn(`⚠️ [FLUTTERWAVE WEBHOOK] Overpayment detected for user ${user.email}: Expected ${expectedAmount}, Received ${amount}`);
+        }
+
+        console.log(`✅ [FLUTTERWAVE WEBHOOK] Amount verified: ${currency} ${amount} (expected: ${expectedAmount})`);
 
         // ─── ✅ UPGRADE USER ───
         const endDate = new Date();
-        endDate.setDate(endDate.getDate() + 30); // 30 days from now
+        endDate.setDate(endDate.getDate() + 30);
 
         try {
+            // ✅ If overpayment, maybe give bonus days?
+            let bonusDays = 0;
+            if (amount > expectedAmount * 2) {
+                bonusDays = 30; // Double payment = double subscription time
+                endDate.setDate(endDate.getDate() + 30);
+                console.log(`🎁 [FLUTTERWAVE WEBHOOK] Overpayment bonus: +30 days for user ${user.email}`);
+            }
+
             const updateData = {
                 subscriptionTier: planType,
                 subscriptionEndDate: endDate,
-                lastTxRef: null // Clear the reference after processing
+                lastTxRef: null
             };
 
-            // Save payment history if field exists
-            if (user.paymentHistory !== undefined) {
-                if (!user.paymentHistory) {
-                    user.paymentHistory = [];
-                }
-                user.paymentHistory.push({
-                    amount: amount || 0,
-                    currency: currency || 'USD',
-                    plan: planType,
-                    txRef: txRef,
-                    status: status,
-                    date: new Date(),
-                    paymentData: payload.data || payload
-                });
-                updateData.paymentHistory = user.paymentHistory;
+            if (!user.paymentHistory) {
+                user.paymentHistory = [];
             }
+            user.paymentHistory.push({
+                amount: amount,
+                currency: currency || 'USD',
+                plan: planType,
+                txRef: txRef,
+                status: status,
+                date: new Date(),
+                paymentData: payload.data || payload,
+                bonusDays: bonusDays
+            });
+            updateData.paymentHistory = user.paymentHistory;
 
             await User.findByIdAndUpdate(user._id, updateData);
             
+            processedTransactions.set(cacheKey, {
+                timestamp: Date.now(),
+                userId: user._id.toString(),
+                plan: planType,
+                amount: amount,
+                status: 'success'
+            });
+            
             console.log(`✅ [FLUTTERWAVE WEBHOOK] User ${user.email} upgraded to ${planType.toUpperCase()} (30 days)`);
-            if (amount) {
-                console.log(`📊 [FLUTTERWAVE WEBHOOK] Payment amount: ${currency || 'USD'} ${amount}`);
+            if (bonusDays > 0) {
+                console.log(`🎁 [FLUTTERWAVE WEBHOOK] Bonus days applied: +${bonusDays} days`);
             }
+            console.log(`📊 [FLUTTERWAVE WEBHOOK] Payment: ${currency} ${amount}`);
 
-            // ─── ✅ SEND CONFIRMATION (Optional) ───
+            // ─── ✅ SEND CONFIRMATION ───
             try {
                 const { sendEmail } = require('./nylasService');
+                let emailBody = `Your Skyline AA-1 subscription has been upgraded to the ${planType.toUpperCase()} plan.\n\nPlan details:\n- Tier: ${planType.toUpperCase()}\n- Expires: ${endDate.toLocaleDateString()}\n- Payment reference: ${txRef}\n- Amount: ${currency} ${amount}`;
+                
+                if (bonusDays > 0) {
+                    emailBody += `\n\n🎁 Bonus: ${bonusDays} extra days added due to overpayment.`;
+                }
+                
+                emailBody += `\n\nThank you for your subscription!\n\nThe Skyline Team`;
+
                 await sendEmail({
                     to: user.email,
                     subject: `Subscription Upgrade Confirmed - ${planType.toUpperCase()} Plan`,
-                    body: `Your Skyline AA-1 subscription has been upgraded to the ${planType.toUpperCase()} plan.\n\nPlan details:\n- Tier: ${planType.toUpperCase()}\n- Expires: ${endDate.toLocaleDateString()}\n- Payment reference: ${txRef}\n\nThank you for your subscription!\n\nThe Skyline Team`,
+                    body: emailBody,
                     userId: user._id
                 });
                 console.log(`📧 [FLUTTERWAVE WEBHOOK] Confirmation email sent to ${user.email}`);
             } catch (emailErr) {
                 console.warn(`⚠️ [FLUTTERWAVE WEBHOOK] Failed to send confirmation email:`, emailErr.message);
-                // Don't fail the webhook if email fails
             }
 
             return res.status(200).json({ 
@@ -185,7 +282,11 @@ module.exports = async (req, res) => {
                 message: `User upgraded to ${planType}`,
                 userId: user._id,
                 tier: planType,
-                expires: endDate
+                expires: endDate,
+                amount: amount,
+                expected: expectedAmount,
+                processed: true,
+                bonusDays: bonusDays
             });
 
         } catch (updateErr) {
