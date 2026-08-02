@@ -2,12 +2,11 @@ const User = require('./User');
 const ChatMessage = require('./ChatMessage');
 const Notification = require('./Notification');
 const Report = require('./Report');
-const { verifyLayer2, verifyLayer3 } = require('./authController');
 const { isValidObjectId, sanitizeString, sanitizeQuery } = require('./sanitize');
 
-// Verification layers (direct passthrough)
-const adminVerifyLayer2 = (req, res) => verifyLayer2(req, res);
-const adminVerifyLayer3 = (req, res) => verifyLayer3(req, res);
+// ❌ REMOVED: adminVerifyLayer2 and adminVerifyLayer3
+// These were security question-based verification
+// Now handled by JWT-based admin auth
 
 // GET /api/admin/users
 const getAllUsers = async (req, res) => {
@@ -61,7 +60,7 @@ const deleteUser = async (req, res) => {
     }
 };
 
-// GET /api/admin/users/:id/details (includes full message history – now uses ChatMessage)
+// GET /api/admin/users/:id/details
 const getUserDetails = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.id)) {
@@ -80,7 +79,7 @@ const getUserDetails = async (req, res) => {
     }
 };
 
-// GET /api/admin/users/:id/chat-view (only chat messages)
+// GET /api/admin/users/:id/chat-view
 const getUserChatView = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.id)) {
@@ -99,7 +98,7 @@ const getUserChatView = async (req, res) => {
     }
 };
 
-// POST /api/admin/users/:id/message – send an admin message (becomes Notification)
+// POST /api/admin/users/:id/message
 const sendUserMessage = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.id)) {
@@ -142,8 +141,6 @@ const getAllReports = async (req, res) => {
 };
 
 module.exports = {
-    adminVerifyLayer2,
-    adminVerifyLayer3,
     getAllUsers,
     suspendUser,
     deleteUser,
