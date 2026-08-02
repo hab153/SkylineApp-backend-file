@@ -5,6 +5,9 @@ const { verifyToken } = require('./authMiddleware');
 const {
     register,
     login,
+    adminLogin,
+    setupAdmin,
+    getAdminSetupStatus,
     logout,
     revokeAllTokens,
     verifyEmail,
@@ -14,15 +17,7 @@ const {
     resetPassword,
     verifyAge,
     changeEmail,
-    verifyLayer2,
-    verifyLayer3,
-    deleteAccount,
-    setupAdminSecurity,
-    checkAdminSecurityStatus,
-    // ✅ ADD THESE NEW IMPORTS
-    adminLogin,
-    setupAdmin,
-    getAdminSetupStatus
+    deleteAccount
 } = require('./authController');
 
 // ─── ✅ RATE LIMITERS FOR AUTH ENDPOINTS ───
@@ -32,7 +27,6 @@ const resetLimiter = rateLimit({
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 5, // 5 attempts per hour
     keyGenerator: (req) => {
-        // Use email if present, otherwise IP
         return req.body.email || req.ip;
     },
     message: {
@@ -112,21 +106,10 @@ router.post('/logout', verifyToken, logout);
 router.post('/revoke-tokens', verifyToken, revokeAllTokens);
 router.put('/change-email', verifyToken, changeEmail);
 router.put('/verify-age', verifyToken, verifyAge);
-router.post('/verify-layer-2', verifyToken, verifyLayer2);
-router.post('/verify-layer-3', verifyToken, verifyLayer3);
 router.delete('/delete-account', verifyToken, deleteAccount);
 
-// ──────────────────────────────
-// ✅ ADMIN SECURITY SETUP ROUTES
-// ──────────────────────────────
-// Check if admin has completed security setup
-router.get('/admin/security-status', verifyToken, checkAdminSecurityStatus);
-
-// Setup admin security questions (only for admins)
-router.post('/admin/setup-security', verifyToken, setupAdminSecurity);
-
 // ════════════════════════════════════════════
-// ✅ NEW: ADMIN SETUP ROUTES (NO HARDCODED CREDENTIALS)
+// ✅ SECURE ADMIN SETUP ROUTES (NO HARDCODED CREDENTIALS)
 // ════════════════════════════════════════════
 
 // ─── Get admin setup status (public - no auth required) ───
@@ -138,7 +121,9 @@ router.post('/admin/setup', setupAdmin);
 // ─── Admin login (public - separate from regular login) ───
 router.post('/admin/login', adminLogin);
 
-console.log('✅ [AUTH ROUTES] Admin setup routes registered:');
+console.log('✅ [AUTH ROUTES] Routes registered:');
+console.log('   📋 POST /api/auth/register');
+console.log('   📋 POST /api/auth/login');
 console.log('   📋 GET  /api/auth/admin/setup-status');
 console.log('   📋 POST /api/auth/admin/setup');
 console.log('   📋 POST /api/auth/admin/login');
