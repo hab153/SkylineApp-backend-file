@@ -18,7 +18,11 @@ const {
     verifyLayer3,
     deleteAccount,
     setupAdminSecurity,
-    checkAdminSecurityStatus
+    checkAdminSecurityStatus,
+    // ✅ ADD THESE NEW IMPORTS
+    adminLogin,
+    setupAdmin,
+    getAdminSetupStatus
 } = require('./authController');
 
 // ─── ✅ RATE LIMITERS FOR AUTH ENDPOINTS ───
@@ -120,5 +124,23 @@ router.get('/admin/security-status', verifyToken, checkAdminSecurityStatus);
 
 // Setup admin security questions (only for admins)
 router.post('/admin/setup-security', verifyToken, setupAdminSecurity);
+
+// ════════════════════════════════════════════
+// ✅ NEW: ADMIN SETUP ROUTES (NO HARDCODED CREDENTIALS)
+// ════════════════════════════════════════════
+
+// ─── Get admin setup status (public - no auth required) ───
+router.get('/admin/setup-status', getAdminSetupStatus);
+
+// ─── Create initial admin (public - requires setup token) ───
+router.post('/admin/setup', setupAdmin);
+
+// ─── Admin login (public - separate from regular login) ───
+router.post('/admin/login', adminLogin);
+
+console.log('✅ [AUTH ROUTES] Admin setup routes registered:');
+console.log('   📋 GET  /api/auth/admin/setup-status');
+console.log('   📋 POST /api/auth/admin/setup');
+console.log('   📋 POST /api/auth/admin/login');
 
 module.exports = router;
