@@ -781,4 +781,4 @@ const server = app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`); 
     console.log(`✅ [SERVER] All routes registered successfully`);
 });
-server.timeout = 300000;
+server.timeout = 300000; 
