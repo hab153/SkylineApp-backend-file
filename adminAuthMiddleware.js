@@ -4,7 +4,7 @@ const User = require('./User');
 
 // ✅ SECURE: Strict JWT secret getter - NO FALLBACKS
 const getAdminJwtSecret = () => {
-    const secret = process.env.ADMIN_JWT_SECRET;
+    const secret = process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
     if (!secret) {
         console.error('❌ CRITICAL: ADMIN_JWT_SECRET is not defined in environment variables');
         throw new Error('ADMIN_JWT_SECRET is not configured');
@@ -50,7 +50,7 @@ const verifyAdminToken = async (req, res, next) => {
         // Fetch admin from database
         let admin;
         try {
-            admin = await User.findById(adminId).select('email isAdmin isSuspended permissions');
+            admin = await User.findById(adminId).select('email isAdmin isSuspended');
         } catch (dbErr) {
             console.error('❌ [ADMIN AUTH] Database error:', dbErr.message);
             return res.status(500).json({ message: 'Server error during authentication' });
@@ -78,7 +78,6 @@ const verifyAdminToken = async (req, res, next) => {
         req.userId = admin._id;
         req.user = admin;
         req.isAdmin = true;
-        req.adminPermissions = admin.permissions || ['all'];
         next();
 
     } catch (error) {
