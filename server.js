@@ -99,10 +99,110 @@ console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
-// ─── ✅ CRITICAL: Validate all required environment variables ───
-// In Nylas V3, NYLAS_API_KEY serves as the client secret
+// ──────────────────────────────────────────────────────────────
+//  ✅ FIX #1: JWT SECRET VALIDATION (ENHANCED - HARD FAILS)
+// ──────────────────────────────────────────────────────────────
+
+console.log('\n🔐 [SECURITY] Validating JWT secrets...');
+
+// ─── Helper function to generate entropy recommendation ───
+function getEntropyRecommendation() {
+    const generated = crypto.randomBytes(32).toString('hex');
+    return `\n   💡 RECOMMENDED: Use this cryptographically generated string:\n   ${generated}\n   Run: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`;
+}
+
+// ============================================================
+// 1. VALIDATE JWT_SECRET (HARD FAIL)
+// ============================================================
+const jwtSecret = process.env.JWT_SECRET;
+
+// Check if JWT_SECRET exists
+if (!jwtSecret) {
+    console.error('❌ [SECURITY] JWT_SECRET is not defined in environment variables!');
+    console.error('   ⚠️ Please set JWT_SECRET in your .env file (minimum 32 characters)');
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+// Check if JWT_SECRET is at least 32 characters
+if (jwtSecret.length < 32) {
+    console.error(`❌ [SECURITY] JWT_SECRET is too short (${jwtSecret.length} characters). Minimum is 32 characters.`);
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+// ✅ ENHANCEMENT 1: Hard fail on weak/default secrets
+const weakSecrets = [
+    'secret', 'password', '1234567890', 'jwtsecret', 'supersecret', 
+    'mysecret', 'changeme', 'test', '1234', 'qwerty', 'admin', 
+    'letmein', 'welcome', 'monkey', 'dragon', 'master', 'hello'
+];
+
+const isWeak = weakSecrets.some(weak => {
+    // Check for exact match OR if the secret contains the weak word
+    return jwtSecret.toLowerCase().includes(weak) || 
+           weak.toLowerCase().includes(jwtSecret.toLowerCase());
+});
+
+if (isWeak) {
+    console.error(`❌ [SECURITY] JWT_SECRET "${jwtSecret}" appears to be weak or contains common words!`);
+    console.error('   ⚠️ This is a hard fail - server will not start with weak credentials.');
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+console.log(`✅ [SECURITY] JWT_SECRET is configured (length: ${jwtSecret.length} characters)`);
+
+// ============================================================
+// 2. ENHANCEMENT 2: ADMIN_JWT_SECRET IS MANDATORY & DISTINCT
+// ============================================================
+const adminJwtSecret = process.env.ADMIN_JWT_SECRET;
+
+// Check if ADMIN_JWT_SECRET exists
+if (!adminJwtSecret) {
+    console.error('❌ [SECURITY] ADMIN_JWT_SECRET is not defined in environment variables!');
+    console.error('   ⚠️ ADMIN_JWT_SECRET is MANDATORY for production security.');
+    console.error('   ⚠️ It must be different from JWT_SECRET.');
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+// Check if ADMIN_JWT_SECRET is at least 32 characters
+if (adminJwtSecret.length < 32) {
+    console.error(`❌ [SECURITY] ADMIN_JWT_SECRET is too short (${adminJwtSecret.length} characters). Minimum is 32 characters.`);
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+// ✅ ENHANCEMENT 2: Ensure ADMIN_JWT_SECRET is DISTINCT from JWT_SECRET
+if (adminJwtSecret === jwtSecret) {
+    console.error('❌ [SECURITY] ADMIN_JWT_SECRET is the same as JWT_SECRET!');
+    console.error('   ⚠️ For security, ADMIN_JWT_SECRET MUST be different from JWT_SECRET.');
+    console.error('   ⚠️ This prevents admin access if JWT_SECRET is compromised.');
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+// Hard fail on weak admin secrets too
+const isAdminWeak = weakSecrets.some(weak => {
+    return adminJwtSecret.toLowerCase().includes(weak) || 
+           weak.toLowerCase().includes(adminJwtSecret.toLowerCase());
+});
+
+if (isAdminWeak) {
+    console.error(`❌ [SECURITY] ADMIN_JWT_SECRET "${adminJwtSecret}" appears to be weak or contains common words!`);
+    console.error('   ⚠️ This is a hard fail - server will not start with weak credentials.');
+    console.error(getEntropyRecommendation());
+    process.exit(1);
+}
+
+console.log(`✅ [SECURITY] ADMIN_JWT_SECRET is configured (length: ${adminJwtSecret.length} characters)`);
+console.log(`✅ [SECURITY] ADMIN_JWT_SECRET is distinct from JWT_SECRET`);
+
+// ============================================================
+// 3. VALIDATE OTHER REQUIRED ENV VARS
+// ============================================================
 const requiredEnvVars = [
-    'JWT_SECRET',
     'NYLAS_CLIENT_ID',
     'NYLAS_API_KEY',
     'FLUTTERWAVE_SECRET_KEY',
@@ -127,10 +227,12 @@ if (missingEnvVars.length > 0) {
 }
 
 console.log('✅ All required environment variables are configured');
-console.log(`   📋 JWT_SECRET: ${process.env.JWT_SECRET ? '✅ Set' : '❌ Missing'}`);
+console.log(`   📋 JWT_SECRET: ✅ Set (${jwtSecret.length} chars)`);
+console.log(`   📋 ADMIN_JWT_SECRET: ✅ Set (${adminJwtSecret.length} chars, distinct)`);
 console.log(`   📋 NYLAS_CLIENT_ID: ${process.env.NYLAS_CLIENT_ID ? '✅ Set' : '❌ Missing'}`);
 console.log(`   📋 NYLAS_API_KEY: ${process.env.NYLAS_API_KEY ? '✅ Set' : '❌ Missing'}`);
 console.log(`   📋 FLUTTERWAVE_SECRET_KEY: ${process.env.FLUTTERWAVE_SECRET_KEY ? '✅ Set' : '❌ Missing'}`);
+console.log(`   📋 MONGODB_URI: ${process.env.MONGODB_URI ? '✅ Set' : '❌ Missing'}`);
 
 // ─── BACKUP CHECK ───
 const fs = require('fs-extra');
@@ -474,8 +576,6 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 console.log('✅ [SERVER] AI suggestion route registered');
 
 // ─── ADMIN ROUTES ───
-
-// ✅ DIRECT ADMIN LOGIN (NO LAYER 2)
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -499,13 +599,14 @@ app.post('/api/admin/login', async (req, res) => {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
+        // Use ADMIN_JWT_SECRET (mandatory, distinct)
         const adminToken = jwt.sign(
             { 
                 id: admin._id, 
                 role: 'admin',
                 permissions: admin.permissions || ['all']
             },
-            process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET,
+            process.env.ADMIN_JWT_SECRET,
             { expiresIn: '30m' }
         );
 
