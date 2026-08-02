@@ -75,14 +75,11 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    adminAns_dish: { type: String, default: null },
-    adminAns_pn:   { type: String, default: null },
-    adminAns_mum:  { type: String, default: null },
-    adminAns_dm:   { type: String, default: null },
-    adminAns_dad:  { type: String, default: null },
-    adminAns_friend: { type: String, default: null },
-    adminAns_enemy:  { type: String, default: null },
-    adminAns_app:    { type: String, default: null },
+    // ✅ Admin permissions (for future expansion)
+    permissions: {
+        type: [String],
+        default: ['all']
+    },
 
     // Token version for revocation
     tokenVersion: {
