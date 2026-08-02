@@ -33,31 +33,27 @@ const getAdminJwtSecret = () => {
 // ════════════════════════════════════════════
 const setupInitialAdmin = async () => {
     try {
-        // Check if any admin exists
         const existingAdmin = await User.findOne({ isAdmin: true });
         if (existingAdmin) {
             console.log(`✅ [ADMIN SETUP] Admin already exists: ${existingAdmin.email}`);
             return;
         }
 
-        // ✅ SECURE: Generate a one-time setup token (NOT hardcoded)
         const setupToken = crypto.randomBytes(32).toString('hex');
         
         console.log('═══════════════════════════════════════════════════════════');
         console.log('🔐 [ADMIN SETUP] No admin user found!');
         console.log('📋 [ADMIN SETUP] To create the first admin, use the setup endpoint:');
-        console.log(`   POST /api/admin/setup`);
+        console.log(`   POST /api/auth/admin/setup`);
         console.log(`   Body: { email, password, username, setupToken: "${setupToken}" }`);
         console.log('═══════════════════════════════════════════════════════════');
 
-        // Store setup token in a secure location (in-memory for now)
-        // In production, store in Redis or a secure database
         if (!global._adminSetupTokens) {
             global._adminSetupTokens = new Map();
         }
         global._adminSetupTokens.set(setupToken, {
             createdAt: new Date(),
-            expiresAt: new Date(Date.now() + 60 * 60 * 1000) // 1 hour expiry
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000)
         });
 
         return setupToken;
@@ -136,16 +132,13 @@ const register = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ SECURE: Login function (NO HARDCODED BACKDOOR)
+// ✅ SECURE: Login function
 // ════════════════════════════════════════════
 const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     
     try {
-        // ❌ REMOVED: Hardcoded admin backdoor
-        // ✅ Now uses proper database authentication
-
         const query = sanitizeQuery({
             $or: [
                 { email: identifier },
@@ -178,7 +171,6 @@ const login = async (req, res) => {
             }
         }
         
-        // ─── REGULAR USER LOGIN ───
         const secret = getJwtSecret();
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         
@@ -189,7 +181,6 @@ const login = async (req, res) => {
             }
             const csrfToken = await generateCsrfToken(user.id);
             
-            // ✅ If user is admin, include flag
             const response = { 
                 token, 
                 csrfToken, 
@@ -202,12 +193,10 @@ const login = async (req, res) => {
                 }
             };
             
-            // ✅ If admin, they need to use /api/admin/login endpoint
-            // This is a regular user login - admins should use admin login
             if (user.isAdmin) {
                 response.message = 'Admin users please use the admin login endpoint';
                 response.adminLoginRequired = true;
-                response.adminLoginUrl = '/api/admin/login';
+                response.adminLoginUrl = '/api/auth/admin/login';
             }
             
             res.json(response);
@@ -226,7 +215,6 @@ const setupAdmin = async (req, res) => {
     try {
         const { email, password, username, setupToken } = req.body;
 
-        // ─── VALIDATE INPUT ───
         if (!email || !password || !username || !setupToken) {
             return res.status(400).json({ 
                 success: false, 
@@ -234,7 +222,6 @@ const setupAdmin = async (req, res) => {
             });
         }
 
-        // ─── VALIDATE SETUP TOKEN ───
         if (!global._adminSetupTokens || !global._adminSetupTokens.has(setupToken)) {
             return res.status(401).json({ 
                 success: false, 
@@ -251,16 +238,14 @@ const setupAdmin = async (req, res) => {
             });
         }
 
-        // ─── CHECK IF ADMIN ALREADY EXISTS ───
         const existingAdmin = await User.findOne({ isAdmin: true });
         if (existingAdmin) {
             return res.status(400).json({ 
                 success: false, 
-                message: 'Admin already exists. This setup endpoint is only for initial admin creation.' 
+                message: 'Admin already exists.' 
             });
         }
 
-        // ─── VALIDATE EMAIL ───
         const emailExists = await User.findOne({ email: email.toLowerCase().trim() });
         if (emailExists) {
             return res.status(400).json({ 
@@ -269,7 +254,6 @@ const setupAdmin = async (req, res) => {
             });
         }
 
-        // ─── VALIDATE USERNAME ───
         const usernameExists = await User.findOne({ username: username.trim() });
         if (usernameExists) {
             return res.status(400).json({ 
@@ -278,7 +262,6 @@ const setupAdmin = async (req, res) => {
             });
         }
 
-        // ─── VALIDATE PASSWORD STRENGTH ───
         if (password.length < 8) {
             return res.status(400).json({ 
                 success: false, 
@@ -286,7 +269,6 @@ const setupAdmin = async (req, res) => {
             });
         }
 
-        // ─── CREATE ADMIN USER ───
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -303,12 +285,10 @@ const setupAdmin = async (req, res) => {
 
         await adminUser.save();
 
-        // ─── CLEANUP SETUP TOKEN ───
         global._adminSetupTokens.delete(setupToken);
 
         console.log(`✅ [ADMIN SETUP] Admin user created: ${adminUser.email}`);
 
-        // ─── GENERATE ADMIN TOKEN ───
         const secret = getAdminJwtSecret();
         const adminToken = jwt.sign(
             { 
@@ -356,7 +336,6 @@ const getAdminSetupStatus = async (req, res) => {
             });
         }
 
-        // Generate a new setup token if none exists
         if (!global._adminSetupTokens || global._adminSetupTokens.size === 0) {
             const setupToken = crypto.randomBytes(32).toString('hex');
             if (!global._adminSetupTokens) {
@@ -373,7 +352,7 @@ const getAdminSetupStatus = async (req, res) => {
             adminExists: false,
             needsSetup: true,
             message: 'No admin exists. Please use the setup endpoint with a valid token.',
-            setupEndpoint: '/api/admin/setup'
+            setupEndpoint: '/api/auth/admin/setup'
         });
 
     } catch (error) {
@@ -399,13 +378,11 @@ const adminLogin = async (req, res) => {
             });
         }
 
-        // ✅ Find admin by email
         const admin = await User.findOne({ 
             email: email.toLowerCase().trim(), 
             isAdmin: true 
         });
 
-        // ✅ Constant-time comparison to prevent timing attacks
         const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
         const validPassword = admin 
             ? await bcrypt.compare(password, admin.password)
@@ -419,7 +396,6 @@ const adminLogin = async (req, res) => {
             });
         }
 
-        // ✅ Check if admin is suspended
         if (admin.isSuspended) {
             return res.status(403).json({
                 success: false,
@@ -428,7 +404,6 @@ const adminLogin = async (req, res) => {
             });
         }
 
-        // ✅ Generate admin token
         const secret = getAdminJwtSecret();
         const adminToken = jwt.sign(
             { 
@@ -464,7 +439,7 @@ const adminLogin = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Logout function
+// ✅ Logout function
 // ════════════════════════════════════════════
 const logout = async (req, res) => {
     try {
@@ -483,7 +458,7 @@ const logout = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Revoke all tokens
+// ✅ Revoke all tokens
 // ════════════════════════════════════════════
 const revokeAllTokens = async (req, res) => {
     try {
@@ -502,7 +477,7 @@ const revokeAllTokens = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Verify email
+// ✅ Verify email
 // ════════════════════════════════════════════
 const verifyEmail = async (req, res) => {
     try {
@@ -519,7 +494,7 @@ const verifyEmail = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Verify username
+// ✅ Verify username
 // ════════════════════════════════════════════
 const verifyUsername = async (req, res) => {
     try {
@@ -537,7 +512,7 @@ const verifyUsername = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Reset password via email/username
+// ✅ Reset password via email/username
 // ════════════════════════════════════════════
 const resetPasswordEmailUsername = async (req, res) => {
     try {
@@ -566,7 +541,7 @@ const resetPasswordEmailUsername = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Forgot password
+// ✅ Forgot password
 // ════════════════════════════════════════════
 const forgotPassword = async (req, res) => {
     try {
@@ -603,7 +578,7 @@ const forgotPassword = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Reset password with token
+// ✅ Reset password with token
 // ════════════════════════════════════════════
 const resetPassword = async (req, res) => {
     try {
@@ -633,7 +608,7 @@ const resetPassword = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Verify age
+// ✅ Verify age
 // ════════════════════════════════════════════
 const verifyAge = async (req, res) => {
     const { day, month, year } = req.body;
@@ -673,7 +648,7 @@ const verifyAge = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Change email
+// ✅ Change email
 // ════════════════════════════════════════════
 const changeEmail = async (req, res) => {
     const { currentPassword, newEmail } = req.body;
@@ -701,7 +676,7 @@ const changeEmail = async (req, res) => {
 };
 
 // ════════════════════════════════════════════
-// ✅ FIXED: Delete account - COMPLETE DATA PURGE (GDPR Compliance)
+// ✅ Delete account - GDPR Compliance
 // ════════════════════════════════════════════
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
@@ -724,7 +699,6 @@ const deleteAccount = async (req, res) => {
 
         console.log(`🗑️ [DELETE ACCOUNT] Starting deletion process for user: ${user.email} (${userId})`);
 
-        // Delete all user data
         const ChatMessage = require('./ChatMessage');
         const chatResult = await ChatMessage.deleteMany({ userId });
         console.log(`   📝 Deleted ${chatResult.deletedCount} chat messages`);
