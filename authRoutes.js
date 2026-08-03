@@ -5,9 +5,6 @@ const { verifyToken } = require('./authMiddleware');
 const {
     register,
     login,
-    adminLogin,
-    setupAdmin,
-    getAdminSetupStatus,
     logout,
     revokeAllTokens,
     verifyEmail,
@@ -15,10 +12,21 @@ const {
     resetPasswordEmailUsername,
     forgotPassword,
     resetPassword,
-    verifyAge,
-    changeEmail,
-    deleteAccount
+    verifyLayer2,
+    verifyLayer3,
+    setupAdminSecurity,
+    checkAdminSecurityStatus
 } = require('./authController');
+
+// Import user-specific routes from userController
+const {
+    changeEmail,
+    verifyAge,
+    deleteUserAccount,
+    deactivateUserAccount,
+    restoreUserAccount,
+    getDeletionStatus
+} = require('./userController');
 
 // ─── ✅ RATE LIMITERS FOR AUTH ENDPOINTS ───
 
@@ -106,26 +114,21 @@ router.post('/logout', verifyToken, logout);
 router.post('/revoke-tokens', verifyToken, revokeAllTokens);
 router.put('/change-email', verifyToken, changeEmail);
 router.put('/verify-age', verifyToken, verifyAge);
-router.delete('/delete-account', verifyToken, deleteAccount);
 
-// ════════════════════════════════════════════
-// ✅ SECURE ADMIN SETUP ROUTES (NO HARDCODED CREDENTIALS)
-// ════════════════════════════════════════════
+// GDPR Account Management
+router.delete('/delete-account', verifyToken, deleteUserAccount);
+router.post('/deactivate-account', verifyToken, deactivateUserAccount);
+router.post('/restore-account', verifyToken, restoreUserAccount);
+router.get('/deletion-status', verifyToken, getDeletionStatus);
 
-// ─── Get admin setup status (public - no auth required) ───
-router.get('/admin/setup-status', getAdminSetupStatus);
+// Admin Security Setup (Protected)
+router.post('/admin/setup-security', verifyToken, setupAdminSecurity);
+router.get('/admin/security-status', verifyToken, checkAdminSecurityStatus);
 
-// ─── Create initial admin (public - requires setup token) ───
-router.post('/admin/setup', setupAdmin);
+// Admin Layer Verification (Protected)
+router.post('/admin/verify-layer-2', verifyToken, verifyLayer2);
+router.post('/admin/verify-layer-3', verifyToken, verifyLayer3);
 
-// ─── Admin login (public - separate from regular login) ───
-router.post('/admin/login', adminLogin);
-
-console.log('✅ [AUTH ROUTES] Routes registered:');
-console.log('   📋 POST /api/auth/register');
-console.log('   📋 POST /api/auth/login');
-console.log('   📋 GET  /api/auth/admin/setup-status');
-console.log('   📋 POST /api/auth/admin/setup');
-console.log('   📋 POST /api/auth/admin/login');
+console.log('✅ [AUTH ROUTES] Routes registered successfully');
 
 module.exports = router;
