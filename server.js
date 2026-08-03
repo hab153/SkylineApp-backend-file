@@ -52,7 +52,7 @@ const Report = require('./Report');
 const requestQueue = require('./requestQueue');
 
 // Import auth controller functions
-const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login } = require('./authController');
+const { logout, revokeAllTokens, forgotPassword, resetPassword, register, login, generateAdminTotp, enableAdminTotp, verifyAdminTotpLogin } = require('./authController');
 
 // Import sessionController for session routes
 const sessionController = require('./sessionController');
@@ -60,24 +60,11 @@ const sessionController = require('./sessionController');
 // Validation imports
 const { validate } = require('./validationMiddleware');
 const {
-    registerSchema,
-    loginSchema,
-    changeEmailSchema,
-    resetPasswordSchema,
-    forgotPasswordSchema,
-    verifyAgeSchema,
-    updateProfileSchema,
-    batchSendSchema,
-    renameLeadSchema,
-    updateAutoReplySchema,
-    chatSchema,
-    feedbackSchema,
-    adminMessageSchema,
-    reportSchema,
-    autoFollowUpSchema,
-    assistantSchema,
-    dreamSchema,
-    dreamRefineSchema
+    registerSchema, loginSchema, changeEmailSchema, resetPasswordSchema,
+    forgotPasswordSchema, verifyAgeSchema, updateProfileSchema, batchSendSchema,
+    renameLeadSchema, updateAutoReplySchema, chatSchema, feedbackSchema,
+    adminMessageSchema, reportSchema, autoFollowUpSchema, assistantSchema,
+    dreamSchema, dreamRefineSchema
 } = require('./validationSchemas');
 
 // Backup job
@@ -102,63 +89,36 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 // ──────────────────────────────────────────────────────────────
 //  ✅ FIX #1: JWT SECRET VALIDATION (ENHANCED - HARD FAILS)
 // ──────────────────────────────────────────────────────────────
-
 console.log('\n🔐 [SECURITY] Validating JWT secrets...');
 
-// ─── Helper function to generate entropy recommendation ───
 function getEntropyRecommendation() {
     const generated = crypto.randomBytes(32).toString('hex');
     return `\n   💡 RECOMMENDED: Use this cryptographically generated string:\n   ${generated}\n   Run: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`;
 }
 
-// ============================================================
-// 1. VALIDATE JWT_SECRET (HARD FAIL)
-// ============================================================
 const jwtSecret = process.env.JWT_SECRET;
-
-// Check if JWT_SECRET exists
 if (!jwtSecret) {
     console.error('❌ [SECURITY] JWT_SECRET is not defined in environment variables!');
     console.error('   ⚠️ Please set JWT_SECRET in your .env file (minimum 32 characters)');
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
-// Check if JWT_SECRET is at least 32 characters
 if (jwtSecret.length < 32) {
     console.error(`❌ [SECURITY] JWT_SECRET is too short (${jwtSecret.length} characters). Minimum is 32 characters.`);
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
-// ✅ ENHANCEMENT 1: Hard fail on weak/default secrets
-const weakSecrets = [
-    'secret', 'password', '1234567890', 'jwtsecret', 'supersecret', 
-    'mysecret', 'changeme', 'test', '1234', 'qwerty', 'admin', 
-    'letmein', 'welcome', 'monkey', 'dragon', 'master', 'hello'
-];
-
-const isWeak = weakSecrets.some(weak => {
-    // Check for exact match OR if the secret contains the weak word
-    return jwtSecret.toLowerCase().includes(weak) || 
-           weak.toLowerCase().includes(jwtSecret.toLowerCase());
-});
-
+const weakSecrets = ['secret', 'password', '1234567890', 'jwtsecret', 'supersecret', 'mysecret', 'changeme', 'test', '1234', 'qwerty', 'admin', 'letmein', 'welcome', 'monkey', 'dragon', 'master', 'hello'];
+const isWeak = weakSecrets.some(weak => jwtSecret.toLowerCase().includes(weak) || weak.toLowerCase().includes(jwtSecret.toLowerCase()));
 if (isWeak) {
     console.error(`❌ [SECURITY] JWT_SECRET "${jwtSecret}" appears to be weak or contains common words!`);
     console.error('   ⚠️ This is a hard fail - server will not start with weak credentials.');
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
 console.log(`✅ [SECURITY] JWT_SECRET is configured (length: ${jwtSecret.length} characters)`);
 
-// ============================================================
-// 2. ENHANCEMENT 2: ADMIN_JWT_SECRET IS MANDATORY & DISTINCT
-// ============================================================
 const adminJwtSecret = process.env.ADMIN_JWT_SECRET;
-
-// Check if ADMIN_JWT_SECRET exists
 if (!adminJwtSecret) {
     console.error('❌ [SECURITY] ADMIN_JWT_SECRET is not defined in environment variables!');
     console.error('   ⚠️ ADMIN_JWT_SECRET is MANDATORY for production security.');
@@ -166,15 +126,11 @@ if (!adminJwtSecret) {
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
-// Check if ADMIN_JWT_SECRET is at least 32 characters
 if (adminJwtSecret.length < 32) {
     console.error(`❌ [SECURITY] ADMIN_JWT_SECRET is too short (${adminJwtSecret.length} characters). Minimum is 32 characters.`);
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
-// ✅ ENHANCEMENT 2: Ensure ADMIN_JWT_SECRET is DISTINCT from JWT_SECRET
 if (adminJwtSecret === jwtSecret) {
     console.error('❌ [SECURITY] ADMIN_JWT_SECRET is the same as JWT_SECRET!');
     console.error('   ⚠️ For security, ADMIN_JWT_SECRET MUST be different from JWT_SECRET.');
@@ -182,50 +138,26 @@ if (adminJwtSecret === jwtSecret) {
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
-// Hard fail on weak admin secrets too
-const isAdminWeak = weakSecrets.some(weak => {
-    return adminJwtSecret.toLowerCase().includes(weak) || 
-           weak.toLowerCase().includes(adminJwtSecret.toLowerCase());
-});
-
+const isAdminWeak = weakSecrets.some(weak => adminJwtSecret.toLowerCase().includes(weak) || weak.toLowerCase().includes(adminJwtSecret.toLowerCase()));
 if (isAdminWeak) {
     console.error(`❌ [SECURITY] ADMIN_JWT_SECRET "${adminJwtSecret}" appears to be weak or contains common words!`);
     console.error('   ⚠️ This is a hard fail - server will not start with weak credentials.');
     console.error(getEntropyRecommendation());
     process.exit(1);
 }
-
 console.log(`✅ [SECURITY] ADMIN_JWT_SECRET is configured (length: ${adminJwtSecret.length} characters)`);
 console.log(`✅ [SECURITY] ADMIN_JWT_SECRET is distinct from JWT_SECRET`);
 
-// ============================================================
-// 3. VALIDATE OTHER REQUIRED ENV VARS
-// ============================================================
-const requiredEnvVars = [
-    'NYLAS_CLIENT_ID',
-    'NYLAS_API_KEY',
-    'FLUTTERWAVE_SECRET_KEY',
-    'FLUTTERWAVE_SECRET_HASH',
-    'MONGODB_URI'
-];
-
-const missingEnvVars = requiredEnvVars.filter(varName => {
-    const value = process.env[varName];
-    return !value || value.trim() === '';
-});
-
+const requiredEnvVars = ['NYLAS_CLIENT_ID', 'NYLAS_API_KEY', 'FLUTTERWAVE_SECRET_KEY', 'FLUTTERWAVE_SECRET_HASH', 'MONGODB_URI'];
+const missingEnvVars = requiredEnvVars.filter(varName => { const value = process.env[varName]; return !value || value.trim() === ''; });
 if (missingEnvVars.length > 0) {
     console.error('❌ CRITICAL ERROR: Missing required environment variables:');
-    missingEnvVars.forEach(varName => {
-        console.error(`   ⚠️ ${varName} is not defined or empty`);
-    });
+    missingEnvVars.forEach(varName => console.error(`   ⚠️ ${varName} is not defined or empty`));
     console.error('');
     console.error('⚠️ Please set all required environment variables in your .env file or Render dashboard.');
     console.error('⚠️ The server will not start until all required variables are configured.');
     process.exit(1);
 }
-
 console.log('✅ All required environment variables are configured');
 console.log(`   📋 JWT_SECRET: ✅ Set (${jwtSecret.length} chars)`);
 console.log(`   📋 ADMIN_JWT_SECRET: ✅ Set (${adminJwtSecret.length} chars, distinct)`);
@@ -237,7 +169,6 @@ console.log(`   📋 MONGODB_URI: ${process.env.MONGODB_URI ? '✅ Set' : '❌ M
 // ─── BACKUP CHECK ───
 const fs = require('fs-extra');
 const backupDir = process.env.BACKUP_DIR || './backups';
-
 try {
     if (fs.existsSync(backupDir)) {
         const backups = fs.readdirSync(backupDir).filter(f => f.endsWith('.zip'));
@@ -247,60 +178,40 @@ try {
             const latest = backups.sort().pop();
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
-            if (days > 7) {
-                console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
-            } else {
-                console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
-            }
+            if (days > 7) console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago. Consider running "npm run backup".`);
+            else console.log(`✅ [BACKUP] Recent backup found: ${latest} (${days.toFixed(1)} days old)`);
         }
     } else {
         console.warn('⚠️ [BACKUP] Backup directory not found. Create one with "npm run backup".');
     }
-} catch (err) {
-    console.warn('⚠️ [BACKUP] Could not check backup status:', err.message);
-}
+} catch (err) { console.warn('⚠️ [BACKUP] Could not check backup status:', err.message); }
 
 // ─── SECURITY MIDDLEWARE ───
 app.use(helmet());
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
-const ALLOWED_ORIGINS = [
-    'https://skylineai-app.vercel.app', 
-    'http://localhost:3000'
-];
-
+const ALLOWED_ORIGINS = ['https://skylineai-app.vercel.app', 'http://localhost:3000'];
 app.use(cors({
     origin: function(origin, callback) {
         if (!origin) return callback(null, true);
-        if (ALLOWED_ORIGINS.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
-        }
+        if (ALLOWED_ORIGINS.indexOf(origin) !== -1) callback(null, true);
+        else callback(new Error('Not allowed by CORS'));
     },
     credentials: true
 }));
 
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 200,
+    windowMs: 15 * 60 * 1000, max: 200,
     keyGenerator: (req) => req.userId || req.ip,
-    skipSuccessfulRequests: false,
-    standardHeaders: true,
-    legacyHeaders: false,
+    skipSuccessfulRequests: false, standardHeaders: true, legacyHeaders: false,
 });
 app.use(globalLimiter);
-
 console.log('✅ [SERVER] Security middleware applied');
 
 // ─── HEALTH CHECK ───
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
 
 // ─── WEBHOOKS ───
@@ -318,42 +229,29 @@ app.use(xssOutputProtection);
 
 // ─── MONGODB CONNECTION ───
 console.log('🔗 [SERVER] Connecting to MongoDB...');
-mongoose.connect(process.env.MONGODB_URI, {
-    maxPoolSize: 50,
-    serverSelectionTimeoutMS: 5000
-})
+mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 50, serverSelectionTimeoutMS: 5000 })
     .then(async () => {
         console.log('✅ MongoDB Connected');
-        
         try {
             console.log('🔧 [SERVER] Creating database indexes...');
-            
             const ChatMessage = require('./ChatMessage');
             await ChatMessage.collection.createIndex({ userId: 1, sessionId: 1 });
             await ChatMessage.collection.createIndex({ userId: 1, createdAt: -1 });
             console.log('✅ [SERVER] ChatMessage indexes created');
-            
             await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
             await Lead.collection.createIndex({ userId: 1, email: 1 });
             console.log('✅ [SERVER] Lead indexes created');
-            
             console.log('✅ [SERVER] All database indexes created');
-        } catch (indexErr) {
-            console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message);
-        }
-        
+        } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
         startExpiryJob();
         startFollowUpJob();
-        if (process.env.NODE_ENV !== 'test') {
-            startBackupJob();
-        }
+        if (process.env.NODE_ENV !== 'test') startBackupJob();
         startDataExportCleanupJob();
         verifyWebhookRegistration();
         startTokenRefreshJob();
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err));
 
-// ─── WEBHOOK VERIFICATION ───
 async function verifyWebhookRegistration() {
     try {
         console.log('🔍 [WEBHOOK] Verifying webhook registration...');
@@ -363,53 +261,32 @@ async function verifyWebhookRegistration() {
         console.log('   → Select your app → Webhooks');
         console.log('   → Add URL: https://skylineapp-backend-file.onrender.com/api/nylas/webhook');
         console.log('   → Triggers: message.created, message.sent, grant.expired, grant.refreshed');
-    } catch (error) {
-        console.error('❌ [WEBHOOK] Verification error:', error.message);
-    }
+    } catch (error) { console.error('❌ [WEBHOOK] Verification error:', error.message); }
 }
 
-// ─── TOKEN REFRESH JOB ───
 async function startTokenRefreshJob() {
     console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
-    
     setInterval(async () => {
         try {
             const EmailAccount = require('./EmailAccount');
             const now = new Date();
             const fiveMinutesFromNow = new Date(now.getTime() + 5 * 60 * 1000);
-            
-            const expiringAccounts = await EmailAccount.find({
-                isConnected: true,
-                tokenExpiry: { 
-                    $lt: fiveMinutesFromNow,
-                    $gte: now
-                }
-            });
-            
-            if (expiringAccounts.length > 0) {
-                console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
-            }
-            
+            const expiringAccounts = await EmailAccount.find({ isConnected: true, tokenExpiry: { $lt: fiveMinutesFromNow, $gte: now } });
+            if (expiringAccounts.length > 0) console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
             for (const account of expiringAccounts) {
                 try {
                     const { refreshNylasToken } = require('./nylasService');
                     console.log(`🔄 [TOKEN REFRESH] Refreshing token for user: ${account.userId}`);
                     await refreshNylasToken(account.userId);
-                } catch (err) {
-                    console.error(`❌ [TOKEN REFRESH] Failed to refresh for user ${account.userId}:`, err.message);
-                }
+                } catch (err) { console.error(`❌ [TOKEN REFRESH] Failed to refresh for user ${account.userId}:`, err.message); }
             }
-            
-        } catch (error) {
-            console.error('❌ [TOKEN REFRESH] Job error:', error.message);
-        }
+        } catch (error) { console.error('❌ [TOKEN REFRESH] Job error:', error.message); }
     }, 5 * 60 * 1000);
 }
 
 // ════════════════════════════════════════════
 //  ROUTES
 // ════════════════════════════════════════════
-
 app.use('/api/auth', authRoutes);
 console.log('✅ [SERVER] Auth routes registered');
 
@@ -424,10 +301,7 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
-    console.log('📝 [NYLAS ROUTE] Headers:', {
-        authorization: req.headers.authorization ? '✅ Present' : ' Missing',
-        'content-type': req.headers['content-type'] || 'Not set'
-    });
+    console.log('📝 [NYLAS ROUTE] Headers:', { authorization: req.headers.authorization ? '✅ Present' : ' Missing', 'content-type': req.headers['content-type'] || 'Not set' });
     console.log('📝 [NYLAS ROUTE] Method:', req.method);
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     next();
@@ -442,10 +316,7 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
     res.json(status);
   } catch (error) {
     console.error('❌ [NYLAS STATUS] Error:', error);
-    res.status(500).json({ 
-      connected: false, 
-      error: 'Failed to check status' 
-    });
+    res.status(500).json({ connected: false, error: 'Failed to check status' });
   }
 });
 
@@ -454,26 +325,9 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('✅ [TEST] Callback test route hit!');
     console.log('📥 [TEST] Full URL:', req.originalUrl);
     console.log('📥 [TEST] Query params:', req.query);
-    console.log('📥 [TEST] Headers:', {
-        host: req.headers.host,
-        'user-agent': req.headers['user-agent']
-    });
+    console.log('📥 [TEST] Headers:', { host: req.headers.host, 'user-agent': req.headers['user-agent'] });
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    
-    res.send(`
-        <h1>✅ Test Callback Working!</h1>
-        <p>If you see this, the route is accessible.</p>
-        <p>Full URL: ${req.originalUrl}</p>
-        <p>Query: ${JSON.stringify(req.query)}</p>
-        <p>Time: ${new Date().toISOString()}</p>
-        <hr>
-        <p><strong>Next Steps:</strong></p>
-        <ul>
-            <li>Check if this matches your Nylas redirect URI</li>
-            <li>Make sure this exact URI is whitelisted in Nylas Dashboard</li>
-            <li>Try the actual callback: <a href="/api/auth/nylas/callback?test=123">/api/auth/nylas/callback?test=123</a></li>
-        </ul>
-    `);
+    res.send(`<h1>✅ Test Callback Working!</h1><p>If you see this, the route is accessible.</p><p>Full URL: ${req.originalUrl}</p><p>Query: ${JSON.stringify(req.query)}</p><p>Time: ${new Date().toISOString()}</p><hr><p><strong>Next Steps:</strong></p><ul><li>Check if this matches your Nylas redirect URI</li><li>Make sure this exact URI is whitelisted in Nylas Dashboard</li><li>Try the actual callback: <a href="/api/auth/nylas/callback?test=123">/api/auth/nylas/callback?test=123</a></li></ul>`);
 });
 
 // ─── PAYMENT ROUTE ───
@@ -504,13 +358,10 @@ app.use('/api/data', dataExportRoutes);
 
 // ─── LEAD / CONVERSATION ROUTES ───
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
-
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
-
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
 console.log('✅ [SERVER] GET /api/conversations/:leadId registered');
-
 app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
 app.put('/api/leads/:leadId/auto-reply', verifyToken, validate(updateAutoReplySchema), leadController.updateAutoReply);
 app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
@@ -520,11 +371,9 @@ console.log('✅ [SERVER] All lead routes registered');
 
 // ─── FOLLOW-UP ROUTES ───
 console.log('🔧 [SERVER] Registering follow-up routes...');
-
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
-
 console.log('✅ [SERVER] Follow-up routes registered');
 console.log('   📋 GET    /api/leads/:leadId/follow-up-status');
 console.log('   📋 POST   /api/leads/:leadId/suggest-follow-up');
@@ -545,11 +394,9 @@ console.log('✅ [SERVER] Notification routes registered');
 // ─── CHAT & DREAMS ROUTES ───
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
 app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
-
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.post('/api/sessions', verifyToken, sessionController.createSession);
 console.log('✅ [SERVER] Session routes registered');
-
 app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamSchema), chatController.analyzeDream);
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 console.log('✅ [SERVER] Dreams routes registered');
@@ -559,15 +406,10 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     console.log('💡 [AI SUGGEST] Request received');
     try {
         const { messages } = req.body;
-        if (!messages || !Array.isArray(messages)) {
-            return res.status(400).json({ error: 'Invalid message format.' });
-        }
+        if (!messages || !Array.isArray(messages)) return res.status(400).json({ error: 'Invalid message format.' });
         const contextMessages = messages.slice(-3);
         const suggestion = await generateSuggestion(contextMessages);
-        res.json({
-            suggestion,
-            remainingHints: req.remainingHints
-        });
+        res.json({ suggestion, remainingHints: req.remainingHints });
     } catch (error) {
         console.error('AI Suggestion Error:', error);
         res.status(500).json({ error: 'Failed to generate suggestion.' });
@@ -575,49 +417,37 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 });
 console.log('✅ [SERVER] AI suggestion route registered');
 
-// ─── ADMIN ROUTES ───
+// ─── ADMIN ROUTES (SECURE TOTP) ───
+
+// Step 1: Admin Login (Password only - issues temp token)
 app.post('/api/admin/login', async (req, res) => {
     try {
         const { email, password } = req.body;
-        
-        if (!email || !password) {
-            return res.status(400).json({ error: 'Email and password required' });
-        }
-
-        const admin = await User.findOne({ 
-            email: email.toLowerCase().trim(), 
-            isAdmin: true 
-        });
-
+        if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+        const admin = await User.findOne({ email: email.toLowerCase().trim(), isAdmin: true });
         const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
-        const validPassword = admin 
-            ? await bcrypt.compare(password, admin.password)
-            : await bcrypt.compare(password, dummyHash);
-
+        const validPassword = admin ? await bcrypt.compare(password, admin.password) : await bcrypt.compare(password, dummyHash);
         if (!admin || !validPassword) {
             console.warn(`[ADMIN AUTH FAILED] Email: ${email}, IP: ${req.ip}`);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
-
-        // Use ADMIN_JWT_SECRET (mandatory, distinct)
-        const adminToken = jwt.sign(
-            { 
-                id: admin._id, 
-                role: 'admin',
-                permissions: admin.permissions || ['all']
-            },
-            process.env.ADMIN_JWT_SECRET,
-            { expiresIn: '30m' }
-        );
-
-        console.log(`[ADMIN AUTH SUCCESS] User: ${admin.email}, IP: ${req.ip}`);
-        res.json({ success: true, token: adminToken });
-
+        if (!admin.adminTotpEnabled) {
+            return res.status(403).json({ error: '2FA not configured. Please contact support or use setup endpoint.' });
+        }
+        const tempToken = jwt.sign({ id: admin._id }, process.env.JWT_SECRET, { expiresIn: '5m' });
+        res.json({ success: true, tempToken, requires2FA: true });
     } catch (err) {
         console.error('[ADMIN AUTH ERROR]', err);
         res.status(500).json({ error: 'Authentication service unavailable' });
     }
 });
+
+// Step 2: Verify TOTP Code
+app.post('/api/admin/verify-2fa', verifyAdminTotpLogin);
+
+// Setup Endpoints (Protected)
+app.get('/api/admin/setup-2fa', verifyAdminToken, generateAdminTotp);
+app.post('/api/admin/enable-2fa', verifyAdminToken, enableAdminTotp);
 
 // Honeypot: Block all other /admin* paths with 404
 app.use(/^\/admin/i, (req, res) => {
@@ -651,14 +481,12 @@ console.log('✅ [SERVER] Report routes registered');
 
 // ─── HISTORY ROUTES ───
 console.log('🔧 [SERVER] Registering history routes...');
-
 app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.get('/api/history/messages/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
 app.put('/api/history/rename/:sessionId', verifyToken, sessionController.renameSession);
 app.put('/api/history/pin/:sessionId', verifyToken, sessionController.pinSession);
 app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.deleteSession);
-
 console.log('✅ [SERVER] History routes registered');
 console.log('   📋 GET    /api/history/sessions');
 console.log('   📋 GET    /api/history/messages/:sessionId');
@@ -671,108 +499,40 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
         const Session = require('./Session');
-        
         const userId = req.userId;
         const sessions = await Session.find({ userId }).sort({ updatedAt: -1 }).limit(5);
-        
-        let result = {
-            userId: userId,
-            totalSessions: sessions.length,
-            sessions: []
-        };
-        
+        let result = { userId, totalSessions: sessions.length, sessions: [] };
         for (const session of sessions) {
-            const messages = await ChatMessage.find({ 
-                userId, 
-                sessionId: session.sessionId 
-            }).sort({ createdAt: 1 });
-            
+            const messages = await ChatMessage.find({ userId, sessionId: session.sessionId }).sort({ createdAt: 1 });
             result.sessions.push({
-                sessionId: session.sessionId,
-                name: session.name,
-                messageCount: messages.length,
-                messages: messages.map(m => ({
-                    role: m.role,
-                    content: m.content ? m.content.substring(0, 100) : ' EMPTY',
-                    contentLength: m.content ? m.content.length : 0,
-                    hasContent: !!m.content
-                }))
+                sessionId: session.sessionId, name: session.name, messageCount: messages.length,
+                messages: messages.map(m => ({ role: m.role, content: m.content ? m.content.substring(0, 100) : ' EMPTY', contentLength: m.content ? m.content.length : 0, hasContent: !!m.content }))
             });
         }
-        
         res.json(result);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
         const Lead = require('./Lead');
-        
-        const lead = await Lead.findOne({ 
-            _id: req.params.leadId, 
-            userId: req.userId 
-        });
-        
-        if (!lead) {
-            return res.json({ 
-                exists: false, 
-                message: 'Lead not found' 
-            });
-        }
-        
-        const chatMessages = await ChatMessage.find({ 
-            userId: req.userId, 
-            sessionId: lead._id.toString() 
-        });
-        
+        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+        if (!lead) return res.json({ exists: false, message: 'Lead not found' });
+        const chatMessages = await ChatMessage.find({ userId: req.userId, sessionId: lead._id.toString() });
         res.json({
-            lead: {
-                id: lead._id,
-                name: lead.name,
-                email: lead.email,
-                status: lead.status,
-                repliesCount: lead.replies?.length || 0,
-                replies: lead.replies || []
-            },
-            chatMessages: chatMessages.map(m => ({
-                id: m._id,
-                role: m.role,
-                content: m.content,
-                title: m.title,
-                createdAt: m.createdAt
-            })),
+            lead: { id: lead._id, name: lead.name, email: lead.email, status: lead.status, repliesCount: lead.replies?.length || 0, replies: lead.replies || [] },
+            chatMessages: chatMessages.map(m => ({ id: m._id, role: m.role, content: m.content, title: m.title, createdAt: m.createdAt })),
             totalMessages: (lead.replies?.length || 0) + chatMessages.length
         });
-    } catch (error) {
-        res.status(500).json({ error: error.message, stack: error.stack });
-    }
+    } catch (error) { res.status(500).json({ error: error.message, stack: error.stack }); }
 });
 
 app.get('/api/debug/leads', verifyToken, async (req, res) => {
     try {
-        const leads = await Lead.find({ userId: req.userId })
-            .select('name email status replies lastContactDate createdAt')
-            .sort({ lastContactDate: -1 })
-            .limit(20);
-        
-        res.json({
-            count: leads.length,
-            leads: leads.map(l => ({
-                id: l._id,
-                name: l.name,
-                email: l.email,
-                status: l.status,
-                repliesCount: l.replies?.length || 0,
-                lastContactDate: l.lastContactDate,
-                createdAt: l.createdAt
-            }))
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+        const leads = await Lead.find({ userId: req.userId }).select('name email status replies lastContactDate createdAt').sort({ lastContactDate: -1 }).limit(20);
+        res.json({ count: leads.length, leads: leads.map(l => ({ id: l._id, name: l.name, email: l.email, status: l.status, repliesCount: l.replies?.length || 0, lastContactDate: l.lastContactDate, createdAt: l.createdAt })) });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
 // ─── START SERVER ───
@@ -781,4 +541,4 @@ const server = app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`); 
     console.log(`✅ [SERVER] All routes registered successfully`);
 });
-server.timeout = 300000; 
+server.timeout = 300000;
