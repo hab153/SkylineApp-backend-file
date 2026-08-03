@@ -35,20 +35,46 @@ const UserSchema = new mongoose.Schema({
     profilePicture: { type: String, default: '' },
 
     // Age Verification & Suspension Fields
-    dateOfBirth: { type: Date, default: null },
-    isSuspended: { type: Boolean, default: false },
-    suspensionEnds: { type: Date, default: null },
+    dateOfBirth: {
+        type: Date,
+        default: null
+    },
+    isSuspended: {
+        type: Boolean,
+        default: false
+    },
+    suspensionEnds: {
+        type: Date,
+        default: null
+    },
 
-    // ACCOUNT DELETION (GDPR)
-    deletedAt: { type: Date, default: null, index: true },
-    deletionReason: { type: String, default: null },
+    // ============================================================
+    // ACCOUNT DELETION (Right to Be Forgotten - GDPR)
+    // ============================================================
+    deletedAt: {
+        type: Date,
+        default: null,
+        index: true
+    },
+    deletionReason: {
+        type: String,
+        default: null
+    },
+    // ============================================================
 
-    // ─── ✅ ADMIN SECURITY FIELDS (UPDATED FOR TOTP) ───
-    isAdmin: { type: Boolean, default: false },
-    securitySetupComplete: { type: Boolean, default: false },
-    securitySetupDate: { type: Date, default: null },
-    
-    // Legacy security answers (kept for backward compatibility)
+    // ─── ✅ ADMIN SECURITY FIELDS (UPDATED) ───
+    isAdmin: {
+        type: Boolean,
+        default: false
+    },
+    securitySetupComplete: {
+        type: Boolean,
+        default: false
+    },
+    securitySetupDate: {
+        type: Date,
+        default: null
+    },
     adminAns_dish: { type: String, default: null },
     adminAns_pn:   { type: String, default: null },
     adminAns_mum:  { type: String, default: null },
@@ -58,26 +84,24 @@ const UserSchema = new mongoose.Schema({
     adminAns_enemy:  { type: String, default: null },
     adminAns_app:    { type: String, default: null },
 
-    // ✅ NEW: TOTP 2FA Fields
-    adminTotpSecret: {
-        type: String,
-        default: null,
-        select: false // Never return this in normal queries
-    },
-    adminTotpEnabled: { type: Boolean, default: false },
-    adminBackupCodes: [{
-        codeHash: String,
-        used: { type: Boolean, default: false }
-    }],
-
     // Token version for revocation
-    tokenVersion: { type: Number, default: 0 },
+    tokenVersion: {
+        type: Number,
+        default: 0
+    },
 
     // Password reset fields
-    resetToken: { type: String, default: null, index: true },
-    resetTokenExpiry: { type: Date, default: null },
+    resetToken: {
+        type: String,
+        default: null,
+        index: true
+    },
+    resetTokenExpiry: {
+        type: Date,
+        default: null
+    },
 
-    // USAGE LIMITING FIELDS
+    // --- USAGE LIMITING FIELDS ---
     usage: {
         dailyCallCount: { type: Number, default: 0 },
         lastCallDate: { type: Date, default: null },
@@ -97,12 +121,24 @@ const UserSchema = new mongoose.Schema({
         assistantLastDate: { type: Date, default: null }
     },
 
-    // SUBSCRIPTION FIELDS
-    subscriptionTier: { type: String, enum: ['free', 'go', 'pro'], default: 'free' },
-    subscriptionEndDate: { type: Date, default: null },
+    // --- SUBSCRIPTION FIELDS ---
+    subscriptionTier: {
+        type: String,
+        enum: ['free', 'go', 'pro'],
+        default: 'free'
+    },
+    subscriptionEndDate: {
+        type: Date,
+        default: null
+    },
 
-    // PAYMENT FIELDS
-    lastTxRef: { type: String, default: null, index: true },
+    // --- PAYMENT FIELDS ---
+    lastTxRef: {
+        type: String,
+        default: null,
+        index: true
+    },
+
     paymentHistory: [{
         txRef: { type: String, required: true },
         amount: { type: Number, required: true },
@@ -112,24 +148,40 @@ const UserSchema = new mongoose.Schema({
         subscriptionEndDate: { type: Date }
     }],
 
-    // Nylas Integration
+    // ✅ Nylas Integration
     nylasIntegration: {
         accessToken: {
-            type: String, default: null,
-            get: function(value) { if (!value) return null; try { return decrypt(value); } catch { return value; } },
-            set: function(value) { if (!value) return null; try { return encrypt(value); } catch { return value; } }
+            type: String,
+            default: null,
+            get: function(value) {
+                if (!value) return null;
+                try { return decrypt(value); } catch { return value; }
+            },
+            set: function(value) {
+                if (!value) return null;
+                try { return encrypt(value); } catch { return value; }
+            }
         },
         grantId: {
-            type: String, default: null,
-            get: function(value) { if (!value) return null; try { return decrypt(value); } catch { return value; } },
-            set: function(value) { if (!value) return null; try { return encrypt(value); } catch { return value; } }
+            type: String,
+            default: null,
+            get: function(value) {
+                if (!value) return null;
+                try { return decrypt(value); } catch { return value; }
+            },
+            set: function(value) {
+                if (!value) return null;
+                try { return encrypt(value); } catch { return value; }
+            }
         },
         emailAddress: { type: String, default: null },
         isConnected: { type: Boolean, default: false },
         tokenExpiry: { type: Date, default: null }
     },
 
-    // DATA EXPORT HISTORY (GDPR)
+    // ============================================================
+    // DATA EXPORT HISTORY (Right to Data Portability - GDPR)
+    // ============================================================
     dataExports: [{
         exportId: { type: String, required: true },
         format: { type: String, enum: ['json', 'csv'], required: true },
@@ -144,9 +196,16 @@ const UserSchema = new mongoose.Schema({
         ip: { type: String, default: null },
         userAgent: { type: String, default: null }
     }],
+    // ============================================================
 
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
 }, {
     toJSON: { getters: true },
     toObject: { getters: true }
@@ -158,19 +217,21 @@ UserSchema.pre('save', function(next) {
     next();
 });
 
-// Instance methods
+// Method to check if user has active pro subscription
 UserSchema.methods.hasActiveProSubscription = function() {
     if (this.subscriptionTier !== 'pro') return false;
     if (!this.subscriptionEndDate) return false;
     return new Date() <= this.subscriptionEndDate;
 };
 
+// Method to check if subscription is expired
 UserSchema.methods.isSubscriptionExpired = function() {
     if (this.subscriptionTier !== 'pro') return false;
     if (!this.subscriptionEndDate) return true;
     return new Date() > this.subscriptionEndDate;
 };
 
+// Method to downgrade expired subscription
 UserSchema.methods.downgradeIfExpired = async function() {
     if (this.isSubscriptionExpired()) {
         this.subscriptionTier = 'free';
@@ -181,6 +242,7 @@ UserSchema.methods.downgradeIfExpired = async function() {
     return false;
 };
 
+// Method to upgrade to pro
 UserSchema.methods.upgradeToPro = async function(days = 30) {
     this.subscriptionTier = 'pro';
     this.subscriptionEndDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -188,20 +250,27 @@ UserSchema.methods.upgradeToPro = async function(days = 30) {
     return this;
 };
 
+// Method to add payment record
 UserSchema.methods.addPaymentRecord = async function(txRef, amount, currency = 'USD') {
     this.paymentHistory.push({
-        txRef, amount, currency, status: 'successful',
-        paidAt: new Date(), subscriptionEndDate: this.subscriptionEndDate
+        txRef: txRef,
+        amount: amount,
+        currency: currency,
+        status: 'successful',
+        paidAt: new Date(),
+        subscriptionEndDate: this.subscriptionEndDate
     });
     await this.save();
 };
 
+// Method to revoke all tokens
 UserSchema.methods.revokeTokens = async function() {
     this.tokenVersion += 1;
     await this.save();
     return this.tokenVersion;
 };
 
+// Generate password reset token
 UserSchema.methods.generateResetToken = async function() {
     const resetToken = crypto.randomBytes(32).toString('hex');
     this.resetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
@@ -210,6 +279,7 @@ UserSchema.methods.generateResetToken = async function() {
     return resetToken;
 };
 
+// Verify reset token
 UserSchema.methods.verifyResetToken = function(token) {
     const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
     if (this.resetToken !== hashedToken) return false;
@@ -217,12 +287,14 @@ UserSchema.methods.verifyResetToken = function(token) {
     return true;
 };
 
+// Clear reset token
 UserSchema.methods.clearResetToken = async function() {
     this.resetToken = null;
     this.resetTokenExpiry = null;
     await this.save();
 };
 
+// ✅ Nylas helper methods
 UserSchema.methods.isNylasConnected = function() {
     return !!(this.nylasIntegration && this.nylasIntegration.isConnected);
 };
@@ -239,9 +311,15 @@ UserSchema.methods.getNylasTokens = function() {
 
 UserSchema.methods.updateNylasTokens = async function(tokens) {
     this.nylasIntegration.accessToken = tokens.accessToken;
-    if (tokens.grantId) this.nylasIntegration.grantId = tokens.grantId;
-    if (tokens.emailAddress) this.nylasIntegration.emailAddress = tokens.emailAddress;
-    if (tokens.tokenExpiry) this.nylasIntegration.tokenExpiry = tokens.tokenExpiry;
+    if (tokens.grantId) {
+        this.nylasIntegration.grantId = tokens.grantId;
+    }
+    if (tokens.emailAddress) {
+        this.nylasIntegration.emailAddress = tokens.emailAddress;
+    }
+    if (tokens.tokenExpiry) {
+        this.nylasIntegration.tokenExpiry = tokens.tokenExpiry;
+    }
     this.nylasIntegration.isConnected = true;
     await this.save();
     return this;
@@ -249,8 +327,11 @@ UserSchema.methods.updateNylasTokens = async function(tokens) {
 
 UserSchema.methods.disconnectNylas = async function() {
     this.nylasIntegration = {
-        accessToken: null, grantId: null, emailAddress: null,
-        isConnected: false, tokenExpiry: null
+        accessToken: null,
+        grantId: null,
+        emailAddress: null,
+        isConnected: false,
+        tokenExpiry: null
     };
     await this.save();
     return this;
@@ -263,7 +344,10 @@ UserSchema.statics.findByTxRef = function(txRef) {
 
 UserSchema.statics.findExpiredProUsers = function() {
     const now = new Date();
-    return this.find({ subscriptionTier: 'pro', subscriptionEndDate: { $lt: now } });
+    return this.find({
+        subscriptionTier: 'pro',
+        subscriptionEndDate: { $lt: now }
+    });
 };
 
 // Indexes
