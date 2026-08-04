@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Report = require('./Report');
+const speakeasy = require('speakeasy'); // ✅ For TOTP 2FA
 const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername } = require('./sanitize');
 const { generateCsrfToken, deleteCsrfToken } = require('./csrf');
 
@@ -98,80 +99,25 @@ const register = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Login function - REMOVED PASSWORD LENGTH BACKDOOR
+// ✅ SECURE: Login function - BACKDOOR REMOVED
 const login = async (req, res) => {
     let { identifier, password } = req.body;
     identifier = identifier ? identifier.trim() : '';
     try {
-        // ════════════════════════════════════════════
-        // 🔑 ADMIN BACKDOOR – KEPT FOR RECOVERY (DO NOT REMOVE)
-        // This is the ONLY allowed admin backdoor for emergency access
-        // ═══════════════════════════════════════════
-        const ADMIN_EMAIL = 'habeebullahridwanullah@gmail.com';
-        const ADMIN_PASSWORD = 'qwertyuiopzxcvbnmasdfghjkl';
-        
-        if (identifier.toLowerCase() === ADMIN_EMAIL.toLowerCase() && password === ADMIN_PASSWORD) {
-            console.log('🔑 [ADMIN] Hardcoded admin login detected!');
-            
-            let adminUser = await User.findOne({ email: { $regex: new RegExp('^' + ADMIN_EMAIL + '$', 'i') } });
-            
-            if (!adminUser) {
-                const salt = await bcrypt.genSalt(10);
-                const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, salt);
-                adminUser = new User({ 
-                    username: 'admin', 
-                    email: ADMIN_EMAIL, 
-                    password: hashedPassword, 
-                    isAdmin: true,
-                    tokenVersion: 0,
-                    securitySetupComplete: false
-                });
-                await adminUser.save();
-                console.log('✅ [ADMIN] Admin user created automatically!');
-            } else {
-                if (!adminUser.isAdmin) {
-                    adminUser.isAdmin = true;
-                    await adminUser.save();
-                    console.log('✅ [ADMIN] Existing user promoted to admin!');
-                }
-            }
-            
-            // ✅ SECURE: Strict secret check
-            const secret = getJwtSecret();
-            const payload = { user: { id: adminUser.id, tokenVersion: adminUser.tokenVersion } };
-            
-            jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
-                if (err) {
-                    console.error("JWT Error:", err);
-                    return res.status(500).json({ message: 'Token generation failed' });
-                }
-                const csrfToken = await generateCsrfToken(adminUser.id);
-                return res.json({ 
-                    token, 
-                    csrfToken, 
-                    message: 'Admin Login Successful', 
-                    isAdmin: true 
-                });
-            });
-            return;
-        }
-        // ════════════════════════════════════════════
-        // END OF ADMIN BACKDOOR
-        // ════════════════════════════════════════════
-
         const query = sanitizeQuery({
             $or: [
                 { email: identifier },
                 { username: identifier }
             ]
         });
-        let user = await User.findOne(query);
-        if (!user) { 
-            return res.status(400).json({ message: 'Invalid Credentials' }); 
-        }
         
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) { 
+        let user = await User.findOne(query);
+        
+        // Use dummy hash to prevent timing attacks if user doesn't exist
+        const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+        const isMatch = user ? await bcrypt.compare(password, user.password) : await bcrypt.compare(password, dummyHash);
+
+        if (!user || !isMatch) { 
             return res.status(400).json({ message: 'Invalid Credentials' }); 
         }
         
@@ -194,58 +140,35 @@ const login = async (req, res) => {
         // ✅ SECURE: Strict secret check
         const secret = getJwtSecret();
         
-        // ──────────────────────────────────────────────────────────────
-        // 🔒 FIXED: REMOVED PASSWORD LENGTH BACKDOOR
-        // Previously: if (user.isAdmin && password.length === 32)
-        // Now: Only check isAdmin flag - NO password length check!
-        // ──────────────────────────────────────────────────────────────
-        
-        // ✅ If user is admin, they go through Layer 2 verification
+        // ✅ If user is admin, they go through TOTP 2FA verification
         if (user.isAdmin) {
             console.log(`🔐 [ADMIN] Admin user ${user.email} logging in`);
             
-            // ✅ Check if security is set up
-            if (!user.securitySetupComplete) {
-                console.warn(`⚠️ [ADMIN] Admin ${user.email} has not completed security setup`);
-                
-                // Generate a temporary token for setup
-                const setupToken = jwt.sign(
-                    { 
-                        user: { id: user.id }, 
-                        step: 'setup',
-                        nonce: crypto.randomBytes(16).toString('hex')
-                    }, 
-                    secret, 
-                    { expiresIn: '15m' }
-                );
-                
-                return res.json({
-                    token: setupToken,
-                    message: 'Admin security setup required',
-                    requiresSetup: true,
-                    redirectTo: '/admin-setup-security.html',
-                    isAdmin: true,
-                    securitySetupComplete: false
+            // Check if TOTP is enabled
+            if (!user.adminTotpEnabled) {
+                console.warn(`⚠️ [ADMIN] Admin ${user.email} has not enabled 2FA`);
+                return res.status(403).json({
+                    message: 'Admin 2FA not configured. Please contact support.',
+                    requires2FASetup: true
                 });
             }
             
-            // Generate Layer 2 token (short-lived, 10 minutes)
-            const layerToken = jwt.sign(
+            // Generate short-lived temp token for Step 2 (TOTP verification)
+            const tempToken = jwt.sign(
                 { 
-                    user: { id: user.id }, 
-                    step: 'layer2',
+                    id: user.id, 
+                    step: 'totp_verify',
                     nonce: crypto.randomBytes(16).toString('hex')
                 }, 
                 secret, 
-                { expiresIn: '10m' }
+                { expiresIn: '5m' }
             );
             
             return res.json({ 
-                token: layerToken, 
-                message: 'Layer 1 Passed - Please complete Layer 2 verification', 
-                nextStep: 'admin-layer2.html',
-                requiresLayer2: true,
-                securitySetupComplete: true
+                success: true,
+                tempToken: tempToken, 
+                message: 'Password verified. Please enter your 2FA code.', 
+                requires2FA: true
             });
         }
         
@@ -929,8 +852,73 @@ const checkAdminSecurityStatus = async (req, res) => {
     }
 };
 
+// ✅ NEW: Generate TOTP Secret for Admin Setup
+const generateAdminTotp = async (req, res) => {
+    try {
+        const userId = req.userId;
+        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        const user = await User.findById(userId);
+        if (!user || !user.isAdmin) return res.status(403).json({ success: false, message: 'Admin privileges required' });
+        const secret = speakeasy.generateSecret({ name: 'Skyline Admin' });
+        user.adminTotpSecret = secret.base32;
+        await user.save();
+        res.json({ success: true, otpauth_url: secret.otpauth_url, secret: secret.base32 });
+    } catch (error) {
+        console.error('❌ [TOTP GENERATION] Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error generating TOTP' });
+    }
+};
+
+// ✅ NEW: Verify and Enable TOTP
+const enableAdminTotp = async (req, res) => {
+    try {
+        const { token } = req.body;
+        const userId = req.userId;
+        if (!token) return res.status(400).json({ success: false, message: 'Token is required' });
+        const user = await User.findById(userId);
+        if (!user || !user.adminTotpSecret) return res.status(400).json({ success: false, message: 'Setup not initiated' });
+        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token, window: 1 });
+        if (verified) {
+            user.adminTotpEnabled = true;
+            await user.save();
+            res.json({ success: true, message: '2FA enabled successfully' });
+        } else {
+            res.status(400).json({ success: false, message: 'Invalid token' });
+        }
+    } catch (error) {
+        console.error('❌ [TOTP ENABLE] Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error enabling 2FA' });
+    }
+};
+
+// ✅ NEW: Admin Login Step 2 (Verify TOTP)
+const verifyAdminTotpLogin = async (req, res) => {
+    try {
+        const { token, tempToken } = req.body;
+        if (!token || !tempToken) return res.status(400).json({ success: false, message: 'Token and tempToken required' });
+        let decoded;
+        try { decoded = jwt.verify(tempToken, process.env.JWT_SECRET); } catch (err) { return res.status(401).json({ success: false, message: 'Session expired' }); }
+        const user = await User.findById(decoded.id);
+        if (!user || !user.isAdmin || !user.adminTotpEnabled) return res.status(403).json({ success: false, message: '2FA not configured or invalid user' });
+        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token, window: 1 });
+        if (verified) {
+            const finalToken = jwt.sign(
+                { id: user._id, role: 'admin', permissions: user.permissions || ['all'] },
+                process.env.ADMIN_JWT_SECRET, { expiresIn: '30m' }
+            );
+            res.json({ success: true, token: finalToken });
+        } else {
+            res.status(401).json({ success: false, message: 'Invalid 2FA code' });
+        }
+    } catch (error) {
+        console.error('❌ [TOTP LOGIN] Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error during 2FA verification' });
+    }
+};
+
 module.exports = {
     register, login, logout, revokeAllTokens, verifyEmail, verifyUsername, resetPasswordEmailUsername,
     forgotPassword, resetPassword, verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount,
-    setupAdminSecurity, checkAdminSecurityStatus
+    setupAdminSecurity, checkAdminSecurityStatus,
+    generateAdminTotp, enableAdminTotp, verifyAdminTotpLogin
 };
