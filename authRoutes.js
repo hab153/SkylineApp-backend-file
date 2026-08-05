@@ -9,7 +9,7 @@ const {
     revokeAllTokens,
     verifyEmail,
     verifyUsername,
-    resetPasswordEmailUsername,
+    // ✅ REMOVED: resetPasswordEmailUsername - VULNERABLE ENDPOINT DELETED
     forgotPassword,
     resetPassword,
     verifyLayer2,
@@ -100,10 +100,10 @@ router.post('/login', loginLimiter, login);
 
 // ──────────────────────────────
 // PASSWORD RESET ROUTES (with strict rate limiting)
+// ✅ REMOVED: /reset-password-email-username - VULNERABLE ENDPOINT DELETED
 // ──────────────────────────────
 router.post('/verify-email', verifyLimiter, verifyEmail);
 router.post('/verify-username', verifyLimiter, verifyUsername);
-router.post('/reset-password-email-username', resetLimiter, resetPasswordEmailUsername);
 router.post('/forgot-password', resetLimiter, forgotPassword);
 router.post('/reset-password', resetLimiter, resetPassword);
 
