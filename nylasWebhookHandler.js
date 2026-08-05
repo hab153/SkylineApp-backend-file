@@ -5,23 +5,38 @@ const User = require('./User');
 const Message = require('./Message'); 
 const ChatMessage = require('./ChatMessage');
 const { generateAIReply } = require('./aiReplyGenerator');
-// ✅ IMPORT ENCRYPTION MODULE TO MANUALLY DECRYPT
 const { decrypt } = require('./encryption'); 
+const { isValidObjectId, sanitizeString } = require('./sanitize');
 
-// ✅ HELPER: Strip HTML tags and decode entities BEFORE saving to DB
+// ✅ FIX #37: Single-pass sanitization — strip tags FIRST, then decode entities ONCE
 function sanitizeEmailBody(html) {
-  if (!html) return '';
-  // Decode common HTML entities first
-  let decoded = html
-    .replace(/&quot;/g, '"')
+  if (!html || typeof html !== 'string') return '';
+  
+  // Step 1: Strip ALL HTML tags first
+  let stripped = html.replace(/<[^>]*>/g, '');
+  
+  // Step 2: Decode HTML entities ONCE after stripping
+  let decoded = stripped
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, ' ');
   
-  // Strip ALL HTML tags completely
-  return decoded.replace(/<[^>]*>/g, '').trim();
+  // Step 3: Strip any tags revealed by decoding (prevents double-escape bypass)
+  decoded = decoded.replace(/<[^>]*>/g, '');
+  
+  return decoded.trim();
+}
+
+// ✅ FIX #40: Complete email sanitization with strict character whitelist
+function sanitizeEmailAddress(email) {
+  if (!email || typeof email !== 'string') return null;
+  // Only allow valid email characters
+  let sanitized = email.replace(/[^\w@.\-+]/g, '').trim();
+  if (!sanitized || !sanitized.includes('@') || sanitized.length > 254) return null;
+  return sanitized.toLowerCase();
 }
 
 // ✅ SECURITY: Validate Nylas webhook signature
@@ -33,32 +48,27 @@ function validateWebhookSignature(req) {
     return false;
   }
   
-  // Nylas V3 sends signature in X-Nylas-Signature header
   const signature = req.headers['x-nylas-signature'] || req.headers['X-Nylas-Signature'];
   
-  if (!signature) {
+  if (!signature || typeof signature !== 'string') {
     console.warn('⚠️ [WEBHOOK SECURITY] Missing X-Nylas-Signature header');
     return false;
   }
   
-  // Get raw body for signature verification
   let rawBody;
   if (Buffer.isBuffer(req.body)) {
     rawBody = req.body.toString('utf8');
   } else if (typeof req.body === 'string') {
     rawBody = req.body;
   } else {
-    // If body was already parsed to JSON, re-stringify it
     rawBody = JSON.stringify(req.body);
   }
   
-  // Compute expected HMAC-SHA256 signature
   const expectedSignature = crypto
     .createHmac('sha256', webhookSecret)
     .update(rawBody)
     .digest('hex');
   
-  // Constant-time comparison to prevent timing attacks
   try {
     const sigBuffer = Buffer.from(signature, 'hex');
     const expectedBuffer = Buffer.from(expectedSignature, 'hex');
@@ -85,19 +95,23 @@ exports.handleWebhook = async (req, res) => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🔔 [WEBHOOK] Request received!');
   console.log(' [WEBHOOK] Method:', req.method);
-  console.log(' [WEBHOOK] URL:', req.url);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  // ✅ GET challenge requests don't need signature validation (Nylas verification step)
+  // ✅ GET challenge — Nylas verification step
   if (req.method === 'GET' && req.query.challenge) {
+    // ✅ FIX #34: Sanitize challenge before reflecting in response (prevent XSS)
+    const challenge = String(req.query.challenge).replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!challenge) {
+      return res.status(400).send('Invalid challenge');
+    }
     console.log(' [Nylas Webhook] Received GET challenge, responding...');
-    return res.status(200).send(req.query.challenge);
+    return res.status(200).send(challenge);
   }
 
   if (req.method === 'POST') {
     // ✅ CRITICAL SECURITY: Validate webhook signature BEFORE processing
     if (!validateWebhookSignature(req)) {
-      console.error('❌ [WEBHOOK SECURITY] Rejected unsigned/invalid webhook request from IP:', req.ip);
+      console.error('❌ [WEBHOOK SECURITY] Rejected unsigned/invalid webhook request');
       return res.status(401).json({ error: 'Invalid webhook signature' });
     }
     
@@ -120,15 +134,13 @@ exports.handleWebhook = async (req, res) => {
       }
     }
     
-    console.log('📨 [NYLAS WEBHOOK] Event received');
-    console.log(' [NYLAS WEBHOOK] Event type:', eventData.type);
+    console.log('📨 [NYLAS WEBHOOK] Event type:', eventData.type);
 
     try {
       switch (eventData.type) {
         case 'message.created':
         case 'message.updated':
         case 'thread.replied':
-          console.log('✅ [WEBHOOK] Processing message');
           await handleMessageCreated(eventData);
           break;
         case 'message.sent':
@@ -154,10 +166,10 @@ exports.handleWebhook = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-//  HANDLE: Message Created / Updated - WITH THREAD ID
+//  HANDLE: Message Created / Updated
 // ────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
-  console.log(' [WEBHOOK] Processing message');
+  console.log(' [WEBHOOK] Processing message created/updated');
   
   try {
     const data = eventData.data || {};
@@ -169,12 +181,9 @@ async function handleMessageCreated(eventData) {
     }
     
     const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
-    
-    // ✅ Extract thread_id from message
     const threadId = message.thread_id || data.thread_id || object.thread_id || null;
-    console.log(' [WEBHOOK] Thread ID:', threadId);
     
-    // ✅ Extract from object.from (where Nylas puts the data)
+    // ✅ Extract sender info
     let fromEmail = null;
     let fromName = null;
     if (object.from) {
@@ -188,18 +197,15 @@ async function handleMessageCreated(eventData) {
     }
     
     let toEmail = null;
-    let toName = null;
     if (object.to) {
       if (Array.isArray(object.to) && object.to.length > 0) {
         toEmail = object.to[0].email || object.to[0].address;
-        toName = object.to[0].name || '';
       } else if (typeof object.to === 'object') {
         toEmail = object.to.email || object.to.address;
-        toName = object.to.name || '';
       }
     }
     
-    // Fallback: Check message.from if object.from didn't work
+    // Fallback from message-level fields
     if (!fromEmail && message.from) {
       if (Array.isArray(message.from) && message.from.length > 0) {
         fromEmail = message.from[0]?.email || message.from[0]?.address;
@@ -213,77 +219,71 @@ async function handleMessageCreated(eventData) {
     if (!toEmail && message.to) {
       if (Array.isArray(message.to) && message.to.length > 0) {
         toEmail = message.to[0]?.email || message.to[0]?.address;
-        toName = message.to[0]?.name || '';
       } else if (typeof message.to === 'object') {
         toEmail = message.to.email || message.to.address;
-        toName = message.to.name || '';
       }
     }
     
     const subject = message.subject || data.subject || object.subject || '(no subject)';
-    
-    // ✅ FIX: Sanitize body BEFORE saving to prevent HTML pollution in DB
     const rawBody = message.body || message.text || message.snippet || data.body || data.snippet || object.body || '';
     const body = sanitizeEmailBody(rawBody); 
-    
     const snippet = message.snippet || data.snippet || object.snippet || '';
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
-    console.log(' [WEBHOOK] From:', fromEmail, fromName ? `(${fromName})` : '');
-    console.log(' [WEBHOOK] To:', toEmail, toName ? `(${toName})` : '');
-    console.log(' [WEBHOOK] Subject:', subject);
+    // ✅ FIX #40: Sanitize emails with complete character whitelist
+    const safeFromEmail = sanitizeEmailAddress(fromEmail);
+    const safeToEmail = sanitizeEmailAddress(toEmail);
 
-    if (!grantId) {
-      console.log('️ [WEBHOOK] Missing grantId');
+    // ✅ FIX #27: Validate and cast grantId to string for query safety
+    if (!grantId || typeof grantId !== 'string') {
+      console.log('️ [WEBHOOK] Missing or invalid grantId');
       return;
     }
+    const safeGrantId = String(grantId).replace(/[^a-zA-Z0-9_-]/g, '');
 
-    const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
+    const emailAccount = await EmailAccount.findOne({ nylasGrantId: safeGrantId });
     if (!emailAccount) {
-      console.log('️ [WEBHOOK] No email account found for grantId:', grantId);
+      console.log('️ [WEBHOOK] No email account found for grantId');
       return;
     }
 
-    // ✅ CRITICAL FIX: Skip processing if this message was sent FROM our own email
-    // This prevents your sent messages from being processed as incoming customer replies
-    if (fromEmail && emailAccount.emailAddress && 
-        fromEmail.toLowerCase() === emailAccount.emailAddress.toLowerCase()) {
-      console.log('️ [WEBHOOK] Skipping - this is OUR sent message, not a customer reply');
+    // Skip own sent messages
+    if (safeFromEmail && emailAccount.emailAddress && 
+        safeFromEmail.toLowerCase() === String(emailAccount.emailAddress).toLowerCase()) {
+      console.log('️ [WEBHOOK] Skipping own sent message');
       return;
     }
 
-    const userId = emailAccount.userId;
-    console.log('✅ [WEBHOOK] Found userId:', userId);
+    // ✅ FIX #27: Cast userId to string for all subsequent queries
+    const userId = String(emailAccount.userId);
+    if (!isValidObjectId(userId)) {
+      console.error('❌ [WEBHOOK] Invalid userId from email account');
+      return;
+    }
 
-    // ✅ STEP 1: Try to find lead by thread_id (MOST ACCURATE)
+    // ✅ STEP 1: Find lead by thread_id
     let lead = null;
-    if (threadId) {
-      lead = await Lead.findOne({ 
-        userId: userId,
-        threadId: threadId
-      });
-      if (lead) {
-        console.log('✅ [WEBHOOK] Found lead by thread_id:', lead.name);
-        console.log('✅ [WEBHOOK] Lead ID:', lead._id);
-      } else {
-        console.log('️ [WEBHOOK] No lead found with thread_id:', threadId);
+    if (threadId && typeof threadId === 'string') {
+      const safeThreadId = String(threadId).replace(/[^a-zA-Z0-9_-]/g, '');
+      if (safeThreadId) {
+        lead = await Lead.findOne({ userId: userId, threadId: safeThreadId });
+        if (lead) {
+          console.log('✅ [WEBHOOK] Found lead by thread_id:', lead._id);
+        }
       }
     }
 
-    // ✅ STEP 2: If not found by thread_id, try email match (fallback)
-    if (!lead && (fromEmail || toEmail)) {
-      console.log(' [WEBHOOK] Thread ID not found, trying email match...');
-      lead = await findMatchingLead(userId, fromEmail, toEmail);
+    // ✅ STEP 2: Fallback to exact email match
+    if (!lead && (safeFromEmail || safeToEmail)) {
+      lead = await findMatchingLead(userId, safeFromEmail, safeToEmail);
     }
 
-    // ✅ STEP 3: If no lead found, CREATE ONE
+    // ✅ STEP 3: Create new lead if none found
     if (!lead) {
-      console.log(' [WEBHOOK] No matching lead found, creating new lead...');
-      console.log(' [WEBHOOK] Creating lead for email:', fromEmail || toEmail);
-      
-      const leadEmail = fromEmail || toEmail || 'unknown@email.com';
-      // ✅ FIX: Use fromName if available, otherwise use local part of email
-      const displayName = fromName || leadEmail.split('@')[0] || 'Unknown Contact';
+      const leadEmail = safeFromEmail || safeToEmail || 'unknown@email.com';
+      const displayName = (fromName && typeof fromName === 'string') 
+        ? sanitizeString(fromName.substring(0, 100)) 
+        : leadEmail.split('@')[0] || 'Unknown Contact';
       
       lead = new Lead({
         userId: userId,
@@ -291,101 +291,59 @@ async function handleMessageCreated(eventData) {
         email: leadEmail,
         company: '',
         status: 'New',
-        // ✅ Save thread_id if available
-        threadId: threadId || null,
+        threadId: (threadId && typeof threadId === 'string') ? String(threadId).replace(/[^a-zA-Z0-9_-]/g, '') : null,
         replies: [{
-          from: 'ai', // ✅ FIXED: Customer messages = LEFT SIDE
+          from: 'customer',
           content: body || snippet || '(No content)',
-          subject: subject || '(no subject)',
+          subject: typeof subject === 'string' ? subject.substring(0, 200) : '(no subject)',
           date: new Date(),
           read: false,
-          messageId: messageId || null
+          messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null
         }],
         lastContactDate: new Date(),
         autoReplyEnabled: false
       });
       
       await lead.save();
-      console.log('✅ [WEBHOOK] Created new lead with ID:', lead._id);
-      console.log('✅ [WEBHOOK] Lead name:', lead.name);
-      console.log('✅ [WEBHOOK] Lead email:', lead.email);
-      if (threadId) {
-        console.log('✅ [WEBHOOK] Thread ID saved:', threadId);
-      }
+      console.log('✅ [WEBHOOK] Created new lead:', lead._id);
     }
 
-    // ✅ Process the reply
-    await processReply(lead, fromEmail, subject, body, snippet, messageId, userId);
+    await processReply(lead, safeFromEmail, subject, body, snippet, messageId, userId);
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling message:', error.message);
-    console.error('❌ [WEBHOOK] Error stack:', error.stack);
   }
 }
 
 // ───────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD - FIXED ENCRYPTION HANDLING
+//  FIND MATCHING LEAD — EXACT EMAIL MATCH ONLY (no domain fallback)
 // ────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
-  console.log(' [WEBHOOK] Looking for lead...');
-  console.log(' [WEBHOOK] Searching by FROM email:', fromEmail);
-  console.log(' [WEBHOOK] Searching by TO email:', toEmail);
-  
-  // Normalize search emails
   const normalizedFrom = fromEmail?.toLowerCase()?.trim();
   const normalizedTo = toEmail?.toLowerCase()?.trim();
   
-  if (!normalizedFrom && !normalizedTo) {
-    console.log(' [WEBHOOK] No valid email to search for');
-    return null;
-  }
+  if (!normalizedFrom && !normalizedTo) return null;
 
-  // ✅ FIX: Fetch ALL leads once and compare decrypted emails in memory
-  // This avoids multiple DB queries and handles encryption correctly
-  const allLeads = await Lead.find({ userId: userId });
-  console.log(`🔍 [WEBHOOK] Checking ${allLeads.length} leads for matching email`);
+  const allLeads = await Lead.find({ userId: String(userId) });
   
   for (const lead of allLeads) {
-    // ✅ CRITICAL FIX: Manually decrypt the email since Mongoose getters 
-    // don't fire on raw document properties in loops
     let decryptedEmail = lead.email;
     try {
-      // Check if it looks encrypted (base64 format)
       if (decryptedEmail && /^[A-Za-z0-9+/=]{20,}$/.test(decryptedEmail)) {
         decryptedEmail = decrypt(decryptedEmail);
       }
     } catch (err) {
-      console.warn('⚠️ [WEBHOOK] Failed to decrypt email for lead:', lead._id);
       continue;
     }
     
     const cleanEmail = decryptedEmail?.toLowerCase()?.trim();
-    
     if (!cleanEmail) continue;
     
-    // Exact match check
-    if (normalizedFrom && cleanEmail === normalizedFrom) {
-      console.log('✅ [WEBHOOK] Found lead by exact FROM email match:', lead.name);
-      return lead;
-    }
-    
-    if (normalizedTo && cleanEmail === normalizedTo) {
-      console.log('✅ [WEBHOOK] Found lead by exact TO email match:', lead.name);
-      return lead;
-    }
-    
-    // Domain fallback match (if exact fails)
-    if (normalizedFrom?.includes('@') && cleanEmail.includes('@')) {
-      const fromDomain = normalizedFrom.split('@')[1];
-      const leadDomain = cleanEmail.split('@')[1];
-      if (fromDomain === leadDomain) {
-        console.log('✅ [WEBHOOK] Found lead by domain match:', lead.name);
-        return lead;
-      }
-    }
+    // ✅ Exact match only — domain fallback removed per H.I.S.V. recommendation
+    if (normalizedFrom && cleanEmail === normalizedFrom) return lead;
+    if (normalizedTo && cleanEmail === normalizedTo) return lead;
   }
 
-  console.log('❌ [WEBHOOK] No matching lead found after checking all leads');
   return null;
 }
 
@@ -393,9 +351,6 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
 //  PROCESS REPLY
 // ──────────────────────────────────────────────────────────────
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
-  console.log('📝 [WEBHOOK] Processing reply for lead:', lead.name);
-  console.log(' [WEBHOOK] Lead ID:', lead._id);
-
   try {
     lead.status = 'Replied';
     lead.lastContactDate = new Date();
@@ -403,54 +358,51 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     if (!lead.replies) lead.replies = [];
     
     const replyContent = body || snippet || '(No content)';
-    const replySubject = subject || '(no subject)';
+    const replySubject = (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)';
     
     lead.replies.push({
-      from: 'ai', // ✅ CUSTOMER REPLY = LEFT SIDE
+      from: 'customer',
       content: replyContent,
       subject: replySubject,
       date: new Date(),
-      messageId: messageId || null,
+      messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null,
       read: false
     });
     
     await lead.save();
-    console.log('✅ [WEBHOOK] Reply saved to lead. Total replies:', lead.replies.length);
 
+    // ✅ FIX #28: Cast all values to strings for ChatMessage creation
     try {
       const chatMessage = new ChatMessage({
-        userId: userId,
-        sessionId: lead._id.toString(),
+        userId: String(userId),
+        sessionId: String(lead._id),
         role: 'user',
         content: replyContent,
         title: replySubject,
         createdAt: new Date()
       });
       await chatMessage.save();
-      console.log('✅ [WEBHOOK] Reply saved to ChatMessage');
     } catch (chatErr) {
-      console.warn('️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
+      console.warn('️ [WEBHOOK] Failed to save ChatMessage:', chatErr.message);
     }
 
+    // ✅ FIX #29: Cast all values to strings for Notification creation
     try {
       const notification = new Message({
-        userId: userId,
+        userId: String(userId),
         sessionId: 'lead-reply-notification',
-        role: 'ai',
-        title: ` ${lead.name} replied!`,
-        content: `"${snippet ? snippet.substring(0, 200) : 'New reply from lead'}"`,
+        role: 'system',
+        title: `${sanitizeString(String(lead.name || 'Lead'))} replied`,
+        content: snippet ? String(snippet).substring(0, 200) : 'New reply from lead',
         notificationType: 'lead_reply',
-        leadId: lead._id,
+        leadId: String(lead._id),
         isRead: false,
         createdAt: new Date()
       });
       await notification.save();
-      console.log('✅ [WEBHOOK] Notification created');
     } catch (notifErr) {
-      console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
+      console.warn('⚠️ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
-
-    console.log('✅ [WEBHOOK] Reply processing complete');
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error processing reply:', error.message);
@@ -458,11 +410,9 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
 }
 
 // ────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent - FIXED DUPLICATE PREVENTION
+//  HANDLE: Message Sent
 // ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
-  console.log(' [WEBHOOK-SENT] Message sent event triggered');
-  
   try {
     const data = eventData.data || {};
     const object = data.object || {};
@@ -473,34 +423,29 @@ async function handleMessageSent(eventData) {
     const body = message.body || data.body || '';
     const grantId = data.grant_id || message.grant_id || object.grant_id;
     
-    console.log(' [WEBHOOK-SENT] To:', toEmail);
-    console.log('📩 [WEBHOOK-SENT] Grant ID:', grantId);
+    // ✅ FIX #30: Sanitize and validate inputs
+    const safeToEmail = sanitizeEmailAddress(toEmail);
+    
+    if (!safeToEmail || !grantId || typeof grantId !== 'string') return;
+    
+    const safeGrantId = String(grantId).replace(/[^a-zA-Z0-9_-]/g, '');
 
-    if (!toEmail || !grantId) return;
+    const emailAccount = await EmailAccount.findOne({ nylasGrantId: safeGrantId });
+    if (!emailAccount) return;
 
-    const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
-    if (!emailAccount) {
-        console.log('️ [WEBHOOK-SENT] No email account found for grant:', grantId);
-        return;
-    }
+    // ✅ FIX #30: Cast userId to string
+    const userId = String(emailAccount.userId);
+    if (!isValidObjectId(userId)) return;
 
-    const userId = emailAccount.userId;
-    console.log(' [WEBHOOK-SENT] Found User ID:', userId);
-
-    // ✅ Use optimized findMatchingLead instead of regex on encrypted field
-    const lead = await findMatchingLead(userId, null, toEmail);
+    const lead = await findMatchingLead(userId, null, safeToEmail);
 
     if (lead) {
-      console.log('✅ [WEBHOOK-SENT] Matched existing lead:', lead.name, '(ID:', lead._id, ')');
-      
-      // ✅ ROBUST DUPLICATE CHECK: 
-      // Check last 5 messages for identical content within 60 seconds
-      // This prevents double-saving when batchSend already saved it
       const recentReplies = lead.replies.slice(-5);
+      const safeBody = typeof body === 'string' ? body.trim() : '';
       const isDuplicate = recentReplies.some(r => 
         r.from === 'lead' && 
-        r.content.trim() === body.trim() && 
-        Math.abs(new Date() - new Date(r.date)) < 60000 // 60 second window
+        String(r.content || '').trim() === safeBody && 
+        Math.abs(new Date() - new Date(r.date)) < 60000
       );
 
       if (!isDuplicate) {
@@ -509,20 +454,15 @@ async function handleMessageSent(eventData) {
         
         if (!lead.replies) lead.replies = [];
         lead.replies.push({
-          from: 'lead', // ✅ USER SENT MESSAGE = RIGHT SIDE
-          content: body || '',
-          subject: subject,
+          from: 'lead',
+          content: safeBody,
+          subject: (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)',
           date: new Date(),
           read: true
         });
         
         await lead.save();
-        console.log('💾 [WEBHOOK-SENT] Updated lead status and replies.');
-      } else {
-        console.log('️ [WEBHOOK-SENT] Duplicate sent message skipped (already saved by batchSend).');
       }
-    } else {
-        console.log(' [WEBHOOK-SENT] NO LEAD FOUND for email:', toEmail);
     }
 
   } catch (error) {
@@ -534,27 +474,29 @@ async function handleMessageSent(eventData) {
 //  HANDLE: Grant Expired
 // ─────────────────────────────────────────────────────────────
 async function handleGrantExpired(eventData) {
-  console.log(' [WEBHOOK] Grant expired');
-  
   try {
     const data = eventData.data || {};
     const grantId = data.grant_id;
-    if (!grantId) return;
+    
+    // ✅ FIX #31: Validate grantId type before query
+    if (!grantId || typeof grantId !== 'string') return;
+    const safeGrantId = String(grantId).replace(/[^a-zA-Z0-9_-]/g, '');
 
-    const emailAccount = await EmailAccount.findOne({ nylasGrantId: grantId });
+    const emailAccount = await EmailAccount.findOne({ nylasGrantId: safeGrantId });
     
     if (emailAccount) {
       emailAccount.isConnected = false;
-      emailAccount.lastRefreshError = 'Grant expired webhook';
+      emailAccount.lastRefreshError = 'Grant expired';
       await emailAccount.save();
 
       try {
+        // ✅ FIX #31: Cast userId to string for notification
         const notification = new Message({
-          userId: emailAccount.userId,
+          userId: String(emailAccount.userId),
           sessionId: 'system-notification',
-          role: 'ai',
-          title: '️ Email Connection Expired',
-          content: 'Your email connection has expired. Please reconnect to continue sending emails.',
+          role: 'system',
+          title: 'Email Connection Expired',
+          content: 'Your email connection has expired. Please reconnect.',
           notificationType: 'token_expired',
           leadId: null,
           isRead: false,
@@ -562,7 +504,7 @@ async function handleGrantExpired(eventData) {
         });
         await notification.save();
       } catch (notifErr) {
-        console.error(' [WEBHOOK] Failed to create notification:', notifErr.message);
+        console.warn('⚠️ [WEBHOOK] Failed to create expiry notification:', notifErr.message);
       }
     }
 
@@ -575,20 +517,16 @@ async function handleGrantExpired(eventData) {
 //  HANDLE: Grant Refreshed
 // ──────────────────────────────────────────────────────────
 async function handleGrantRefreshed(eventData) {
-  console.log('🔄 [WEBHOOK] Grant refreshed');
-  
   try {
     const data = eventData.data || {};
     const grantId = data.grant_id;
-    if (!grantId) return;
+    
+    if (!grantId || typeof grantId !== 'string') return;
+    const safeGrantId = String(grantId).replace(/[^a-zA-Z0-9_-]/g, '');
 
     await EmailAccount.findOneAndUpdate(
-      { nylasGrantId: grantId },
-      {
-        isConnected: true,
-        refreshFailCount: 0,
-        lastRefreshError: null
-      }
+      { nylasGrantId: safeGrantId },
+      { isConnected: true, refreshFailCount: 0, lastRefreshError: null }
     );
 
   } catch (error) {
@@ -601,13 +539,11 @@ async function handleGrantRefreshed(eventData) {
 // ─────────────────────────────────────────────────────────────
 async function generateAndSendAutoReply(lead, userId) {
   try {
-    console.log(' [AUTO-REPLY] Generating reply for:', lead.email);
-    
-    const user = await User.findById(userId);
+    const user = await User.findById(String(userId));
     if (!user) return;
 
     const emailAccount = await EmailAccount.findOne({ 
-      userId: userId,
+      userId: String(userId),
       isConnected: true
     });
 
@@ -641,7 +577,7 @@ async function generateAndSendAutoReply(lead, userId) {
     if (result && result.success) {
       if (!lead.replies) lead.replies = [];
       lead.replies.push({
-        from: 'lead', // ✅ AUTO-REPLIES ARE USER-SIDE = RIGHT ALIGNMENT
+        from: 'lead',
         content: aiResponse,
         subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
         date: new Date(),
@@ -650,10 +586,9 @@ async function generateAndSendAutoReply(lead, userId) {
       });
       
       await lead.save();
-      console.log('✅ [AUTO-REPLY] Auto-reply sent to:', lead.email);
     }
 
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-      }
+  }
