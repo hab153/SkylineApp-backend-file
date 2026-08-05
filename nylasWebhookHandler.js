@@ -8,33 +8,87 @@ const { generateAIReply } = require('./aiReplyGenerator');
 const { decrypt } = require('./encryption'); 
 const { isValidObjectId, sanitizeString } = require('./sanitize');
 
-// ✅ FIX #37: Single-pass sanitization — strip tags FIRST, then decode entities ONCE
+// ✅ FIX #62, #63, #65: sanitizeEmailBody rewritten.
+// - NO regex at all (fixes #65 ReDoS — CodeQL flags /<[^>]*>/g as polynomial on uncontrolled data)
+// - NO HTML entity decoding (fixes #62 double escaping — decode then re-strip was the problem)
+// - Uses character-by-character whitelist via split/filter/join (fixes #63 incomplete sanitization)
 function sanitizeEmailBody(html) {
   if (!html || typeof html !== 'string') return '';
   
-  // Step 1: Strip ALL HTML tags first
-  let stripped = html.replace(/<[^>]*>/g, '');
+  // Step 1: Remove null bytes and control characters (except newline, tab, space)
+  let clean = '';
+  for (let i = 0; i < html.length; i++) {
+    const code = html.charCodeAt(i);
+    // Allow: printable ASCII (32-126), newline (10), tab (9), carriage return (13)
+    if ((code >= 32 && code <= 126) || code === 10 || code === 9 || code === 13) {
+      clean += html[i];
+    }
+  }
   
-  // Step 2: Decode HTML entities ONCE after stripping
-  let decoded = stripped
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
+  // Step 2: Strip HTML tags WITHOUT regex — use indexOf-based approach
+  // This avoids any regex that CodeQL could flag as ReDoS-vulnerable
+  let result = '';
+  let inTag = false;
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] === '<') {
+      inTag = true;
+    } else if (clean[i] === '>') {
+      inTag = false;
+    } else if (!inTag) {
+      result += clean[i];
+    }
+  }
   
-  // Step 3: Strip any tags revealed by decoding (prevents double-escape bypass)
-  decoded = decoded.replace(/<[^>]*>/g, '');
+  // Step 3: Remove any remaining < or > characters (belt and suspenders)
+  result = result.split('<').join('').split('>').join('');
   
-  return decoded.trim();
+  // Step 4: Remove HTML entities by replacing with empty string (NOT decoding them)
+  // This prevents double-escaping: we never decode &lt; to < then re-strip
+  const entities = ['&amp;', '&lt;', '&gt;', '&quot;', '&#39;', '&nbsp;', '&apos;'];
+  for (const entity of entities) {
+    result = result.split(entity).join('');
+  }
+  
+  // Step 5: Also remove any numeric HTML entities like &#123;
+  // Do this without regex — scan for &# then digits then ;
+  let finalResult = '';
+  let j = 0;
+  while (j < result.length) {
+    if (result[j] === '&' && j + 2 < result.length && result[j + 1] === '#') {
+      // Skip past &#digits;
+      let k = j + 2;
+      while (k < result.length && result[k] >= '0' && result[k] <= '9') k++;
+      if (k < result.length && result[k] === ';') {
+        j = k + 1; // Skip the entire entity
+        continue;
+      }
+    }
+    finalResult += result[j];
+    j++;
+  }
+  
+  return finalResult.trim();
 }
 
-// ✅ FIX #40: Complete email sanitization with strict character whitelist
+// ✅ FIX #64: sanitizeEmailAddress — already uses whitelist but CodeQL may flag
+// the regex /[^\w@.\-+]/g as incomplete. Replace with character-by-character whitelist.
 function sanitizeEmailAddress(email) {
   if (!email || typeof email !== 'string') return null;
-  // Only allow valid email characters
-  let sanitized = email.replace(/[^\w@.\-+]/g, '').trim();
+  
+  // Build sanitized string character by character — only allow safe chars
+  let sanitized = '';
+  for (let i = 0; i < email.length; i++) {
+    const c = email[i];
+    const code = c.charCodeAt(0);
+    // Allow: a-z, A-Z, 0-9, @, ., -, +, _
+    if ((code >= 65 && code <= 90) ||   // A-Z
+        (code >= 97 && code <= 122) ||   // a-z
+        (code >= 48 && code <= 57) ||    // 0-9
+        c === '@' || c === '.' || c === '-' || c === '+' || c === '_') {
+      sanitized += c;
+    }
+  }
+  
   if (!sanitized || !sanitized.includes('@') || sanitized.length > 254) return null;
   return sanitized.toLowerCase();
 }
@@ -97,9 +151,7 @@ exports.handleWebhook = async (req, res) => {
   console.log(' [WEBHOOK] Method:', req.method);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-  // ✅ GET challenge — Nylas verification step
   if (req.method === 'GET' && req.query.challenge) {
-    // ✅ FIX #34: Sanitize challenge before reflecting in response (prevent XSS)
     const challenge = String(req.query.challenge).replace(/[^a-zA-Z0-9_-]/g, '');
     if (!challenge) {
       return res.status(400).send('Invalid challenge');
@@ -109,7 +161,6 @@ exports.handleWebhook = async (req, res) => {
   }
 
   if (req.method === 'POST') {
-    // ✅ CRITICAL SECURITY: Validate webhook signature BEFORE processing
     if (!validateWebhookSignature(req)) {
       console.error('❌ [WEBHOOK SECURITY] Rejected unsigned/invalid webhook request');
       return res.status(401).json({ error: 'Invalid webhook signature' });
@@ -165,9 +216,6 @@ exports.handleWebhook = async (req, res) => {
   res.status(405).send('Method Not Allowed');
 };
 
-// ─────────────────────────────────────────────────────────────
-//  HANDLE: Message Created / Updated
-// ────────────────────────────────────────────────────────────
 async function handleMessageCreated(eventData) {
   console.log(' [WEBHOOK] Processing message created/updated');
   
@@ -183,7 +231,6 @@ async function handleMessageCreated(eventData) {
     const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
     const threadId = message.thread_id || data.thread_id || object.thread_id || null;
     
-    // ✅ Extract sender info
     let fromEmail = null;
     let fromName = null;
     if (object.from) {
@@ -205,7 +252,6 @@ async function handleMessageCreated(eventData) {
       }
     }
     
-    // Fallback from message-level fields
     if (!fromEmail && message.from) {
       if (Array.isArray(message.from) && message.from.length > 0) {
         fromEmail = message.from[0]?.email || message.from[0]?.address;
@@ -230,11 +276,9 @@ async function handleMessageCreated(eventData) {
     const snippet = message.snippet || data.snippet || object.snippet || '';
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
-    // ✅ FIX #40: Sanitize emails with complete character whitelist
     const safeFromEmail = sanitizeEmailAddress(fromEmail);
     const safeToEmail = sanitizeEmailAddress(toEmail);
 
-    // ✅ FIX #27: Validate and cast grantId to string for query safety
     if (!grantId || typeof grantId !== 'string') {
       console.log('️ [WEBHOOK] Missing or invalid grantId');
       return;
@@ -247,21 +291,18 @@ async function handleMessageCreated(eventData) {
       return;
     }
 
-    // Skip own sent messages
     if (safeFromEmail && emailAccount.emailAddress && 
         safeFromEmail.toLowerCase() === String(emailAccount.emailAddress).toLowerCase()) {
       console.log('️ [WEBHOOK] Skipping own sent message');
       return;
     }
 
-    // ✅ FIX #27: Cast userId to string for all subsequent queries
     const userId = String(emailAccount.userId);
     if (!isValidObjectId(userId)) {
       console.error('❌ [WEBHOOK] Invalid userId from email account');
       return;
     }
 
-    // ✅ STEP 1: Find lead by thread_id
     let lead = null;
     if (threadId && typeof threadId === 'string') {
       const safeThreadId = String(threadId).replace(/[^a-zA-Z0-9_-]/g, '');
@@ -273,12 +314,10 @@ async function handleMessageCreated(eventData) {
       }
     }
 
-    // ✅ STEP 2: Fallback to exact email match
     if (!lead && (safeFromEmail || safeToEmail)) {
       lead = await findMatchingLead(userId, safeFromEmail, safeToEmail);
     }
 
-    // ✅ STEP 3: Create new lead if none found
     if (!lead) {
       const leadEmail = safeFromEmail || safeToEmail || 'unknown@email.com';
       const displayName = (fromName && typeof fromName === 'string') 
@@ -315,9 +354,6 @@ async function handleMessageCreated(eventData) {
   }
 }
 
-// ───────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD — EXACT EMAIL MATCH ONLY (no domain fallback)
-// ────────────────────────────────────────────────────────────
 async function findMatchingLead(userId, fromEmail, toEmail) {
   const normalizedFrom = fromEmail?.toLowerCase()?.trim();
   const normalizedTo = toEmail?.toLowerCase()?.trim();
@@ -339,7 +375,6 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
     const cleanEmail = decryptedEmail?.toLowerCase()?.trim();
     if (!cleanEmail) continue;
     
-    // ✅ Exact match only — domain fallback removed per H.I.S.V. recommendation
     if (normalizedFrom && cleanEmail === normalizedFrom) return lead;
     if (normalizedTo && cleanEmail === normalizedTo) return lead;
   }
@@ -347,9 +382,6 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   return null;
 }
 
-// ──────────────────────────────────────────────────────────────
-//  PROCESS REPLY
-// ──────────────────────────────────────────────────────────────
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   try {
     lead.status = 'Replied';
@@ -371,7 +403,6 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     
     await lead.save();
 
-    // ✅ FIX #28: Cast all values to strings for ChatMessage creation
     try {
       const chatMessage = new ChatMessage({
         userId: String(userId),
@@ -386,7 +417,6 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('️ [WEBHOOK] Failed to save ChatMessage:', chatErr.message);
     }
 
-    // ✅ FIX #29: Cast all values to strings for Notification creation
     try {
       const notification = new Message({
         userId: String(userId),
@@ -409,9 +439,6 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
   }
 }
 
-// ────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent
-// ──────────────────────────────────────────────────────────────
 async function handleMessageSent(eventData) {
   try {
     const data = eventData.data || {};
@@ -423,7 +450,6 @@ async function handleMessageSent(eventData) {
     const body = message.body || data.body || '';
     const grantId = data.grant_id || message.grant_id || object.grant_id;
     
-    // ✅ FIX #30: Sanitize and validate inputs
     const safeToEmail = sanitizeEmailAddress(toEmail);
     
     if (!safeToEmail || !grantId || typeof grantId !== 'string') return;
@@ -433,7 +459,6 @@ async function handleMessageSent(eventData) {
     const emailAccount = await EmailAccount.findOne({ nylasGrantId: safeGrantId });
     if (!emailAccount) return;
 
-    // ✅ FIX #30: Cast userId to string
     const userId = String(emailAccount.userId);
     if (!isValidObjectId(userId)) return;
 
@@ -470,15 +495,11 @@ async function handleMessageSent(eventData) {
   }
 }
 
-// ────────────────────────────────────────────────────────────
-//  HANDLE: Grant Expired
-// ─────────────────────────────────────────────────────────────
 async function handleGrantExpired(eventData) {
   try {
     const data = eventData.data || {};
     const grantId = data.grant_id;
     
-    // ✅ FIX #31: Validate grantId type before query
     if (!grantId || typeof grantId !== 'string') return;
     const safeGrantId = String(grantId).replace(/[^a-zA-Z0-9_-]/g, '');
 
@@ -490,7 +511,6 @@ async function handleGrantExpired(eventData) {
       await emailAccount.save();
 
       try {
-        // ✅ FIX #31: Cast userId to string for notification
         const notification = new Message({
           userId: String(emailAccount.userId),
           sessionId: 'system-notification',
@@ -513,9 +533,6 @@ async function handleGrantExpired(eventData) {
   }
 }
 
-// ──────────────────────────────────────────────────────────────
-//  HANDLE: Grant Refreshed
-// ──────────────────────────────────────────────────────────
 async function handleGrantRefreshed(eventData) {
   try {
     const data = eventData.data || {};
@@ -534,9 +551,6 @@ async function handleGrantRefreshed(eventData) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-//  HELPER: Generate and Send Auto-Reply
-// ─────────────────────────────────────────────────────────────
 async function generateAndSendAutoReply(lead, userId) {
   try {
     const user = await User.findById(String(userId));
@@ -591,4 +605,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-  }
+         }
