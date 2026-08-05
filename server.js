@@ -100,14 +100,13 @@ console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 
 // ──────────────────────────────────────────────────────────────
-//  ✅ FIX #1: JWT SECRET VALIDATION (ENHANCED - HARD FAILS)
+//  ✅ JWT SECRET VALIDATION (ENHANCED - HARD FAILS)
 // ──────────────────────────────────────────────────────────────
 
 console.log('\n🔐 [SECURITY] Validating JWT secrets...');
 
 function getEntropyRecommendation() {
-    // ✅ FIX #43: Do NOT log the generated secret — only show command to generate one
-    return `\n   💡 RECOMMENDED: Run this command to generate a secure secret:\n   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`;
+    return '\n   💡 RECOMMENDED: Run this command to generate a secure secret:\n   node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"';
 }
 
 const jwtSecret = process.env.JWT_SECRET;
@@ -117,19 +116,19 @@ if (!jwtSecret) {
     process.exit(1);
 }
 if (jwtSecret.length < 32) {
-    // ✅ FIX #43: Do NOT log the actual secret value or its length context
-    console.error(`❌ [SECURITY] JWT_SECRET is too short. Minimum 32 characters required.`);
+    console.error('❌ [SECURITY] JWT_SECRET is too short. Minimum 32 characters required.');
     process.exit(1);
 }
 const weakSecrets = ['secret', 'password', '1234567890', 'jwtsecret', 'supersecret', 'mysecret', 'changeme', 'test', '1234', 'qwerty', 'admin', 'letmein', 'welcome', 'monkey', 'dragon', 'master', 'hello'];
 const isWeak = weakSecrets.some(weak => jwtSecret.toLowerCase().includes(weak) || weak.toLowerCase().includes(jwtSecret.toLowerCase()));
 if (isWeak) {
-    // ✅ FIX #43: Do NOT log the actual secret value
-    console.error(`❌ [SECURITY] JWT_SECRET appears to contain a weak/common pattern. Use a cryptographically random string.`);
+    console.error('❌ [SECURITY] JWT_SECRET appears to contain a weak/common pattern. Use a cryptographically random string.');
     process.exit(1);
 }
-// ✅ FIX #43: Only log length, never the value
-console.log(`✅ [SECURITY] JWT_SECRET is configured (length: ${jwtSecret.length} chars)`);
+// ✅ FIX #66: Do NOT reference jwtSecret at all in log output.
+// CodeQL flags ${jwtSecret.length} as logging sensitive data because jwtSecret
+// is tainted from process.env.JWT_SECRET. Even .length is flagged.
+console.log('✅ [SECURITY] JWT_SECRET is configured and validated');
 
 const adminJwtSecret = process.env.ADMIN_JWT_SECRET;
 if (!adminJwtSecret) {
@@ -137,7 +136,7 @@ if (!adminJwtSecret) {
     process.exit(1);
 }
 if (adminJwtSecret.length < 32) {
-    console.error(`❌ [SECURITY] ADMIN_JWT_SECRET is too short. Minimum 32 characters required.`);
+    console.error('❌ [SECURITY] ADMIN_JWT_SECRET is too short. Minimum 32 characters required.');
     process.exit(1);
 }
 if (adminJwtSecret === jwtSecret) {
@@ -146,16 +145,14 @@ if (adminJwtSecret === jwtSecret) {
 }
 const isAdminWeak = weakSecrets.some(weak => adminJwtSecret.toLowerCase().includes(weak) || weak.toLowerCase().includes(adminJwtSecret.toLowerCase()));
 if (isAdminWeak) {
-    // ✅ FIX #44: Do NOT log the actual secret value
-    console.error(`❌ [SECURITY] ADMIN_JWT_SECRET appears to contain a weak/common pattern. Use a cryptographically random string.`);
+    console.error('❌ [SECURITY] ADMIN_JWT_SECRET appears to contain a weak/common pattern. Use a cryptographically random string.');
     process.exit(1);
 }
-console.log(`✅ [SECURITY] ADMIN_JWT_SECRET is configured and distinct.`);
+console.log('✅ [SECURITY] ADMIN_JWT_SECRET is configured and distinct.');
 
 const requiredEnvVars = ['NYLAS_CLIENT_ID', 'NYLAS_API_KEY', 'FLUTTERWAVE_SECRET_KEY', 'FLUTTERWAVE_SECRET_HASH', 'MONGODB_URI'];
 const missingEnvVars = requiredEnvVars.filter(varName => { const value = process.env[varName]; return !value || value.trim() === ''; });
 if (missingEnvVars.length > 0) {
-    // ✅ FIX #45: Log which vars are missing but NEVER their values
     console.error('❌ CRITICAL ERROR: Missing required environment variables:', missingEnvVars.join(', '));
     process.exit(1);
 }
@@ -172,8 +169,8 @@ try {
             const latest = backups.sort().pop();
             const stats = fs.statSync(path.join(backupDir, latest));
             const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
-            if (days > 7) console.warn(`⚠️ [BACKUP] Last backup was ${days.toFixed(1)} days ago.`);
-            else console.log(`✅ [BACKUP] Recent backup found: ${latest}`);
+            if (days > 7) console.warn('⚠️ [BACKUP] Last backup was ' + days.toFixed(1) + ' days ago.');
+            else console.log('✅ [BACKUP] Recent backup found: ' + latest);
         }
     } else console.warn('⚠️ [BACKUP] Backup directory not found.');
 } catch (err) { console.warn('⚠️ [BACKUP] Could not check backup status:', err.message); }
@@ -314,13 +311,13 @@ async function startTokenRefreshJob() {
             const now = new Date();
             const fiveMinutesFromNow = new Date(now.getTime() + 5 * 60 * 1000);
             const expiringAccounts = await EmailAccount.find({ isConnected: true, tokenExpiry: { $lt: fiveMinutesFromNow, $gte: now } });
-            if (expiringAccounts.length > 0) console.log(`🔄 [TOKEN REFRESH] Found ${expiringAccounts.length} accounts expiring soon`);
+            if (expiringAccounts.length > 0) console.log('🔄 [TOKEN REFRESH] Found ' + expiringAccounts.length + ' accounts expiring soon');
             for (const account of expiringAccounts) {
                 try {
                     const { refreshNylasToken } = require('./nylasService');
-                    console.log(`🔄 [TOKEN REFRESH] Refreshing token for user ID: ${account.userId}`);
+                    console.log('🔄 [TOKEN REFRESH] Refreshing token for user ID: ' + account.userId);
                     await refreshNylasToken(account.userId);
-                } catch (err) { console.error(`❌ [TOKEN REFRESH] Failed to refresh for user ${account.userId}:`, err.message); }
+                } catch (err) { console.error('❌ [TOKEN REFRESH] Failed to refresh for user ' + account.userId + ':', err.message); }
             }
         } catch (error) { console.error('❌ [TOKEN REFRESH] Job error:', error.message); }
     }, 5 * 60 * 1000);
@@ -360,9 +357,6 @@ app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
   }
 });
 
-// ✅ FIX #35: Removed reflected XSS in test-callback route
-// This route reflected req.originalUrl and req.query directly into HTML without encoding.
-// Replaced with a safe static response that does not reflect any user input.
 app.get('/api/auth/nylas/test-callback', (req, res) => {
     console.log('✅ [TEST] Callback test route hit');
     res.status(200).json({ 
@@ -465,8 +459,7 @@ app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
         const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
         const validPassword = admin ? await bcrypt.compare(password, admin.password) : await bcrypt.compare(password, dummyHash);
         if (!admin || !validPassword) {
-            // ✅ Do not log the email in failed auth attempts
-            console.warn(`[ADMIN AUTH FAILED] IP: ${req.ip}`);
+            console.warn('[ADMIN AUTH FAILED] IP: ' + req.ip);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
         if (!admin.adminTotpEnabled) {
@@ -489,7 +482,7 @@ app.post('/api/admin/enable-2fa', verifyAdminToken, require('./authController').
 
 // Honeypot: Block all other /admin* paths with 404
 app.use(/^\/admin/i, (req, res) => {
-    console.warn(`[SECURITY] Suspicious scan from ${req.ip}: ${req.originalUrl}`);
+    console.warn('[SECURITY] Suspicious scan from ' + req.ip);
     res.status(404).json({ error: 'Not Found' });
 });
 
@@ -570,7 +563,7 @@ app.get('/api/debug/leads', verifyAdminToken, async (req, res) => {
 // ─── START SERVER ───
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
-    console.log(`🚀 Server running on port ${PORT}`); 
-    console.log(`✅ [SERVER] All routes registered successfully`);
+    console.log('🚀 Server running on port ' + PORT); 
+    console.log('✅ [SERVER] All routes registered successfully');
 });
 server.timeout = 300000;
