@@ -174,7 +174,24 @@ try {
 } catch (err) { console.warn('⚠️ [BACKUP] Could not check backup status:', err.message); }
 
 // ─── SECURITY MIDDLEWARE ───
-app.use(helmet());
+// ✅ FIX #3: Custom Content-Security-Policy Header
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com", "https://*.googletagmanager.com"],
+            styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+            fontSrc: ["'self'", "https://fonts.gstatic.com"],
+            imgSrc: ["'self'", "data:", "https:", "blob:"],
+            connectSrc: ["'self'", "https://skylineapp-backend-file.onrender.com", "https://*.google-analytics.com", "https://*.analytics.google.com"],
+            frameSrc: ["'none'"],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"],
+            formAction: ["'self'"]
+        }
+    },
+    crossOriginEmbedderPolicy: false // Required for some third-party scripts
+}));
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
@@ -188,7 +205,7 @@ app.use(cors({
     credentials: true
 }));
 
-// ✅ NEW: Strict Rate Limiters for Auth Endpoints
+// ✅ Strict Rate Limiters for Auth Endpoints
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 5, // 5 attempts
@@ -212,6 +229,16 @@ const resetLimiter = rateLimit({
     max: 5, // 5 attempts
     keyGenerator: (req) => req.body.email || req.ip,
     message: { success: false, message: 'Too many reset attempts. Please try again in 1 hour.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// ✅ NEW: Admin Login Rate Limiter
+const adminLoginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // 5 attempts
+    keyGenerator: (req) => req.body.email || req.ip,
+    message: { success: false, message: 'Too many admin login attempts. Please try again in 15 minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
 });
@@ -434,7 +461,8 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 console.log('✅ [SERVER] AI suggestion route registered');
 
 // ─── ADMIN ROUTES (SECURE TOTP) ───
-app.post('/api/admin/login', async (req, res) => {
+// ✅ FIX #1: Admin login now has strict rate limiting
+app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
         if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
@@ -508,8 +536,8 @@ console.log('   📋 PUT    /api/history/rename/:sessionId');
 console.log('   📋 PUT    /api/history/pin/:sessionId');
 console.log('   📋 DELETE /api/history/delete/:sessionId');
 
-// ─── DEBUG ROUTES ───
-app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
+// ─── DEBUG ROUTES (✅ FIX #2: NOW ADMIN-ONLY) ───
+app.get('/api/debug/verify-messages', verifyAdminToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
         const Session = require('./Session');
@@ -527,7 +555,7 @@ app.get('/api/debug/verify-messages', verifyToken, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
+app.get('/api/debug/conversation/:leadId', verifyAdminToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
         const Lead = require('./Lead');
@@ -542,7 +570,7 @@ app.get('/api/debug/conversation/:leadId', verifyToken, async (req, res) => {
     } catch (error) { res.status(500).json({ error: error.message, stack: error.stack }); }
 });
 
-app.get('/api/debug/leads', verifyToken, async (req, res) => {
+app.get('/api/debug/leads', verifyAdminToken, async (req, res) => {
     try {
         const leads = await Lead.find({ userId: req.userId }).select('name email status replies lastContactDate createdAt').sort({ lastContactDate: -1 }).limit(20);
         res.json({ count: leads.length, leads: leads.map(l => ({ id: l._id, name: l.name, email: l.email, status: l.status, repliesCount: l.replies?.length || 0, lastContactDate: l.lastContactDate, createdAt: l.createdAt })) });
