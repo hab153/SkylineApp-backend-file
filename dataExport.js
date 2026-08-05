@@ -27,6 +27,52 @@ const EXPORT_DIR = path.join(__dirname, 'exports');
 // Ensure export directory exists
 fs.ensureDirSync(EXPORT_DIR);
 
+// ✅ SECURITY: Sanitize filename to prevent path traversal attacks
+function sanitizeFileName(fileName) {
+    if (!fileName || typeof fileName !== 'string') return null;
+    
+    // Remove any directory traversal sequences
+    let sanitized = fileName
+        .replace(/\.\./g, '')           // Remove ..
+        .replace(/\//g, '')             // Remove forward slashes
+        .replace(/\\/g, '')             // Remove backslashes
+        .replace(/\x00/g, '')           // Remove null bytes
+        .trim();
+    
+    // Only allow alphanumeric, dots, hyphens, underscores
+    sanitized = sanitized.replace(/[^a-zA-Z0-9._-]/g, '');
+    
+    // Ensure it's not empty after sanitization
+    if (!sanitized || sanitized.length === 0) return null;
+    
+    // Final check: resolved path must be inside EXPORT_DIR
+    const resolvedPath = path.resolve(EXPORT_DIR, sanitized);
+    if (!resolvedPath.startsWith(path.resolve(EXPORT_DIR))) {
+        return null;
+    }
+    
+    return sanitized;
+}
+
+// ✅ SECURITY: Validate exportId format
+function isValidExportId(exportId) {
+    if (!exportId || typeof exportId !== 'string') return false;
+    return /^export_\d+_[a-fA-F0-9]{16}$/.test(exportId);
+}
+
+// ✅ SECURITY: Safely resolve file path within EXPORT_DIR
+function safeResolvePath(fileName) {
+    const sanitized = sanitizeFileName(fileName);
+    if (!sanitized) return null;
+    
+    const resolvedPath = path.resolve(EXPORT_DIR, sanitized);
+    if (!resolvedPath.startsWith(path.resolve(EXPORT_DIR))) {
+        return null;
+    }
+    
+    return resolvedPath;
+}
+
 /**
  * Generate a unique export ID
  * @returns {string} - Unique export ID
@@ -179,7 +225,14 @@ async function exportAsJSON(userId) {
     const exportId = generateExportId();
     const exportData = await getUserData(userId);
 
-    const filePath = path.join(EXPORT_DIR, `${exportId}.json`);
+    // ✅ FIX #4: Use safeResolvePath instead of raw path.join
+    const fileName = `${exportId}.json`;
+    const filePath = safeResolvePath(fileName);
+    
+    if (!filePath) {
+        throw new Error('Invalid file path generated');
+    }
+    
     await fs.writeJson(filePath, exportData, { spaces: 2 });
 
     const stats = await fs.stat(filePath);
@@ -188,7 +241,7 @@ async function exportAsJSON(userId) {
     return {
         exportId,
         filePath,
-        fileName: `${exportId}.json`,
+        fileName,
         fileSize,
         format: 'json'
     };
@@ -203,7 +256,14 @@ async function exportAsCSV(userId) {
     const exportId = generateExportId();
     const exportData = await getUserData(userId);
 
-    const tempDir = path.join(EXPORT_DIR, `temp_${exportId}`);
+    // ✅ FIX #5: Sanitize temp directory name
+    const tempDirName = `temp_${exportId}`;
+    const tempDir = safeResolvePath(tempDirName);
+    
+    if (!tempDir) {
+        throw new Error('Invalid temp directory path generated');
+    }
+    
     await fs.ensureDir(tempDir);
 
     try {
@@ -257,34 +317,49 @@ async function exportAsCSV(userId) {
                 try {
                     const parser = new Parser({ fields: config.fields });
                     const csv = parser.parse(config.data);
-                    const csvPath = path.join(tempDir, `${config.name}.csv`);
+                    // ✅ FIX: Sanitize CSV filename
+                    const csvFileName = sanitizeFileName(`${config.name}.csv`);
+                    if (!csvFileName) continue;
+                    const csvPath = path.join(tempDir, csvFileName);
                     await fs.writeFile(csvPath, csv);
                 } catch (err) {
                     console.warn(`⚠️ [CSV Export] Could not export ${config.name}:`, err.message);
                 }
             } else {
                 // Create empty file with headers
-                const emptyPath = path.join(tempDir, `${config.name}.csv`);
+                const emptyFileName = sanitizeFileName(`${config.name}.csv`);
+                if (!emptyFileName) continue;
+                const emptyPath = path.join(tempDir, emptyFileName);
                 await fs.writeFile(emptyPath, config.fields.join(',') + '\n');
             }
         }
 
         // Add metadata file
-        const metadataPath = path.join(tempDir, 'metadata.json');
-        await fs.writeJson(metadataPath, {
-            exportedAt: new Date().toISOString(),
-            exporterVersion: '1.0.0',
-            userId: exportData.exportMetadata.userId,
-            username: exportData.exportMetadata.username,
-            email: exportData.exportMetadata.email,
-            totalLeads: exportData.leads.length,
-            totalMessages: exportData.chatMessages.length,
-            totalNotifications: exportData.notifications.length,
-            format: 'csv'
-        }, { spaces: 2 });
+        const metadataFileName = sanitizeFileName('metadata.json');
+        if (metadataFileName) {
+            const metadataPath = path.join(tempDir, metadataFileName);
+            await fs.writeJson(metadataPath, {
+                exportedAt: new Date().toISOString(),
+                exporterVersion: '1.0.0',
+                userId: exportData.exportMetadata.userId,
+                username: exportData.exportMetadata.username,
+                email: exportData.exportMetadata.email,
+                totalLeads: exportData.leads.length,
+                totalMessages: exportData.chatMessages.length,
+                totalNotifications: exportData.notifications.length,
+                format: 'csv'
+            }, { spaces: 2 });
+        }
 
         // Create zip file
-        const zipPath = path.join(EXPORT_DIR, `${exportId}.zip`);
+        // ✅ FIX #6: Use safeResolvePath for zip output
+        const zipFileName = `${exportId}.zip`;
+        const zipPath = safeResolvePath(zipFileName);
+        
+        if (!zipPath) {
+            throw new Error('Invalid zip file path generated');
+        }
+        
         const output = fs.createWriteStream(zipPath);
         const archive = archiver('zip', { zlib: { level: 9 } });
 
@@ -296,7 +371,7 @@ async function exportAsCSV(userId) {
                 resolve({
                     exportId,
                     filePath: zipPath,
-                    fileName: `${exportId}.zip`,
+                    fileName: zipFileName,
                     fileSize: stats.size,
                     format: 'csv'
                 });
@@ -373,8 +448,10 @@ async function createExport(userId, format = 'json', ip = null, userAgent = null
         const oldExports = user.dataExports.slice(0, user.dataExports.length - 19);
         for (const old of oldExports) {
             try {
-                const oldPath = path.join(EXPORT_DIR, old.fileName || `${old.exportId}.json`);
-                if (await fs.pathExists(oldPath)) {
+                // ✅ FIX: Use safeResolvePath for old file deletion
+                const oldFileName = old.fileName || `${old.exportId}.json`;
+                const oldPath = safeResolvePath(oldFileName);
+                if (oldPath && await fs.pathExists(oldPath)) {
                     await fs.remove(oldPath);
                     console.log(`🗑️ [DATA EXPORT] Deleted old export: ${old.fileName}`);
                 }
@@ -409,6 +486,11 @@ async function createExport(userId, format = 'json', ip = null, userAgent = null
  * @returns {object} - Export record
  */
 async function getExport(userId, exportId) {
+    // ✅ FIX: Validate exportId format
+    if (!isValidExportId(exportId)) {
+        throw new Error('Invalid export ID format');
+    }
+    
     const user = await User.findById(userId);
     if (!user) {
         throw new Error('User not found');
@@ -419,9 +501,10 @@ async function getExport(userId, exportId) {
         throw new Error('Export not found');
     }
 
-    // Check if file exists
-    const filePath = path.join(EXPORT_DIR, exportRecord.fileName || `${exportId}.json`);
-    const fileExists = await fs.pathExists(filePath);
+    // ✅ FIX: Use safeResolvePath for file existence check
+    const fileName = exportRecord.fileName || `${exportId}.json`;
+    const filePath = safeResolvePath(fileName);
+    const fileExists = filePath ? await fs.pathExists(filePath) : false;
 
     return {
         ...exportRecord.toObject ? exportRecord.toObject() : exportRecord,
@@ -446,8 +529,10 @@ async function listExports(userId) {
     // Check which files still exist
     const results = [];
     for (const exp of exports) {
-        const filePath = path.join(EXPORT_DIR, exp.fileName || `${exp.exportId}.json`);
-        const fileExists = await fs.pathExists(filePath);
+        // ✅ FIX: Use safeResolvePath for file existence check
+        const fileName = exp.fileName || `${exp.exportId}.json`;
+        const filePath = safeResolvePath(fileName);
+        const fileExists = filePath ? await fs.pathExists(filePath) : false;
         results.push({
             ...exp.toObject ? exp.toObject() : exp,
             fileExists,
@@ -468,6 +553,11 @@ async function listExports(userId) {
  * @returns {boolean} - Success
  */
 async function deleteExport(userId, exportId) {
+    // ✅ FIX: Validate exportId format
+    if (!isValidExportId(exportId)) {
+        throw new Error('Invalid export ID format');
+    }
+    
     const user = await User.findById(userId);
     if (!user) {
         throw new Error('User not found');
@@ -480,9 +570,10 @@ async function deleteExport(userId, exportId) {
 
     const exportRecord = user.dataExports[index];
     
-    // Delete file
-    const filePath = path.join(EXPORT_DIR, exportRecord.fileName || `${exportId}.json`);
-    if (await fs.pathExists(filePath)) {
+    // ✅ FIX: Use safeResolvePath for file deletion
+    const fileName = exportRecord.fileName || `${exportId}.json`;
+    const filePath = safeResolvePath(fileName);
+    if (filePath && await fs.pathExists(filePath)) {
         await fs.remove(filePath);
     }
 
@@ -508,9 +599,10 @@ async function cleanupExpiredExports() {
 
         for (const exp of user.dataExports) {
             if (new Date(exp.expiresAt) < now) {
-                // Delete file
-                const filePath = path.join(EXPORT_DIR, exp.fileName || `${exp.exportId}.json`);
-                if (await fs.pathExists(filePath)) {
+                // ✅ FIX: Use safeResolvePath for expired file deletion
+                const fileName = exp.fileName || `${exp.exportId}.json`;
+                const filePath = safeResolvePath(fileName);
+                if (filePath && await fs.pathExists(filePath)) {
                     await fs.remove(filePath);
                 }
                 toDelete.push(exp.exportId);
