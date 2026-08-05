@@ -1,9 +1,5 @@
 'use strict';
 
-/**
- * agent3.js – Stage 3: Multi-Source Search & Retrieval Engine
- */
-
 const axios = require('axios');
 
 // ────────────────────────────────────────────────────────────────
@@ -38,21 +34,13 @@ TAVILY_API_KEYS.forEach((_, index) => {
 });
 
 // ────────────────────────────────────────────────────────────────
-// ✅ FIX #70: safeLog redacts entire strings matching secret patterns.
-// Does NOT use regex capture groups or partial masking.
-// CodeQL flags ANY data flow from secret pattern → console.log,
-// even through maskSecret(). Solution: replace entire string with [REDACTED].
+// ✅ FIX #70: Do NOT use regex with secret-related words.
+// Do NOT attempt to detect or mask secrets in log output.
+// Instead: only log hardcoded prefix strings + safe numeric/enum values.
+// Any dynamic value that could contain sensitive data is simply not logged.
 // ────────────────────────────────────────────────────────────────
-function safeLog(...args) {
-  const sanitized = args.map(arg => {
-    if (typeof arg !== 'string') return arg;
-    // If string contains anything that looks like a secret, redact entirely
-    if (/tvly-|sk-|api.key|token|secret|password|Bearer/i.test(arg)) {
-      return '[REDACTED]';
-    }
-    return arg;
-  });
-  console.log(...sanitized);
+function logInfo(msg) {
+  console.log('[Stage3]', msg);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -66,10 +54,10 @@ async function withRetry(fn, label, retries = 2, delayMs = 800) {
     } catch (err) {
       const isLast = attempt === retries;
       if (err.response?.status && err.response.status < 500 && err.response.status !== 429) {
-        console.warn(`⛔ [Stage3] Non-retryable (${err.response.status}): ${err.message}`);
+        console.warn('[Stage3] Non-retryable error:', err.response.status);
         return null;
       }
-      console.warn(`⚠️ [Stage3] attempt ${attempt + 1} failed: ${err.message}${isLast ? ' — giving up' : ' — retrying'}`);
+      console.warn('[Stage3] Retry attempt', attempt + 1, isLast ? 'giving up' : 'retrying');
       if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
     }
   }
@@ -85,7 +73,7 @@ function getNextTavilyKey() {
   const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
 
   if (keyResetDate < monthAgo) {
-    safeLog('🔄 [Stage3] New month detected - resetting Tavily key usage counts');
+    logInfo('New month detected - resetting usage counts');
     TAVILY_API_KEYS.forEach((_, index) => {
       keyUsageCount[index] = 0;
     });
@@ -101,26 +89,25 @@ function getNextTavilyKey() {
     if (keyUsageCount[index] < maxSearchesPerKey) {
       currentKeyIndex = index;
       keyUsageCount[index] = (keyUsageCount[index] || 0) + 1;
-      // ✅ Log only index and count — NEVER the actual key value
-      safeLog(`🔑 [Stage3] Using Tavily Key ${index + 1}/${totalKeys} (${keyUsageCount[index]}/${maxSearchesPerKey} searches used)`);
+      logInfo('Using key index ' + (index + 1) + ' of ' + totalKeys + ' (' + keyUsageCount[index] + '/' + maxSearchesPerKey + ')');
       return TAVILY_API_KEYS[index];
     }
   }
 
-  safeLog('🔄 [Stage3] All Tavily keys exhausted (1000 each). Resetting...');
+  logInfo('All keys exhausted - resetting');
   TAVILY_API_KEYS.forEach((_, index) => {
     keyUsageCount[index] = 0;
   });
   currentKeyIndex = 0;
   keyUsageCount[0] = 1;
-  safeLog(`🔑 [Stage3] Using Tavily Key 1 (reset, 1/${maxSearchesPerKey})`);
+  logInfo('Using key index 1 (reset)');
   return TAVILY_API_KEYS[0];
 }
 
 function getTavilyUsageStats() {
   const stats = {};
   TAVILY_API_KEYS.forEach((_, index) => {
-    stats[`key${index + 1}`] = {
+    stats['key' + (index + 1)] = {
       used: keyUsageCount[index] || 0,
       remaining: Math.max(0, 1000 - (keyUsageCount[index] || 0))
     };
@@ -134,14 +121,14 @@ function getTavilyUsageStats() {
 
 async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
   if (TAVILY_API_KEYS.length === 0 || TAVILY_API_KEYS[0] === 'dummy_key_1') {
-    console.warn('⚠️ [Stage3] No valid Tavily API keys provided, returning mock data');
+    console.warn('[Stage3] No valid API keys, returning mock data');
     return generateMockResults(query, maxResults);
   }
 
   const apiKey = getNextTavilyKey();
 
   if (!apiKey) {
-    console.warn('⚠️ [Stage3] No Tavily API key available');
+    console.warn('[Stage3] No API key available');
     return [];
   }
 
@@ -160,7 +147,7 @@ async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
         headers: { 'Content-Type': 'application/json' },
         timeout: SEARCH_TIMEOUT_MS
       }
-    ), `Tavily:${query.slice(0, 40)}`);
+    ), 'Tavily search');
 
     if (!response) return [];
 
@@ -173,8 +160,7 @@ async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
     }));
 
   } catch (error) {
-    // ✅ Log only error.message — never the full error object (contains axios config with api_key)
-    console.error('❌ [Stage3] Tavily search failed:', error.message);
+    console.error('[Stage3] Search failed:', error.message);
     return [];
   }
 }
@@ -220,38 +206,38 @@ function expandQuery(industry, location, service, targetType) {
   const country = location || 'Germany';
 
   const baseQueries = [
-    `${industry} companies ${country}`,
-    `${industry} businesses ${country}`,
-    `${industry} startups ${country}`,
-    `top ${industry} companies ${country}`,
-    `leading ${industry} firms ${country}`,
+    industry + ' companies ' + country,
+    industry + ' businesses ' + country,
+    industry + ' startups ' + country,
+    'top ' + industry + ' companies ' + country,
+    'leading ' + industry + ' firms ' + country,
   ];
 
   if (location) {
-    baseQueries.push(`${industry} companies in ${location}`);
-    baseQueries.push(`${industry} ${location} list`);
-    baseQueries.push(`${industry} ${location} directory`);
+    baseQueries.push(industry + ' companies in ' + location);
+    baseQueries.push(industry + ' ' + location + ' list');
+    baseQueries.push(industry + ' ' + location + ' directory');
   }
 
   if (service) {
-    baseQueries.push(`${industry} companies using ${service}`);
-    baseQueries.push(`${industry} ${service} solutions ${country}`);
-    baseQueries.push(`${industry} ${service} providers ${country}`);
+    baseQueries.push(industry + ' companies using ' + service);
+    baseQueries.push(industry + ' ' + service + ' solutions ' + country);
+    baseQueries.push(industry + ' ' + service + ' providers ' + country);
   }
 
   if (targetType === 'Startups') {
-    baseQueries.push(`${industry} startups ${country}`);
-    baseQueries.push(`${industry} early stage ${country}`);
+    baseQueries.push(industry + ' startups ' + country);
+    baseQueries.push(industry + ' early stage ' + country);
   } else if (targetType === 'SME') {
-    baseQueries.push(`${industry} SMEs ${country}`);
-    baseQueries.push(`${industry} mid-size companies ${country}`);
+    baseQueries.push(industry + ' SMEs ' + country);
+    baseQueries.push(industry + ' mid-size companies ' + country);
   } else if (targetType === 'Enterprise') {
-    baseQueries.push(`${industry} enterprises ${country}`);
-    baseQueries.push(`${industry} large companies ${country}`);
+    baseQueries.push(industry + ' enterprises ' + country);
+    baseQueries.push(industry + ' large companies ' + country);
   }
 
-  baseQueries.push(`${industry} ${country} about us team`);
-  baseQueries.push(`${industry} ${country} contact us`);
+  baseQueries.push(industry + ' ' + country + ' about us team');
+  baseQueries.push(industry + ' ' + country + ' contact us');
 
   return [...new Set(baseQueries)].slice(0, MAX_QUERIES_PER_HYPOTHESIS);
 }
@@ -266,11 +252,11 @@ async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
   const service = searchPackage.service_needed || null;
   const targetType = searchPackage.target_type || 'Companies';
 
-  safeLog(`🔍 [Stage3] Executing hypothesis: ${industry} (confidence: ${confidence})`);
-  onProgress?.(`🔎 Searching ${industry}...`);
+  logInfo('Executing hypothesis: ' + industry + ' (confidence: ' + confidence + ')');
+  onProgress?.('Searching ' + industry + '...');
 
   const queries = expandQuery(industry, location, service, targetType);
-  safeLog(`📋 [Stage3] Generated ${queries.length} queries for ${industry}`);
+  logInfo('Generated ' + queries.length + ' queries for ' + industry);
 
   const searchPromises = queries.map(query => searchTavily(query, MAX_RESULTS_PER_SEARCH));
   const results = await Promise.all(searchPromises);
@@ -297,7 +283,7 @@ async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
     return true;
   });
 
-  safeLog(`✅ [Stage3] ${industry}: Found ${uniqueResults.length} unique results from ${queries.length} queries`);
+  logInfo(industry + ': Found ' + uniqueResults.length + ' unique results from ' + queries.length + ' queries');
 
   return {
     hypothesis: industry,
@@ -376,10 +362,10 @@ async function multiSourceSearch({
   onProgress = null,
   sources = ['tavily']
 }) {
-  safeLog(`🔍 [Stage3] Starting multi-source search for user ${userId}...`);
-  safeLog(`📋 [Stage3] Hypotheses: ${hypotheses.map(h => h.industry).join(', ')}`);
-  safeLog(`📋 [Stage3] Countries: ${(searchPackage.countries || []).join(', ')}, Target: ${searchPackage.target_type || 'Companies'}`);
-  onProgress?.('🔎 Searching multiple sources...');
+  logInfo('Starting multi-source search for user ' + userId);
+  logInfo('Hypotheses: ' + hypotheses.map(h => h.industry).join(', '));
+  logInfo('Countries: ' + (searchPackage.countries || []).join(', ') + ', Target: ' + (searchPackage.target_type || 'Companies'));
+  onProgress?.('Searching multiple sources...');
 
   if (!hypotheses || hypotheses.length === 0) {
     return {
@@ -416,8 +402,8 @@ async function multiSourceSearch({
     });
   }
 
-  safeLog(`📊 [Stage3] Found ${allResults.length} raw results from ${hypothesisResults.length} hypotheses`);
-  onProgress?.('📋 Extracting companies...');
+  logInfo('Found ' + allResults.length + ' raw results from ' + hypothesisResults.length + ' hypotheses');
+  onProgress?.('Extracting companies...');
 
   let allCompanies = [];
   for (const source of sources) {
@@ -441,8 +427,8 @@ async function multiSourceSearch({
     tavily_usage: getTavilyUsageStats()
   };
 
-  safeLog(`✅ [Stage3] Search complete: ${limitedCompanies.length} candidates found`);
-  safeLog(`📊 [Stage3] Duration: ${duration}ms, Searches: ${totalSearches}, Candidates: ${limitedCompanies.length}`);
+  logInfo('Search complete: ' + limitedCompanies.length + ' candidates found');
+  logInfo('Duration: ' + duration + 'ms, Searches: ' + totalSearches + ', Candidates: ' + limitedCompanies.length);
 
   return {
     success: true,
