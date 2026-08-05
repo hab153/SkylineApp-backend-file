@@ -10,8 +10,13 @@ async function setupAdmin(req, res) {
     try {
         const { setupKey, email, password } = req.body;
         
-        // Validate setup key
-        const VALID_SETUP_KEY = process.env.ADMIN_SETUP_KEY || 'SKYLINE-SETUP-2026-SECURE';
+        // ✅ SECURITY FIX: No fallback key. Fail if ADMIN_SETUP_KEY is not configured.
+        const VALID_SETUP_KEY = process.env.ADMIN_SETUP_KEY;
+        if (!VALID_SETUP_KEY) {
+            console.error('❌ [ADMIN SETUP] CRITICAL: ADMIN_SETUP_KEY is not defined in environment variables!');
+            return res.status(500).json({ error: 'Admin setup is not configured. Contact system administrator.' });
+        }
+        
         if (setupKey !== VALID_SETUP_KEY) {
             return res.status(403).json({ error: 'Invalid setup key' });
         }
