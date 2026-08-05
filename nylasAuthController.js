@@ -5,7 +5,6 @@ const { isValidObjectId } = require('./sanitize');
 
 // ─── ✅ VALIDATE NYLAS CONFIG ───
 function validateNylasConfig() {
-    // In Nylas V3, NYLAS_API_KEY serves as the client secret
     const required = ['NYLAS_CLIENT_ID', 'NYLAS_API_KEY'];
     const missing = required.filter(key => {
         const value = process.env[key];
@@ -19,15 +18,24 @@ function validateNylasConfig() {
     }
     
     console.log('✅ [NYLAS AUTH] Nylas configuration validated');
-    console.log(`   📋 Client ID: ${process.env.NYLAS_CLIENT_ID ? '✅ Set' : '❌ Missing'}`);
-    console.log(`   📋 API Key: ${process.env.NYLAS_API_KEY ? '✅ Set' : '❌ Missing'}`);
     return true;
 }
 
 const NYLAS_CONFIG_VALID = validateNylasConfig();
 
+/**
+ * ✅ Extract a single string value from a query parameter.
+ * Handles arrays (takes first element), rejects non-strings.
+ * Returns null if the value is missing or not a valid string.
+ */
+function extractQueryParam(param) {
+    if (param === undefined || param === null) return null;
+    const value = Array.isArray(param) ? param[0] : param;
+    if (typeof value !== 'string' || value.trim() === '') return null;
+    return value;
+}
+
 exports.getAuthUrl = async (req, res) => {
-  // ✅ Check Nylas config first
   if (!NYLAS_CONFIG_VALID) {
     console.error('❌ [NYLAS AUTH] Cannot generate auth URL: Nylas not configured');
     return res.status(503).json({
@@ -39,14 +47,17 @@ exports.getAuthUrl = async (req, res) => {
   try {
     const userId = req.userId;
     
-    // 1. Create State
+    if (!userId || !isValidObjectId(userId)) {
+      return res.status(401).json({ error: 'Invalid user ID' });
+    }
+    const safeUserId = String(userId);
+    
     const stateObj = {
-      userId: userId,
+      userId: safeUserId,
       nonce: crypto.randomBytes(16).toString('hex')
     };
     const stateString = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
-    // 2. ✅ USE FULL GOOGLE SCOPE URIs
     const clientId = process.env.NYLAS_CLIENT_ID;
     const redirectUri = encodeURIComponent(process.env.NYLAS_REDIRECT_URI);
     
@@ -59,103 +70,70 @@ exports.getAuthUrl = async (req, res) => {
       "https://www.googleapis.com/auth/gmail.modify"
     ].join(" "));
     
-    // ✅ CRITICAL: access_type=offline is a QUERY PARAMETER for Google (not a scope)
     const authUrl = `https://api.us.nylas.com/v3/connect/auth?` +
       `client_id=${clientId}` +
       `&redirect_uri=${redirectUri}` +
       `&response_type=code` +
       `&scope=${scope}` +
       `&state=${stateString}` +
-      `&access_type=offline` +      // ← This is correct for Google
+      `&access_type=offline` +
       `&provider=google`;
 
-    console.log('✅ [Nylas Auth] URL generated with full Google scopes');
-    console.log('✅ [Nylas Auth] access_type=offline included for refresh token');
-    
+    console.log('✅ [Nylas Auth] URL generated');
     res.json({ url: authUrl });
     
   } catch (error) {
     console.error('❌ [Nylas Auth] Error:', error.message);
     res.status(500).json({ 
-      message: 'Failed to generate authentication link.', 
-      error: error.message 
+      message: 'Failed to generate authentication link.'
     });
   }
 };
 
 exports.handleCallback = async (req, res) => {
-  // ✅ Check Nylas config first
   if (!NYLAS_CONFIG_VALID) {
     console.error('❌ [NYLAS AUTH] Cannot process callback: Nylas not configured');
-    return res.status(503).send(`
-      <h1>Email Service Not Configured</h1>
-      <p>The email service is not configured properly. Please contact support.</p>
-    `);
+    return res.status(503).json({ error: 'Email service not configured.' });
   }
 
   try {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('📥 [NYLAS CALLBACK] Received callback');
-    console.log('📥 [NYLAS CALLBACK] Method:', req.method);
-    console.log('📥 [NYLAS CALLBACK] Code present:', !!req.query.code);
-    console.log('📥 [NYLAS CALLBACK] State present:', !!req.query.state);
-    console.log('📥 [NYLAS CALLBACK] Error present:', req.query.error || 'none');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
-    // ✅ FIX #36: Type confusion - Validate all query params are strings, not arrays/objects
-    const code = Array.isArray(req.query.code) ? req.query.code[0] : req.query.code;
-    const stateString = Array.isArray(req.query.state) ? req.query.state[0] : req.query.state;
-    const error = Array.isArray(req.query.error) ? req.query.error[0] : req.query.error;
+    // ✅ FIX #36: Use extractQueryParam to guarantee string type or null.
+    // This eliminates type confusion — CodeQL can see that only strings pass through.
+    const code = extractQueryParam(req.query.code);
+    const stateString = extractQueryParam(req.query.state);
+    const errorParam = extractQueryParam(req.query.error);
 
-    // ✅ Ensure params are strings (prevent type confusion attacks)
-    if (code !== undefined && typeof code !== 'string') {
-      console.warn('⚠️ [NYLAS CALLBACK] Code parameter is not a string, rejecting');
-      return res.status(400).send('<h1>Invalid Parameters</h1><p>Code must be a string.</p>');
-    }
-    if (stateString !== undefined && typeof stateString !== 'string') {
-      console.warn('⚠️ [NYLAS CALLBACK] State parameter is not a string, rejecting');
-      return res.status(400).send('<h1>Invalid Parameters</h1><p>State must be a string.</p>');
-    }
-
-    if (error) {
-      console.log('❌ [NYLAS CALLBACK] Error from Nylas:', error);
-      const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(String(error))}`;
-      console.log('🔄 [NYLAS CALLBACK] Redirecting to:', redirectUrl);
-      return res.redirect(redirectUrl);
+    if (errorParam) {
+      console.log('❌ [NYLAS CALLBACK] Error from Nylas');
+      const safeError = encodeURIComponent(errorParam.substring(0, 200));
+      return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${safeError}`);
     }
 
     if (!code || !stateString) {
       console.log('❌ [NYLAS CALLBACK] Missing required parameters');
-      console.log('❌ [NYLAS CALLBACK] code:', code ? 'present' : 'MISSING');
-      console.log('❌ [NYLAS CALLBACK] state:', stateString ? 'present' : 'MISSING');
-      return res.status(400).send(`
-        <h1>Missing Parameters</h1>
-        <p>Code: ${code ? '✅' : '❌'}</p>
-        <p>State: ${stateString ? '✅' : '❌'}</p>
-      `);
+      return res.status(400).json({ error: 'Missing code or state parameter' });
     }
 
-    let userId;
+    // Decode and validate state
+    let decodedState;
     try {
-      const decodedState = JSON.parse(Buffer.from(stateString, 'base64').toString());
-      
-      // ✅ FIX: Validate userId is a valid ObjectId string (prevent type confusion)
-      if (!decodedState.userId || typeof decodedState.userId !== 'string' || !isValidObjectId(decodedState.userId)) {
-        console.error('❌ [NYLAS CALLBACK] Invalid userId in state:', decodedState.userId);
-        return res.status(400).send('<h1>Invalid State</h1><p>User ID is invalid.</p>');
-      }
-      
-      userId = decodedState.userId;
-      console.log('✅ [NYLAS CALLBACK] Decoded userId:', userId);
+      decodedState = JSON.parse(Buffer.from(stateString, 'base64').toString());
     } catch (e) {
-      console.error('❌ [NYLAS CALLBACK] Invalid State format:', e.message);
-      return res.status(400).send('<h1>Invalid State</h1><p>State parameter could not be decoded.</p>');
+      console.error('❌ [NYLAS CALLBACK] Invalid State format');
+      return res.status(400).json({ error: 'Invalid state parameter' });
     }
 
-    if (!userId) {
-      console.log('❌ [NYLAS CALLBACK] No userId in state');
-      return res.status(400).send('<h1>Invalid State</h1><p>User ID missing from state.</p>');
+    // ✅ FIX #36: Strict type validation on decoded userId
+    if (!decodedState.userId || typeof decodedState.userId !== 'string' || !isValidObjectId(decodedState.userId)) {
+      console.error('❌ [NYLAS CALLBACK] Invalid userId in state');
+      return res.status(400).json({ error: 'Invalid user ID in state' });
     }
+
+    // ✅ FIX #24/#25: Cast to String immediately — before ANY database call.
+    // CodeQL flags DB queries where the variable hasn't been explicitly String-typed.
+    const safeUserId = String(decodedState.userId);
 
     console.log('🔍 [NYLAS CALLBACK] Exchanging code for token...');
 
@@ -163,7 +141,7 @@ exports.handleCallback = async (req, res) => {
     
     const response = await nylas.auth.exchangeCodeForToken({
       clientId: process.env.NYLAS_CLIENT_ID,
-      clientSecret: process.env.NYLAS_API_KEY, // ← NYLAS_API_KEY is the client secret in V3
+      clientSecret: process.env.NYLAS_API_KEY,
       redirectUri: process.env.NYLAS_REDIRECT_URI,
       code: code,
     });
@@ -172,71 +150,58 @@ exports.handleCallback = async (req, res) => {
     
     const { grantId, accessToken, refreshToken, expiresIn, email } = response;
 
-    // ✅ FIX: Validate response fields are expected types
+    // Validate response fields are expected types
     if (!grantId || typeof grantId !== 'string') {
       console.error('❌ [NYLAS CALLBACK] Invalid grantId in response');
-      const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=invalid_grant`;
-      return res.redirect(redirectUrl);
+      return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=invalid_grant`);
     }
     if (!accessToken || typeof accessToken !== 'string') {
       console.error('❌ [NYLAS CALLBACK] Invalid accessToken in response');
-      const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=invalid_token`;
-      return res.redirect(redirectUrl);
+      return res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=invalid_token`);
     }
 
-    console.log('📊 [NYLAS CALLBACK] Token info:', {
-      grantId: grantId ? '✅' : 'MISSING',
-      expiresIn: expiresIn || 'MISSING',
-      hasAccessToken: !!accessToken,
-      hasRefreshToken: !!refreshToken,
-      email: email || 'Not provided'
-    });
+    // Sanitize all values before DB writes
+    const safeGrantId = String(grantId);
+    const safeAccessToken = String(accessToken);
+    const safeRefreshToken = refreshToken ? String(refreshToken) : null;
+    const safeExpiresIn = (typeof expiresIn === 'number' && expiresIn > 0) ? expiresIn : 3600;
+    const safeEmail = (typeof email === 'string' && email.length > 0) ? email.substring(0, 254) : 'Connected';
 
-    // ✅ STEP 1: Save to EmailAccount model with refresh token
-    console.log('💾 [NYLAS CALLBACK] Saving to EmailAccount for userId:', userId);
+    // ✅ FIX #24: EmailAccount.findOneAndUpdate uses safeUserId (explicitly String-typed above)
     await EmailAccount.findOneAndUpdate(
-      { userId: userId },
+      { userId: safeUserId },
       {
-        nylasGrantId: grantId,
+        nylasGrantId: safeGrantId,
         isConnected: true,
-        accessToken: accessToken,
-        refreshToken: refreshToken || null,
-        tokenExpiry: new Date(Date.now() + ((typeof expiresIn === 'number' ? expiresIn : 3600) * 1000)),
-        emailAddress: (typeof email === 'string' ? email : 'Connected'),
+        accessToken: safeAccessToken,
+        refreshToken: safeRefreshToken,
+        tokenExpiry: new Date(Date.now() + (safeExpiresIn * 1000)),
+        emailAddress: safeEmail,
         refreshFailCount: 0,
         lastRefreshError: null
       },
       { upsert: true, new: true }
     );
 
-    // ✅ STEP 2: ALSO update User.nylasIntegration
-    console.log('💾 [NYLAS CALLBACK] Updating User.nylasIntegration for userId:', userId);
+    // ✅ FIX #25: User.findOneAndUpdate uses safeUserId (explicitly String-typed above)
     await User.findOneAndUpdate(
-      { _id: userId },
+      { _id: safeUserId },
       {
         'nylasIntegration.isConnected': true,
-        'nylasIntegration.accessToken': accessToken,
-        'nylasIntegration.grantId': grantId,
-        'nylasIntegration.emailAddress': (typeof email === 'string' ? email : 'Connected'),
-        'nylasIntegration.tokenExpiry': new Date(Date.now() + ((typeof expiresIn === 'number' ? expiresIn : 3600) * 1000))
+        'nylasIntegration.accessToken': safeAccessToken,
+        'nylasIntegration.grantId': safeGrantId,
+        'nylasIntegration.emailAddress': safeEmail,
+        'nylasIntegration.tokenExpiry': new Date(Date.now() + (safeExpiresIn * 1000))
       },
       { upsert: true, new: true }
     );
 
-    console.log('✅ [NYLAS CALLBACK] Account saved successfully to both models');
+    console.log('✅ [NYLAS CALLBACK] Account saved successfully');
     
-    const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=success`;
-    console.log('🔄 [NYLAS CALLBACK] Redirecting to:', redirectUrl);
-    res.redirect(redirectUrl);
+    res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=success`);
 
   } catch (error) {
-    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.error('❌ [NYLAS CALLBACK] EXCEPTION CAUGHT:');
-    console.error('❌ [NYLAS CALLBACK] Error message:', error.message);
-    console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    
-    const redirectUrl = `${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=${encodeURIComponent(error.message || 'Unknown error')}`;
-    console.log('🔄 [NYLAS CALLBACK] Redirecting with error to:', redirectUrl);
-    res.redirect(redirectUrl);
+    console.error('❌ [NYLAS CALLBACK] Error:', error.message);
+    res.redirect(`${process.env.FRONTEND_URL}/dashboard.html?nylas=error&error=callback_failed`);
   }
 };
