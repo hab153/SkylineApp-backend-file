@@ -34,32 +34,43 @@ TAVILY_API_KEYS.forEach((_, index) => {
 });
 
 // ────────────────────────────────────────────────────────────────
-// FIX (CodeQL js/clear-text-logging): logInfo must never receive
-// raw user-controlled or identity-bearing values (userId, industry
-// text, search-package content, API keys, etc). Only literal
-// strings and safe numeric/counts may be interpolated by callers.
-// This function itself stays a dumb sink; the enforcement happens
-// at every call site below (see fixes throughout the file).
+// ✅ FIX #70: Structured logger that ONLY emits a fixed event label
+// plus sanitized numeric/boolean/null metadata.
+// No free-form strings are ever passed to console.log.
+// This prevents ANY tainted data (including TAVILY_API_KEYS values)
+// from flowing into log output.
 // ────────────────────────────────────────────────────────────────
-function logInfo(msg) {
-  console.log('[Stage3]', msg);
+function logInfo(event, meta) {
+  if (!meta || typeof meta !== 'object') {
+    console.log('[Stage3]', event);
+    return;
+  }
+  // Only allow number, boolean, null values in metadata
+  const safe = {};
+  for (const k of Object.keys(meta)) {
+    const v = meta[k];
+    if (typeof v === 'number' || typeof v === 'boolean' || v === null) {
+      safe[k] = v;
+    }
+  }
+  console.log('[Stage3]', event, JSON.stringify(safe));
 }
 
 // ────────────────────────────────────────────────────────────────
 // 2. Utility: Retry helper
 // ────────────────────────────────────────────────────────────────
 
-async function withRetry(fn, label, retries = 2, delayMs = 800) {
+async function withRetry(fn, retries = 2, delayMs = 800) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       const isLast = attempt === retries;
       if (err.response?.status && err.response.status < 500 && err.response.status !== 429) {
-        console.warn('[Stage3] Non-retryable error:', err.response.status);
+        logInfo('non_retryable_error', { status: err.response.status });
         return null;
       }
-      console.warn('[Stage3] Retry attempt', attempt + 1, isLast ? 'giving up' : 'retrying');
+      logInfo('retry_attempt', { attempt: attempt + 1, givingUp: isLast });
       if (!isLast) await new Promise(r => setTimeout(r, delayMs * (attempt + 1)));
     }
   }
@@ -75,7 +86,7 @@ function getNextTavilyKey() {
   const monthAgo = new Date(now.getFullYear(), now.getMonth() - 1, now.getDate());
 
   if (keyResetDate < monthAgo) {
-    logInfo('New month detected - resetting usage counts');
+    logInfo('new_month_reset');
     TAVILY_API_KEYS.forEach((_, index) => {
       keyUsageCount[index] = 0;
     });
@@ -91,19 +102,18 @@ function getNextTavilyKey() {
     if (keyUsageCount[index] < maxSearchesPerKey) {
       currentKeyIndex = index;
       keyUsageCount[index] = (keyUsageCount[index] || 0) + 1;
-      // FIX: never log the key itself - index/count are safe numeric values only.
-      logInfo('Using key index ' + (index + 1) + ' of ' + totalKeys + ' (' + keyUsageCount[index] + '/' + maxSearchesPerKey + ')');
+      logInfo('key_selected', { keyIndex: index + 1, totalKeys: totalKeys, usage: keyUsageCount[index], limit: maxSearchesPerKey });
       return TAVILY_API_KEYS[index];
     }
   }
 
-  logInfo('All keys exhausted - resetting');
+  logInfo('all_keys_exhausted_reset');
   TAVILY_API_KEYS.forEach((_, index) => {
     keyUsageCount[index] = 0;
   });
   currentKeyIndex = 0;
   keyUsageCount[0] = 1;
-  logInfo('Using key index 1 (reset)');
+  logInfo('key_selected', { keyIndex: 1, totalKeys: totalKeys, usage: 1, limit: maxSearchesPerKey });
   return TAVILY_API_KEYS[0];
 }
 
@@ -124,14 +134,14 @@ function getTavilyUsageStats() {
 
 async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
   if (TAVILY_API_KEYS.length === 0 || TAVILY_API_KEYS[0] === 'dummy_key_1') {
-    console.warn('[Stage3] No valid API keys, returning mock data');
+    logInfo('mock_mode', { reason: 1 });
     return generateMockResults(query, maxResults);
   }
 
   const apiKey = getNextTavilyKey();
 
   if (!apiKey) {
-    console.warn('[Stage3] No API key available');
+    logInfo('no_key_available');
     return [];
   }
 
@@ -150,7 +160,7 @@ async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
         headers: { 'Content-Type': 'application/json' },
         timeout: SEARCH_TIMEOUT_MS
       }
-    ), 'Tavily search');
+    ));
 
     if (!response) return [];
 
@@ -163,10 +173,7 @@ async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
     }));
 
   } catch (error) {
-    // FIX: log error.message only (Axios/Tavily failure reason), never the
-    // full error object (which can carry the request config, including
-    // the api_key we just sent in the POST body).
-    console.error('[Stage3] Search failed:', error.message);
+    logInfo('search_failed', { hasMessage: !!error.message });
     return [];
   }
 }
@@ -258,14 +265,11 @@ async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
   const service = searchPackage.service_needed || null;
   const targetType = searchPackage.target_type || 'Companies';
 
-  // FIX: do not interpolate raw `industry` (external/user-controlled text)
-  // into the log line. Log only the safe numeric confidence value.
-  logInfo('Executing hypothesis search (confidence: ' + confidence + ')');
-  onProgress?.('Searching ' + industry + '...');
+  logInfo('hypothesis_start', { confidence: confidence });
+  onProgress?.('Searching...');
 
   const queries = expandQuery(industry, location, service, targetType);
-  // FIX: log only the count, not the industry text.
-  logInfo('Generated ' + queries.length + ' queries for current hypothesis');
+  logInfo('queries_generated', { count: queries.length });
 
   const searchPromises = queries.map(query => searchTavily(query, MAX_RESULTS_PER_SEARCH));
   const results = await Promise.all(searchPromises);
@@ -292,8 +296,7 @@ async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
     return true;
   });
 
-  // FIX: drop raw `industry` from the log message, keep only counts.
-  logInfo('Hypothesis search done: found ' + uniqueResults.length + ' unique results from ' + queries.length + ' queries');
+  logInfo('hypothesis_complete', { uniqueResults: uniqueResults.length, queriesUsed: queries.length });
 
   return {
     hypothesis: industry,
@@ -372,11 +375,7 @@ async function multiSourceSearch({
   onProgress = null,
   sources = ['tavily']
 }) {
-  // FIX: never log the raw userId (an identity/PII-bearing value).
-  // Log only that a search started and how many hypotheses/countries
-  // are involved (counts, not content).
-  logInfo('Starting multi-source search (' + (hypotheses?.length || 0) + ' hypotheses)');
-  logInfo('Countries requested: ' + (searchPackage.countries?.length || 0) + ', Target: ' + (searchPackage.target_type ? 'set' : 'default'));
+  logInfo('search_start', { hypothesisCount: hypotheses.length });
   onProgress?.('Searching multiple sources...');
 
   if (!hypotheses || hypotheses.length === 0) {
@@ -414,7 +413,7 @@ async function multiSourceSearch({
     });
   }
 
-  logInfo('Found ' + allResults.length + ' raw results from ' + hypothesisResults.length + ' hypotheses');
+  logInfo('raw_results_collected', { count: allResults.length, hypotheses: hypothesisResults.length });
   onProgress?.('Extracting companies...');
 
   let allCompanies = [];
@@ -439,8 +438,7 @@ async function multiSourceSearch({
     tavily_usage: getTavilyUsageStats()
   };
 
-  logInfo('Search complete: ' + limitedCompanies.length + ' candidates found');
-  logInfo('Duration: ' + duration + 'ms, Searches: ' + totalSearches + ', Candidates: ' + limitedCompanies.length);
+  logInfo('search_complete', { candidates: limitedCompanies.length, durationMs: duration, searches: totalSearches });
 
   return {
     success: true,
