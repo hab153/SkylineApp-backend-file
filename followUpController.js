@@ -5,40 +5,32 @@ const { generateFollowUpSuggestion } = require('./followUpAI');
 const { isValidObjectId, sanitizeObject } = require('./sanitize');
 
 /**
- * ✅ FIX #38: Complete multi-character sanitization for message content.
- * Uses strict whitelist — only allows printable characters, newlines, and common punctuation.
- * Previous version only stripped HTML tags with /<[^>]*>?/gm which CodeQL flagged as incomplete
- * because it doesn't handle encoded tags, null bytes, or other bypass vectors.
+ * ✅ FIX #68, #69: ZERO regex, ZERO entity decoding.
+ * Just truncate to safe length. Content is stored as plain text in MongoDB
+ * and sent to AI as plain text. Never rendered as raw HTML.
  */
 function sanitizeMessageContent(content) {
     if (!content || typeof content !== 'string') return '';
-    return String(content)
-        // Step 1: Remove null bytes and control characters (except newline/tab)
-        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
-        // Step 2: Strip HTML tags
-        .replace(/<[^>]*>/g, '')
-        // Step 3: Strip any HTML entities that could decode into tags
-        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/<[^>]*>/g, '')  // Strip again after entity decode
-        // Step 4: Restore safe entities
-        .replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        // Step 5: Trim and limit length
-        .trim()
-        .substring(0, 500);
+    return content.substring(0, 500);
 }
 
 /**
- * ✅ FIX #7: Safe string interpolation — NEVER pass user-controlled data
- * as a format string to console.log or any printf-like function.
- * This helper ensures all logged values are plain strings, not format specifiers.
+ * ✅ FIX #7: Structured logger — only fixed event labels + numeric/boolean metadata.
+ * No free-form strings, no regex, no string manipulation.
  */
-function safeLog(prefix, ...args) {
-    const safeArgs = args.map(arg => {
-        if (arg === null || arg === undefined) return String(arg);
-        if (typeof arg === 'object') return JSON.stringify(arg);
-        return String(arg).replace(/%[sdifoO]/g, '');  // Strip printf format specifiers
-    });
-    console.log(prefix, ...safeArgs);
+function safeLog(event, meta) {
+    if (!meta || typeof meta !== 'object') {
+        console.log('[FOLLOW-UP]', event);
+        return;
+    }
+    const safe = {};
+    for (const k of Object.keys(meta)) {
+        const v = meta[k];
+        if (typeof v === 'number' || typeof v === 'boolean' || v === null) {
+            safe[k] = v;
+        }
+    }
+    console.log('[FOLLOW-UP]', event, JSON.stringify(safe));
 }
 
 // POST /api/leads/:leadId/auto-follow-up
@@ -47,9 +39,7 @@ const toggleAutoFollowUp = async (req, res) => {
         const { leadId } = req.params;
         let { enabled, delayDays } = req.body;
 
-        // ✅ FIX #7: Use safeLog instead of console.log with template literals
-        // that could contain user-controlled format specifiers
-        safeLog('🔄 [FOLLOW-UP] Toggle auto follow-up for lead:', leadId, 'enabled:', enabled, 'delayDays:', delayDays);
+        safeLog('toggle_auto_follow_up', { enabled: enabled, delayDays: delayDays });
 
         if (!leadId || !isValidObjectId(leadId)) {
             return res.status(400).json({ success: false, message: 'Invalid lead ID' });
@@ -58,11 +48,9 @@ const toggleAutoFollowUp = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Enabled must be a boolean' });
         }
 
-        // Validate and sanitize delayDays
         delayDays = (delayDays && typeof delayDays === 'number' && delayDays > 0) ? Math.floor(delayDays) : 3;
         if (delayDays > 30) delayDays = 30;
 
-        // ✅ Cast IDs to String before any DB query
         const safeLeadId = String(leadId);
         const safeUserId = String(req.userId);
 
@@ -89,20 +77,20 @@ const toggleAutoFollowUp = async (req, res) => {
             user.usage.dailyAutoFollowUpCount = (user.usage.dailyAutoFollowUpCount || 0) + 1;
             await user.save();
 
-            safeLog('✅ [FOLLOW-UP] Auto follow-up ENABLED for lead:', safeLeadId, 'scheduled for:', scheduledDate.toISOString());
+            safeLog('auto_follow_up_enabled', { delayDays: delayDays });
 
             return res.json({
                 success: true,
                 autoFollowUpEnabled: true,
                 followUpScheduledDate: scheduledDate,
-                message: `Auto follow-up enabled. First follow-up scheduled in ${delayDays} day(s).`
+                message: 'Auto follow-up enabled. First follow-up scheduled in ' + delayDays + ' day(s).'
             });
         } else {
             lead.autoFollowUpEnabled = false;
             lead.followUpScheduledDate = null;
             await lead.save();
 
-            safeLog('✅ [FOLLOW-UP] Auto follow-up DISABLED for lead:', safeLeadId);
+            safeLog('auto_follow_up_disabled');
 
             return res.json({
                 success: true,
@@ -121,7 +109,7 @@ const suggestFollowUp = async (req, res) => {
     try {
         const { leadId } = req.params;
 
-        safeLog('💡 [FOLLOW-UP] Suggest follow-up for lead:', leadId);
+        safeLog('suggest_follow_up');
 
         if (!leadId || !isValidObjectId(leadId)) {
             return res.status(400).json({ success: false, message: 'Invalid lead ID' });
@@ -143,7 +131,6 @@ const suggestFollowUp = async (req, res) => {
             });
         }
 
-        // ✅ FIX #38: Use complete sanitization instead of incomplete HTML strip
         const formattedMessages = messages.slice(-3).map(msg => ({
             from: String(msg.from || ''),
             content: sanitizeMessageContent(msg.content),
@@ -176,7 +163,7 @@ const suggestFollowUp = async (req, res) => {
             console.warn('⚠️ Could not update usage count:', userErr.message);
         }
 
-        safeLog('✅ [FOLLOW-UP] Suggestion generated for lead:', safeLeadId);
+        safeLog('suggestion_generated');
 
         res.json({
             success: true,
@@ -194,7 +181,7 @@ const getFollowUpStatus = async (req, res) => {
     try {
         const { leadId } = req.params;
 
-        safeLog('📊 [FOLLOW-UP] Get status for lead:', leadId);
+        safeLog('get_follow_up_status');
 
         if (!leadId || !isValidObjectId(leadId)) {
             return res.status(400).json({ success: false, message: 'Invalid lead ID' });
