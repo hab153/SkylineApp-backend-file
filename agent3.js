@@ -33,37 +33,24 @@ let currentKeyIndex = 0;
 let keyUsageCount = {};
 let keyResetDate = new Date();
 
-TAVILY_API_KEYS.forEach((key, index) => {
+TAVILY_API_KEYS.forEach((_, index) => {
   keyUsageCount[index] = 0;
 });
 
 // ────────────────────────────────────────────────────────────────
-// ✅ FIX #42: Mask sensitive values before logging.
-// Shows first 4 and last 4 characters, replaces middle with ***.
-// For short strings, shows only first 2 chars + ***.
+// ✅ FIX #70: safeLog redacts entire strings matching secret patterns.
+// Does NOT use regex capture groups or partial masking.
+// CodeQL flags ANY data flow from secret pattern → console.log,
+// even through maskSecret(). Solution: replace entire string with [REDACTED].
 // ────────────────────────────────────────────────────────────────
-function maskSecret(value) {
-  if (!value || typeof value !== 'string') return '***';
-  if (value.length <= 8) return value.substring(0, 2) + '***';
-  return value.substring(0, 4) + '***' + value.substring(value.length - 4);
-}
-
-/**
- * ✅ Safe logger that masks any string matching known secret patterns.
- * Prevents accidental logging of API keys, tokens, passwords.
- */
 function safeLog(...args) {
   const sanitized = args.map(arg => {
     if (typeof arg !== 'string') return arg;
-    // Mask anything that looks like an API key or token
-    return arg
-      .replace(/(tvly-[a-zA-Z0-9]+)/g, (match) => maskSecret(match))
-      .replace(/(sk-[a-zA-Z0-9]+)/g, (match) => maskSecret(match))
-      .replace(/(key[_\s]*[:=]\s*)([a-zA-Z0-9_-]{8,})/gi, (full, prefix, key) => prefix + maskSecret(key))
-      .replace(/(api[_\s]*key[_\s]*[:=]\s*)([a-zA-Z0-9_-]{8,})/gi, (full, prefix, key) => prefix + maskSecret(key))
-      .replace(/(token[_\s]*[:=]\s*)([a-zA-Z0-9_-]{8,})/gi, (full, prefix, key) => prefix + maskSecret(key))
-      .replace(/(password[_\s]*[:=]\s*)([^\s,}"]{4,})/gi, (full, prefix, pass) => prefix + '***')
-      .replace(/(secret[_\s]*[:=]\s*)([^\s,}"]{4,})/gi, (full, prefix, sec) => prefix + '***');
+    // If string contains anything that looks like a secret, redact entirely
+    if (/tvly-|sk-|api.key|token|secret|password|Bearer/i.test(arg)) {
+      return '[REDACTED]';
+    }
+    return arg;
   });
   console.log(...sanitized);
 }
@@ -114,7 +101,7 @@ function getNextTavilyKey() {
     if (keyUsageCount[index] < maxSearchesPerKey) {
       currentKeyIndex = index;
       keyUsageCount[index] = (keyUsageCount[index] || 0) + 1;
-      // ✅ FIX #42: Log key INDEX and usage count, NEVER the actual key value
+      // ✅ Log only index and count — NEVER the actual key value
       safeLog(`🔑 [Stage3] Using Tavily Key ${index + 1}/${totalKeys} (${keyUsageCount[index]}/${maxSearchesPerKey} searches used)`);
       return TAVILY_API_KEYS[index];
     }
@@ -186,9 +173,8 @@ async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
     }));
 
   } catch (error) {
-    // ✅ FIX #42: Log only the error message, never the full error object
-    // which could contain the API key in the request config
-    console.error(`❌ [Stage3] Tavily search failed:`, error.message);
+    // ✅ Log only error.message — never the full error object (contains axios config with api_key)
+    console.error('❌ [Stage3] Tavily search failed:', error.message);
     return [];
   }
 }
@@ -390,7 +376,6 @@ async function multiSourceSearch({
   onProgress = null,
   sources = ['tavily']
 }) {
-  // ✅ FIX #42: Never log searchPackage directly — it may contain sensitive config
   safeLog(`🔍 [Stage3] Starting multi-source search for user ${userId}...`);
   safeLog(`📋 [Stage3] Hypotheses: ${hypotheses.map(h => h.industry).join(', ')}`);
   safeLog(`📋 [Stage3] Countries: ${(searchPackage.countries || []).join(', ')}, Target: ${searchPackage.target_type || 'Companies'}`);
@@ -457,7 +442,6 @@ async function multiSourceSearch({
   };
 
   safeLog(`✅ [Stage3] Search complete: ${limitedCompanies.length} candidates found`);
-  // ✅ FIX #42: Log stats object safely — getTavilyUsageStats returns only counts, not keys
   safeLog(`📊 [Stage3] Duration: ${duration}ms, Searches: ${totalSearches}, Candidates: ${limitedCompanies.length}`);
 
   return {
@@ -483,7 +467,6 @@ module.exports = {
   executeHypothesisSearch,
   extractCompaniesFromResults,
   generateMockResults,
-  // ✅ FIX #42: Do NOT export TAVILY_API_KEYS — prevents accidental logging by consumers
   MAX_RESULTS_PER_SEARCH,
   MAX_QUERIES_PER_HYPOTHESIS,
   MAX_CONCURRENT_SEARCHES,
