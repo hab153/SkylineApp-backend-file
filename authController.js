@@ -264,32 +264,9 @@ const verifyUsername = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Reset password via email/username
-const resetPasswordEmailUsername = async (req, res) => {
-    try {
-        const { email, username, newPassword } = req.body;
-        if (!email || !username || !newPassword) { 
-            return res.status(400).json({ message: 'Email, username, and new password are required' }); 
-        }
-        if (newPassword.length < 8) { 
-            return res.status(400).json({ message: 'Password must be at least 8 characters' }); 
-        }
-        const sanitizedEmail = sanitizeEmail(email);
-        const sanitizedUsername = sanitizeUsername(username);
-        const query = sanitizeQuery({ email: sanitizedEmail, username: sanitizedUsername });
-        const user = await User.findOne(query);
-        if (!user) { return res.status(400).json({ message: 'Invalid email or username' }); }
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(newPassword, salt);
-        user.password = hashedPassword;
-        await user.revokeTokens();
-        await user.save();
-        res.json({ message: 'Password reset successfully.' });
-    } catch (err) { 
-        console.error('Reset Password Error:', err.message); 
-        res.status(500).json({ message: 'Server Error' }); 
-    }
-};
+// ✅ REMOVED: resetPasswordEmailUsername - VULNERABLE ENDPOINT DELETED
+// This endpoint allowed password reset with only email+username (no token/2FA).
+// Secure alternative: use forgotPassword + resetPassword flow with emailed token.
 
 // ✅ FIXED: Forgot password
 const forgotPassword = async (req, res) => {
@@ -314,7 +291,8 @@ const forgotPassword = async (req, res) => {
                     userId: user._id 
                 });
             } else { 
-                console.log(`Reset link for ${user.email}: ${resetUrl}`); 
+                // ✅ SECURITY FIX: Never log reset URLs or tokens
+                console.log(`[PASSWORD RESET] Reset link generated for user ID: ${user._id}`);
             }
         } catch (emailErr) { 
             console.error('Email send error:', emailErr.message); 
@@ -917,7 +895,7 @@ const verifyAdminTotpLogin = async (req, res) => {
 };
 
 module.exports = {
-    register, login, logout, revokeAllTokens, verifyEmail, verifyUsername, resetPasswordEmailUsername,
+    register, login, logout, revokeAllTokens, verifyEmail, verifyUsername,
     forgotPassword, resetPassword, verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount,
     setupAdminSecurity, checkAdminSecurityStatus,
     generateAdminTotp, enableAdminTotp, verifyAdminTotpLogin
