@@ -24,22 +24,85 @@ function sanitizeEmailBody(html) {
   return decoded.replace(/<[^>]*>/g, '').trim();
 }
 
-exports.handleWebhook = async (req, res) => {
-  // ✅ FIXED: Match your Render environment variable name EXACTLY
+// ✅ SECURITY: Validate Nylas webhook signature
+function validateWebhookSignature(req) {
   const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET_SKYLINE;
+  
+  if (!webhookSecret) {
+    console.error('❌ [WEBHOOK SECURITY] NYLAS_WEBHOOK_SECRET_SKYLINE is not configured!');
+    return false;
+  }
+  
+  // Nylas V3 sends signature in X-Nylas-Signature header
+  const signature = req.headers['x-nylas-signature'] || req.headers['X-Nylas-Signature'];
+  
+  if (!signature) {
+    console.warn('⚠️ [WEBHOOK SECURITY] Missing X-Nylas-Signature header');
+    return false;
+  }
+  
+  // Get raw body for signature verification
+  let rawBody;
+  if (Buffer.isBuffer(req.body)) {
+    rawBody = req.body.toString('utf8');
+  } else if (typeof req.body === 'string') {
+    rawBody = req.body;
+  } else {
+    // If body was already parsed to JSON, re-stringify it
+    rawBody = JSON.stringify(req.body);
+  }
+  
+  // Compute expected HMAC-SHA256 signature
+  const expectedSignature = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(rawBody)
+    .digest('hex');
+  
+  // Constant-time comparison to prevent timing attacks
+  try {
+    const sigBuffer = Buffer.from(signature, 'hex');
+    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+    
+    if (sigBuffer.length !== expectedBuffer.length) {
+      console.warn('⚠️ [WEBHOOK SECURITY] Signature length mismatch');
+      return false;
+    }
+    
+    const isValid = crypto.timingSafeEqual(sigBuffer, expectedBuffer);
+    
+    if (!isValid) {
+      console.warn('⚠️ [WEBHOOK SECURITY] Invalid webhook signature - request rejected');
+    }
+    
+    return isValid;
+  } catch (err) {
+    console.error('❌ [WEBHOOK SECURITY] Signature comparison error:', err.message);
+    return false;
+  }
+}
 
+exports.handleWebhook = async (req, res) => {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('🔔 [WEBHOOK] Request received!');
   console.log(' [WEBHOOK] Method:', req.method);
   console.log(' [WEBHOOK] URL:', req.url);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
+  // ✅ GET challenge requests don't need signature validation (Nylas verification step)
   if (req.method === 'GET' && req.query.challenge) {
     console.log(' [Nylas Webhook] Received GET challenge, responding...');
     return res.status(200).send(req.query.challenge);
   }
 
   if (req.method === 'POST') {
+    // ✅ CRITICAL SECURITY: Validate webhook signature BEFORE processing
+    if (!validateWebhookSignature(req)) {
+      console.error('❌ [WEBHOOK SECURITY] Rejected unsigned/invalid webhook request from IP:', req.ip);
+      return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
+    
+    console.log('✅ [WEBHOOK SECURITY] Signature validated successfully');
+
     let eventData = req.body;
     if (Buffer.isBuffer(eventData)) {
       try {
@@ -593,4 +656,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-                      }
+      }
