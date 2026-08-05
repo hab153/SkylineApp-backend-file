@@ -4,26 +4,24 @@ const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
-// ─── ✅ EMAIL SANITIZATION FUNCTIONS ───
+// ─── ✅ COMPLETE EMAIL SANITIZATION FUNCTIONS ───
 
 /**
  * Sanitize email subject - Remove CRLF to prevent header injection
  */
 function sanitizeEmailSubject(subject) {
-    if (!subject) return '';
+    if (!subject || typeof subject !== 'string') return '';
     return String(subject)
-        .replace(/[\r\n]/g, ' ')
-        .replace(/\t/g, ' ')
-        .replace(/\0/g, '')
+        .replace(/[\r\n\t\0]/g, ' ')
         .trim()
         .substring(0, 200);
 }
 
 /**
- * Sanitize email body - Keep newlines but remove carriage returns
+ * Sanitize email body - Keep newlines but remove carriage returns and null bytes
  */
 function sanitizeEmailBody(body) {
-    if (!body) return '';
+    if (!body || typeof body !== 'string') return '';
     return String(body)
         .replace(/\r\n/g, '\n')
         .replace(/\r/g, '\n')
@@ -32,25 +30,29 @@ function sanitizeEmailBody(body) {
 }
 
 /**
- * Sanitize email address - Basic validation and sanitization
+ * ✅ FIX #39: Complete multi-character email sanitization.
+ * Uses strict whitelist — only allows valid email characters.
+ * Previous version only removed \r\n and <> which CodeQL flagged as incomplete.
  */
 function sanitizeEmailAddress(email) {
-    if (!email) return '';
-    return String(email)
-        .replace(/[\r\n]/g, ' ')
-        .replace(/[<>]/g, '')
-        .trim()
-        .toLowerCase();
+    if (!email || typeof email !== 'string') return '';
+    // Step 1: Strip all characters not in the email-safe whitelist
+    let sanitized = email.replace(/[^\w@.\-+]/g, '');
+    // Step 2: Validate basic structure
+    if (!sanitized || !sanitized.includes('@') || sanitized.length > 254) return '';
+    // Step 3: Lowercase
+    return sanitized.toLowerCase().trim();
 }
 
 /**
- * Sanitize name for email - Remove control characters
+ * Sanitize name for email - Remove control characters with complete whitelist
  */
 function sanitizeEmailName(name) {
-    if (!name) return '';
+    if (!name || typeof name !== 'string') return '';
+    // ✅ FIX #39: Use whitelist instead of blacklist for complete sanitization
     return String(name)
-        .replace(/[\r\n]/g, ' ')
-        .replace(/\0/g, '')
+        .replace(/[^\w\s.\-']/g, '')  // Only allow word chars, spaces, dots, hyphens, apostrophes
+        .replace(/[\r\n\t\0]/g, ' ')
         .trim()
         .substring(0, 100);
 }
@@ -72,14 +74,12 @@ function sanitizeLeadForEmail(leadData) {
 
 // ─── IDEMPOTENCY CACHE ───
 const idempotencyCache = new Map();
-const IDEMPOTENCY_TTL = 5 * 60 * 1000; // 5 minutes
+const IDEMPOTENCY_TTL = 5 * 60 * 1000;
 
-// ─── HELPER: Generate idempotency key ───
 function generateIdempotencyKey(userId, leadId, action, email) {
-    return `${userId}:${leadId || email}:${action}`;
+    return `${String(userId)}:${String(leadId || email || '')}:${String(action)}`;
 }
 
-// ─── HELPER: Clean up expired idempotency keys ───
 function cleanupIdempotencyCache() {
     const now = Date.now();
     for (const [key, value] of idempotencyCache.entries()) {
@@ -89,47 +89,38 @@ function cleanupIdempotencyCache() {
     }
 }
 
-// Run cleanup every minute
 setInterval(cleanupIdempotencyCache, 60 * 1000);
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations - FIXED (Proper userId filtering)
+//  GET /api/conversations
 // ──────────────────────────────────────────────────────────────
 const getConversations = async (req, res) => {
-    console.log('🔵 [getConversations] ENTERED - userId:', req.userId);
     try {
-        if (!req.userId) {
-            console.error('❌ [getConversations] No userId in request');
-            return res.status(401).json({ message: 'Unauthorized: No user ID' });
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
         }
-        if (!isValidObjectId(req.userId)) {
-            console.error('❌ [getConversations] Invalid userId format:', req.userId);
-            return res.status(400).json({ message: 'Invalid user ID' });
-        }
-        
-        console.log(`📡 [getConversations] Fetching leads for userId: ${req.userId}`);
-        
-        const leads = await Lead.find({ userId: req.userId })
+
+        // ✅ Cast userId to String before any DB query
+        const safeUserId = String(req.userId);
+
+        const leads = await Lead.find({ userId: safeUserId })
             .sort({ lastContactDate: -1 })
             .limit(100);
-            
-        console.log(`✅ [getConversations] Found ${leads.length} leads for user ${req.userId}`);
-        
+
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
             const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
             const preview = lastReply
-                ? lastReply.content.replace(/<[^>]*>?/gm, '').substring(0, 50)
+                ? String(lastReply.content || '').replace(/<[^>]*>?/gm, '').substring(0, 50)
                 : "No messages yet";
-            
+
             const unreadCount = replies.filter(r => r.from === 'lead' && !r.read).length || 0;
-            const email = lead.email || '';
-            
+
             return {
                 id: lead._id.toString(),
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
-                email: email,
+                email: lead.email || '',
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
@@ -139,75 +130,62 @@ const getConversations = async (req, res) => {
                 autoReplyInstructions: lead.autoReplyInstructions || ''
             };
         });
-        
-        console.log(`📤 [getConversations] Returning ${conversations.length} conversations for user ${req.userId}`);
+
         res.json(conversations);
     } catch (err) {
-        console.error('❌ [getConversations] Error:', err);
-        console.error('❌ [getConversations] Error stack:', err.stack);
+        console.error('❌ [getConversations] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId - FIXED ARRAY FILTER ERROR
+//  GET /api/conversations/:leadId
 // ────────────────────────────────────────────────────────────
 const getConversationById = async (req, res) => {
-    console.log('🔵 [getConversationById] ENTERED - leadId:', req.params.leadId);
-    
     try {
-        if (!req.userId) {
-            console.error('❌ [getConversationById] No userId');
+        if (!req.userId || !isValidObjectId(req.userId)) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
-        if (!isValidObjectId(req.userId)) {
-            console.error('❌ [getConversationById] Invalid userId format');
-            return res.status(400).json({ success: false, message: 'Invalid user ID' });
-        }
+
         const { leadId } = req.params;
-        
-        if (!isValidObjectId(leadId)) {
-            console.error('❌ [getConversationById] Invalid leadId format:', leadId);
+
+        if (!leadId || !isValidObjectId(leadId)) {
             return res.status(400).json({ success: false, message: 'Invalid lead ID format' });
         }
-        
-        console.log(`📡 [getConversationById] Fetching lead ${leadId} for user ${req.userId}`);
-        
-        const lead = await Lead.findOne({ _id: leadId, userId: req.userId });
-        
+
+        // ✅ Cast both IDs to String before any DB query
+        const safeUserId = String(req.userId);
+        const safeLeadId = String(leadId);
+
+        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
+
         if (!lead) {
-            console.warn(`⚠️ [getConversationById] Lead not found for leadId: ${leadId}, userId: ${req.userId}`);
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
-        console.log(`✅ [getConversationById] Lead found: ${lead.name || lead.email || 'Unknown'}`);
-        
-        const email = lead.email || '';
-        
-        // ✅ FIX: Mark replies as read WITHOUT triggering schema validation on arrayFilters
+
+        // Mark replies as read
         if (lead.replies && lead.replies.length > 0) {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
                 await Lead.updateOne(
-                    { _id: leadId, userId: req.userId },
+                    { _id: safeLeadId, userId: safeUserId },
                     { $set: { 'replies.$[elem].read': true } },
-                    { 
+                    {
                         arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }],
                         strict: false
                     }
                 );
-                console.log(`📖 [getConversationById] Marked ${unreadReplies.length} replies as read`);
             }
         }
-        
+
         let allMessages = lead.replies || [];
-        console.log(`📡 [getConversationById] Found ${allMessages.length} replies in lead`);
-        
+
         allMessages.sort((a, b) => {
             const dateA = a.date ? new Date(a.date) : new Date(0);
             const dateB = b.date ? new Date(b.date) : new Date(0);
             return dateA - dateB;
         });
-        
+
         const cleanHistory = allMessages.map(msg => ({
             from: msg.from || 'lead',
             content: msg.content || '',
@@ -216,15 +194,13 @@ const getConversationById = async (req, res) => {
             messageId: msg.messageId || null,
             read: msg.read || false
         }));
-        
-        console.log(`📤 [getConversationById] Returning ${cleanHistory.length} messages for lead ${leadId}`);
-        
+
         res.json({
             success: true,
             lead: {
                 id: lead._id.toString(),
                 name: lead.name || lead.email || 'Unknown',
-                email: email,
+                email: lead.email || '',
                 company: lead.company || '',
                 status: lead.status || 'New',
                 autoReplyEnabled: lead.autoReplyEnabled || false,
@@ -232,10 +208,9 @@ const getConversationById = async (req, res) => {
             },
             messages: cleanHistory
         });
-        
+
     } catch (err) {
-        console.error(' [getConversationById] Error:', err);
-        console.error('❌ [getConversationById] Error stack:', err.stack);
+        console.error('❌ [getConversationById] Error:', err.message);
         res.status(500).json({ success: false, message: 'Server Error fetching conversation' });
     }
 };
@@ -244,26 +219,29 @@ const getConversationById = async (req, res) => {
 //  PUT /api/leads/:leadId/rename
 // ─────────────────────────────────────────────────────────────
 const renameLead = async (req, res) => {
-    console.log('🔵 [renameLead] ENTERED - leadId:', req.params.leadId);
     try {
-        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
+        if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
             return res.status(400).json({ message: 'Invalid ID' });
         }
+
         const { newName } = req.body;
         if (!newName || typeof newName !== 'string' || newName.trim() === '') {
             return res.status(400).json({ message: 'New name is required' });
         }
+
+        const safeUserId = String(req.userId);
+        const safeLeadId = String(req.params.leadId);
         const sanitizedNewName = newName.trim().slice(0, 100);
-        
-        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+
+        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
         lead.name = sanitizedNewName;
         await lead.save();
-        console.log(`✏️ [renameLead] Lead ${lead._id} renamed to ${lead.name}`);
+
         res.json({ success: true, newName: lead.name });
     } catch (err) {
-        console.error('❌ [renameLead] Error:', err);
+        console.error('❌ [renameLead] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -272,94 +250,80 @@ const renameLead = async (req, res) => {
 //  PUT /api/leads/:leadId/auto-reply
 // ──────────────────────────────────────────────────────────────
 const updateAutoReply = async (req, res) => {
-    console.log('🔵 [updateAutoReply] ENTERED - leadId:', req.params.leadId);
     try {
-        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        if (!isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
+        if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
             return res.status(400).json({ message: 'Invalid ID' });
         }
+
         const { enabled, instructions } = req.body;
         if (typeof enabled !== 'boolean') {
             return res.status(400).json({ message: 'Enabled must be a boolean' });
         }
-        const sanitizedInstructions = instructions ? instructions.trim().slice(0, 2000) : '';
-        
-        const lead = await Lead.findOne({ _id: req.params.leadId, userId: req.userId });
+
+        const safeUserId = String(req.userId);
+        const safeLeadId = String(req.params.leadId);
+        const sanitizedInstructions = instructions ? String(instructions).trim().slice(0, 2000) : '';
+
+        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
         if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
         await lead.save();
-        console.log(` [updateAutoReply] Lead ${lead._id} auto-reply enabled=${enabled}`);
+
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
-        console.error('❌ [updateAutoReply] Error:', err);
+        console.error('❌ [updateAutoReply] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
 // ──────────────────────────────────────────────────────────────
-//  POST /api/leads/batch-send - COMPLETE FIX WITH TOKEN RETRY + SANITIZATION
+//  POST /api/leads/batch-send
 // ──────────────────────────────────────────────────────────────
 const batchSend = async (req, res) => {
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('📨 [BE-BATCH] Request received');
-    console.log('👤 [BE-BATCH] User ID:', req.userId);
-    console.log('🆔 [BE-BATCH] Received Lead ID:', req.body.leadId);
-    console.log('🚫 [BE-BATCH] Allow New Lead:', req.body.allowNewLead);
-    
     try {
-        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const safeUserId = String(req.userId);
         const { leads, leadId, allowNewLead = true } = req.body;
-        
-        // ─── ✅ BATCH SIZE VALIDATION ───
+
         const MAX_BATCH_SIZE = 100;
-        
+
         if (!Array.isArray(leads)) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Leads must be an array' 
-            });
+            return res.status(400).json({ success: false, message: 'Leads must be an array' });
         }
-        
+
         if (leads.length === 0) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'At least one lead is required' 
-            });
+            return res.status(400).json({ success: false, message: 'At least one lead is required' });
         }
-        
+
         if (leads.length > MAX_BATCH_SIZE) {
-            return res.status(400).json({ 
-                success: false, 
-                message: `Batch size exceeds maximum limit of ${MAX_BATCH_SIZE} leads. You sent ${leads.length}.`,
+            return res.status(400).json({
+                success: false,
+                message: `Batch size exceeds maximum limit of ${MAX_BATCH_SIZE} leads.`,
                 maxAllowed: MAX_BATCH_SIZE,
                 sentCount: leads.length
             });
         }
-        
-        console.log(`📊 [BE-BATCH] Processing ${leads.length} leads (max: ${MAX_BATCH_SIZE})`);
 
-        // ─── ✅ SANITIZE ALL LEAD DATA FOR EMAIL ───
         const sanitizedLeads = leads.map(lead => sanitizeLeadForEmail(lead));
-        console.log('✅ [BE-BATCH] All lead data sanitized for email');
 
-        // ─── CHECK EMAIL LIMIT FIRST ───
         try {
-            await checkAndIncrementSendLimit(req.userId);
+            await checkAndIncrementSendLimit(safeUserId);
         } catch (limitError) {
-            return res.status(429).json({ 
-                success: false, 
+            return res.status(429).json({
+                success: false,
                 message: limitError.message,
-                limitReached: true 
+                limitReached: true
             });
         }
 
-        // ─── GET EMAIL ACCOUNT WITH TOKEN HANDLING ───
         const EmailAccount = require('./EmailAccount');
-        let account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
-        
-        // ✅ Check if Nylas is connected
+        let account = await EmailAccount.findOne({ userId: safeUserId, isConnected: true });
+
         if (!account) {
             return res.status(401).json({
                 success: false,
@@ -368,118 +332,87 @@ const batchSend = async (req, res) => {
             });
         }
 
-        // ✅ FIX: Handle token refresh with retry logic
+        // Token refresh logic
         let tokenValid = true;
-        let tokenError = null;
-        
         try {
-            // Check if token is expired
             const now = new Date();
             const tokenExpiry = new Date(account.tokenExpiry);
-            const timeUntilExpiry = (tokenExpiry - now) / 1000; // seconds
-            
-            console.log(`🔐 [BE-BATCH] Token expires in ${timeUntilExpiry} seconds`);
-            
-            // If token expires in less than 5 minutes, refresh it
+            const timeUntilExpiry = (tokenExpiry - now) / 1000;
+
             if (timeUntilExpiry < 300) {
-                console.log('🔄 [BE-BATCH] Token expiring soon, refreshing...');
-                
-                // ✅ RETRY LOGIC: Try up to 3 times
                 let refreshAttempts = 0;
                 const MAX_REFRESH_ATTEMPTS = 3;
                 let refreshed = false;
-                
+
                 while (refreshAttempts < MAX_REFRESH_ATTEMPTS && !refreshed) {
                     try {
                         refreshAttempts++;
-                        console.log(`🔄 [BE-BATCH] Refresh attempt ${refreshAttempts}/${MAX_REFRESH_ATTEMPTS}`);
-                        
                         const { refreshNylasToken } = require('./nylasService');
-                        const newToken = await refreshNylasToken(req.userId);
-                        
+                        const newToken = await refreshNylasToken(safeUserId);
+
                         if (newToken && newToken.accessToken) {
                             refreshed = true;
-                            tokenValid = true;
-                            console.log('✅ [BE-BATCH] Token refreshed successfully');
-                            
-                            // Update account with new token
-                            account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+                            account = await EmailAccount.findOne({ userId: safeUserId, isConnected: true });
                         }
                     } catch (refreshErr) {
-                        console.error(`❌ [BE-BATCH] Refresh attempt ${refreshAttempts} failed:`, refreshErr.message);
-                        tokenError = refreshErr.message;
-                        
                         if (refreshAttempts < MAX_REFRESH_ATTEMPTS) {
-                            // Wait before retry (exponential backoff)
                             const waitTime = Math.min(1000 * Math.pow(2, refreshAttempts - 1), 5000);
-                            console.log(`⏳ [BE-BATCH] Waiting ${waitTime}ms before retry...`);
                             await new Promise(resolve => setTimeout(resolve, waitTime));
                         }
                     }
                 }
-                
-                // If all refresh attempts failed
+
                 if (!refreshed) {
-                    console.error(`❌ [BE-BATCH] All ${MAX_REFRESH_ATTEMPTS} refresh attempts failed`);
                     tokenValid = false;
-                    
-                    // ✅ Fallback: Try to continue with stale token
-                    console.warn('⚠️ [BE-BATCH] Continuing with stale token - individual sends may fail');
                 }
-            } else {
-                console.log('✅ [BE-BATCH] Token is valid');
             }
         } catch (err) {
-            console.error('❌ [BE-BATCH] Token refresh error:', err);
             tokenValid = false;
-            tokenError = err.message;
-            // Continue with stale token
         }
 
-        // ✅ CASE 1: Sending to an EXISTING lead (from notifications.html)
+        // CASE 1: Sending to an EXISTING lead
         if (leadId) {
-            console.log('🔍 [BE-BATCH] Searching for existing lead:', leadId);
-            
-            // ─── CHECK IDEMPOTENCY ───
-            const idempotencyKey = generateIdempotencyKey(req.userId, leadId, 'batchSend', null);
+            if (!isValidObjectId(leadId)) {
+                return res.status(400).json({ success: false, message: 'Invalid lead ID' });
+            }
+
+            // ✅ FIX #26: Cast leadId to String before DB query
+            const safeLeadId = String(leadId);
+
+            const idempotencyKey = generateIdempotencyKey(safeUserId, safeLeadId, 'batchSend', null);
             const cached = idempotencyCache.get(idempotencyKey);
             if (cached) {
-                console.log(`⏭️ [BE-BATCH] Skipping duplicate request for lead ${leadId}`);
                 return res.json({
                     success: true,
                     alreadyProcessed: true,
                     message: 'Email was already sent',
-                    leadId: leadId
+                    leadId: safeLeadId
                 });
             }
-            
-            const targetLead = await Lead.findOne({ _id: leadId, userId: req.userId });
-            
+
+            // ✅ FIX #26: Use safeLeadId and safeUserId in query
+            const targetLead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
+
             if (!targetLead) {
-                console.error('❌ [BE-BATCH] Lead NOT FOUND for ID:', leadId);
                 return res.status(404).json({
                     success: false,
                     error: 'LEAD_NOT_FOUND',
                     message: 'Conversation not found.'
                 });
             }
-            
-            console.log('✅ [BE-BATCH] Lead FOUND:', targetLead.name, '(ID:', targetLead._id, ')');
-            
-            // ✅ USE SANITIZED LEAD DATA
+
             const leadData = sanitizedLeads[0];
             const msgContent = leadData.messages[0].body;
             const msgSubject = leadData.messages[0].subject || 'Re: Conversation';
             const now = new Date();
-            
-            // ─── CHECK FOR DUPLICATE MESSAGES ───
-            const lastReply = targetLead.replies && targetLead.replies.length > 0 ? targetLead.replies[targetLead.replies.length - 1] : null;
-            const isDuplicate = lastReply && 
-                                lastReply.content === msgContent && 
-                                (new Date() - new Date(lastReply.date)) < 5000;
+
+            const lastReply = targetLead.replies && targetLead.replies.length > 0
+                ? targetLead.replies[targetLead.replies.length - 1] : null;
+            const isDuplicate = lastReply &&
+                String(lastReply.content || '') === msgContent &&
+                (new Date() - new Date(lastReply.date)) < 5000;
 
             if (!isDuplicate) {
-                console.log('💾 [BE-BATCH] Saving new reply to Lead.replies...');
                 if (!targetLead.replies) targetLead.replies = [];
                 targetLead.replies.push({
                     date: now,
@@ -491,72 +424,47 @@ const batchSend = async (req, res) => {
                 });
                 targetLead.lastContactDate = now;
                 targetLead.status = 'Contacted';
-            } else {
-                console.log('⚠️ [BE-BATCH] Duplicate detected. Skipping save.');
             }
-            
-            // ── SEND EMAIL WITH RETRY ──
+
             let emailSent = false;
             let emailError = null;
             let threadId = null;
-            
-            if (!account) {
-                emailError = 'No email account connected';
-            } else {
-                // ✅ RETRY LOGIC: Try up to 2 times per email
+
+            if (account) {
                 let sendAttempts = 0;
                 const MAX_SEND_ATTEMPTS = 2;
-                
+
                 while (sendAttempts < MAX_SEND_ATTEMPTS && !emailSent) {
                     try {
                         sendAttempts++;
-                        console.log(`📧 [BE-BATCH] Send attempt ${sendAttempts}/${MAX_SEND_ATTEMPTS} to ${targetLead.email}`);
-                        
-                        // ✅ Use the updated account for each attempt
-                        const freshAccount = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
-                        
-                        // ✅ sendEmail now sanitizes internally too
                         const result = await sendEmail(
-                            req.userId,
+                            safeUserId,
                             targetLead.email,
                             msgSubject,
                             msgContent
                         );
-                        
+
                         if (result.success) {
                             emailSent = true;
                             threadId = result.threadId;
-                            console.log(`✅ [BE-BATCH] Email sent successfully to ${targetLead.email}`);
-                            
-                            if (threadId) {
-                                targetLead.threadId = threadId;
-                                console.log(`💾 [BE-BATCH] Saved threadId to lead: ${threadId}`);
-                            }
+                            if (threadId) targetLead.threadId = threadId;
                         } else {
                             emailError = result.error || 'Email send failed';
-                            console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} failed: ${emailError}`);
-                            
                             if (sendAttempts < MAX_SEND_ATTEMPTS) {
-                                const waitTime = 1000 * sendAttempts;
-                                console.log(`⏳ [BE-BATCH] Waiting ${waitTime}ms before retry...`);
-                                await new Promise(resolve => setTimeout(resolve, waitTime));
+                                await new Promise(resolve => setTimeout(resolve, 1000 * sendAttempts));
                             }
                         }
                     } catch (sendErr) {
                         emailError = sendErr.message;
-                        console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} error: ${emailError}`);
-                        
                         if (sendAttempts < MAX_SEND_ATTEMPTS) {
-                            const waitTime = 1000 * sendAttempts;
-                            await new Promise(resolve => setTimeout(resolve, waitTime));
+                            await new Promise(resolve => setTimeout(resolve, 1000 * sendAttempts));
                         }
                     }
                 }
             }
-            
+
             await targetLead.save();
-            
-            // ─── STORE IN IDEMPOTENCY CACHE ───
+
             if (emailSent) {
                 idempotencyCache.set(idempotencyKey, {
                     timestamp: Date.now(),
@@ -564,42 +472,33 @@ const batchSend = async (req, res) => {
                     success: true
                 });
             }
-            
-            console.log('📤 [BE-BATCH] Returning response...');
-            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-            
-            res.json({
+
+            return res.json({
                 success: true,
                 message: emailSent ? 'Email sent successfully.' : 'Message saved but email not sent.',
                 leadId: targetLead._id.toString(),
-                emailSent: emailSent,
+                emailSent,
                 emailError: emailError || null,
                 threadId: threadId || null,
                 tokenRefreshed: tokenValid
             });
-            
-        // ✅ CASE 2: Creating NEW leads and sending (from page.html)
+
+        // CASE 2: Creating NEW leads and sending
         } else {
-            console.log('📝 [BE-BATCH] No Lead ID provided. Creating new leads...');
             if (allowNewLead === false) {
-                console.error('❌ [BE-BATCH] New lead creation blocked by allowNewLead=false');
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
             }
 
             let results = [];
             let anyFailed = false;
 
-            // ─── PROCESS LEADS (with batch size already validated) ───
-            // ✅ Use sanitized leads
             for (const leadData of sanitizedLeads) {
                 const now = new Date();
                 const leadEmail = leadData.email;
-                
-                // ─── CHECK IDEMPOTENCY ───
-                const idempotencyKey = generateIdempotencyKey(req.userId, null, 'createSend', leadEmail);
+
+                const idempotencyKey = generateIdempotencyKey(safeUserId, null, 'createSend', leadEmail);
                 const cached = idempotencyCache.get(idempotencyKey);
                 if (cached) {
-                    console.log(`⏭️ [BE-BATCH] Skipping duplicate lead creation for ${leadEmail}`);
                     results.push({
                         email: leadEmail,
                         name: leadData.name,
@@ -609,17 +508,13 @@ const batchSend = async (req, res) => {
                     });
                     continue;
                 }
-                
-                // ─── FIND OR CREATE LEAD WITH LOCK ───
-                let lead = await Lead.findOne({ userId: req.userId, email: leadEmail });
-                
+
+                // ✅ FIX #26: Use safeUserId in all queries
+                let lead = await Lead.findOne({ userId: safeUserId, email: leadEmail });
+
                 if (lead) {
-                    console.log(`📋 [BE-BATCH] Lead already exists for ${leadEmail}, updating...`);
-                    
-                    // Check if this exact message was already sent
                     const lastReply = lead.replies?.[lead.replies.length - 1];
-                    if (lastReply && lastReply.content === leadData.messages[0].body) {
-                        console.log(`⏭️ [BE-BATCH] Duplicate message detected for ${leadEmail}`);
+                    if (lastReply && String(lastReply.content || '') === leadData.messages[0].body) {
                         results.push({
                             email: leadEmail,
                             name: leadData.name,
@@ -629,12 +524,11 @@ const batchSend = async (req, res) => {
                         });
                         continue;
                     }
-                    
-                    // ✅ ATOMIC: Update lead status
+
                     await Lead.findOneAndUpdate(
-                        { _id: lead._id, userId: req.userId },
-                        { 
-                            $set: { 
+                        { _id: String(lead._id), userId: safeUserId },
+                        {
+                            $set: {
                                 status: 'Contacted',
                                 lastContactDate: now
                             },
@@ -650,13 +544,9 @@ const batchSend = async (req, res) => {
                             }
                         }
                     );
-                    
                 } else {
-                    console.log(`🆕 [BE-BATCH] Creating new lead for ${leadEmail}`);
-                    
-                    // ✅ ATOMIC: Create new lead
                     lead = new Lead({
-                        userId: req.userId,
+                        userId: safeUserId,
                         name: leadData.name || leadData.company || 'Unknown',
                         email: leadEmail,
                         company: leadData.company || '',
@@ -673,52 +563,36 @@ const batchSend = async (req, res) => {
                     });
                 }
 
-                // ─── SEND EMAIL WITH RETRY ───
                 let emailSent = false;
                 let emailError = null;
 
                 if (account && leadEmail) {
-                    // ✅ RETRY LOGIC: Try up to 2 times per email
                     let sendAttempts = 0;
                     const MAX_SEND_ATTEMPTS = 2;
-                    
+
                     while (sendAttempts < MAX_SEND_ATTEMPTS && !emailSent) {
                         try {
                             sendAttempts++;
-                            console.log(`📧 [BE-BATCH] Send attempt ${sendAttempts}/${MAX_SEND_ATTEMPTS} to ${leadEmail}`);
-                            
-                            // ✅ Use fresh account for each attempt
-                            const freshAccount = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
-                            
-                            // ✅ sendEmail now sanitizes internally too
                             const result = await sendEmail(
-                                req.userId,
+                                safeUserId,
                                 leadEmail,
                                 leadData.messages[0].subject || 'Hello from Skyline',
                                 leadData.messages[0].body
                             );
-                            
+
                             if (result.success) {
                                 emailSent = true;
                                 if (result.threadId) lead.threadId = result.threadId;
-                                console.log(`✅ [BE-BATCH] Email sent successfully to ${leadEmail}`);
                             } else {
                                 emailError = result.error || 'Email send failed';
-                                console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} failed: ${emailError}`);
-                                
                                 if (sendAttempts < MAX_SEND_ATTEMPTS) {
-                                    const waitTime = 1000 * sendAttempts;
-                                    console.log(`⏳ [BE-BATCH] Waiting ${waitTime}ms before retry...`);
-                                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                                    await new Promise(resolve => setTimeout(resolve, 1000 * sendAttempts));
                                 }
                             }
                         } catch (sendErr) {
                             emailError = sendErr.message;
-                            console.error(`❌ [BE-BATCH] Send attempt ${sendAttempts} error: ${emailError}`);
-                            
                             if (sendAttempts < MAX_SEND_ATTEMPTS) {
-                                const waitTime = 1000 * sendAttempts;
-                                await new Promise(resolve => setTimeout(resolve, waitTime));
+                                await new Promise(resolve => setTimeout(resolve, 1000 * sendAttempts));
                             }
                         }
                     }
@@ -727,10 +601,8 @@ const batchSend = async (req, res) => {
                     anyFailed = true;
                 }
 
-                // ─── SAVE LEAD ───
                 await lead.save();
-                
-                // ─── STORE IN IDEMPOTENCY CACHE ───
+
                 if (emailSent) {
                     idempotencyCache.set(idempotencyKey, {
                         timestamp: Date.now(),
@@ -738,7 +610,7 @@ const batchSend = async (req, res) => {
                         success: true
                     });
                 }
-                
+
                 results.push({
                     leadId: lead._id,
                     email: leadEmail,
@@ -747,18 +619,16 @@ const batchSend = async (req, res) => {
                 });
             }
 
-            console.log(`📤 [BE-BATCH] Batch complete. Sent ${results.filter(r=>r.sent).length}/${results.length}`);
-            
-            res.json({
+            return res.json({
                 success: !anyFailed,
                 message: anyFailed ? 'Some emails failed to send.' : 'All emails sent successfully.',
-                results: results,
+                results,
                 tokenRefreshed: tokenValid
             });
         }
-        
+
     } catch (err) {
-        console.error('💥 [BE-BATCH] Fatal Error:', err);
+        console.error('💥 [BE-BATCH] Fatal Error:', err.message);
         res.status(500).json({ message: 'Server Error during batch send' });
     }
 };
@@ -767,15 +637,15 @@ const batchSend = async (req, res) => {
 //  POST /api/reconnect-and-send
 // ──────────────────────────────────────────────────────────────
 const reconnectAndSend = async (req, res) => {
-    console.log('🔵 [reconnectAndSend] ENTERED');
     try {
-        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
         }
 
+        const safeUserId = String(req.userId);
         const EmailAccount = require('./EmailAccount');
-        const account = await EmailAccount.findOne({ userId: req.userId, isConnected: true });
+        const account = await EmailAccount.findOne({ userId: safeUserId, isConnected: true });
+
         if (!account) {
             return res.status(401).json({
                 success: false,
@@ -784,30 +654,28 @@ const reconnectAndSend = async (req, res) => {
             });
         }
 
-        const leadsWithPending = await Lead.find({ userId: req.userId, 'replies.status': 'pending' });
+        const leadsWithPending = await Lead.find({ userId: safeUserId, 'replies.status': 'pending' });
         let sentCount = 0;
+
         for (const lead of leadsWithPending) {
             const pendingMessages = lead.replies.filter(r => r.status === 'pending');
+
             for (const msg of pendingMessages) {
-                // ─── CHECK IDEMPOTENCY ───
-                const idempotencyKey = generateIdempotencyKey(req.userId, lead._id, 'reconnectSend', null);
+                const idempotencyKey = generateIdempotencyKey(safeUserId, String(lead._id), 'reconnectSend', null);
                 const cached = idempotencyCache.get(idempotencyKey);
-                if (cached) {
-                    console.log(`⏭️ [reconnectAndSend] Skipping duplicate for lead ${lead._id}`);
-                    continue;
-                }
-                
+                if (cached) continue;
+
                 try {
-                    // ✅ Sanitize before sending
                     const sanitizedSubject = sanitizeEmailSubject(msg.subject || 'Re: Conversation');
                     const sanitizedBody = sanitizeEmailBody(msg.content || '');
-                    
+
                     const result = await sendEmail(
-                        req.userId,
+                        safeUserId,
                         lead.email,
                         sanitizedSubject,
                         sanitizedBody
                     );
+
                     if (result.success) {
                         msg.status = 'sent';
                         sentCount++;
@@ -825,31 +693,31 @@ const reconnectAndSend = async (req, res) => {
             }
             await lead.save();
         }
+
         res.json({ success: true, sentCount });
     } catch (err) {
-        console.error(' [reconnectAndSend] Error:', err);
+        console.error('❌ [reconnectAndSend] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
 // ──────────────────────────────────────────────────────────────
-//  GET /api/leads - FIXED (Proper userId filtering)
+//  GET /api/leads
 // ─────────────────────────────────────────────────────────────
 const getAllLeads = async (req, res) => {
-    console.log('🔵 [getAllLeads] ENTERED - userId:', req.userId);
     try {
-        if (!req.userId) return res.status(401).json({ message: 'Unauthorized' });
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ message: 'Invalid user ID' });
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
         }
-        
-        const leads = await Lead.find({ userId: req.userId })
+
+        const safeUserId = String(req.userId);
+
+        const leads = await Lead.find({ userId: safeUserId })
             .sort({ createdAt: -1 });
-            
-        console.log(`✅ [getAllLeads] Found ${leads.length} leads for user ${req.userId}`);
+
         res.json(leads);
     } catch (err) {
-        console.error('❌ [getAllLeads] Error:', err);
+        console.error('❌ [getAllLeads] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
