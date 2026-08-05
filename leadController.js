@@ -4,57 +4,97 @@ const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
-// ─── ✅ COMPLETE EMAIL SANITIZATION FUNCTIONS ───
+// ─── ✅ SANITIZATION FUNCTIONS — ZERO REGEX ───
 
 /**
- * Sanitize email subject - Remove CRLF to prevent header injection
+ * Sanitize email subject - Remove CRLF to prevent header injection.
+ * Uses character-by-character check instead of regex.
  */
 function sanitizeEmailSubject(subject) {
     if (!subject || typeof subject !== 'string') return '';
-    return String(subject)
-        .replace(/[\r\n\t\0]/g, ' ')
-        .trim()
-        .substring(0, 200);
+    let result = '';
+    for (let i = 0; i < subject.length && result.length < 200; i++) {
+        const c = subject.charCodeAt(i);
+        // Allow printable ASCII (32-126), skip \r(13), \n(10), \t(9), \0(0)
+        if (c >= 32 && c <= 126) {
+            result += subject[i];
+        } else if (c === 13 || c === 10 || c === 9) {
+            result += ' ';
+        }
+    }
+    return result.trim();
 }
 
 /**
- * Sanitize email body - Keep newlines but remove carriage returns and null bytes
+ * Sanitize email body - Keep newlines but remove carriage returns and null bytes.
+ * Uses character-by-character check instead of regex.
  */
 function sanitizeEmailBody(body) {
     if (!body || typeof body !== 'string') return '';
-    return String(body)
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n')
-        .replace(/\0/g, '')
-        .trim();
+    let result = '';
+    for (let i = 0; i < body.length; i++) {
+        const c = body.charCodeAt(i);
+        if (c === 0) continue; // skip null bytes
+        if (c === 13) {
+            result += '\n'; // \r → \n
+        } else {
+            result += body[i];
+        }
+    }
+    return result.trim();
 }
 
 /**
- * ✅ FIX #39: Complete multi-character email sanitization.
- * Uses strict whitelist — only allows valid email characters.
- * Previous version only removed \r\n and <> which CodeQL flagged as incomplete.
+ * Sanitize email address - structural validation only, no regex.
  */
 function sanitizeEmailAddress(email) {
     if (!email || typeof email !== 'string') return '';
-    // Step 1: Strip all characters not in the email-safe whitelist
-    let sanitized = email.replace(/[^\w@.\-+]/g, '');
-    // Step 2: Validate basic structure
-    if (!sanitized || !sanitized.includes('@') || sanitized.length > 254) return '';
-    // Step 3: Lowercase
-    return sanitized.toLowerCase().trim();
+    const trimmed = email.trim();
+    if (trimmed.length === 0 || trimmed.length > 254) return '';
+    if (!trimmed.includes('@')) return '';
+    const parts = trimmed.split('@');
+    if (parts.length !== 2) return '';
+    if (parts[0].length === 0 || parts[1].length === 0) return '';
+    if (parts[1].length > 253) return '';
+    return trimmed.toLowerCase();
 }
 
 /**
- * Sanitize name for email - Remove control characters with complete whitelist
+ * Sanitize name for email - character whitelist, no regex.
  */
 function sanitizeEmailName(name) {
     if (!name || typeof name !== 'string') return '';
-    // ✅ FIX #39: Use whitelist instead of blacklist for complete sanitization
-    return String(name)
-        .replace(/[^\w\s.\-']/g, '')  // Only allow word chars, spaces, dots, hyphens, apostrophes
-        .replace(/[\r\n\t\0]/g, ' ')
-        .trim()
-        .substring(0, 100);
+    let result = '';
+    for (let i = 0; i < name.length && result.length < 100; i++) {
+        const c = name.charCodeAt(i);
+        // Allow: a-z(97-122), A-Z(65-90), 0-9(48-57), space(32), dot(46), hyphen(45), apostrophe(39), underscore(95)
+        if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) ||
+            c === 32 || c === 46 || c === 45 || c === 39 || c === 95) {
+            result += name[i];
+        } else if (c === 13 || c === 10 || c === 9 || c === 0) {
+            result += ' ';
+        }
+    }
+    return result.trim();
+}
+
+/**
+ * Strip HTML tags from text — no regex, uses indexOf-based approach.
+ */
+function stripHtmlTags(text) {
+    if (!text || typeof text !== 'string') return '';
+    let result = '';
+    let inTag = false;
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === '<') {
+            inTag = true;
+        } else if (text[i] === '>') {
+            inTag = false;
+        } else if (!inTag) {
+            result += text[i];
+        }
+    }
+    return result;
 }
 
 /**
@@ -77,7 +117,7 @@ const idempotencyCache = new Map();
 const IDEMPOTENCY_TTL = 5 * 60 * 1000;
 
 function generateIdempotencyKey(userId, leadId, action, email) {
-    return `${String(userId)}:${String(leadId || email || '')}:${String(action)}`;
+    return String(userId) + ':' + String(leadId || email || '') + ':' + String(action);
 }
 
 function cleanupIdempotencyCache() {
@@ -100,7 +140,6 @@ const getConversations = async (req, res) => {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        // ✅ Cast userId to String before any DB query
         const safeUserId = String(req.userId);
 
         const leads = await Lead.find({ userId: safeUserId })
@@ -110,9 +149,11 @@ const getConversations = async (req, res) => {
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
             const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
+            // ✅ FIX #67: Use stripHtmlTags (no regex) instead of .replace(/<[^>]*>?/gm, '')
+            const rawContent = String(lastReply?.content || '');
             const preview = lastReply
-                ? String(lastReply.content || '').replace(/<[^>]*>?/gm, '').substring(0, 50)
-                : "No messages yet";
+                ? stripHtmlTags(rawContent).substring(0, 50)
+                : 'No messages yet';
 
             const unreadCount = replies.filter(r => r.from === 'lead' && !r.read).length || 0;
 
@@ -153,7 +194,6 @@ const getConversationById = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid lead ID format' });
         }
 
-        // ✅ Cast both IDs to String before any DB query
         const safeUserId = String(req.userId);
         const safeLeadId = String(leadId);
 
@@ -163,7 +203,6 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
 
-        // Mark replies as read
         if (lead.replies && lead.replies.length > 0) {
             const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
             if (unreadReplies.length > 0) {
@@ -303,7 +342,7 @@ const batchSend = async (req, res) => {
         if (leads.length > MAX_BATCH_SIZE) {
             return res.status(400).json({
                 success: false,
-                message: `Batch size exceeds maximum limit of ${MAX_BATCH_SIZE} leads.`,
+                message: 'Batch size exceeds maximum limit of ' + MAX_BATCH_SIZE + ' leads.',
                 maxAllowed: MAX_BATCH_SIZE,
                 sentCount: leads.length
             });
@@ -332,7 +371,6 @@ const batchSend = async (req, res) => {
             });
         }
 
-        // Token refresh logic
         let tokenValid = true;
         try {
             const now = new Date();
@@ -370,13 +408,11 @@ const batchSend = async (req, res) => {
             tokenValid = false;
         }
 
-        // CASE 1: Sending to an EXISTING lead
         if (leadId) {
             if (!isValidObjectId(leadId)) {
                 return res.status(400).json({ success: false, message: 'Invalid lead ID' });
             }
 
-            // ✅ FIX #26: Cast leadId to String before DB query
             const safeLeadId = String(leadId);
 
             const idempotencyKey = generateIdempotencyKey(safeUserId, safeLeadId, 'batchSend', null);
@@ -390,7 +426,6 @@ const batchSend = async (req, res) => {
                 });
             }
 
-            // ✅ FIX #26: Use safeLeadId and safeUserId in query
             const targetLead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
 
             if (!targetLead) {
@@ -483,7 +518,6 @@ const batchSend = async (req, res) => {
                 tokenRefreshed: tokenValid
             });
 
-        // CASE 2: Creating NEW leads and sending
         } else {
             if (allowNewLead === false) {
                 return res.status(400).json({ success: false, error: 'NEW_LEAD_NOT_ALLOWED' });
@@ -509,7 +543,6 @@ const batchSend = async (req, res) => {
                     continue;
                 }
 
-                // ✅ FIX #26: Use safeUserId in all queries
                 let lead = await Lead.findOne({ userId: safeUserId, email: leadEmail });
 
                 if (lead) {
