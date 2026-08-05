@@ -7,6 +7,14 @@ const { sanitizeString, isValidObjectId } = require('./sanitize');
 const crypto = require('crypto');
 
 /**
+ * ✅ Generate a cryptographically secure session ID.
+ * Uses crypto.randomBytes — NEVER Math.random().
+ */
+function generateSecureSessionId() {
+    return `assistant_${Date.now()}_${crypto.randomBytes(16).toString('hex')}`;
+}
+
+/**
  * POST /api/assistant
  * Handles assistant chat messages with context
  */
@@ -16,10 +24,9 @@ const assistantChat = async (req, res) => {
         const { message, sessionId } = req.body;
 
         console.log('🤖 [ASSISTANT] Chat request received');
-        console.log(' [ASSISTANT] User ID:', userId);
         console.log('🤖 [ASSISTANT] Message length:', message?.length || 0);
-        console.log('🤖 [ASSISTANT] Session ID present:', !!sessionId);
 
+        // Validate message
         if (!message || typeof message !== 'string' || message.trim() === '') {
             return res.status(400).json({ 
                 success: false,
@@ -28,7 +35,6 @@ const assistantChat = async (req, res) => {
             });
         }
 
-        // ✅ Validate message length to prevent abuse
         if (message.length > 5000) {
             return res.status(400).json({
                 success: false,
@@ -39,33 +45,31 @@ const assistantChat = async (req, res) => {
 
         const cleanMessage = sanitizeString(message.trim());
 
-        // ✅ FIX #1: Use crypto.randomBytes instead of Math.random() for session ID
+        // ✅ FIX #1: Always use crypto.randomBytes for session ID generation.
+        // If user provides a sessionId, validate it strictly. Otherwise generate securely.
         let currentSessionId;
-        if (sessionId && typeof sessionId === 'string') {
-            // Validate provided sessionId format
-            if (/^[a-zA-Z0-9_-]{10,100}$/.test(sessionId)) {
-                currentSessionId = sessionId;
-            } else {
-                // Generate secure session ID if provided one is invalid
-                currentSessionId = `assistant_${Date.now()}_${crypto.randomBytes(16).toString('hex')}`;
-            }
+        if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{10,100}$/.test(sessionId)) {
+            currentSessionId = sessionId;
         } else {
-            currentSessionId = `assistant_${Date.now()}_${crypto.randomBytes(16).toString('hex')}`;
+            currentSessionId = generateSecureSessionId();
         }
 
-        // ✅ Validate userId is valid ObjectId
-        if (!isValidObjectId(userId)) {
+        // ✅ FIX #8: Cast userId to String IMMEDIATELY — before ANY database call.
+        // CodeQL flags any DB query where the variable hasn't been explicitly typed.
+        if (!userId || !isValidObjectId(userId)) {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid user ID',
                 response: 'Invalid session.'
             });
         }
+        const safeUserId = String(userId);
+        const safeSessionId = String(currentSessionId);
 
-        // Get user info for context
-        const user = await User.findById(userId).select('fullName subscriptionTier country skillLevel primaryGoal interests');
+        // ✅ FIX #8: Use safeUserId (explicitly String-typed) in ALL queries from here on.
+        const user = await User.findById(safeUserId).select('fullName subscriptionTier country skillLevel primaryGoal interests');
         if (!user) {
-            console.error('❌ [ASSISTANT] User not found:', userId);
+            console.error('❌ [ASSISTANT] User not found');
             return res.status(404).json({ 
                 success: false,
                 error: 'User not found',
@@ -73,11 +77,8 @@ const assistantChat = async (req, res) => {
             });
         }
 
-        // ✅ FIX #8: Ensure query parameters are properly typed strings, not objects/arrays
-        const safeUserId = String(userId);
-        const safeSessionId = String(currentSessionId);
-
         // Check if session exists, create if not
+        // ✅ FIX #9: All query params are safeUserId/safeSessionId — explicitly String-typed above
         let session = await Session.findOne({ 
             userId: safeUserId, 
             sessionId: safeSessionId,
@@ -85,9 +86,9 @@ const assistantChat = async (req, res) => {
         });
 
         if (!session) {
-            // ✅ FIX #9: Sanitize session name before saving
             const sessionName = cleanMessage.substring(0, 50) || 'Assistant Chat';
             
+            // ✅ FIX #9: Session.create uses only safeUserId and safeSessionId
             session = await Session.create({
                 userId: safeUserId,
                 sessionId: safeSessionId,
@@ -97,7 +98,7 @@ const assistantChat = async (req, res) => {
             });
             console.log('✅ [ASSISTANT] New session created');
         } else {
-            // ✅ FIX #9: Verify session belongs to this user before updating
+            // Verify session belongs to this user
             if (String(session.userId) !== safeUserId) {
                 return res.status(403).json({
                     success: false,
@@ -106,7 +107,6 @@ const assistantChat = async (req, res) => {
                 });
             }
             
-            // Update session timestamp
             await Session.findOneAndUpdate(
                 { userId: safeUserId, sessionId: safeSessionId },
                 { updatedAt: new Date() }
@@ -115,7 +115,7 @@ const assistantChat = async (req, res) => {
         }
 
         // Save user message
-        // ✅ FIX #10: Ensure all values passed to create are properly typed
+        // ✅ FIX #10: ChatMessage.create uses only safeUserId and safeSessionId
         await ChatMessage.create({
             userId: safeUserId,
             sessionId: safeSessionId,
@@ -143,16 +143,14 @@ const assistantChat = async (req, res) => {
 
         console.log('📝 [ASSISTANT] Context messages count:', contextMessages.length);
 
-        // Generate AI response using the suggestion function
+        // Generate AI response
         let aiResponse;
         try {
-            // Use the existing suggestion generator with context
             const suggestion = await generateSuggestion(contextMessages.slice(-3));
             aiResponse = suggestion || "I'm here to help! What would you like to know?";
             console.log('✅ [ASSISTANT] AI response generated');
         } catch (aiError) {
             console.error('❌ [ASSISTANT] AI generation error:', aiError.message);
-            // Fallback response
             aiResponse = "I'm sorry, I'm having trouble processing your request right now. Please try again in a moment.";
         }
 
