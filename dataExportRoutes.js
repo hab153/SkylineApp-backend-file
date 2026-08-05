@@ -9,63 +9,66 @@ const express = require('express');
 const router = express.Router();
 const { verifyToken } = require('./authMiddleware');
 const { csrfProtection } = require('./csrf');
-const { createExport, getExport, listExports, deleteExport } = require('./dataExport');
+const { createExport, getExport, listExports, deleteExport, EXPORT_DIR } = require('./dataExport');
 const path = require('path');
 const fs = require('fs-extra');
-const { EXPORT_DIR } = require('./dataExport');
 
-// ✅ SECURITY: Sanitize filename to prevent path traversal attacks
-function sanitizeFileName(fileName) {
-    if (!fileName || typeof fileName !== 'string') return null;
-    
-    // Remove any directory traversal sequences
-    let sanitized = fileName
-        .replace(/\.\./g, '')           // Remove ..
-        .replace(/\//g, '')             // Remove forward slashes
-        .replace(/\\/g, '')             // Remove backslashes
-        .replace(/\x00/g, '')           // Remove null bytes
-        .trim();
-    
-    // Only allow alphanumeric, dots, hyphens, underscores
-    sanitized = sanitized.replace(/[^a-zA-Z0-9._-]/g, '');
-    
-    // Ensure it's not empty after sanitization
-    if (!sanitized || sanitized.length === 0) return null;
-    
-    // Final check: resolved path must be inside EXPORT_DIR
-    const resolvedPath = path.resolve(EXPORT_DIR, sanitized);
-    if (!resolvedPath.startsWith(path.resolve(EXPORT_DIR))) {
-        return null;
-    }
-    
-    return sanitized;
+// Resolved once at startup — never changes
+const SAFE_EXPORT_DIR = path.resolve(EXPORT_DIR);
+
+/**
+ * ✅ Validate exportId against the strict pattern used by dataExport.js.
+ * Only accepts: export_<digits>_<16 hex chars>
+ * Returns null if invalid — no fallback.
+ */
+function validateExportId(exportId) {
+    if (!exportId || typeof exportId !== 'string') return null;
+    if (!/^export_\d+_[a-fA-F0-9]{16}$/.test(exportId)) return null;
+    return exportId;
 }
 
-// ✅ SECURITY: Validate exportId format (must be alphanumeric/hex only)
-function isValidExportId(exportId) {
-    if (!exportId || typeof exportId !== 'string') return false;
-    // Allow MongoDB ObjectId format (24 hex chars) or UUID format
-    return /^[a-fA-F0-9]{24}$/.test(exportId) || /^[a-fA-F0-9-]{36}$/.test(exportId);
+/**
+ * ✅ Build a safe file path within EXPORT_DIR from an exportId and extension.
+ * Uses path.basename() to strip any directory components.
+ * Verifies the resolved path starts with SAFE_EXPORT_DIR + separator.
+ * Returns null if anything is wrong.
+ */
+function buildSafeFilePath(exportId, extension) {
+    const validId = validateExportId(exportId);
+    if (!validId) return null;
+
+    const allowedExt = ['json', 'zip', 'csv'];
+    const ext = String(extension).replace(/^\./, '').toLowerCase();
+    if (!allowedExt.includes(ext)) return null;
+
+    const fileName = `${validId}.${ext}`;
+
+    // path.basename strips any ../ or / components
+    const baseName = path.basename(fileName);
+    if (!baseName || baseName !== fileName) return null;
+
+    const resolved = path.resolve(SAFE_EXPORT_DIR, baseName);
+
+    // Must be inside SAFE_EXPORT_DIR
+    if (!resolved.startsWith(SAFE_EXPORT_DIR + path.sep)) return null;
+
+    return resolved;
 }
 
 /**
  * POST /api/data/export
  * Initiate a new data export
- * 
- * Body: { format: 'json' | 'csv' }
  */
 router.post('/export', verifyToken, csrfProtection, async (req, res) => {
     try {
         const { format = 'json' } = req.body;
-        
-        // Validate format
+
         if (!['json', 'csv'].includes(format)) {
-            return res.status(400).json({ 
-                error: 'Invalid format. Supported formats: json, csv' 
+            return res.status(400).json({
+                error: 'Invalid format. Supported formats: json, csv'
             });
         }
 
-        // Get IP for logging
         const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
         const userAgent = req.headers['user-agent'];
 
@@ -79,16 +82,16 @@ router.post('/export', verifyToken, csrfProtection, async (req, res) => {
 
     } catch (error) {
         console.error('[DataExport] Export error:', error.message);
-        
+
         if (error.message === 'Rate limit exceeded. Please wait 1 hour before requesting another export.') {
             return res.status(429).json({ error: error.message });
         }
         if (error.message === 'User not found') {
             return res.status(404).json({ error: error.message });
         }
-        
-        res.status(500).json({ 
-            error: 'Failed to create export. Please try again later.' 
+
+        res.status(500).json({
+            error: 'Failed to create export. Please try again later.'
         });
     }
 });
@@ -110,8 +113,8 @@ router.get('/exports', verifyToken, async (req, res) => {
         if (error.message === 'User not found') {
             return res.status(404).json({ error: error.message });
         }
-        res.status(500).json({ 
-            error: 'Failed to list exports' 
+        res.status(500).json({
+            error: 'Failed to list exports'
         });
     }
 });
@@ -123,72 +126,63 @@ router.get('/exports', verifyToken, async (req, res) => {
 router.get('/export/:exportId', verifyToken, async (req, res) => {
     try {
         const { exportId } = req.params;
-        
-        // ✅ FIX #2/#3: Validate exportId format to prevent path traversal
-        if (!isValidExportId(exportId)) {
-            return res.status(400).json({ 
-                error: 'Invalid export ID format' 
+
+        // ✅ FIX #2/#3: Validate exportId against strict pattern
+        const validExportId = validateExportId(exportId);
+        if (!validExportId) {
+            return res.status(400).json({
+                error: 'Invalid export ID format'
             });
         }
-        
-        // Get export record
-        const exportRecord = await getExport(req.userId, exportId);
-        
+
+        // Get export record from DB
+        const exportRecord = await getExport(req.userId, validExportId);
+
         if (!exportRecord || !exportRecord.fileExists) {
-            return res.status(404).json({ 
-                error: 'Export not found or expired' 
+            return res.status(404).json({
+                error: 'Export not found or expired'
             });
         }
 
-        // Check if file is expired
         if (new Date(exportRecord.expiresAt) < new Date()) {
-            return res.status(410).json({ 
-                error: 'Export has expired. Please request a new one.' 
+            return res.status(410).json({
+                error: 'Export has expired. Please request a new one.'
             });
         }
 
-        // ✅ FIX #2/#3: Sanitize filename before constructing path
-        const rawFileName = exportRecord.fileName || `${exportId}.json`;
-        const fileName = sanitizeFileName(rawFileName);
-        
-        if (!fileName) {
-            console.warn(`⚠️ [DataExport] Blocked path traversal attempt: ${rawFileName}`);
-            return res.status(400).json({ 
-                error: 'Invalid file name' 
-            });
-        }
-        
-        const filePath = path.join(EXPORT_DIR, fileName);
+        // ✅ FIX #2/#3: Build safe file path using buildSafeFilePath().
+        // This function uses path.basename() + prefix verification.
+        // No raw path.join() with user-controlled input anywhere.
+        const ext = exportRecord.format === 'csv' ? 'zip' : 'json';
+        const filePath = buildSafeFilePath(validExportId, ext);
 
-        // ✅ Double-check: resolved path must be inside EXPORT_DIR
-        const resolvedFilePath = path.resolve(filePath);
-        if (!resolvedFilePath.startsWith(path.resolve(EXPORT_DIR))) {
-            console.warn(`⚠️ [DataExport] Blocked path traversal: ${filePath}`);
-            return res.status(403).json({ 
-                error: 'Access denied' 
+        if (!filePath) {
+            console.warn(`⚠️ [DataExport] Blocked unsafe path for exportId: ${validExportId}`);
+            return res.status(400).json({
+                error: 'Invalid file path'
             });
         }
 
-        // Check if file exists
         if (!await fs.pathExists(filePath)) {
-            return res.status(404).json({ 
-                error: 'Export file not found' 
+            return res.status(404).json({
+                error: 'Export file not found'
             });
         }
 
-        // Determine content type
+        // Determine content type from the safe extension
         let contentType;
-        if (fileName.endsWith('.zip')) {
+        if (ext === 'zip') {
             contentType = 'application/zip';
-        } else if (fileName.endsWith('.json')) {
+        } else if (ext === 'json') {
             contentType = 'application/json';
-        } else if (fileName.endsWith('.csv')) {
+        } else if (ext === 'csv') {
             contentType = 'text/csv';
         } else {
             contentType = 'application/octet-stream';
         }
 
-        // Send file
+        const fileName = path.basename(filePath);
+
         res.setHeader('Content-Type', contentType);
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
         res.setHeader('Content-Length', exportRecord.fileSize || 0);
@@ -201,8 +195,8 @@ router.get('/export/:exportId', verifyToken, async (req, res) => {
         if (error.message === 'Export not found') {
             return res.status(404).json({ error: error.message });
         }
-        res.status(500).json({ 
-            error: 'Failed to download export' 
+        res.status(500).json({
+            error: 'Failed to download export'
         });
     }
 });
@@ -214,16 +208,16 @@ router.get('/export/:exportId', verifyToken, async (req, res) => {
 router.delete('/export/:exportId', verifyToken, csrfProtection, async (req, res) => {
     try {
         const { exportId } = req.params;
-        
-        // ✅ FIX: Validate exportId format
-        if (!isValidExportId(exportId)) {
-            return res.status(400).json({ 
-                error: 'Invalid export ID format' 
+
+        const validExportId = validateExportId(exportId);
+        if (!validExportId) {
+            return res.status(400).json({
+                error: 'Invalid export ID format'
             });
         }
-        
-        await deleteExport(req.userId, exportId);
-        
+
+        await deleteExport(req.userId, validExportId);
+
         res.json({
             success: true,
             message: 'Export deleted successfully'
@@ -234,8 +228,8 @@ router.delete('/export/:exportId', verifyToken, csrfProtection, async (req, res)
         if (error.message === 'Export not found') {
             return res.status(404).json({ error: error.message });
         }
-        res.status(500).json({ 
-            error: 'Failed to delete export' 
+        res.status(500).json({
+            error: 'Failed to delete export'
         });
     }
 });
