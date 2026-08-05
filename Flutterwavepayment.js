@@ -2,28 +2,26 @@ const axios = require('axios');
 const User = require('./User');
 
 /**
- * ✅ FIX #41: Mask sensitive values before logging.
- * Shows first 4 and last 4 characters, replaces middle with ***.
+ * ✅ FIX #71: maskSecret now returns ONLY '***' — never shows any characters.
+ * CodeQL flags ANY partial reveal of a secret value, even first/last 4 chars.
  */
-function maskSecret(value) {
-    if (!value || typeof value !== 'string') return '***';
-    if (value.length <= 8) return value.substring(0, 2) + '***';
-    return value.substring(0, 4) + '***' + value.substring(value.length - 4);
+function maskSecret() {
+    return '***';
 }
 
 /**
- * ✅ Safe logger that masks any string matching known secret/token patterns.
+ * ✅ FIX #71: safeLog redacts entire strings that match secret patterns.
+ * Does NOT attempt to partially mask — just replaces with [REDACTED].
+ * This eliminates the data flow from secret → console.log that CodeQL detects.
  */
 function safeLog(...args) {
     const sanitized = args.map(arg => {
         if (typeof arg !== 'string') return arg;
-        return arg
-            .replace(/(FLWSECK-[a-zA-Z0-9]+)/g, (match) => maskSecret(match))
-            .replace(/(sk_[a-zA-Z0-9]+)/g, (match) => maskSecret(match))
-            .replace(/(Bearer\s+)([a-zA-Z0-9_-]{8,})/g, (full, prefix, token) => prefix + maskSecret(token))
-            .replace(/(key[_\s]*[:=]\s*)([a-zA-Z0-9_-]{8,})/gi, (full, prefix, key) => prefix + maskSecret(key))
-            .replace(/(secret[_\s]*[:=]\s*)([a-zA-Z0-9_-]{8,})/gi, (full, prefix, sec) => prefix + maskSecret(sec))
-            .replace(/(token[_\s]*[:=]\s*)([a-zA-Z0-9_-]{8,})/gi, (full, prefix, tok) => prefix + maskSecret(tok));
+        // If string matches any secret pattern, replace entirely
+        if (/FLWSECK|sk_|Bearer|api.key|secret|token|password/i.test(arg)) {
+            return '[REDACTED]';
+        }
+        return arg;
     });
     console.log(...sanitized);
 }
@@ -46,7 +44,6 @@ const createFlutterwavePayment = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // ✅ FIX #41: Do NOT log user email — it's PII
         safeLog('👤 [PAYMENT] User identified, ID:', safeUserId);
 
         let amount = 0;
@@ -75,10 +72,9 @@ const createFlutterwavePayment = async (req, res) => {
             return res.status(500).json({ message: 'Server configuration error: Missing Payment Key' });
         }
 
-        // ✅ FIX #41: NEVER log even a partial secret key.
-        // Previous code logged: process.env.FLUTTERWAVE_SECRET_KEY.substring(0, 10) + '...'
-        // CodeQL flags ANY logging of env vars that contain secrets, even partial.
-        safeLog('🔑 [PAYMENT] Secret Key is configured (length:', process.env.FLUTTERWAVE_SECRET_KEY.length, 'chars)');
+        // ✅ FIX #71: Do NOT reference process.env.FLUTTERWAVE_SECRET_KEY at all in log.
+        // Not even .length — CodeQL flags any access to a secret env var near console.log.
+        safeLog('🔑 [PAYMENT] Secret Key is configured and validated');
 
         const payload = {
             tx_ref: txRef,
@@ -114,21 +110,17 @@ const createFlutterwavePayment = async (req, res) => {
         );
 
         if (response.data.status === 'success') {
-            // ✅ FIX #41: Do NOT log the payment link — it contains a session token
             safeLog('✅ [PAYMENT] Payment link generated successfully');
             res.json({
                 link: response.data.data.link,
                 txRef: txRef
             });
         } else {
-            // ✅ FIX #41: Do NOT log full response.data — it may contain sensitive fields
             console.error('❌ [PAYMENT] Flutterwave API returned non-success status');
             throw new Error(response.data.message || 'Failed to create payment link');
         }
 
     } catch (err) {
-        // ✅ FIX #41: Do NOT log err.response?.data — it contains the full API response
-        // which may include authorization headers or sensitive payment data
         console.error('❌ [PAYMENT] Critical Error:', err.message);
         res.status(500).json({
             message: 'Could not initiate payment',
