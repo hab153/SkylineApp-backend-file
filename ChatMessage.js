@@ -39,6 +39,7 @@ const ChatMessageSchema = new mongoose.Schema({
 });
 
 // ✅ SPEED: Compound index for faster chat queries
+
 ChatMessageSchema.index({ userId: 1, sessionId: 1 });
 ChatMessageSchema.index({ userId: 1, createdAt: -1 });
 
