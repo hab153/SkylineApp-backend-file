@@ -6,7 +6,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Report = require('./Report');
 const speakeasy = require('speakeasy'); // ✅ For TOTP 2FA
-const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername } = require('./sanitize');
+const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername, sanitizeString } = require('./sanitize');
 const { generateCsrfToken, deleteCsrfToken } = require('./csrf');
 
 // ✅ SECURE: Strict JWT secret getter - NO FALLBACKS
@@ -35,17 +35,31 @@ function validateSecurityAnswer(answer, fieldName) {
 const register = async (req, res) => {
     let { username, email, password } = req.body;
     
+    // ✅ FIX #11/#12: Validate input types before processing
+    if (typeof username !== 'string' || typeof email !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ message: 'Invalid input types. All fields must be strings.' });
+    }
+    
     const originalUsername = username;
     username = sanitizeUsername(username);
     email = sanitizeEmail(email);
     
+    // ✅ Ensure sanitized values are still valid strings
+    if (!username || !email || !password) {
+        return res.status(400).json({ message: 'Invalid input after sanitization.' });
+    }
+    
     try {
-        const emailExists = await User.findOne({ email });
+        // ✅ FIX #11: Explicitly cast to string for query safety
+        const safeEmail = String(email);
+        const safeUsername = String(username);
+        
+        const emailExists = await User.findOne({ email: safeEmail });
         if (emailExists) {
             return res.status(400).json({ message: 'Email already registered.' });
         }
         
-        const usernameExists = await User.findOne({ username });
+        const usernameExists = await User.findOne({ username: safeUsername });
         if (usernameExists) {
             return res.status(400).json({ message: 'Username already taken.' });
         }
@@ -54,8 +68,8 @@ const register = async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, salt);
         
         const user = new User({ 
-            username, 
-            email, 
+            username: safeUsername, 
+            email: safeEmail, 
             password: hashedPassword, 
             tokenVersion: 0,
             fullName: originalUsername
@@ -102,12 +116,26 @@ const register = async (req, res) => {
 // ✅ SECURE: Login function - BACKDOOR REMOVED
 const login = async (req, res) => {
     let { identifier, password } = req.body;
+    
+    // ✅ FIX: Validate input types
+    if (typeof identifier !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ message: 'Invalid input types.' });
+    }
+    
     identifier = identifier ? identifier.trim() : '';
+    
+    if (!identifier || !password) {
+        return res.status(400).json({ message: 'Identifier and password are required.' });
+    }
+    
     try {
+        // ✅ FIX #11/#12: Sanitize and explicitly type-cast identifier
+        const safeIdentifier = String(sanitizeString(identifier));
+        
         const query = sanitizeQuery({
             $or: [
-                { email: identifier },
-                { username: identifier }
+                { email: safeIdentifier },
+                { username: safeIdentifier }
             ]
         });
         
@@ -142,11 +170,11 @@ const login = async (req, res) => {
         
         // ✅ If user is admin, they go through TOTP 2FA verification
         if (user.isAdmin) {
-            console.log(`🔐 [ADMIN] Admin user ${user.email} logging in`);
+            console.log(`🔐 [ADMIN] Admin user logging in`);
             
             // Check if TOTP is enabled
             if (!user.adminTotpEnabled) {
-                console.warn(`⚠️ [ADMIN] Admin ${user.email} has not enabled 2FA`);
+                console.warn(`⚠️ [ADMIN] Admin has not enabled 2FA`);
                 return res.status(403).json({
                     message: 'Admin 2FA not configured. Please contact support.',
                     requires2FASetup: true
@@ -205,7 +233,7 @@ const logout = async (req, res) => {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        const user = await User.findById(req.userId);
+        const user = await User.findById(String(req.userId));
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
         await deleteCsrfToken(req.userId);
@@ -222,7 +250,7 @@ const revokeAllTokens = async (req, res) => {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        const user = await User.findById(req.userId);
+        const user = await User.findById(String(req.userId));
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         await user.revokeTokens();
         await deleteCsrfToken(req.userId);
@@ -237,8 +265,8 @@ const revokeAllTokens = async (req, res) => {
 const verifyEmail = async (req, res) => {
     try {
         const { email } = req.body;
-        if (!email) { return res.status(400).json({ message: 'Email is required' }); }
-        const sanitizedEmail = sanitizeEmail(email);
+        if (!email || typeof email !== 'string') { return res.status(400).json({ message: 'Email is required' }); }
+        const sanitizedEmail = String(sanitizeEmail(email));
         const user = await User.findOne({ email: sanitizedEmail });
         if (!user) { return res.status(404).json({ message: 'Email not found.' }); }
         res.json({ success: true, message: 'Email verified' });
@@ -252,9 +280,11 @@ const verifyEmail = async (req, res) => {
 const verifyUsername = async (req, res) => {
     try {
         const { email, username } = req.body;
-        if (!email || !username) { return res.status(400).json({ message: 'Email and username are required' }); }
-        const sanitizedEmail = sanitizeEmail(email);
-        const sanitizedUsername = sanitizeUsername(username);
+        if (!email || typeof email !== 'string' || !username || typeof username !== 'string') { 
+            return res.status(400).json({ message: 'Email and username are required' }); 
+        }
+        const sanitizedEmail = String(sanitizeEmail(email));
+        const sanitizedUsername = String(sanitizeUsername(username));
         const user = await User.findOne({ email: sanitizedEmail, username: sanitizedUsername });
         if (!user) { return res.status(400).json({ message: 'Username does not match.' }); }
         res.json({ success: true, message: 'Username verified' });
@@ -265,15 +295,13 @@ const verifyUsername = async (req, res) => {
 };
 
 // ✅ REMOVED: resetPasswordEmailUsername - VULNERABLE ENDPOINT DELETED
-// This endpoint allowed password reset with only email+username (no token/2FA).
-// Secure alternative: use forgotPassword + resetPassword flow with emailed token.
 
 // ✅ FIXED: Forgot password
 const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
-        if (!email) { return res.status(400).json({ message: 'Email is required' }); }
-        const sanitizedEmail = sanitizeEmail(email);
+        if (!email || typeof email !== 'string') { return res.status(400).json({ message: 'Email is required' }); }
+        const sanitizedEmail = String(sanitizeEmail(email));
         const user = await User.findOne({ email: sanitizedEmail });
         if (!user) { 
             return res.json({ message: 'If an account exists with this email, a reset link has been sent.' }); 
@@ -308,13 +336,13 @@ const forgotPassword = async (req, res) => {
 const resetPassword = async (req, res) => {
     try {
         const { token, newPassword } = req.body;
-        if (!token || !newPassword) { 
+        if (!token || typeof token !== 'string' || !newPassword || typeof newPassword !== 'string') { 
             return res.status(400).json({ message: 'Token and new password are required' }); 
         }
         if (newPassword.length < 8) { 
             return res.status(400).json({ message: 'Password must be at least 8 characters' }); 
         }
-        const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+        const hashedToken = crypto.createHash('sha256').update(String(token)).digest('hex');
         const query = sanitizeQuery({ resetToken: hashedToken, resetTokenExpiry: { $gt: new Date() } });
         const user = await User.findOne(query);
         if (!user) { return res.status(400).json({ message: 'Invalid or expired reset token' }); }
@@ -336,6 +364,11 @@ const resetPassword = async (req, res) => {
 const verifyLayer2 = async (req, res) => {
     const { dish, pn, mum, dm } = req.body;
     
+    // ✅ FIX #13: Validate ALL inputs are strings before any processing
+    if (typeof dish !== 'string' || typeof pn !== 'string' || typeof mum !== 'string' || typeof dm !== 'string') {
+        return res.status(400).json({ message: 'All answers must be strings.' });
+    }
+    
     // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
     const validations = [
         validateSecurityAnswer(dish, 'Favorite dish'),
@@ -354,20 +387,22 @@ const verifyLayer2 = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' }); 
         }
         
-        const user = await User.findById(req.userId);
+        // ✅ FIX #13: Cast userId to string for query safety
+        const safeUserId = String(req.userId);
+        const user = await User.findById(safeUserId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
         
         // ✅ CRITICAL: Verify user is actually an admin
         if (!user.isAdmin) {
-            console.warn(`⚠️ [Layer2] Non-admin user ${user.email} attempted Layer 2 verification`);
+            console.warn(`⚠️ [Layer2] Non-admin user attempted Layer 2 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
         // ✅ CRITICAL: Check that security setup is complete
         if (!user.securitySetupComplete) {
-            console.warn(`⚠️ [Layer2] Admin ${user.email} has not completed security setup`);
+            console.warn(`⚠️ [Layer2] Admin has not completed security setup`);
             return res.status(403).json({
                 message: 'Admin security setup not completed',
                 needsSetup: true,
@@ -386,17 +421,17 @@ const verifyLayer2 = async (req, res) => {
         const missingAnswers = requiredAnswers.filter(a => !a.field || a.field.length < 3);
         if (missingAnswers.length > 0) {
             const missingNames = missingAnswers.map(a => a.name).join(', ');
-            console.error(`❌ [Layer2] Admin ${user.email} has missing or short security answers: ${missingNames}`);
+            console.error(`❌ [Layer2] Admin has missing or short security answers: ${missingNames}`);
             return res.status(500).json({ 
                 message: 'Admin security answers not configured. Please contact support.' 
             });
         }
         
         // ✅ Compare answers (all already validated as non-empty above)
-        const d1 = await bcrypt.compare(dish.trim().toLowerCase(), user.adminAns_dish);
-        const d2 = await bcrypt.compare(pn.trim().toLowerCase(), user.adminAns_pn);
-        const d3 = await bcrypt.compare(mum.trim().toLowerCase(), user.adminAns_mum);
-        const d4 = await bcrypt.compare(dm.trim().toLowerCase(), user.adminAns_dm);
+        const d1 = await bcrypt.compare(String(dish).trim().toLowerCase(), user.adminAns_dish);
+        const d2 = await bcrypt.compare(String(pn).trim().toLowerCase(), user.adminAns_pn);
+        const d3 = await bcrypt.compare(String(mum).trim().toLowerCase(), user.adminAns_mum);
+        const d4 = await bcrypt.compare(String(dm).trim().toLowerCase(), user.adminAns_dm);
         
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
@@ -417,11 +452,11 @@ const verifyLayer2 = async (req, res) => {
         }
         
         // ✅ Log failed attempts for security monitoring
-        console.warn(`⚠️ [Layer2] Failed verification attempt for admin ${user.email}`);
+        console.warn(`⚠️ [Layer2] Failed verification attempt for admin`);
         res.status(400).json({ message: 'Incorrect answers' });
         
     } catch (err) { 
-        console.error('❌ Layer2 Error:', err); 
+        console.error('❌ Layer2 Error:', err.message); 
         res.status(500).json({ message: 'Server Error' }); 
     }
 };
@@ -429,6 +464,11 @@ const verifyLayer2 = async (req, res) => {
 // ✅ FIXED: Verify Layer 3 - WITH SECURITY ANSWERS VALIDATION
 const verifyLayer3 = async (req, res) => {
     const { dad, friend, enemy, app } = req.body;
+    
+    // ✅ FIX #14: Validate ALL inputs are strings before any processing
+    if (typeof dad !== 'string' || typeof friend !== 'string' || typeof enemy !== 'string' || typeof app !== 'string') {
+        return res.status(400).json({ message: 'All answers must be strings.' });
+    }
     
     // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
     const validations = [
@@ -448,20 +488,22 @@ const verifyLayer3 = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' }); 
         }
         
-        const user = await User.findById(req.userId);
+        // ✅ FIX #14: Cast userId to string for query safety
+        const safeUserId = String(req.userId);
+        const user = await User.findById(safeUserId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
         
         // ✅ CRITICAL: Verify user is actually an admin
         if (!user.isAdmin) {
-            console.warn(`⚠️ [Layer3] Non-admin user ${user.email} attempted Layer 3 verification`);
+            console.warn(`⚠️ [Layer3] Non-admin user attempted Layer 3 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
         // ✅ CRITICAL: Check that security setup is complete
         if (!user.securitySetupComplete) {
-            console.warn(`⚠️ [Layer3] Admin ${user.email} has not completed security setup`);
+            console.warn(`⚠️ [Layer3] Admin has not completed security setup`);
             return res.status(403).json({
                 message: 'Admin security setup not completed',
                 needsSetup: true,
@@ -480,17 +522,17 @@ const verifyLayer3 = async (req, res) => {
         const missingAnswers = requiredAnswers.filter(a => !a.field || a.field.length < 3);
         if (missingAnswers.length > 0) {
             const missingNames = missingAnswers.map(a => a.name).join(', ');
-            console.error(`❌ [Layer3] Admin ${user.email} has missing or short security answers: ${missingNames}`);
+            console.error(`❌ [Layer3] Admin has missing or short security answers: ${missingNames}`);
             return res.status(500).json({ 
                 message: 'Admin security answers not configured. Please contact support.' 
             });
         }
         
         // ✅ Compare answers (all already validated as non-empty above)
-        const d1 = await bcrypt.compare(dad.trim().toLowerCase(), user.adminAns_dad);
-        const d2 = await bcrypt.compare(friend.trim().toLowerCase(), user.adminAns_friend);
-        const d3 = await bcrypt.compare(enemy.trim().toLowerCase(), user.adminAns_enemy);
-        const d4 = await bcrypt.compare(app.trim().toLowerCase(), user.adminAns_app);
+        const d1 = await bcrypt.compare(String(dad).trim().toLowerCase(), user.adminAns_dad);
+        const d2 = await bcrypt.compare(String(friend).trim().toLowerCase(), user.adminAns_friend);
+        const d3 = await bcrypt.compare(String(enemy).trim().toLowerCase(), user.adminAns_enemy);
+        const d4 = await bcrypt.compare(String(app).trim().toLowerCase(), user.adminAns_app);
         
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
@@ -508,11 +550,11 @@ const verifyLayer3 = async (req, res) => {
         }
         
         // ✅ Log failed attempts for security monitoring
-        console.warn(`⚠️ [Layer3] Failed verification attempt for admin ${user.email}`);
+        console.warn(`⚠️ [Layer3] Failed verification attempt for admin`);
         res.status(400).json({ message: 'Incorrect answers' });
         
     } catch (err) { 
-        console.error('❌ Layer3 Error:', err); 
+        console.error('❌ Layer3 Error:', err.message); 
         res.status(500).json({ message: 'Server Error' }); 
     }
 };
@@ -520,12 +562,23 @@ const verifyLayer3 = async (req, res) => {
 // ✅ FIXED: Verify age
 const verifyAge = async (req, res) => {
     const { day, month, year } = req.body;
+    
+    // ✅ FIX #15: Validate inputs are numbers
+    const numDay = Number(day);
+    const numMonth = Number(month);
+    const numYear = Number(year);
+    
+    if (isNaN(numDay) || isNaN(numMonth) || isNaN(numYear) || numDay < 1 || numDay > 31 || numMonth < 1 || numMonth > 12 || numYear < 1900 || numYear > 2026) {
+        return res.status(400).json({ message: 'Invalid date values.' });
+    }
+    
     try {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
-        let user = await User.findById(req.userId);
+        const safeUserId = String(req.userId);
+        let user = await User.findById(safeUserId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         
-        const birthDate = new Date(year, month - 1, day);
+        const birthDate = new Date(numYear, numMonth - 1, numDay);
         const today = new Date();
         let age = today.getFullYear() - birthDate.getFullYear();
         const m = today.getMonth() - birthDate.getMonth();
@@ -558,15 +611,22 @@ const verifyAge = async (req, res) => {
 // ✅ FIXED: Change email
 const changeEmail = async (req, res) => {
     const { currentPassword, newEmail } = req.body;
+    
+    // ✅ Validate input types
+    if (typeof currentPassword !== 'string' || typeof newEmail !== 'string') {
+        return res.status(400).json({ message: 'Invalid input types.' });
+    }
+    
     try {
         if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
-        let user = await User.findById(req.userId);
+        const safeUserId = String(req.userId);
+        let user = await User.findById(safeUserId);
         if (!user) { return res.status(404).json({ message: 'User not found' }); }
         
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) { return res.status(400).json({ message: 'Current password is incorrect' }); }
         
-        const sanitizedNewEmail = sanitizeEmail(newEmail);
+        const sanitizedNewEmail = String(sanitizeEmail(newEmail));
         const existingUser = await User.findOne({ email: sanitizedNewEmail });
         if (existingUser && existingUser._id.toString() !== user._id.toString()) { 
             return res.status(400).json({ message: 'Email is already in use' }); 
@@ -584,13 +644,20 @@ const changeEmail = async (req, res) => {
 // ✅ FIXED: Delete account - COMPLETE DATA PURGE (GDPR Compliance)
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
+    
+    // ✅ Validate input type
+    if (typeof password !== 'string') {
+        return res.status(400).json({ message: 'Password must be a string.' });
+    }
+    
     try {
         // ─── VALIDATE USER ───
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        const user = await User.findById(req.userId);
+        const safeUserId = String(req.userId);
+        const user = await User.findById(safeUserId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -601,9 +668,9 @@ const deleteAccount = async (req, res) => {
             return res.status(400).json({ message: 'Incorrect password. Account not deleted.' });
         }
 
-        const userId = req.userId;
+        const userId = safeUserId;
 
-        console.log(`🗑️ [DELETE ACCOUNT] Starting deletion process for user: ${user.email} (${userId})`);
+        console.log(`🗑️ [DELETE ACCOUNT] Starting deletion process for user ID: ${userId}`);
 
         // ─── ✅ DELETE ALL USER DATA ───
 
@@ -650,13 +717,12 @@ const deleteAccount = async (req, res) => {
             const followUpResult = await FollowUpSchedule.deleteMany({ userId });
             console.log(`   ⏰ Deleted ${followUpResult.deletedCount} follow-up schedules`);
         } catch (err) {
-            // FollowUpSchedule might not exist, which is fine
             console.log(`   ⏰ No follow-up schedule model found, skipping`);
         }
 
         // 10. ✅ FINALLY: Delete the User account
         await User.findByIdAndDelete(userId);
-        console.log(`   👤 Deleted user account: ${user.email}`);
+        console.log(`   👤 Deleted user account ID: ${userId}`);
 
         // ─── TOTAL SUMMARY ───
         const totalDeleted = 
@@ -691,7 +757,6 @@ const deleteAccount = async (req, res) => {
 
     } catch (err) {
         console.error('❌ [DELETE ACCOUNT] Error:', err.message);
-        console.error('❌ [DELETE ACCOUNT] Stack:', err.stack);
         res.status(500).json({ 
             success: false,
             message: 'Server Error during account deletion',
@@ -704,18 +769,19 @@ const deleteAccount = async (req, res) => {
 const setupAdminSecurity = async (req, res) => {
     try {
         const userId = req.userId;
-        if (!userId) {
+        if (!userId || !isValidObjectId(userId)) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
         // ✅ Verify user is admin
-        const user = await User.findById(userId);
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId);
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
 
         if (!user.isAdmin) {
-            console.warn(`⚠️ [SECURITY SETUP] Non-admin user ${user.email} attempted to setup security`);
+            console.warn(`⚠️ [SECURITY SETUP] Non-admin user attempted to setup security`);
             return res.status(403).json({ success: false, message: 'Admin privileges required' });
         }
 
@@ -724,6 +790,14 @@ const setupAdminSecurity = async (req, res) => {
             dish, pn, mum, dm,  // Layer 2 questions
             dad, friend, enemy, app  // Layer 3 questions
         } = req.body;
+
+        // ✅ Validate all inputs are strings
+        const allInputs = { dish, pn, mum, dm, dad, friend, enemy, app };
+        for (const [key, value] of Object.entries(allInputs)) {
+            if (typeof value !== 'string') {
+                return res.status(400).json({ success: false, message: `Invalid input type for ${key}. Must be a string.` });
+            }
+        }
 
         // Validate all answers are present and meet minimum requirements
         const requiredFields = [
@@ -755,14 +829,14 @@ const setupAdminSecurity = async (req, res) => {
         // ─── ✅ HASH ALL ANSWERS ───
         const saltRounds = 10;
         
-        const hashedDish = await bcrypt.hash(dish.trim().toLowerCase(), saltRounds);
-        const hashedPn = await bcrypt.hash(pn.trim().toLowerCase(), saltRounds);
-        const hashedMum = await bcrypt.hash(mum.trim().toLowerCase(), saltRounds);
-        const hashedDm = await bcrypt.hash(dm.trim().toLowerCase(), saltRounds);
-        const hashedDad = await bcrypt.hash(dad.trim().toLowerCase(), saltRounds);
-        const hashedFriend = await bcrypt.hash(friend.trim().toLowerCase(), saltRounds);
-        const hashedEnemy = await bcrypt.hash(enemy.trim().toLowerCase(), saltRounds);
-        const hashedApp = await bcrypt.hash(app.trim().toLowerCase(), saltRounds);
+        const hashedDish = await bcrypt.hash(String(dish).trim().toLowerCase(), saltRounds);
+        const hashedPn = await bcrypt.hash(String(pn).trim().toLowerCase(), saltRounds);
+        const hashedMum = await bcrypt.hash(String(mum).trim().toLowerCase(), saltRounds);
+        const hashedDm = await bcrypt.hash(String(dm).trim().toLowerCase(), saltRounds);
+        const hashedDad = await bcrypt.hash(String(dad).trim().toLowerCase(), saltRounds);
+        const hashedFriend = await bcrypt.hash(String(friend).trim().toLowerCase(), saltRounds);
+        const hashedEnemy = await bcrypt.hash(String(enemy).trim().toLowerCase(), saltRounds);
+        const hashedApp = await bcrypt.hash(String(app).trim().toLowerCase(), saltRounds);
 
         // ─── ✅ SAVE TO USER ───
         user.adminAns_dish = hashedDish;
@@ -778,7 +852,7 @@ const setupAdminSecurity = async (req, res) => {
 
         await user.save();
 
-        console.log(`✅ [SECURITY SETUP] Admin ${user.email} completed security setup`);
+        console.log(`✅ [SECURITY SETUP] Admin completed security setup`);
 
         res.json({
             success: true,
@@ -800,11 +874,12 @@ const setupAdminSecurity = async (req, res) => {
 const checkAdminSecurityStatus = async (req, res) => {
     try {
         const userId = req.userId;
-        if (!userId) {
+        if (!userId || !isValidObjectId(userId)) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
-        const user = await User.findById(userId).select('isAdmin securitySetupComplete securitySetupDate');
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId).select('isAdmin securitySetupComplete securitySetupDate');
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -834,8 +909,9 @@ const checkAdminSecurityStatus = async (req, res) => {
 const generateAdminTotp = async (req, res) => {
     try {
         const userId = req.userId;
-        if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
-        const user = await User.findById(userId);
+        if (!userId || !isValidObjectId(userId)) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId);
         if (!user || !user.isAdmin) return res.status(403).json({ success: false, message: 'Admin privileges required' });
         const secret = speakeasy.generateSecret({ name: 'Skyline Admin' });
         user.adminTotpSecret = secret.base32;
@@ -852,10 +928,12 @@ const enableAdminTotp = async (req, res) => {
     try {
         const { token } = req.body;
         const userId = req.userId;
-        if (!token) return res.status(400).json({ success: false, message: 'Token is required' });
-        const user = await User.findById(userId);
+        if (!token || typeof token !== 'string') return res.status(400).json({ success: false, message: 'Token is required' });
+        if (!userId || !isValidObjectId(userId)) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId);
         if (!user || !user.adminTotpSecret) return res.status(400).json({ success: false, message: 'Setup not initiated' });
-        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token, window: 1 });
+        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
         if (verified) {
             user.adminTotpEnabled = true;
             await user.save();
@@ -873,12 +951,21 @@ const enableAdminTotp = async (req, res) => {
 const verifyAdminTotpLogin = async (req, res) => {
     try {
         const { token, tempToken } = req.body;
-        if (!token || !tempToken) return res.status(400).json({ success: false, message: 'Token and tempToken required' });
+        if (!token || typeof token !== 'string' || !tempToken || typeof tempToken !== 'string') {
+            return res.status(400).json({ success: false, message: 'Token and tempToken required' });
+        }
         let decoded;
         try { decoded = jwt.verify(tempToken, process.env.JWT_SECRET); } catch (err) { return res.status(401).json({ success: false, message: 'Session expired' }); }
-        const user = await User.findById(decoded.id);
+        
+        // ✅ Validate decoded ID
+        if (!decoded.id || !isValidObjectId(decoded.id)) {
+            return res.status(401).json({ success: false, message: 'Invalid session' });
+        }
+        
+        const safeId = String(decoded.id);
+        const user = await User.findById(safeId);
         if (!user || !user.isAdmin || !user.adminTotpEnabled) return res.status(403).json({ success: false, message: '2FA not configured or invalid user' });
-        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token, window: 1 });
+        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
         if (verified) {
             const finalToken = jwt.sign(
                 { id: user._id, role: 'admin', permissions: user.permissions || ['all'] },
