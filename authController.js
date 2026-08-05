@@ -1,678 +1,989 @@
-const crypto = require('crypto');
-const EmailAccount = require('./EmailAccount');
-const Lead = require('./Lead');
 const User = require('./User');
-const Message = require('./Message'); 
 const ChatMessage = require('./ChatMessage');
-const { generateAIReply } = require('./aiReplyGenerator');
-// ✅ IMPORT ENCRYPTION MODULE TO MANUALLY DECRYPT
-const { decrypt } = require('./encryption'); 
-const { isValidObjectId, sanitizeString } = require('./sanitize');
+const Notification = require('./Notification');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const Report = require('./Report');
+const speakeasy = require('speakeasy'); // ✅ For TOTP 2FA
+const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername, sanitizeString } = require('./sanitize');
+const { generateCsrfToken, deleteCsrfToken } = require('./csrf');
 
-// ✅ FIX #37: Single-pass HTML sanitization (no double escaping)
-function sanitizeEmailBody(html) {
-  if (!html || typeof html !== 'string') return '';
-  
-  // Step 1: Strip ALL HTML tags first (prevents double-escaping issues)
-  let stripped = html.replace(/<[^>]*>/g, '');
-  
-  // Step 2: Decode HTML entities ONCE after stripping tags
-  let decoded = stripped
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ');
-  
-  // Step 3: Strip any tags that may have been revealed by decoding
-  decoded = decoded.replace(/<[^>]*>/g, '');
-  
-  return decoded.trim();
-}
-
-// ✅ FIX #40: Complete multi-character sanitization for email addresses
-function sanitizeEmail(email) {
-  if (!email || typeof email !== 'string') return null;
-  // Remove all non-standard characters, keep only valid email chars
-  let sanitized = email.replace(/[^\w@.\-+]/g, '').trim();
-  // Validate basic email format
-  if (!sanitized || !sanitized.includes('@') || sanitized.length > 254) return null;
-  return sanitized.toLowerCase();
-}
-
-// ✅ SECURITY: Validate Nylas webhook signature
-function validateWebhookSignature(req) {
-  const webhookSecret = process.env.NYLAS_WEBHOOK_SECRET_SKYLINE;
-  
-  if (!webhookSecret) {
-    console.error('❌ [WEBHOOK SECURITY] NYLAS_WEBHOOK_SECRET_SKYLINE is not configured!');
-    return false;
-  }
-  
-  // Nylas V3 sends signature in X-Nylas-Signature header
-  const signature = req.headers['x-nylas-signature'] || req.headers['X-Nylas-Signature'];
-  
-  if (!signature || typeof signature !== 'string') {
-    console.warn('⚠️ [WEBHOOK SECURITY] Missing X-Nylas-Signature header');
-    return false;
-  }
-  
-  // Get raw body for signature verification
-  let rawBody;
-  if (Buffer.isBuffer(req.body)) {
-    rawBody = req.body.toString('utf8');
-  } else if (typeof req.body === 'string') {
-    rawBody = req.body;
-  } else {
-    rawBody = JSON.stringify(req.body);
-  }
-  
-  // Compute expected HMAC-SHA256 signature
-  const expectedSignature = crypto
-    .createHmac('sha256', webhookSecret)
-    .update(rawBody)
-    .digest('hex');
-  
-  // Constant-time comparison to prevent timing attacks
-  try {
-    const sigBuffer = Buffer.from(signature, 'hex');
-    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
-    
-    if (sigBuffer.length !== expectedBuffer.length) {
-      console.warn('⚠️ [WEBHOOK SECURITY] Signature length mismatch');
-      return false;
+// ✅ SECURE: Strict JWT secret getter - NO FALLBACKS
+const getJwtSecret = () => {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+        console.error('❌ CRITICAL: JWT_SECRET is not defined in environment variables');
+        throw new Error('JWT_SECRET is not configured');
     }
-    
-    const isValid = crypto.timingSafeEqual(sigBuffer, expectedBuffer);
-    
-    if (!isValid) {
-      console.warn('⚠️ [WEBHOOK SECURITY] Invalid webhook signature - request rejected');
-    }
-    
-    return isValid;
-  } catch (err) {
-    console.error('❌ [WEBHOOK SECURITY] Signature comparison error:', err.message);
-    return false;
-  }
-}
-
-exports.handleWebhook = async (req, res) => {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('🔔 [WEBHOOK] Request received!');
-  console.log(' [WEBHOOK] Method:', req.method);
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-
-  // ✅ GET challenge requests don't need signature validation (Nylas verification step)
-  if (req.method === 'GET' && req.query.challenge) {
-    // ✅ FIX #34: Sanitize challenge value before reflecting in response
-    const challenge = String(req.query.challenge).replace(/[^a-zA-Z0-9_-]/g, '');
-    if (!challenge) {
-      return res.status(400).send('Invalid challenge');
-    }
-    console.log(' [Nylas Webhook] Received GET challenge, responding...');
-    return res.status(200).send(challenge);
-  }
-
-  if (req.method === 'POST') {
-    // ✅ CRITICAL SECURITY: Validate webhook signature BEFORE processing
-    if (!validateWebhookSignature(req)) {
-      console.error('❌ [WEBHOOK SECURITY] Rejected unsigned/invalid webhook request from IP:', req.ip);
-      return res.status(401).json({ error: 'Invalid webhook signature' });
-    }
-    
-    console.log('✅ [WEBHOOK SECURITY] Signature validated successfully');
-
-    let eventData = req.body;
-    if (Buffer.isBuffer(eventData)) {
-      try {
-        eventData = JSON.parse(eventData.toString('utf8'));
-      } catch (e) {
-        console.error(' [Nylas Webhook] Failed to parse JSON body');
-        return res.status(400).send('Invalid JSON');
-      }
-    } else if (typeof eventData === 'string') {
-      try {
-        eventData = JSON.parse(eventData);
-      } catch (e) {
-        console.error(' [Nylas Webhook] Failed to parse JSON string');
-        return res.status(400).send('Invalid JSON');
-      }
-    }
-    
-    console.log('📨 [NYLAS WEBHOOK] Event received');
-    console.log(' [NYLAS WEBHOOK] Event type:', eventData.type);
-
-    try {
-      switch (eventData.type) {
-        case 'message.created':
-        case 'message.updated':
-        case 'thread.replied':
-          console.log('✅ [WEBHOOK] Processing message');
-          await handleMessageCreated(eventData);
-          break;
-        case 'message.sent':
-          await handleMessageSent(eventData);
-          break;
-        case 'grant.expired':
-          await handleGrantExpired(eventData);
-          break;
-        case 'grant.refreshed':
-          await handleGrantRefreshed(eventData);
-          break;
-        default:
-          console.log('ℹ️ [NYLAS WEBHOOK] Unhandled event type:', eventData.type);
-      }
-    } catch (error) {
-      console.error(' [NYLAS WEBHOOK] Error processing event:', error.message);
-    }
-
-    return res.status(200).send('Webhook received');
-  }
-
-  res.status(405).send('Method Not Allowed');
+    return secret;
 };
 
-// ─────────────────────────────────────────────────────────────
-//  HANDLE: Message Created / Updated - WITH THREAD ID
-// ────────────────────────────────────────────────────────────
-async function handleMessageCreated(eventData) {
-  console.log(' [WEBHOOK] Processing message');
-  
-  try {
-    const data = eventData.data || {};
-    const object = data.object || {};
-    let message = object.message || data.message || data;
-    
-    if (message.data && typeof message.data === 'object') {
-      message = message.data;
+// ✅ Validate security answer meets minimum requirements
+function validateSecurityAnswer(answer, fieldName) {
+    if (!answer || typeof answer !== 'string') {
+        return `${fieldName} must be a valid string`;
     }
-    
-    const grantId = data.grant_id || object.grant_id || message.grant_id || message.grantId;
-    
-    // ✅ Extract thread_id from message
-    const threadId = message.thread_id || data.thread_id || object.thread_id || null;
-    console.log(' [WEBHOOK] Thread ID present:', !!threadId);
-    
-    // ✅ Extract from object.from (where Nylas puts the data)
-    let fromEmail = null;
-    let fromName = null;
-    if (object.from) {
-      if (Array.isArray(object.from) && object.from.length > 0) {
-        fromEmail = object.from[0].email || object.from[0].address;
-        fromName = object.from[0].name || '';
-      } else if (typeof object.from === 'object') {
-        fromEmail = object.from.email || object.from.address;
-        fromName = object.from.name || '';
-      }
+    const trimmed = answer.trim();
+    if (trimmed.length < 3) {
+        return `${fieldName} must be at least 3 characters long`;
     }
-    
-    let toEmail = null;
-    let toName = null;
-    if (object.to) {
-      if (Array.isArray(object.to) && object.to.length > 0) {
-        toEmail = object.to[0].email || object.to[0].address;
-        toName = object.to[0].name || '';
-      } else if (typeof object.to === 'object') {
-        toEmail = object.to.email || object.to.address;
-        toName = object.to.name || '';
-      }
-    }
-    
-    // Fallback: Check message.from if object.from didn't work
-    if (!fromEmail && message.from) {
-      if (Array.isArray(message.from) && message.from.length > 0) {
-        fromEmail = message.from[0]?.email || message.from[0]?.address;
-        fromName = message.from[0]?.name || '';
-      } else if (typeof message.from === 'object') {
-        fromEmail = message.from.email || message.from.address;
-        fromName = message.from.name || '';
-      }
-    }
-    
-    if (!toEmail && message.to) {
-      if (Array.isArray(message.to) && message.to.length > 0) {
-        toEmail = message.to[0]?.email || message.to[0]?.address;
-        toName = message.to[0]?.name || '';
-      } else if (typeof message.to === 'object') {
-        toEmail = message.to.email || message.to.address;
-        toName = message.to.name || '';
-      }
-    }
-    
-    const subject = message.subject || data.subject || object.subject || '(no subject)';
-    
-    // ✅ FIX #40: Use complete sanitization for email body
-    const rawBody = message.body || message.text || message.snippet || data.body || data.snippet || object.body || '';
-    const body = sanitizeEmailBody(rawBody); 
-    
-    const snippet = message.snippet || data.snippet || object.snippet || '';
-    const messageId = message.id || message.message_id || data.id || object.id || null;
-    
-    // ✅ FIX #40: Sanitize emails with complete multi-character sanitization
-    const safeFromEmail = sanitizeEmail(fromEmail);
-    const safeToEmail = sanitizeEmail(toEmail);
-    
-    console.log(' [WEBHOOK] From:', safeFromEmail ? 'present' : 'missing');
-    console.log(' [WEBHOOK] To:', safeToEmail ? 'present' : 'missing');
+    return null; // Valid
+}
 
-    if (!grantId || typeof grantId !== 'string') {
-      console.log('️ [WEBHOOK] Missing or invalid grantId');
-      return;
-    }
-
-    const emailAccount = await EmailAccount.findOne({ nylasGrantId: String(grantId) });
-    if (!emailAccount) {
-      console.log('️ [WEBHOOK] No email account found for grantId');
-      return;
-    }
-
-    // ✅ CRITICAL FIX: Skip processing if this message was sent FROM our own email
-    if (safeFromEmail && emailAccount.emailAddress && 
-        safeFromEmail.toLowerCase() === String(emailAccount.emailAddress).toLowerCase()) {
-      console.log('️ [WEBHOOK] Skipping - this is OUR sent message, not a customer reply');
-      return;
-    }
-
-    // ✅ FIX #27: Cast userId to string for query safety
-    const userId = String(emailAccount.userId);
-    if (!isValidObjectId(userId)) {
-      console.error('❌ [WEBHOOK] Invalid userId from email account');
-      return;
+// ✅ FIXED: Register function
+const register = async (req, res) => {
+    let { username, email, password } = req.body;
+    
+    // ✅ FIX #11/#12: Validate input types before processing
+    if (typeof username !== 'string' || typeof email !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ message: 'Invalid input types. All fields must be strings.' });
     }
     
-    console.log('✅ [WEBHOOK] Found userId:', userId);
-
-    // ✅ STEP 1: Try to find lead by thread_id (MOST ACCURATE)
-    let lead = null;
-    if (threadId && typeof threadId === 'string') {
-      // ✅ FIX #27: Use String() cast and sanitizeQuery for thread_id lookup
-      const safeThreadId = String(threadId).replace(/[^a-zA-Z0-9_-]/g, '');
-      if (safeThreadId) {
-        lead = await Lead.findOne({ 
-          userId: userId,
-          threadId: safeThreadId
-        });
-        if (lead) {
-          console.log('✅ [WEBHOOK] Found lead by thread_id:', lead._id);
+    const originalUsername = username;
+    username = sanitizeUsername(username);
+    email = sanitizeEmail(email);
+    
+    // ✅ Ensure sanitized values are still valid strings
+    if (!username || !email || !password) {
+        return res.status(400).json({ message: 'Invalid input after sanitization.' });
+    }
+    
+    try {
+        // ✅ FIX #11: Explicitly cast to string for query safety
+        const safeEmail = String(email);
+        const safeUsername = String(username);
+        
+        const emailExists = await User.findOne({ email: safeEmail });
+        if (emailExists) {
+            return res.status(400).json({ message: 'Email already registered.' });
         }
-      }
-    }
-
-    // ✅ STEP 2: If not found by thread_id, try email match (fallback)
-    if (!lead && (safeFromEmail || safeToEmail)) {
-      console.log(' [WEBHOOK] Thread ID not found, trying email match...');
-      lead = await findMatchingLead(userId, safeFromEmail, safeToEmail);
-    }
-
-    // ✅ STEP 3: If no lead found, CREATE ONE
-    if (!lead) {
-      console.log(' [WEBHOOK] No matching lead found, creating new lead...');
-      
-      const leadEmail = safeFromEmail || safeToEmail || 'unknown@email.com';
-      // ✅ FIX: Use fromName if available, otherwise use local part of email
-      const displayName = (fromName && typeof fromName === 'string') ? fromName.substring(0, 100) : leadEmail.split('@')[0] || 'Unknown Contact';
-      
-      lead = new Lead({
-        userId: userId,
-        name: sanitizeString(displayName),
-        email: leadEmail,
-        company: '',
-        status: 'New',
-        // ✅ Save thread_id if available
-        threadId: (threadId && typeof threadId === 'string') ? String(threadId).replace(/[^a-zA-Z0-9_-]/g, '') : null,
-        replies: [{
-          from: 'ai',
-          content: body || snippet || '(No content)',
-          subject: typeof subject === 'string' ? subject.substring(0, 200) : '(no subject)',
-          date: new Date(),
-          read: false,
-          messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null
-        }],
-        lastContactDate: new Date(),
-        autoReplyEnabled: false
-      });
-      
-      await lead.save();
-      console.log('✅ [WEBHOOK] Created new lead with ID:', lead._id);
-    }
-
-    // ✅ Process the reply
-    await processReply(lead, safeFromEmail, subject, body, snippet, messageId, userId);
-
-  } catch (error) {
-    console.error('❌ [WEBHOOK] Error handling message:', error.message);
-  }
-}
-
-// ───────────────────────────────────────────────────────────
-//  FIND MATCHING LEAD - FIXED: NO DOMAIN-ONLY FALLBACK
-// ────────────────────────────────────────────────────────────
-async function findMatchingLead(userId, fromEmail, toEmail) {
-  console.log(' [WEBHOOK] Looking for lead by exact email match...');
-  
-  // Normalize search emails
-  const normalizedFrom = fromEmail?.toLowerCase()?.trim();
-  const normalizedTo = toEmail?.toLowerCase()?.trim();
-  
-  if (!normalizedFrom && !normalizedTo) {
-    console.log(' [WEBHOOK] No valid email to search for');
-    return null;
-  }
-
-  // ✅ FIX: Fetch ALL leads once and compare decrypted emails in memory
-  const allLeads = await Lead.find({ userId: String(userId) });
-  console.log(`🔍 [WEBHOOK] Checking ${allLeads.length} leads for matching email`);
-  
-  for (const lead of allLeads) {
-    // ✅ CRITICAL FIX: Manually decrypt the email
-    let decryptedEmail = lead.email;
-    try {
-      if (decryptedEmail && /^[A-Za-z0-9+/=]{20,}$/.test(decryptedEmail)) {
-        decryptedEmail = decrypt(decryptedEmail);
-      }
+        
+        const usernameExists = await User.findOne({ username: safeUsername });
+        if (usernameExists) {
+            return res.status(400).json({ message: 'Username already taken.' });
+        }
+        
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        
+        const user = new User({ 
+            username: safeUsername, 
+            email: safeEmail, 
+            password: hashedPassword, 
+            tokenVersion: 0,
+            fullName: originalUsername
+        });
+        await user.save();
+        
+        const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
+        // ✅ SECURE: Strict secret check
+        const secret = getJwtSecret();
+        
+        jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
+            if (err) {
+                console.error("JWT Error:", err);
+                return res.status(500).json({ message: 'Token generation failed' });
+            }
+            const csrfToken = await generateCsrfToken(user.id);
+            res.json({ 
+                token, 
+                csrfToken, 
+                message: 'Registration successful',
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email
+                }
+            });
+        });
     } catch (err) {
-      console.warn('⚠️ [WEBHOOK] Failed to decrypt email for lead:', lead._id);
-      continue;
+        console.error("Registration Error:", err.message);
+        if (err.code === 11000) {
+            const field = Object.keys(err.keyPattern || {})[0];
+            if (field === 'email') {
+                return res.status(400).json({ message: 'Email already registered.' });
+            }
+            if (field === 'username') {
+                return res.status(400).json({ message: 'Username already taken.' });
+            }
+            return res.status(400).json({ message: 'Duplicate field value entered.' });
+        }
+        res.status(500).json({ message: 'Server Error during registration' });
+    }
+};
+
+// ✅ SECURE: Login function - BACKDOOR REMOVED
+const login = async (req, res) => {
+    let { identifier, password } = req.body;
+    
+    // ✅ FIX: Validate input types
+    if (typeof identifier !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ message: 'Invalid input types.' });
     }
     
-    const cleanEmail = decryptedEmail?.toLowerCase()?.trim();
+    identifier = identifier ? identifier.trim() : '';
     
-    if (!cleanEmail) continue;
-    
-    // ✅ Exact match check ONLY (removed domain-only fallback per H.I.S.V. recommendation)
-    if (normalizedFrom && cleanEmail === normalizedFrom) {
-      console.log('✅ [WEBHOOK] Found lead by exact FROM email match:', lead._id);
-      return lead;
+    if (!identifier || !password) {
+        return res.status(400).json({ message: 'Identifier and password are required.' });
     }
     
-    if (normalizedTo && cleanEmail === normalizedTo) {
-      console.log('✅ [WEBHOOK] Found lead by exact TO email match:', lead._id);
-      return lead;
-    }
-  }
-
-  console.log('❌ [WEBHOOK] No matching lead found after checking all leads');
-  return null;
-}
-
-// ──────────────────────────────────────────────────────────────
-//  PROCESS REPLY
-// ──────────────────────────────────────────────────────────────
-async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
-  console.log('📝 [WEBHOOK] Processing reply for lead:', lead._id);
-
-  try {
-    lead.status = 'Replied';
-    lead.lastContactDate = new Date();
-    
-    if (!lead.replies) lead.replies = [];
-    
-    const replyContent = body || snippet || '(No content)';
-    const replySubject = (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)';
-    
-    lead.replies.push({
-      from: 'ai',
-      content: replyContent,
-      subject: replySubject,
-      date: new Date(),
-      messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null,
-      read: false
-    });
-    
-    await lead.save();
-    console.log('✅ [WEBHOOK] Reply saved to lead. Total replies:', lead.replies.length);
-
     try {
-      // ✅ FIX #28: Use String() casts for all query/create values
-      const chatMessage = new ChatMessage({
-        userId: String(userId),
-        sessionId: String(lead._id),
-        role: 'user',
-        content: replyContent,
-        title: replySubject,
-        createdAt: new Date()
-      });
-      await chatMessage.save();
-      console.log('✅ [WEBHOOK] Reply saved to ChatMessage');
-    } catch (chatErr) {
-      console.warn('️ [WEBHOOK] Failed to save to ChatMessage:', chatErr.message);
-    }
-
-    try {
-      // ✅ FIX #29: Use String() casts for notification creation
-      const notification = new Message({
-        userId: String(userId),
-        sessionId: 'lead-reply-notification',
-        role: 'ai',
-        title: `${sanitizeString(String(lead.name || 'Lead'))} replied!`,
-        content: `"${snippet ? String(snippet).substring(0, 200) : 'New reply from lead'}"`,
-        notificationType: 'lead_reply',
-        leadId: String(lead._id),
-        isRead: false,
-        createdAt: new Date()
-      });
-      await notification.save();
-      console.log('✅ [WEBHOOK] Notification created');
-    } catch (notifErr) {
-      console.error('❌ [WEBHOOK] Failed to create notification:', notifErr.message);
-    }
-
-    console.log('✅ [WEBHOOK] Reply processing complete');
-
-  } catch (error) {
-    console.error('❌ [WEBHOOK] Error processing reply:', error.message);
-  }
-}
-
-// ────────────────────────────────────────────────────────────
-//  HANDLE: Message Sent - FIXED DUPLICATE PREVENTION
-// ──────────────────────────────────────────────────────────────
-async function handleMessageSent(eventData) {
-  console.log(' [WEBHOOK-SENT] Message sent event triggered');
-  
-  try {
-    const data = eventData.data || {};
-    const object = data.object || {};
-    let message = object.message || data.message || data;
-    
-    const toEmail = message.to?.[0]?.email || data.to?.[0]?.email || message.recipients?.[0]?.email;
-    const subject = message.subject || data.subject || '(no subject)';
-    const body = message.body || data.body || '';
-    const grantId = data.grant_id || message.grant_id || object.grant_id;
-    
-    // ✅ FIX #30: Validate and sanitize inputs
-    const safeToEmail = sanitizeEmail(toEmail);
-    
-    if (!safeToEmail || !grantId || typeof grantId !== 'string') {
-      console.log('️ [WEBHOOK-SENT] Missing required fields');
-      return;
-    }
-
-    const emailAccount = await EmailAccount.findOne({ nylasGrantId: String(grantId) });
-    if (!emailAccount) {
-        console.log('️ [WEBHOOK-SENT] No email account found for grant');
-        return;
-    }
-
-    // ✅ FIX #30: Cast userId to string
-    const userId = String(emailAccount.userId);
-    if (!isValidObjectId(userId)) {
-      console.error('❌ [WEBHOOK-SENT] Invalid userId');
-      return;
-    }
-
-    // ✅ Use optimized findMatchingLead instead of regex on encrypted field
-    const lead = await findMatchingLead(userId, null, safeToEmail);
-
-    if (lead) {
-      console.log('✅ [WEBHOOK-SENT] Matched existing lead:', lead._id);
-      
-      // ✅ ROBUST DUPLICATE CHECK
-      const recentReplies = lead.replies.slice(-5);
-      const safeBody = typeof body === 'string' ? body.trim() : '';
-      const isDuplicate = recentReplies.some(r => 
-        r.from === 'lead' && 
-        String(r.content || '').trim() === safeBody && 
-        Math.abs(new Date() - new Date(r.date)) < 60000
-      );
-
-      if (!isDuplicate) {
-        lead.status = 'Contacted';
-        lead.lastContactDate = new Date();
+        // ✅ FIX #11/#12: Sanitize and explicitly type-cast identifier
+        const safeIdentifier = String(sanitizeString(identifier));
         
-        if (!lead.replies) lead.replies = [];
-        lead.replies.push({
-          from: 'lead',
-          content: safeBody,
-          subject: (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)',
-          date: new Date(),
-          read: true
+        const query = sanitizeQuery({
+            $or: [
+                { email: safeIdentifier },
+                { username: safeIdentifier }
+            ]
         });
         
-        await lead.save();
-        console.log('💾 [WEBHOOK-SENT] Updated lead status and replies.');
-      } else {
-        console.log('️ [WEBHOOK-SENT] Duplicate sent message skipped.');
-      }
-    } else {
-        console.log(' [WEBHOOK-SENT] NO LEAD FOUND for email');
-    }
+        let user = await User.findOne(query);
+        
+        // Use dummy hash to prevent timing attacks if user doesn't exist
+        const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
+        const isMatch = user ? await bcrypt.compare(password, user.password) : await bcrypt.compare(password, dummyHash);
 
-  } catch (error) {
-    console.error('❌ [WEBHOOK-SENT] Error:', error.message);
-  }
-}
-
-// ────────────────────────────────────────────────────────────
-//  HANDLE: Grant Expired
-// ─────────────────────────────────────────────────────────────
-async function handleGrantExpired(eventData) {
-  console.log(' [WEBHOOK] Grant expired');
-  
-  try {
-    const data = eventData.data || {};
-    const grantId = data.grant_id;
-    
-    // ✅ FIX #31: Validate grantId type
-    if (!grantId || typeof grantId !== 'string') return;
-
-    const emailAccount = await EmailAccount.findOne({ nylasGrantId: String(grantId) });
-    
-    if (emailAccount) {
-      emailAccount.isConnected = false;
-      emailAccount.lastRefreshError = 'Grant expired webhook';
-      await emailAccount.save();
-
-      try {
-        // ✅ FIX #31: Use String() cast for userId
-        const notification = new Message({
-          userId: String(emailAccount.userId),
-          sessionId: 'system-notification',
-          role: 'ai',
-          title: '️ Email Connection Expired',
-          content: 'Your email connection has expired. Please reconnect to continue sending emails.',
-          notificationType: 'token_expired',
-          leadId: null,
-          isRead: false,
-          createdAt: new Date()
+        if (!user || !isMatch) { 
+            return res.status(400).json({ message: 'Invalid Credentials' }); 
+        }
+        
+        if (user.isSuspended) {
+            const now = new Date();
+            const suspensionEnd = new Date(user.suspensionEnds);
+            if (now >= suspensionEnd) { 
+                user.isSuspended = false; 
+                user.suspensionEnds = null; 
+                await user.save(); 
+            } else { 
+                return res.status(403).json({ 
+                    message: 'Account Suspended', 
+                    suspensionEnds: suspensionEnd, 
+                    reason: 'Underage account. Access restricted until 13th birthday.' 
+                });
+            }
+        }
+        
+        // ✅ SECURE: Strict secret check
+        const secret = getJwtSecret();
+        
+        // ✅ If user is admin, they go through TOTP 2FA verification
+        if (user.isAdmin) {
+            console.log(`🔐 [ADMIN] Admin user logging in`);
+            
+            // Check if TOTP is enabled
+            if (!user.adminTotpEnabled) {
+                console.warn(`⚠️ [ADMIN] Admin has not enabled 2FA`);
+                return res.status(403).json({
+                    message: 'Admin 2FA not configured. Please contact support.',
+                    requires2FASetup: true
+                });
+            }
+            
+            // Generate short-lived temp token for Step 2 (TOTP verification)
+            const tempToken = jwt.sign(
+                { 
+                    id: user.id, 
+                    step: 'totp_verify',
+                    nonce: crypto.randomBytes(16).toString('hex')
+                }, 
+                secret, 
+                { expiresIn: '5m' }
+            );
+            
+            return res.json({ 
+                success: true,
+                tempToken: tempToken, 
+                message: 'Password verified. Please enter your 2FA code.', 
+                requires2FA: true
+            });
+        }
+        
+        // ─── REGULAR USER LOGIN ───
+        const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
+        jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
+            if (err) { 
+                console.error("JWT Error:", err); 
+                return res.status(500).json({ message: 'Token generation failed' }); 
+            }
+            const csrfToken = await generateCsrfToken(user.id);
+            res.json({ 
+                token, 
+                csrfToken, 
+                message: 'Login successful',
+                user: {
+                    id: user.id,
+                    email: user.email,
+                    username: user.username,
+                    isAdmin: user.isAdmin || false
+                }
+            });
         });
-        await notification.save();
-      } catch (notifErr) {
-        console.error(' [WEBHOOK] Failed to create notification:', notifErr.message);
-      }
+        
+    } catch (err) { 
+        console.error("Login Error:", err.message); 
+        res.status(500).json({ message: 'Server Error during login' }); 
     }
+};
 
-  } catch (error) {
-    console.error('❌ [WEBHOOK] Error handling grant expired:', error.message);
-  }
-}
-
-// ──────────────────────────────────────────────────────────────
-//  HANDLE: Grant Refreshed
-// ──────────────────────────────────────────────────────────
-async function handleGrantRefreshed(eventData) {
-  console.log('🔄 [WEBHOOK] Grant refreshed');
-  
-  try {
-    const data = eventData.data || {};
-    const grantId = data.grant_id;
-    
-    // ✅ Validate grantId type
-    if (!grantId || typeof grantId !== 'string') return;
-
-    await EmailAccount.findOneAndUpdate(
-      { nylasGrantId: String(grantId) },
-      {
-        isConnected: true,
-        refreshFailCount: 0,
-        lastRefreshError: null
-      }
-    );
-
-  } catch (error) {
-    console.error('❌ [WEBHOOK] Error handling grant refreshed:', error.message);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-//  HELPER: Generate and Send Auto-Reply
-// ─────────────────────────────────────────────────────────────
-async function generateAndSendAutoReply(lead, userId) {
-  try {
-    console.log(' [AUTO-REPLY] Generating reply for lead:', lead._id);
-    
-    const user = await User.findById(String(userId));
-    if (!user) return;
-
-    const emailAccount = await EmailAccount.findOne({ 
-      userId: String(userId),
-      isConnected: true
-    });
-
-    if (!emailAccount || !emailAccount.accessToken) return;
-
-    const aiResponse = await generateAIReply({
-      leadName: lead.name,
-      leadEmail: lead.email,
-      leadCompany: lead.company || '',
-      leadMessage: lead.replies?.[lead.replies.length - 1]?.content || '',
-      instructions: lead.autoReplyInstructions || 'Write a professional and helpful reply.',
-      userContext: {
-        name: user.fullName || 'Skyline User',
-        company: user.company || 'Skyline',
-        businessType: user.businessType || 'B2B'
-      }
-    });
-
-    if (!aiResponse) return;
-
-    const nylas = require('./nylasClient');
-    
-    const result = await nylas.sendEmail({
-      grantId: emailAccount.nylasGrantId,
-      accessToken: emailAccount.accessToken,
-      to: [lead.email],
-      subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
-      body: aiResponse
-    });
-
-    if (result && result.success) {
-      if (!lead.replies) lead.replies = [];
-      lead.replies.push({
-        from: 'lead',
-        content: aiResponse,
-        subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
-        date: new Date(),
-        autoReply: true,
-        read: true
-      });
-      
-      await lead.save();
-      console.log('✅ [AUTO-REPLY] Auto-reply sent');
+// ✅ FIXED: Logout function
+const logout = async (req, res) => {
+    try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        const user = await User.findById(String(req.userId));
+        if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        await user.revokeTokens();
+        await deleteCsrfToken(req.userId);
+        res.json({ message: 'Logged out successfully. All tokens revoked.' });
+    } catch (err) { 
+        console.error('Logout Error:', err.message); 
+        res.status(500).json({ message: 'Server Error during logout' }); 
     }
+};
 
-  } catch (error) {
-    console.error(' [AUTO-REPLY] Error:', error.message);
-  }
-      }
+// ✅ FIXED: Revoke all tokens
+const revokeAllTokens = async (req, res) => {
+    try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        const user = await User.findById(String(req.userId));
+        if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        await user.revokeTokens();
+        await deleteCsrfToken(req.userId);
+        res.json({ message: 'All tokens revoked successfully. Please log in again.' });
+    } catch (err) { 
+        console.error('Revoke Tokens Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Verify email
+const verifyEmail = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email || typeof email !== 'string') { return res.status(400).json({ message: 'Email is required' }); }
+        const sanitizedEmail = String(sanitizeEmail(email));
+        const user = await User.findOne({ email: sanitizedEmail });
+        if (!user) { return res.status(404).json({ message: 'Email not found.' }); }
+        res.json({ success: true, message: 'Email verified' });
+    } catch (err) { 
+        console.error('Verify Email Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Verify username
+const verifyUsername = async (req, res) => {
+    try {
+        const { email, username } = req.body;
+        if (!email || typeof email !== 'string' || !username || typeof username !== 'string') { 
+            return res.status(400).json({ message: 'Email and username are required' }); 
+        }
+        const sanitizedEmail = String(sanitizeEmail(email));
+        const sanitizedUsername = String(sanitizeUsername(username));
+        const user = await User.findOne({ email: sanitizedEmail, username: sanitizedUsername });
+        if (!user) { return res.status(400).json({ message: 'Username does not match.' }); }
+        res.json({ success: true, message: 'Username verified' });
+    } catch (err) { 
+        console.error('Verify Username Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ REMOVED: resetPasswordEmailUsername - VULNERABLE ENDPOINT DELETED
+
+// ✅ FIXED: Forgot password
+const forgotPassword = async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email || typeof email !== 'string') { return res.status(400).json({ message: 'Email is required' }); }
+        const sanitizedEmail = String(sanitizeEmail(email));
+        const user = await User.findOne({ email: sanitizedEmail });
+        if (!user) { 
+            return res.json({ message: 'If an account exists with this email, a reset link has been sent.' }); 
+        }
+        const plainToken = await user.generateResetToken();
+        const frontendUrl = process.env.FRONTEND_URL || 'https://skylineapp-backend-file.onrender.com';
+        const resetUrl = `${frontendUrl}/reset-password.html?token=${plainToken}`;
+        try {
+            if (user.nylasIntegration && user.nylasIntegration.isConnected) {
+                const { sendEmail } = require('./nylasService');
+                await sendEmail({ 
+                    to: user.email, 
+                    subject: 'Password Reset Request - Skyline AA-1', 
+                    body: `You requested a password reset. Click the link below:\n\n${resetUrl}\n\nThis link expires in 1 hour.`, 
+                    userId: user._id 
+                });
+            } else { 
+                // ✅ SECURITY FIX: Never log reset URLs or tokens
+                console.log(`[PASSWORD RESET] Reset link generated for user ID: ${user._id}`);
+            }
+        } catch (emailErr) { 
+            console.error('Email send error:', emailErr.message); 
+        }
+        res.json({ message: 'If an account exists with this email, a reset link has been sent.' });
+    } catch (err) { 
+        console.error('Forgot Password Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Reset password with token
+const resetPassword = async (req, res) => {
+    try {
+        const { token, newPassword } = req.body;
+        if (!token || typeof token !== 'string' || !newPassword || typeof newPassword !== 'string') { 
+            return res.status(400).json({ message: 'Token and new password are required' }); 
+        }
+        if (newPassword.length < 8) { 
+            return res.status(400).json({ message: 'Password must be at least 8 characters' }); 
+        }
+        const hashedToken = crypto.createHash('sha256').update(String(token)).digest('hex');
+        const query = sanitizeQuery({ resetToken: hashedToken, resetTokenExpiry: { $gt: new Date() } });
+        const user = await User.findOne(query);
+        if (!user) { return res.status(400).json({ message: 'Invalid or expired reset token' }); }
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+        user.password = hashedPassword;
+        user.resetToken = null;
+        user.resetTokenExpiry = null;
+        await user.revokeTokens();
+        await user.save();
+        res.json({ message: 'Password reset successfully.' });
+    } catch (err) { 
+        console.error('Reset Password Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Verify Layer 2 - WITH SECURITY ANSWERS VALIDATION
+const verifyLayer2 = async (req, res) => {
+    const { dish, pn, mum, dm } = req.body;
+    
+    // ✅ FIX #13: Validate ALL inputs are strings before any processing
+    if (typeof dish !== 'string' || typeof pn !== 'string' || typeof mum !== 'string' || typeof dm !== 'string') {
+        return res.status(400).json({ message: 'All answers must be strings.' });
+    }
+    
+    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
+    const validations = [
+        validateSecurityAnswer(dish, 'Favorite dish'),
+        validateSecurityAnswer(pn, 'Phone number'),
+        validateSecurityAnswer(mum, "Mother's name"),
+        validateSecurityAnswer(dm, 'Dream destination')
+    ];
+    
+    const errors = validations.filter(v => v !== null);
+    if (errors.length > 0) {
+        return res.status(400).json({ message: errors[0] });
+    }
+    
+    try {
+        if (!isValidObjectId(req.userId)) { 
+            return res.status(400).json({ message: 'Invalid user ID' }); 
+        }
+        
+        // ✅ FIX #13: Cast userId to string for query safety
+        const safeUserId = String(req.userId);
+        const user = await User.findById(safeUserId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // ✅ CRITICAL: Verify user is actually an admin
+        if (!user.isAdmin) {
+            console.warn(`⚠️ [Layer2] Non-admin user attempted Layer 2 verification`);
+            return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
+        
+        // ✅ CRITICAL: Check that security setup is complete
+        if (!user.securitySetupComplete) {
+            console.warn(`⚠️ [Layer2] Admin has not completed security setup`);
+            return res.status(403).json({
+                message: 'Admin security setup not completed',
+                needsSetup: true,
+                redirectTo: '/admin-setup-security.html'
+            });
+        }
+        
+        // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
+        const requiredAnswers = [
+            { field: user.adminAns_dish, name: 'Favorite dish' },
+            { field: user.adminAns_pn, name: 'Phone number' },
+            { field: user.adminAns_mum, name: "Mother's name" },
+            { field: user.adminAns_dm, name: 'Dream destination' }
+        ];
+        
+        const missingAnswers = requiredAnswers.filter(a => !a.field || a.field.length < 3);
+        if (missingAnswers.length > 0) {
+            const missingNames = missingAnswers.map(a => a.name).join(', ');
+            console.error(`❌ [Layer2] Admin has missing or short security answers: ${missingNames}`);
+            return res.status(500).json({ 
+                message: 'Admin security answers not configured. Please contact support.' 
+            });
+        }
+        
+        // ✅ Compare answers (all already validated as non-empty above)
+        const d1 = await bcrypt.compare(String(dish).trim().toLowerCase(), user.adminAns_dish);
+        const d2 = await bcrypt.compare(String(pn).trim().toLowerCase(), user.adminAns_pn);
+        const d3 = await bcrypt.compare(String(mum).trim().toLowerCase(), user.adminAns_mum);
+        const d4 = await bcrypt.compare(String(dm).trim().toLowerCase(), user.adminAns_dm);
+        
+        if (d1 && d2 && d3 && d4) {
+            const secret = getJwtSecret();
+            const layerToken = jwt.sign(
+                { 
+                    user: { id: user.id }, 
+                    step: 'layer3',
+                    nonce: crypto.randomBytes(16).toString('hex')
+                }, 
+                secret, 
+                { expiresIn: '10m' }
+            );
+            return res.json({ 
+                token: layerToken, 
+                nextStep: 'admin-layer3.html',
+                message: 'Layer 2 verification passed' 
+            });
+        }
+        
+        // ✅ Log failed attempts for security monitoring
+        console.warn(`⚠️ [Layer2] Failed verification attempt for admin`);
+        res.status(400).json({ message: 'Incorrect answers' });
+        
+    } catch (err) { 
+        console.error('❌ Layer2 Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Verify Layer 3 - WITH SECURITY ANSWERS VALIDATION
+const verifyLayer3 = async (req, res) => {
+    const { dad, friend, enemy, app } = req.body;
+    
+    // ✅ FIX #14: Validate ALL inputs are strings before any processing
+    if (typeof dad !== 'string' || typeof friend !== 'string' || typeof enemy !== 'string' || typeof app !== 'string') {
+        return res.status(400).json({ message: 'All answers must be strings.' });
+    }
+    
+    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
+    const validations = [
+        validateSecurityAnswer(dad, "Father's name"),
+        validateSecurityAnswer(friend, "Best friend's name"),
+        validateSecurityAnswer(enemy, 'Enemy name'),
+        validateSecurityAnswer(app, 'Favorite app')
+    ];
+    
+    const errors = validations.filter(v => v !== null);
+    if (errors.length > 0) {
+        return res.status(400).json({ message: errors[0] });
+    }
+    
+    try {
+        if (!isValidObjectId(req.userId)) { 
+            return res.status(400).json({ message: 'Invalid user ID' }); 
+        }
+        
+        // ✅ FIX #14: Cast userId to string for query safety
+        const safeUserId = String(req.userId);
+        const user = await User.findById(safeUserId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // ✅ CRITICAL: Verify user is actually an admin
+        if (!user.isAdmin) {
+            console.warn(`⚠️ [Layer3] Non-admin user attempted Layer 3 verification`);
+            return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
+        
+        // ✅ CRITICAL: Check that security setup is complete
+        if (!user.securitySetupComplete) {
+            console.warn(`⚠️ [Layer3] Admin has not completed security setup`);
+            return res.status(403).json({
+                message: 'Admin security setup not completed',
+                needsSetup: true,
+                redirectTo: '/admin-setup-security.html'
+            });
+        }
+        
+        // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
+        const requiredAnswers = [
+            { field: user.adminAns_dad, name: "Father's name" },
+            { field: user.adminAns_friend, name: "Best friend's name" },
+            { field: user.adminAns_enemy, name: 'Enemy name' },
+            { field: user.adminAns_app, name: 'Favorite app' }
+        ];
+        
+        const missingAnswers = requiredAnswers.filter(a => !a.field || a.field.length < 3);
+        if (missingAnswers.length > 0) {
+            const missingNames = missingAnswers.map(a => a.name).join(', ');
+            console.error(`❌ [Layer3] Admin has missing or short security answers: ${missingNames}`);
+            return res.status(500).json({ 
+                message: 'Admin security answers not configured. Please contact support.' 
+            });
+        }
+        
+        // ✅ Compare answers (all already validated as non-empty above)
+        const d1 = await bcrypt.compare(String(dad).trim().toLowerCase(), user.adminAns_dad);
+        const d2 = await bcrypt.compare(String(friend).trim().toLowerCase(), user.adminAns_friend);
+        const d3 = await bcrypt.compare(String(enemy).trim().toLowerCase(), user.adminAns_enemy);
+        const d4 = await bcrypt.compare(String(app).trim().toLowerCase(), user.adminAns_app);
+        
+        if (d1 && d2 && d3 && d4) {
+            const secret = getJwtSecret();
+            const payload = { 
+                user: { id: user.id }, 
+                isAdmin: true,
+                nonce: crypto.randomBytes(16).toString('hex')
+            };
+            const token = jwt.sign(payload, secret, { expiresIn: '7d' });
+            return res.json({ 
+                token, 
+                message: 'Admin Access Granted', 
+                nextStep: 'admin-dashboard.html' 
+            });
+        }
+        
+        // ✅ Log failed attempts for security monitoring
+        console.warn(`⚠️ [Layer3] Failed verification attempt for admin`);
+        res.status(400).json({ message: 'Incorrect answers' });
+        
+    } catch (err) { 
+        console.error('❌ Layer3 Error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Verify age
+const verifyAge = async (req, res) => {
+    const { day, month, year } = req.body;
+    
+    // ✅ FIX #15: Validate inputs are numbers
+    const numDay = Number(day);
+    const numMonth = Number(month);
+    const numYear = Number(year);
+    
+    if (isNaN(numDay) || isNaN(numMonth) || isNaN(numYear) || numDay < 1 || numDay > 31 || numMonth < 1 || numMonth > 12 || numYear < 1900 || numYear > 2026) {
+        return res.status(400).json({ message: 'Invalid date values.' });
+    }
+    
+    try {
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
+        const safeUserId = String(req.userId);
+        let user = await User.findById(safeUserId);
+        if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        
+        const birthDate = new Date(numYear, numMonth - 1, numDay);
+        const today = new Date();
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const m = today.getMonth() - birthDate.getMonth();
+        if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) { age--; }
+        
+        user.dateOfBirth = birthDate;
+        if (age < 13) {
+            user.isSuspended = true;
+            const thirteenthBirthday = new Date(birthDate);
+            thirteenthBirthday.setFullYear(birthDate.getFullYear() + 13);
+            user.suspensionEnds = thirteenthBirthday;
+            await user.save();
+            return res.status(403).json({ 
+                message: 'Underage', 
+                suspensionEnds: thirteenthBirthday, 
+                reason: 'You must be at least 13 years old to use Skyline AA-1.' 
+            });
+        } else {
+            user.isSuspended = false;
+            user.suspensionEnds = null;
+            await user.save();
+            return res.json({ message: 'Age verified. Access granted.' });
+        }
+    } catch (err) { 
+        console.error('Age verification error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Change email
+const changeEmail = async (req, res) => {
+    const { currentPassword, newEmail } = req.body;
+    
+    // ✅ Validate input types
+    if (typeof currentPassword !== 'string' || typeof newEmail !== 'string') {
+        return res.status(400).json({ message: 'Invalid input types.' });
+    }
+    
+    try {
+        if (!isValidObjectId(req.userId)) { return res.status(400).json({ message: 'Invalid user ID' }); }
+        const safeUserId = String(req.userId);
+        let user = await User.findById(safeUserId);
+        if (!user) { return res.status(404).json({ message: 'User not found' }); }
+        
+        const isMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!isMatch) { return res.status(400).json({ message: 'Current password is incorrect' }); }
+        
+        const sanitizedNewEmail = String(sanitizeEmail(newEmail));
+        const existingUser = await User.findOne({ email: sanitizedNewEmail });
+        if (existingUser && existingUser._id.toString() !== user._id.toString()) { 
+            return res.status(400).json({ message: 'Email is already in use' }); 
+        }
+        
+        user.email = sanitizedNewEmail;
+        await user.save();
+        res.json({ message: 'Email updated successfully' });
+    } catch (err) { 
+        console.error('Change email error:', err.message); 
+        res.status(500).json({ message: 'Server Error' }); 
+    }
+};
+
+// ✅ FIXED: Delete account - COMPLETE DATA PURGE (GDPR Compliance)
+const deleteAccount = async (req, res) => {
+    const { password } = req.body;
+    
+    // ✅ Validate input type
+    if (typeof password !== 'string') {
+        return res.status(400).json({ message: 'Password must be a string.' });
+    }
+    
+    try {
+        // ─── VALIDATE USER ───
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        
+        const safeUserId = String(req.userId);
+        const user = await User.findById(safeUserId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
+        // ─── VERIFY PASSWORD ───
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Incorrect password. Account not deleted.' });
+        }
+
+        const userId = safeUserId;
+
+        console.log(`🗑️ [DELETE ACCOUNT] Starting deletion process for user ID: ${userId}`);
+
+        // ─── ✅ DELETE ALL USER DATA ───
+
+        // 1. Delete all ChatMessages
+        const chatResult = await ChatMessage.deleteMany({ userId });
+        console.log(`   📝 Deleted ${chatResult.deletedCount} chat messages`);
+
+        // 2. ✅ DELETE ALL LEADS (CRITICAL for GDPR)
+        const Lead = require('./Lead');
+        const leadResult = await Lead.deleteMany({ userId });
+        console.log(`   📋 Deleted ${leadResult.deletedCount} leads`);
+
+        // 3. Delete all EmailAccounts
+        const EmailAccount = require('./EmailAccount');
+        const emailAccountResult = await EmailAccount.deleteMany({ userId });
+        console.log(`   📧 Deleted ${emailAccountResult.deletedCount} email accounts`);
+
+        // 4. Delete all Sessions
+        const Session = require('./Session');
+        const sessionResult = await Session.deleteMany({ userId });
+        console.log(`   📂 Deleted ${sessionResult.deletedCount} sessions`);
+
+        // 5. Delete all Notifications
+        const notificationResult = await Notification.deleteMany({ userId });
+        console.log(`   🔔 Deleted ${notificationResult.deletedCount} notifications`);
+
+        // 6. Delete all Reports
+        const reportResult = await Report.deleteMany({ userId });
+        console.log(`   📊 Deleted ${reportResult.deletedCount} reports`);
+
+        // 7. Delete all Data Exports
+        const DataExport = require('./DataExport');
+        const dataExportResult = await DataExport.deleteMany({ userId });
+        console.log(`   📦 Deleted ${dataExportResult.deletedCount} data exports`);
+
+        // 8. Delete all Search Caches
+        const SearchCache = require('./SearchCache');
+        const searchCacheResult = await SearchCache.deleteMany({ userId });
+        console.log(`   🔍 Deleted ${searchCacheResult.deletedCount} search caches`);
+
+        // 9. Delete all Follow-up schedules (if any)
+        try {
+            const FollowUpSchedule = require('./FollowUpSchedule');
+            const followUpResult = await FollowUpSchedule.deleteMany({ userId });
+            console.log(`   ⏰ Deleted ${followUpResult.deletedCount} follow-up schedules`);
+        } catch (err) {
+            console.log(`   ⏰ No follow-up schedule model found, skipping`);
+        }
+
+        // 10. ✅ FINALLY: Delete the User account
+        await User.findByIdAndDelete(userId);
+        console.log(`   👤 Deleted user account ID: ${userId}`);
+
+        // ─── TOTAL SUMMARY ───
+        const totalDeleted = 
+            chatResult.deletedCount +
+            leadResult.deletedCount +
+            emailAccountResult.deletedCount +
+            sessionResult.deletedCount +
+            notificationResult.deletedCount +
+            reportResult.deletedCount +
+            dataExportResult.deletedCount +
+            searchCacheResult.deletedCount +
+            1; // User account
+
+        console.log(`✅ [DELETE ACCOUNT] Account deletion complete. Total records deleted: ${totalDeleted}`);
+
+        res.json({ 
+            success: true,
+            message: 'Account and all associated data permanently deleted.',
+            deletedRecords: {
+                chatMessages: chatResult.deletedCount,
+                leads: leadResult.deletedCount,
+                emailAccounts: emailAccountResult.deletedCount,
+                sessions: sessionResult.deletedCount,
+                notifications: notificationResult.deletedCount,
+                reports: reportResult.deletedCount,
+                dataExports: dataExportResult.deletedCount,
+                searchCaches: searchCacheResult.deletedCount,
+                userAccount: 1,
+                total: totalDeleted
+            }
+        });
+
+    } catch (err) {
+        console.error('❌ [DELETE ACCOUNT] Error:', err.message);
+        res.status(500).json({ 
+            success: false,
+            message: 'Server Error during account deletion',
+            error: err.message 
+        });
+    }
+};
+
+// ─── ✅ NEW: Setup Admin Security Questions ───
+const setupAdminSecurity = async (req, res) => {
+    try {
+        const userId = req.userId;
+        if (!userId || !isValidObjectId(userId)) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        // ✅ Verify user is admin
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId);
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        if (!user.isAdmin) {
+            console.warn(`⚠️ [SECURITY SETUP] Non-admin user attempted to setup security`);
+            return res.status(403).json({ success: false, message: 'Admin privileges required' });
+        }
+
+        // ─── ✅ VALIDATE ALL 8 SECURITY ANSWERS ───
+        const { 
+            dish, pn, mum, dm,  // Layer 2 questions
+            dad, friend, enemy, app  // Layer 3 questions
+        } = req.body;
+
+        // ✅ Validate all inputs are strings
+        const allInputs = { dish, pn, mum, dm, dad, friend, enemy, app };
+        for (const [key, value] of Object.entries(allInputs)) {
+            if (typeof value !== 'string') {
+                return res.status(400).json({ success: false, message: `Invalid input type for ${key}. Must be a string.` });
+            }
+        }
+
+        // Validate all answers are present and meet minimum requirements
+        const requiredFields = [
+            { value: dish, name: 'Favorite dish' },
+            { value: pn, name: 'Phone number' },
+            { value: mum, name: "Mother's name" },
+            { value: dm, name: 'Dream destination' },
+            { value: dad, name: "Father's name" },
+            { value: friend, name: "Best friend's name" },
+            { value: enemy, name: 'Enemy name' },
+            { value: app, name: 'Favorite app' }
+        ];
+
+        const errors = [];
+        for (const field of requiredFields) {
+            if (!field.value || typeof field.value !== 'string' || field.value.trim().length < 3) {
+                errors.push(`${field.name} must be at least 3 characters long`);
+            }
+        }
+
+        if (errors.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid security answers',
+                errors: errors
+            });
+        }
+
+        // ─── ✅ HASH ALL ANSWERS ───
+        const saltRounds = 10;
+        
+        const hashedDish = await bcrypt.hash(String(dish).trim().toLowerCase(), saltRounds);
+        const hashedPn = await bcrypt.hash(String(pn).trim().toLowerCase(), saltRounds);
+        const hashedMum = await bcrypt.hash(String(mum).trim().toLowerCase(), saltRounds);
+        const hashedDm = await bcrypt.hash(String(dm).trim().toLowerCase(), saltRounds);
+        const hashedDad = await bcrypt.hash(String(dad).trim().toLowerCase(), saltRounds);
+        const hashedFriend = await bcrypt.hash(String(friend).trim().toLowerCase(), saltRounds);
+        const hashedEnemy = await bcrypt.hash(String(enemy).trim().toLowerCase(), saltRounds);
+        const hashedApp = await bcrypt.hash(String(app).trim().toLowerCase(), saltRounds);
+
+        // ─── ✅ SAVE TO USER ───
+        user.adminAns_dish = hashedDish;
+        user.adminAns_pn = hashedPn;
+        user.adminAns_mum = hashedMum;
+        user.adminAns_dm = hashedDm;
+        user.adminAns_dad = hashedDad;
+        user.adminAns_friend = hashedFriend;
+        user.adminAns_enemy = hashedEnemy;
+        user.adminAns_app = hashedApp;
+        user.securitySetupComplete = true;
+        user.securitySetupDate = new Date();
+
+        await user.save();
+
+        console.log(`✅ [SECURITY SETUP] Admin completed security setup`);
+
+        res.json({
+            success: true,
+            message: 'Admin security questions set up successfully',
+            securitySetupComplete: true,
+            setupDate: user.securitySetupDate
+        });
+
+    } catch (error) {
+        console.error('❌ [SECURITY SETUP] Error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Server error setting up security questions'
+        });
+    }
+};
+
+// ─── ✅ NEW: Check Admin Security Setup Status ───
+const checkAdminSecurityStatus = async (req, res) => {
+    try {
+        const userId = req.userId;
+        if (!userId || !isValidObjectId(userId)) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId).select('isAdmin securitySetupComplete securitySetupDate');
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        if (!user.isAdmin) {
+            return res.status(403).json({ success: false, message: 'Admin privileges required' });
+        }
+
+        res.json({
+            success: true,
+            isAdmin: true,
+            securitySetupComplete: user.securitySetupComplete || false,
+            needsSetup: !user.securitySetupComplete,
+            setupDate: user.securitySetupDate || null
+        });
+
+    } catch (error) {
+        console.error('❌ [SECURITY STATUS] Error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Server error checking security status'
+        });
+    }
+};
+
+// ✅ NEW: Generate TOTP Secret for Admin Setup
+const generateAdminTotp = async (req, res) => {
+    try {
+        const userId = req.userId;
+        if (!userId || !isValidObjectId(userId)) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId);
+        if (!user || !user.isAdmin) return res.status(403).json({ success: false, message: 'Admin privileges required' });
+        const secret = speakeasy.generateSecret({ name: 'Skyline Admin' });
+        user.adminTotpSecret = secret.base32;
+        await user.save();
+        res.json({ success: true, otpauth_url: secret.otpauth_url, secret: secret.base32 });
+    } catch (error) {
+        console.error('❌ [TOTP GENERATION] Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error generating TOTP' });
+    }
+};
+
+// ✅ NEW: Verify and Enable TOTP
+const enableAdminTotp = async (req, res) => {
+    try {
+        const { token } = req.body;
+        const userId = req.userId;
+        if (!token || typeof token !== 'string') return res.status(400).json({ success: false, message: 'Token is required' });
+        if (!userId || !isValidObjectId(userId)) return res.status(401).json({ success: false, message: 'Unauthorized' });
+        const safeUserId = String(userId);
+        const user = await User.findById(safeUserId);
+        if (!user || !user.adminTotpSecret) return res.status(400).json({ success: false, message: 'Setup not initiated' });
+        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
+        if (verified) {
+            user.adminTotpEnabled = true;
+            await user.save();
+            res.json({ success: true, message: '2FA enabled successfully' });
+        } else {
+            res.status(400).json({ success: false, message: 'Invalid token' });
+        }
+    } catch (error) {
+        console.error('❌ [TOTP ENABLE] Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error enabling 2FA' });
+    }
+};
+
+// ✅ NEW: Admin Login Step 2 (Verify TOTP)
+const verifyAdminTotpLogin = async (req, res) => {
+    try {
+        const { token, tempToken } = req.body;
+        if (!token || typeof token !== 'string' || !tempToken || typeof tempToken !== 'string') {
+            return res.status(400).json({ success: false, message: 'Token and tempToken required' });
+        }
+        let decoded;
+        try { decoded = jwt.verify(tempToken, process.env.JWT_SECRET); } catch (err) { return res.status(401).json({ success: false, message: 'Session expired' }); }
+        
+        // ✅ Validate decoded ID
+        if (!decoded.id || !isValidObjectId(decoded.id)) {
+            return res.status(401).json({ success: false, message: 'Invalid session' });
+        }
+        
+        const safeId = String(decoded.id);
+        const user = await User.findById(safeId);
+        if (!user || !user.isAdmin || !user.adminTotpEnabled) return res.status(403).json({ success: false, message: '2FA not configured or invalid user' });
+        const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
+        if (verified) {
+            const finalToken = jwt.sign(
+                { id: user._id, role: 'admin', permissions: user.permissions || ['all'] },
+                process.env.ADMIN_JWT_SECRET, { expiresIn: '30m' }
+            );
+            res.json({ success: true, token: finalToken });
+        } else {
+            res.status(401).json({ success: false, message: 'Invalid 2FA code' });
+        }
+    } catch (error) {
+        console.error('❌ [TOTP LOGIN] Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error during 2FA verification' });
+    }
+};
+
+module.exports = {
+    register, login, logout, revokeAllTokens, verifyEmail, verifyUsername,
+    forgotPassword, resetPassword, verifyAge, changeEmail, verifyLayer2, verifyLayer3, deleteAccount,
+    setupAdminSecurity, checkAdminSecurityStatus,
+    generateAdminTotp, enableAdminTotp, verifyAdminTotpLogin
+};
