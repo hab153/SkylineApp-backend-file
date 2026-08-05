@@ -34,10 +34,12 @@ TAVILY_API_KEYS.forEach((_, index) => {
 });
 
 // ────────────────────────────────────────────────────────────────
-// ✅ FIX #70: Do NOT use regex with secret-related words.
-// Do NOT attempt to detect or mask secrets in log output.
-// Instead: only log hardcoded prefix strings + safe numeric/enum values.
-// Any dynamic value that could contain sensitive data is simply not logged.
+// FIX (CodeQL js/clear-text-logging): logInfo must never receive
+// raw user-controlled or identity-bearing values (userId, industry
+// text, search-package content, API keys, etc). Only literal
+// strings and safe numeric/counts may be interpolated by callers.
+// This function itself stays a dumb sink; the enforcement happens
+// at every call site below (see fixes throughout the file).
 // ────────────────────────────────────────────────────────────────
 function logInfo(msg) {
   console.log('[Stage3]', msg);
@@ -89,6 +91,7 @@ function getNextTavilyKey() {
     if (keyUsageCount[index] < maxSearchesPerKey) {
       currentKeyIndex = index;
       keyUsageCount[index] = (keyUsageCount[index] || 0) + 1;
+      // FIX: never log the key itself - index/count are safe numeric values only.
       logInfo('Using key index ' + (index + 1) + ' of ' + totalKeys + ' (' + keyUsageCount[index] + '/' + maxSearchesPerKey + ')');
       return TAVILY_API_KEYS[index];
     }
@@ -160,6 +163,9 @@ async function searchTavily(query, maxResults = MAX_RESULTS_PER_SEARCH) {
     }));
 
   } catch (error) {
+    // FIX: log error.message only (Axios/Tavily failure reason), never the
+    // full error object (which can carry the request config, including
+    // the api_key we just sent in the POST body).
     console.error('[Stage3] Search failed:', error.message);
     return [];
   }
@@ -252,11 +258,14 @@ async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
   const service = searchPackage.service_needed || null;
   const targetType = searchPackage.target_type || 'Companies';
 
-  logInfo('Executing hypothesis: ' + industry + ' (confidence: ' + confidence + ')');
+  // FIX: do not interpolate raw `industry` (external/user-controlled text)
+  // into the log line. Log only the safe numeric confidence value.
+  logInfo('Executing hypothesis search (confidence: ' + confidence + ')');
   onProgress?.('Searching ' + industry + '...');
 
   const queries = expandQuery(industry, location, service, targetType);
-  logInfo('Generated ' + queries.length + ' queries for ' + industry);
+  // FIX: log only the count, not the industry text.
+  logInfo('Generated ' + queries.length + ' queries for current hypothesis');
 
   const searchPromises = queries.map(query => searchTavily(query, MAX_RESULTS_PER_SEARCH));
   const results = await Promise.all(searchPromises);
@@ -283,7 +292,8 @@ async function executeHypothesisSearch(hypothesis, searchPackage, onProgress) {
     return true;
   });
 
-  logInfo(industry + ': Found ' + uniqueResults.length + ' unique results from ' + queries.length + ' queries');
+  // FIX: drop raw `industry` from the log message, keep only counts.
+  logInfo('Hypothesis search done: found ' + uniqueResults.length + ' unique results from ' + queries.length + ' queries');
 
   return {
     hypothesis: industry,
@@ -362,9 +372,11 @@ async function multiSourceSearch({
   onProgress = null,
   sources = ['tavily']
 }) {
-  logInfo('Starting multi-source search for user ' + userId);
-  logInfo('Hypotheses: ' + hypotheses.map(h => h.industry).join(', '));
-  logInfo('Countries: ' + (searchPackage.countries || []).join(', ') + ', Target: ' + (searchPackage.target_type || 'Companies'));
+  // FIX: never log the raw userId (an identity/PII-bearing value).
+  // Log only that a search started and how many hypotheses/countries
+  // are involved (counts, not content).
+  logInfo('Starting multi-source search (' + (hypotheses?.length || 0) + ' hypotheses)');
+  logInfo('Countries requested: ' + (searchPackage.countries?.length || 0) + ', Target: ' + (searchPackage.target_type ? 'set' : 'default'));
   onProgress?.('Searching multiple sources...');
 
   if (!hypotheses || hypotheses.length === 0) {
