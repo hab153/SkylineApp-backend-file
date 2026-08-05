@@ -25,13 +25,25 @@ const sendMessage = async (req, res) => {
     let { message, history, sessionId } = req.body;
     const userId = req.userId;
     
-    console.log('🔍 [CHAT] Received message:', message);
-    console.log('🔍 [CHAT] User ID:', userId);
-    
-    if (!message) {
-        console.log('❌ [CHAT] Message is empty');
-        return res.status(400).json({ message: 'Message is required' });
+    // ✅ FIX #16: Validate input types before any processing
+    if (!message || typeof message !== 'string') {
+        return res.status(400).json({ message: 'Message is required and must be a string' });
     }
+    
+    if (message.length > 10000) {
+        return res.status(400).json({ message: 'Message too long. Maximum 10000 characters.' });
+    }
+    
+    // ✅ Validate userId
+    if (!isValidObjectId(userId)) {
+        return res.status(400).json({ message: 'Invalid user ID' });
+    }
+    
+    // ✅ FIX #16: Cast userId to string for query safety
+    const safeUserId = String(userId);
+    
+    console.log('🔍 [CHAT] Received message length:', message.length);
+    console.log('🔍 [CHAT] User ID:', safeUserId);
     
     // ✅ FIX: Store original message, sanitize ONLY for display
     const originalMessage = message;
@@ -39,18 +51,26 @@ const sendMessage = async (req, res) => {
     // Sanitize for display purposes only
     const displayMessage = sanitizeString(message);
     
-    console.log('🔍 [CHAT] Original message:', originalMessage);
-    console.log('🔍 [CHAT] Original length:', originalMessage.length);
+    // ✅ FIX #17: Validate and sanitize sessionId
+    let currentSessionId;
+    if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
+        currentSessionId = sessionId;
+    } else {
+        currentSessionId = uuidv4();
+    }
     
-    const currentSessionId = sessionId || uuidv4();
-    const user = await User.findById(userId);
+    const user = await User.findById(safeUserId);
+    if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+    }
+    
     const plan = user.subscriptionTier || 'free';
 
     try {
         // ✅ SAVE USER MESSAGE - Store the ORIGINAL message
         const savedUserMessage = await ChatMessage.create({
-            userId,
-            sessionId: currentSessionId,
+            userId: safeUserId,
+            sessionId: String(currentSessionId),
             role: 'user',
             content: originalMessage,  // ✅ Store original, NOT sanitized
             title: originalMessage.substring(0, 30) + '...'
@@ -60,19 +80,29 @@ const sendMessage = async (req, res) => {
         console.log('✅ [CHAT] Content length saved:', originalMessage.length);
 
         // --- Create/Update Session metadata ---
-        const existingSession = await Session.findOne({ userId, sessionId: currentSessionId });
+        // ✅ FIX #17: Use safe typed values in query
+        const existingSession = await Session.findOne({ 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId) 
+        });
+        
         if (!existingSession) {
             await Session.create({
-                userId,
-                sessionId: currentSessionId,
+                userId: safeUserId,
+                sessionId: String(currentSessionId),
                 type: 'lead',
                 name: originalMessage.substring(0, 50) || 'Lead Search',
                 updatedAt: new Date()
             });
             console.log('✅ [CHAT] Session created:', currentSessionId);
         } else {
+            // ✅ Verify session belongs to this user
+            if (String(existingSession.userId) !== safeUserId) {
+                return res.status(403).json({ message: 'Access denied to this session' });
+            }
+            
             await Session.findOneAndUpdate(
-                { userId, sessionId: currentSessionId },
+                { userId: safeUserId, sessionId: String(currentSessionId) },
                 { updatedAt: new Date() }
             );
             console.log('✅ [CHAT] Session updated:', currentSessionId);
@@ -104,20 +134,22 @@ const sendMessage = async (req, res) => {
         }
 
         // ✅ SAVE AI RESPONSE
+        // ✅ FIX #19: Use safe typed values
         const savedAiMessage = await ChatMessage.create({ 
-            userId, 
-            sessionId: currentSessionId, 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId), 
             role: 'ai', 
-            content: aiReply 
+            content: typeof aiReply === 'string' ? aiReply : 'Unable to generate response.'
         });
         
         console.log('✅ [CHAT] AI response saved:', savedAiMessage._id);
         console.log('✅ [CHAT] AI response length:', aiReply ? aiReply.length : 0);
 
         // ✅ VERIFY messages were saved
+        // ✅ FIX #20: Use safe typed values in count query
         const verifyCount = await ChatMessage.countDocuments({ 
-            userId, 
-            sessionId: currentSessionId 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId) 
         });
         console.log('✅ [CHAT] Total messages in session:', verifyCount);
 
@@ -129,11 +161,11 @@ const sendMessage = async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ [CHAT] Error:', error);
+        console.error('❌ [CHAT] Error:', error.message);
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
             return handleQueueError(error, res);
         }
-        res.status(500).json({ message: error.message || 'Server Error' });
+        res.status(500).json({ message: 'Server Error processing your message' });
     }
 };
 
@@ -141,18 +173,34 @@ const sendMessage = async (req, res) => {
 const submitFeedback = async (req, res) => {
     try {
         const { messageId, type } = req.body;
-        if (!messageId || !['like', 'dislike'].includes(type)) return res.status(400).json({ message: 'Invalid feedback data' });
+        
+        // ✅ Validate inputs
+        if (!messageId || typeof messageId !== 'string' || !['like', 'dislike'].includes(type)) {
+            return res.status(400).json({ message: 'Invalid feedback data' });
+        }
         if (!isValidObjectId(messageId)) {
             return res.status(400).json({ message: 'Invalid message ID' });
         }
-        const message = await ChatMessage.findById(messageId);
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        
+        const safeUserId = String(req.userId);
+        const safeMessageId = String(messageId);
+        
+        const message = await ChatMessage.findById(safeMessageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
-        if (message.userId.toString() !== req.userId) return res.status(403).json({ message: 'Unauthorized' });
+        
+        // ✅ Verify ownership
+        if (String(message.userId) !== safeUserId) {
+            return res.status(403).json({ message: 'Unauthorized' });
+        }
+        
         message.feedback = message.feedback === type ? null : type;
         await message.save();
         res.json({ success: true, feedback: message.feedback });
     } catch (err) {
-        console.error('Submit feedback error:', err);
+        console.error('Submit feedback error:', err.message);
         res.status(500).json({ message: 'Server Error saving feedback' });
     }
 };
@@ -164,15 +212,19 @@ const getSessions = async (req, res) => {
         if (!isValidObjectId(userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        const query = sanitizeQuery({ userId });
+        
+        // ✅ FIX: Cast userId to string for query safety
+        const safeUserId = String(userId);
+        const query = sanitizeQuery({ userId: safeUserId });
+        
         const sessions = await Session.find(query)
             .sort({ pinned: -1, updatedAt: -1 })
             .lean();
 
         const sessionsWithCounts = await Promise.all(sessions.map(async (session) => {
             const count = await ChatMessage.countDocuments({
-                userId,
-                sessionId: session.sessionId
+                userId: safeUserId,
+                sessionId: String(session.sessionId)
             });
             return {
                 _id: session.sessionId,
@@ -186,7 +238,7 @@ const getSessions = async (req, res) => {
 
         res.json(sessionsWithCounts);
     } catch (error) {
-        console.error('[getSessions] Error:', error);
+        console.error('[getSessions] Error:', error.message);
         res.status(500).json({ message: 'Server Error fetching sessions' });
     }
 };
@@ -195,20 +247,39 @@ const getSessions = async (req, res) => {
 const getHistory = async (req, res) => {
     try {
         const { sessionId } = req.params;
+        
+        // ✅ Validate inputs
         if (!sessionId || typeof sessionId !== 'string') {
             return res.status(400).json({ message: 'Invalid session ID' });
         }
+        
         const userId = req.userId;
         if (!isValidObjectId(userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        // Sanitize sessionId string
-        const sanitizedSessionId = sanitizeString(sessionId);
-        const query = sanitizeQuery({ userId, sessionId: sanitizedSessionId });
+        
+        // ✅ FIX: Cast to strings and sanitize
+        const safeUserId = String(userId);
+        const sanitizedSessionId = String(sanitizeString(sessionId));
+        
+        // ✅ Verify session belongs to user before returning messages
+        const session = await Session.findOne({ 
+            userId: safeUserId, 
+            sessionId: sanitizedSessionId 
+        });
+        
+        if (!session) {
+            return res.status(404).json({ message: 'Session not found' });
+        }
+        
+        const query = sanitizeQuery({ 
+            userId: safeUserId, 
+            sessionId: sanitizedSessionId 
+        });
         const messages = await ChatMessage.find(query).sort({ createdAt: 1 });
         res.json(messages);
     } catch (error) {
-        console.error('Get history error:', error);
+        console.error('Get history error:', error.message);
         res.status(500).json({ message: 'Server Error fetching history' });
     }
 };
@@ -217,16 +288,43 @@ const getHistory = async (req, res) => {
 const analyzeDream = async (req, res) => {
     let { dream, sessionId } = req.body;
     const userId = req.userId;
-    if (!dream) return res.status(400).json({ message: 'Dream description is required' });
+    
+    // ✅ Validate inputs
+    if (!dream || typeof dream !== 'string') {
+        return res.status(400).json({ message: 'Dream description is required and must be a string' });
+    }
+    if (!isValidObjectId(userId)) {
+        return res.status(400).json({ message: 'Invalid user ID' });
+    }
+    
+    const safeUserId = String(userId);
     
     // ✅ FIX: Store original, sanitize for display
     const originalDream = dream;
     dream = sanitizeString(dream);
     
-    const currentSessionId = sessionId || uuidv4();
+    // ✅ Validate sessionId
+    let currentSessionId;
+    if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
+        currentSessionId = sessionId;
+    } else {
+        currentSessionId = uuidv4();
+    }
+    
     try {
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: originalDream, title: originalDream.substring(0, 30) + '...' });
-        const user = await User.findById(userId);
+        await ChatMessage.create({ 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId), 
+            role: 'user', 
+            content: originalDream, 
+            title: originalDream.substring(0, 30) + '...' 
+        });
+        
+        const user = await User.findById(safeUserId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
         const userProfile = {
             fullName: user.fullName,
             country: user.country,
@@ -237,14 +335,21 @@ const analyzeDream = async (req, res) => {
             userId: user._id.toString()
         };
         const result = await proQueue.enqueue(() => generateBusinessResponse(originalDream, [], userProfile));
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply });
+        
+        await ChatMessage.create({ 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId), 
+            role: 'ai', 
+            content: typeof result.reply === 'string' ? result.reply : 'Unable to analyze dream.'
+        });
+        
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
             return handleQueueError(error, res);
         }
-        console.error('Dream analyze error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
+        console.error('Dream analyze error:', error.message);
+        res.status(500).json({ message: 'Server Error analyzing dream' });
     }
 };
 
@@ -252,17 +357,43 @@ const analyzeDream = async (req, res) => {
 const refineDream = async (req, res) => {
     let { followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
-    if (!followUpAnswer || !dreamDescription) return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required' });
+    
+    // ✅ Validate inputs
+    if (!followUpAnswer || typeof followUpAnswer !== 'string' || !dreamDescription || typeof dreamDescription !== 'string') {
+        return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required and must be strings' });
+    }
+    if (!isValidObjectId(userId)) {
+        return res.status(400).json({ message: 'Invalid user ID' });
+    }
+    
+    const safeUserId = String(userId);
     
     // ✅ FIX: Store original
     const originalFollowUp = followUpAnswer;
     followUpAnswer = sanitizeString(followUpAnswer);
     dreamDescription = sanitizeString(dreamDescription);
     
-    const currentSessionId = sessionId || uuidv4();
+    // ✅ Validate sessionId
+    let currentSessionId;
+    if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
+        currentSessionId = sessionId;
+    } else {
+        currentSessionId = uuidv4();
+    }
+    
     try {
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'user', content: originalFollowUp });
-        const user = await User.findById(userId);
+        await ChatMessage.create({ 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId), 
+            role: 'user', 
+            content: originalFollowUp 
+        });
+        
+        const user = await User.findById(safeUserId);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        
         const userProfile = {
             fullName: user.fullName,
             country: user.country,
@@ -273,14 +404,21 @@ const refineDream = async (req, res) => {
             userId: user._id.toString()
         };
         const result = await proQueue.enqueue(() => generateBusinessResponse(originalFollowUp, [], userProfile));
-        await ChatMessage.create({ userId, sessionId: currentSessionId, role: 'ai', content: result.reply });
+        
+        await ChatMessage.create({ 
+            userId: safeUserId, 
+            sessionId: String(currentSessionId), 
+            role: 'ai', 
+            content: typeof result.reply === 'string' ? result.reply : 'Unable to refine dream.'
+        });
+        
         res.json({ plan: result.reply, audit: {}, sessionId: currentSessionId });
     } catch (error) {
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
             return handleQueueError(error, res);
         }
-        console.error('Dream refine error:', error);
-        res.status(500).json({ message: error.message || 'Server Error' });
+        console.error('Dream refine error:', error.message);
+        res.status(500).json({ message: 'Server Error refining dream' });
     }
 };
 
