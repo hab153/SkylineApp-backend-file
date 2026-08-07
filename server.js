@@ -207,14 +207,12 @@ function getCached(key) {
 
 function setCache(key, data) {
     _apiCache[key] = { data: data, time: Date.now() };
-    // Prevent memory leak — keep max 200 entries
     var keys = Object.keys(_apiCache);
     if (keys.length > 200) {
         delete _apiCache[keys[0]];
     }
 }
 
-// Clean expired cache entries every 10 minutes
 setInterval(function() {
     var now = Date.now();
     var ttlMs = API_CACHE_TTL * 1000;
@@ -224,6 +222,34 @@ setInterval(function() {
         }
     }
 }, 10 * 60 * 1000);
+
+// ✅ SSE: Real-time push system — stores active browser connections per user
+var sseClients = {};
+
+// Send heartbeat every 30 seconds to keep connections alive through Render's proxy
+setInterval(function() {
+    var userIds = Object.keys(sseClients);
+    for (var i = 0; i < userIds.length; i++) {
+        try {
+            sseClients[userIds[i]].write(':heartbeat\n\n');
+        } catch (e) {
+            delete sseClients[userIds[i]];
+        }
+    }
+}, 30000);
+
+// ✅ SSE: Call this from anywhere to push an event to a specific user's browser instantly
+function notifyUser(userId, eventData) {
+    var uid = String(userId);
+    var client = sseClients[uid];
+    if (client) {
+        try {
+            client.write('data: ' + JSON.stringify(eventData) + '\n\n');
+        } catch (e) {
+            delete sseClients[uid];
+        }
+    }
+}
 
 // ─── SECURITY MIDDLEWARE ───
 app.use(helmet({
@@ -302,9 +328,44 @@ app.use(globalLimiter);
 console.log('✅ [SERVER] Security middleware applied');
 
 // ─── HEALTH CHECK ───
-// ✅ PERF #4: This endpoint is also used by UptimeRobot to prevent Render cold starts
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
+});
+
+// ✅ SSE: Accept token from query string for EventSource (which can't send custom headers)
+app.use('/api/events/stream', function(req, res, next) {
+    if (req.query.token && !req.headers.authorization) {
+        req.headers.authorization = 'Bearer ' + req.query.token;
+    }
+    next();
+});
+
+// ✅ SSE: Real-time event stream endpoint — browser connects via EventSource
+app.get('/api/events/stream', verifyToken, function(req, res) {
+    var userId = String(req.userId);
+
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        'Access-Control-Allow-Origin': 'https://skylineai-app.vercel.app',
+        'Access-Control-Allow-Credentials': 'true'
+    });
+
+    res.write('data: ' + JSON.stringify({ type: 'connected', time: Date.now() }) + '\n\n');
+
+    sseClients[userId] = res;
+    console.log('📡 [SSE] Client connected: ' + userId + ' (total: ' + Object.keys(sseClients).length + ')');
+
+    req.on('close', function() {
+        delete sseClients[userId];
+        console.log('📡 [SSE] Client disconnected: ' + userId + ' (total: ' + Object.keys(sseClients).length + ')');
+    });
+
+    req.on('error', function() {
+        delete sseClients[userId];
+    });
 });
 
 // ─── WEBHOOKS ───
@@ -322,7 +383,6 @@ app.use(xssOutputProtection);
 
 // ─── MONGODB CONNECTION ───
 console.log('🔗 [SERVER] Connecting to MongoDB...');
-// ✅ PERF #5: Reduced pool from 50 to 10 — saves MongoDB Atlas free tier resources
 mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 10, serverSelectionTimeoutMS: 5000 })
     .then(async () => {
         console.log('✅ MongoDB Connected');
@@ -398,7 +458,6 @@ app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
 
 app.get('/api/auth/nylas/callback', nylasAuthController.handleCallback);
 
-// ✅ PERF #3: Cached Nylas status — skips DB+API call if cached < 5 min
 app.get('/api/auth/nylas/status', verifyToken, async (req, res) => {
   try {
     var cacheKey = 'nylas_status_' + String(req.userId);
@@ -437,7 +496,6 @@ app.post('/api/auth/forgot-password', resetLimiter, validate(forgotPasswordSchem
 app.post('/api/auth/reset-password', resetLimiter, validate(resetPasswordSchema), resetPassword);
 app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
 
-// ✅ PERF #3: Cached user profile — skips DB query if cached < 5 min
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) => {
     try {
         var cacheKey = 'user_me_' + String(req.userId);
@@ -445,7 +503,6 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
         if (cached) {
             return res.json(cached);
         }
-        // Call the original controller logic
         var user = await User.findById(req.userId).select('-password -resetToken -resetTokenExpiry -adminAns_dish -adminAns_pn -adminAns_mum -adminAns_dm -adminAns_dad -adminAns_friend -adminAns_enemy -adminAns_app');
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
@@ -460,16 +517,13 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, async (req, res) 
 });
 
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), async (req, res, next) => {
-    // Invalidate cache when user updates profile
     delete _apiCache['user_me_' + String(req.userId)];
     userController.updateUserProfile(req, res, next);
 });
 
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
 
-// ─── GDPR ACCOUNT DELETION ROUTES ───
 app.delete('/api/users/me', verifyToken, async (req, res, next) => {
-    // Invalidate cache when user deletes account
     delete _apiCache['user_me_' + String(req.userId)];
     userController.deleteUserAccount(req, res, next);
 });
@@ -477,10 +531,8 @@ app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserA
 app.post('/api/users/me/restore', verifyToken, userController.restoreUserAccount);
 app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletionStatus);
 
-// ─── DATA EXPORT ROUTES ───
 app.use('/api/data', dataExportRoutes);
 
-// ─── LEAD / CONVERSATION ROUTES ───
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
@@ -493,21 +545,17 @@ app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 console.log('✅ [SERVER] All lead routes registered');
 
-// ─── FOLLOW-UP ROUTES ───
 console.log('🔧 [SERVER] Registering follow-up routes...');
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
 console.log('✅ [SERVER] Follow-up routes registered');
 
-// ─── REVENUE TRACKING ───
 if (typeof revenueController !== 'undefined' && revenueController.getRevenueTracking) {
     app.get('/api/revenue/tracking', verifyToken, revenueController.getRevenueTracking);
     console.log('✅ [SERVER] Revenue tracking route registered');
 }
 
-// ─── NOTIFICATIONS ───
-// ✅ PERF #3: Cached notification count — skips DB query if cached < 60s
 app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
 app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
 app.get('/api/notifications/count', verifyToken, async (req, res) => {
@@ -517,20 +565,16 @@ app.get('/api/notifications/count', verifyToken, async (req, res) => {
         if (cached) {
             return res.json(cached);
         }
-        // Use a shorter TTL for notifications (60 seconds)
         var count = await notificationController.getNotificationCountDirect(req.userId);
         var result = { count: count };
-        // Store with custom shorter TTL
         _apiCache[cacheKey] = { data: result, time: Date.now() };
         res.json(result);
     } catch (err) {
-        // Fallback to original controller
         notificationController.getNotificationCount(req, res);
     }
 });
 console.log('✅ [SERVER] Notification routes registered');
 
-// ─── CHAT & DREAMS ROUTES ───
 app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
 app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
@@ -540,7 +584,6 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 console.log('✅ [SERVER] Dreams routes registered');
 
-// ─── AI SUGGESTION ROUTE ───
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     console.log('💡 [AI SUGGEST] Request received');
     try {
@@ -556,7 +599,6 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 });
 console.log('✅ [SERVER] AI suggestion route registered');
 
-// ─── ADMIN ROUTES (SECURE TOTP) ───
 app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -579,20 +621,16 @@ app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
     }
 });
 
-// Step 2: Verify TOTP Code
 app.post('/api/admin/verify-2fa', require('./authController').verifyAdminTotpLogin);
 
-// Setup Endpoints (Protected)
 app.get('/api/admin/setup-2fa', verifyAdminToken, require('./authController').generateAdminTotp);
 app.post('/api/admin/enable-2fa', verifyAdminToken, require('./authController').enableAdminTotp);
 
-// Honeypot: Block all other /admin* paths with 404
 app.use(/^\/admin/i, (req, res) => {
     console.warn('[SECURITY] Suspicious scan from ' + req.ip);
     res.status(404).json({ error: 'Not Found' });
 });
 
-// ✅ GET ALL USERS (KEPT - needed for admin dashboard)
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     try {
         const users = await User.find({}).select('email username isAdmin isSuspended createdAt _id');
@@ -603,7 +641,6 @@ app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     }
 });
 
-// ✅ LEGACY ADMIN ROUTES (Kept for compatibility)
 app.post('/api/admin/verify-layer-2', verifyAdminToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyAdminToken, adminController.adminVerifyLayer3);
 app.get('/api/admin/users/:id/details', verifyAdminToken, adminController.getUserDetails);
@@ -612,11 +649,9 @@ app.post('/api/admin/users/:id/message', verifyAdminToken, validate(adminMessage
 app.get('/api/admin/reports', verifyAdminToken, adminController.getAllReports);
 console.log('✅ [SERVER] Admin routes registered');
 
-// ─── REPORTS ───
 app.post('/api/reports', verifyToken, validate(reportSchema), reportController.submitReport);
 console.log('✅ [SERVER] Report routes registered');
 
-// ─── HISTORY ROUTES ───
 console.log('🔧 [SERVER] Registering history routes...');
 app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.get('/api/history/messages/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
@@ -626,7 +661,6 @@ app.put('/api/history/pin/:sessionId', verifyToken, sessionController.pinSession
 app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.deleteSession);
 console.log('✅ [SERVER] History routes registered');
 
-// ─── DEBUG ROUTES (ADMIN-ONLY) ───
 app.get('/api/debug/verify-messages', verifyAdminToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
@@ -675,13 +709,13 @@ const server = app.listen(PORT, () => {
 server.timeout = 300000;
 
 // ✅ PERF #6: Self-ping every 10 minutes to prevent Render free tier cold starts
-// This keeps the server awake so users don't experience 30-60s cold start delays
 setInterval(function() {
     var http = require('http');
     http.get('http://localhost:' + PORT + '/api/health', function(res) {
-        res.resume(); // Consume response to free memory
-    }).on('error', function() {
-        // Silently ignore — server might be restarting
-    });
+        res.resume();
+    }).on('error', function() {});
 }, 10 * 60 * 1000);
 console.log('✅ [PERF] Self-ping enabled (every 10 min) to prevent cold starts');
+
+// ✅ SSE: Export notifyUser so nylasWebhookHandler.js can call it
+module.exports.notifyUser = notifyUser;
