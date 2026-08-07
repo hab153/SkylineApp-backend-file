@@ -8,6 +8,9 @@ const { generateAIReply } = require('./aiReplyGenerator');
 const { decrypt } = require('./encryption'); 
 const { isValidObjectId, sanitizeString } = require('./sanitize');
 
+// ✅ SSE: Import shared SSE manager (NO circular dependency)
+const sseManager = require('./sseManager');
+
 function sanitizeEmailBody(html) {
   if (!html || typeof html !== 'string') return '';
   return html.substring(0, 10000);
@@ -310,8 +313,6 @@ async function handleMessageCreated(eventData) {
   }
 }
 
-// ✅ FIX: Removed .lean() — we need full Mongoose documents with .save() method
-// .lean() returns plain JS objects that don't have .save(), causing "lead.save is not a function"
 async function findMatchingLead(userId, fromEmail, toEmail) {
   const normalizedFrom = fromEmail?.toLowerCase()?.trim();
   const normalizedTo = toEmail?.toLowerCase()?.trim();
@@ -340,7 +341,6 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   return null;
 }
 
-// ✅ SSE: processReply now pushes new messages to the user's browser instantly
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   try {
     lead.status = 'Replied';
@@ -393,24 +393,20 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('⚠️ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
 
-    // ✅ SSE: Push new message to user's browser INSTANTLY (< 1 second)
+    // ✅ SSE: Push new message to user's browser INSTANTLY via sseManager (no circular dep)
     try {
-      const serverModule = require('./server');
-      if (serverModule && typeof serverModule.notifyUser === 'function') {
-        serverModule.notifyUser(userId, {
-          type: 'new_message',
-          leadId: String(lead._id),
-          leadName: lead.name || 'Unknown',
-          leadEmail: lead.email || '',
-          fromEmail: fromEmail || '',
-          subject: replySubject,
-          content: replyContent,
-          snippet: snippet ? String(snippet).substring(0, 200) : '',
-          date: new Date().toISOString(),
-          messageId: messageId || ''
-        });
-        console.log('📡 [SSE] Pushed new_message to user ' + userId + ' for lead ' + lead._id);
-      }
+      sseManager.notifyUser(userId, {
+        type: 'new_message',
+        leadId: String(lead._id),
+        leadName: lead.name || 'Unknown',
+        leadEmail: lead.email || '',
+        fromEmail: fromEmail || '',
+        subject: replySubject,
+        content: replyContent,
+        snippet: snippet ? String(snippet).substring(0, 200) : '',
+        date: new Date().toISOString(),
+        messageId: messageId || ''
+      });
     } catch (sseErr) {
       console.warn('⚠️ [SSE] Failed to push notification:', sseErr.message);
     }
@@ -476,25 +472,21 @@ async function handleMessageSent(eventData) {
         
         await lead.save();
 
-        // ✅ SSE: Push sent message to user's browser
+        // ✅ SSE: Push sent message via sseManager
         try {
-          const serverModule = require('./server');
-          if (serverModule && typeof serverModule.notifyUser === 'function') {
-            serverModule.notifyUser(userId, {
-              type: 'new_message',
-              leadId: String(lead._id),
-              leadName: lead.name || 'Unknown',
-              leadEmail: lead.email || '',
-              fromEmail: '',
-              subject: (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)',
-              content: safeBody,
-              snippet: safeBody.substring(0, 200),
-              date: new Date().toISOString(),
-              messageId: '',
-              sent: true
-            });
-            console.log('📡 [SSE] Pushed sent_message to user ' + userId + ' for lead ' + lead._id);
-          }
+          sseManager.notifyUser(userId, {
+            type: 'new_message',
+            leadId: String(lead._id),
+            leadName: lead.name || 'Unknown',
+            leadEmail: lead.email || '',
+            fromEmail: '',
+            subject: (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)',
+            content: safeBody,
+            snippet: safeBody.substring(0, 200),
+            date: new Date().toISOString(),
+            messageId: '',
+            sent: true
+          });
         } catch (sseErr) {
           console.warn('⚠️ [SSE] Failed to push sent notification:', sseErr.message);
         }
@@ -545,16 +537,12 @@ async function handleGrantExpired(eventData) {
         console.warn('⚠️ [WEBHOOK] Failed to create expiry notification:', notifErr.message);
       }
 
-      // ✅ SSE: Notify user that their email connection expired
+      // ✅ SSE: Notify user via sseManager
       try {
-        const serverModule = require('./server');
-        if (serverModule && typeof serverModule.notifyUser === 'function') {
-          serverModule.notifyUser(emailAccount.userId, {
-            type: 'connection_expired',
-            message: 'Your email connection has expired. Please reconnect.'
-          });
-          console.log('📡 [SSE] Pushed connection_expired to user ' + emailAccount.userId);
-        }
+        sseManager.notifyUser(emailAccount.userId, {
+          type: 'connection_expired',
+          message: 'Your email connection has expired. Please reconnect.'
+        });
       } catch (sseErr) {
         console.warn('⚠️ [SSE] Failed to push expiry notification:', sseErr.message);
       }
@@ -640,26 +628,22 @@ async function generateAndSendAutoReply(lead, userId) {
       
       await lead.save();
 
-      // ✅ SSE: Push auto-reply to user's browser
+      // ✅ SSE: Push auto-reply via sseManager
       try {
-        const serverModule = require('./server');
-        if (serverModule && typeof serverModule.notifyUser === 'function') {
-          serverModule.notifyUser(userId, {
-            type: 'new_message',
-            leadId: String(lead._id),
-            leadName: lead.name || 'Unknown',
-            leadEmail: lead.email || '',
-            fromEmail: '',
-            subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
-            content: aiResponse,
-            snippet: aiResponse.substring(0, 200),
-            date: new Date().toISOString(),
-            messageId: '',
-            sent: true,
-            autoReply: true
-          });
-          console.log('📡 [SSE] Pushed auto_reply to user ' + userId + ' for lead ' + lead._id);
-        }
+        sseManager.notifyUser(userId, {
+          type: 'new_message',
+          leadId: String(lead._id),
+          leadName: lead.name || 'Unknown',
+          leadEmail: lead.email || '',
+          fromEmail: '',
+          subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
+          content: aiResponse,
+          snippet: aiResponse.substring(0, 200),
+          date: new Date().toISOString(),
+          messageId: '',
+          sent: true,
+          autoReply: true
+        });
       } catch (sseErr) {
         console.warn('⚠️ [SSE] Failed to push auto-reply notification:', sseErr.message);
       }
@@ -668,4 +652,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-             }
+}
