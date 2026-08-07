@@ -54,7 +54,7 @@ const LeadSchema = new mongoose.Schema({
         date: { type: Date, default: Date.now },
         content: String,
         subject: String,
-        from: { type: String, enum: ['lead', 'ai'] },
+        from: { type: String, enum: ['lead', 'ai', 'customer'] },
         emailId: String
     }],
 
