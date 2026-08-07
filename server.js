@@ -21,6 +21,9 @@ const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
 const nylasAuthController = require('./nylasAuthController');
 const { handleWebhook } = require('./nylasWebhookHandler');
 
+// ✅ SSE: Import shared SSE manager (no circular dependency)
+const sseManager = require('./sseManager');
+
 const { startExpiryJob } = require('./expiryJob');
 const { startFollowUpJob } = require('./followUpJob');
 const flutterwaveWebhook = require('./flutterwaveWebhook');
@@ -125,9 +128,6 @@ if (isWeak) {
     console.error('❌ [SECURITY] JWT_SECRET appears to contain a weak/common pattern. Use a cryptographically random string.');
     process.exit(1);
 }
-// ✅ FIX #66: Do NOT reference jwtSecret at all in log output.
-// CodeQL flags ${jwtSecret.length} as logging sensitive data because jwtSecret
-// is tainted from process.env.JWT_SECRET. Even .length is flagged.
 console.log('✅ [SECURITY] JWT_SECRET is configured and validated');
 
 const adminJwtSecret = process.env.ADMIN_JWT_SECRET;
@@ -255,6 +255,50 @@ console.log('✅ [SERVER] Security middleware applied');
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
+
+// ✅ SSE: Accept token from query string for EventSource (which can't send custom headers)
+app.use('/api/events/stream', function(req, res, next) {
+    if (req.query.token && !req.headers.authorization) {
+        req.headers.authorization = 'Bearer ' + req.query.token;
+    }
+    next();
+});
+
+// ✅ SSE: Real-time event stream endpoint — browser connects via EventSource
+app.get('/api/events/stream', verifyToken, function(req, res) {
+    var userId = String(req.userId);
+
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+        'Access-Control-Allow-Origin': 'https://skylineai-app.vercel.app',
+        'Access-Control-Allow-Credentials': 'true'
+    });
+
+    res.write('data: ' + JSON.stringify({ type: 'connected', time: Date.now() }) + '\n\n');
+
+    sseManager.addClient(userId, res);
+    console.log('📡 [SSE] Client connected: ' + userId + ' (total: ' + sseManager.getClientCount() + ')');
+
+    req.on('close', function() {
+        sseManager.removeClient(userId);
+        console.log('📡 [SSE] Client disconnected: ' + userId + ' (total: ' + sseManager.getClientCount() + ')');
+    });
+
+    req.on('error', function() {
+        sseManager.removeClient(userId);
+    });
+});
+
+// ✅ SSE: Heartbeat every 30 seconds to keep connections alive through Render proxy
+setInterval(function() {
+    var http = require('http');
+    http.get('http://localhost:' + (process.env.PORT || 5001) + '/api/health', function(res) {
+        res.resume();
+    }).on('error', function() {});
+}, 30000);
 
 // ─── WEBHOOKS ───
 console.log('🔧 [SERVER] Registering webhook routes...');
