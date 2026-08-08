@@ -109,9 +109,9 @@ function cleanupIdempotencyCache() {
 
 setInterval(cleanupIdempotencyCache, 60 * 1000);
 
-// ──────────────────────────────────────────────────────────────
-//  GET /api/conversations
-// ──────────────────────────────────────────────────────────────
+// ============================================================
+// ✅ OPTIMIZED: GET /api/conversations WITH PAGINATION
+// ============================================================
 const getConversations = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -119,11 +119,25 @@ const getConversations = async (req, res) => {
         }
 
         const safeUserId = String(req.userId);
+        
+        // ✅ PAGINATION: Get page and limit from query params (like WhatsApp)
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 25; // 25 per page (WhatsApp style)
+        const skip = (page - 1) * limit;
 
+        // ✅ Get total count for pagination metadata
+        const total = await Lead.countDocuments({ userId: safeUserId });
+
+        // ✅ FAST: Use lean() + select() + pagination
         const leads = await Lead.find({ userId: safeUserId })
-            .sort({ lastContactDate: -1 })
-            .limit(100);
+            .select('name email company status lastContactDate createdAt replies unreadCount autoReplyEnabled autoReplyInstructions')
+            .sort({ lastContactDate: -1, createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean() // ← FAST: Returns plain objects
+            .exec();
 
+        // ✅ Format conversations (fast)
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
             const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
@@ -132,7 +146,6 @@ const getConversations = async (req, res) => {
                 ? stripHtmlTags(rawContent).substring(0, 50)
                 : 'No messages yet';
 
-            // ✅ NEW: Use dedicated unreadCount field directly from DB
             const unreadCount = lead.unreadCount || 0;
 
             return {
@@ -150,16 +163,36 @@ const getConversations = async (req, res) => {
             };
         });
 
-        res.json(conversations);
+        // ✅ Send paginated response with metadata
+        res.json({
+            success: true,
+            data: conversations,
+            pagination: {
+                page: page,
+                limit: limit,
+                total: total,
+                pages: Math.ceil(total / limit),
+                hasMore: skip + limit < total
+            }
+        });
+
     } catch (err) {
         console.error('❌ [getConversations] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// ──────────────────────────────────────────────────────────────
-//  GET /api/conversations/:leadId
-// ────────────────────────────────────────────────────────────
+// ============================================================
+// ✅ OPTIMIZED: GET /api/conversations/:leadId WITH CACHE
+// ============================================================
+// ✅ In-memory cache for conversation (30 seconds TTL)
+const conversationCache = new Map();
+const CONVERSATION_CACHE_TTL = 30000;
+
+function getConversationCacheKey(userId, leadId) {
+    return String(userId) + ':' + String(leadId);
+}
+
 const getConversationById = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -175,27 +208,43 @@ const getConversationById = async (req, res) => {
         const safeUserId = String(req.userId);
         const safeLeadId = String(leadId);
 
-        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
+        // ✅ Check cache first
+        const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
+        const cached = conversationCache.get(cacheKey);
+        if (cached && (Date.now() - cached.timestamp < CONVERSATION_CACHE_TTL)) {
+            console.log('⚡ [CACHE] Returning cached conversation for:', safeLeadId);
+            return res.json(cached.data);
+        }
+
+        // ✅ FAST: Use lean() and select only needed fields
+        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId })
+            .select('name email company status replies lastContactDate autoReplyEnabled autoReplyInstructions unreadCount')
+            .lean()
+            .exec();
 
         if (!lead) {
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
 
-        // ✅ NEW: Reset unreadCount to 0 when chat is opened
+        // ✅ Reset unreadCount to 0 when chat is opened
         if (lead.unreadCount > 0) {
-            lead.unreadCount = 0;
-            await lead.save();
+            await Lead.updateOne(
+                { _id: safeLeadId, userId: safeUserId },
+                { $set: { unreadCount: 0 } }
+            );
         }
 
         let allMessages = lead.replies || [];
-
         allMessages.sort((a, b) => {
             const dateA = a.date ? new Date(a.date) : new Date(0);
             const dateB = b.date ? new Date(b.date) : new Date(0);
             return dateA - dateB;
         });
 
-        const cleanHistory = allMessages.map(msg => ({
+        // ✅ Only get last 100 messages for performance
+        const limitedMessages = allMessages.slice(-100);
+
+        const cleanHistory = limitedMessages.map(msg => ({
             from: msg.from || 'lead',
             content: msg.content || '',
             subject: msg.subject || '',
@@ -204,7 +253,7 @@ const getConversationById = async (req, res) => {
             read: msg.read || false
         }));
 
-        res.json({
+        const result = {
             success: true,
             lead: {
                 id: lead._id.toString(),
@@ -215,8 +264,18 @@ const getConversationById = async (req, res) => {
                 autoReplyEnabled: lead.autoReplyEnabled || false,
                 autoReplyInstructions: lead.autoReplyInstructions || ''
             },
-            messages: cleanHistory
+            messages: cleanHistory,
+            totalMessages: allMessages.length,
+            displayedMessages: limitedMessages.length
+        };
+
+        // ✅ Store in cache
+        conversationCache.set(cacheKey, {
+            data: result,
+            timestamp: Date.now()
         });
+
+        res.json(result);
 
     } catch (err) {
         console.error('❌ [getConversationById] Error:', err.message);
@@ -247,6 +306,10 @@ const renameLead = async (req, res) => {
 
         lead.name = sanitizedNewName;
         await lead.save();
+
+        // ✅ Clear cache for this conversation
+        const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
+        conversationCache.delete(cacheKey);
 
         res.json({ success: true, newName: lead.name });
     } catch (err) {
@@ -279,6 +342,10 @@ const updateAutoReply = async (req, res) => {
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
         await lead.save();
+
+        // ✅ Clear cache for this conversation
+        const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
+        conversationCache.delete(cacheKey);
 
         res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
     } catch (err) {
@@ -469,6 +536,10 @@ const batchSend = async (req, res) => {
             }
 
             await targetLead.save();
+
+            // ✅ Clear cache for this conversation
+            const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
+            conversationCache.delete(cacheKey);
 
             if (emailSent) {
                 idempotencyCache.set(idempotencyKey, {
