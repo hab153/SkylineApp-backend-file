@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
+const compression = require('compression'); // ✅ ADDED
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -195,6 +196,20 @@ app.use(helmet({
 }));
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+
+// ✅ COMPRESSION: Enable gzip for faster response transfer
+app.use(compression({
+    level: 6,  // Balanced compression (1-9, 9 is highest but slowest)
+    threshold: 1024,  // Only compress responses > 1KB
+    filter: function(req, res) {
+        // Don't compress webhooks or SSE streams
+        if (req.path.includes('/webhook')) return false;
+        if (req.path.includes('/events/stream')) return false;
+        return compression.filter(req, res);
+    }
+}));
+
+console.log('✅ [SERVER] Compression enabled (gzip)');
 
 const ALLOWED_ORIGINS = ['https://skylineai-app.vercel.app', 'http://localhost:3000'];
 app.use(cors({
