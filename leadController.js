@@ -204,18 +204,17 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
 
-        // ✅ FIX: Mark CUSTOMER messages as read when chat is opened (not lead messages)
+        // ✅ FIX: Mark CUSTOMER messages as read using save() for reliable persistence
         if (lead.replies && lead.replies.length > 0) {
-            const unreadReplies = lead.replies.filter(r => r.from === 'customer' && !r.read);
-            if (unreadReplies.length > 0) {
-                await Lead.updateOne(
-                    { _id: safeLeadId, userId: safeUserId },
-                    { $set: { 'replies.$[elem].read': true } },
-                    {
-                        arrayFilters: [{ 'elem.from': 'customer', 'elem.read': false }],
-                        strict: false
-                    }
-                );
+            let hasUnread = false;
+            for (let i = 0; i < lead.replies.length; i++) {
+                if (lead.replies[i].from === 'customer' && !lead.replies[i].read) {
+                    lead.replies[i].read = true;
+                    hasUnread = true;
+                }
+            }
+            if (hasUnread) {
+                await lead.save();
             }
         }
 
