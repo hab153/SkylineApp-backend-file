@@ -6,16 +6,11 @@ const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
 // ─── ✅ SANITIZATION FUNCTIONS — ZERO REGEX ───
 
-/**
- * Sanitize email subject - Remove CRLF to prevent header injection.
- * Uses character-by-character check instead of regex.
- */
 function sanitizeEmailSubject(subject) {
     if (!subject || typeof subject !== 'string') return '';
     let result = '';
     for (let i = 0; i < subject.length && result.length < 200; i++) {
         const c = subject.charCodeAt(i);
-        // Allow printable ASCII (32-126), skip \r(13), \n(10), \t(9), \0(0)
         if (c >= 32 && c <= 126) {
             result += subject[i];
         } else if (c === 13 || c === 10 || c === 9) {
@@ -25,18 +20,14 @@ function sanitizeEmailSubject(subject) {
     return result.trim();
 }
 
-/**
- * Sanitize email body - Keep newlines but remove carriage returns and null bytes.
- * Uses character-by-character check instead of regex.
- */
 function sanitizeEmailBody(body) {
     if (!body || typeof body !== 'string') return '';
     let result = '';
     for (let i = 0; i < body.length; i++) {
         const c = body.charCodeAt(i);
-        if (c === 0) continue; // skip null bytes
+        if (c === 0) continue;
         if (c === 13) {
-            result += '\n'; // \r → \n
+            result += '\n';
         } else {
             result += body[i];
         }
@@ -44,9 +35,6 @@ function sanitizeEmailBody(body) {
     return result.trim();
 }
 
-/**
- * Sanitize email address - structural validation only, no regex.
- */
 function sanitizeEmailAddress(email) {
     if (!email || typeof email !== 'string') return '';
     const trimmed = email.trim();
@@ -59,15 +47,11 @@ function sanitizeEmailAddress(email) {
     return trimmed.toLowerCase();
 }
 
-/**
- * Sanitize name for email - character whitelist, no regex.
- */
 function sanitizeEmailName(name) {
     if (!name || typeof name !== 'string') return '';
     let result = '';
     for (let i = 0; i < name.length && result.length < 100; i++) {
         const c = name.charCodeAt(i);
-        // Allow: a-z(97-122), A-Z(65-90), 0-9(48-57), space(32), dot(46), hyphen(45), apostrophe(39), underscore(95)
         if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) ||
             c === 32 || c === 46 || c === 45 || c === 39 || c === 95) {
             result += name[i];
@@ -78,9 +62,6 @@ function sanitizeEmailName(name) {
     return result.trim();
 }
 
-/**
- * Strip HTML tags from text — no regex, uses indexOf-based approach.
- */
 function stripHtmlTags(text) {
     if (!text || typeof text !== 'string') return '';
     let result = '';
@@ -97,9 +78,6 @@ function stripHtmlTags(text) {
     return result;
 }
 
-/**
- * Sanitize lead data for email sending
- */
 function sanitizeLeadForEmail(leadData) {
     return {
         name: sanitizeEmailName(leadData.name),
@@ -149,14 +127,13 @@ const getConversations = async (req, res) => {
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
             const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
-            // ✅ FIX #67: Use stripHtmlTags (no regex) instead of .replace(/<[^>]*>?/gm, '')
             const rawContent = String(lastReply?.content || '');
             const preview = lastReply
                 ? stripHtmlTags(rawContent).substring(0, 50)
                 : 'No messages yet';
 
-            // ✅ FIX: Count unread CUSTOMER messages (not lead messages)
-            const unreadCount = replies.filter(r => r.from === 'customer' && !r.read).length || 0;
+            // ✅ NEW: Use dedicated unreadCount field directly from DB
+            const unreadCount = lead.unreadCount || 0;
 
             return {
                 id: lead._id.toString(),
@@ -204,18 +181,10 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
 
-        // ✅ FIX: Mark CUSTOMER messages as read using save() for reliable persistence
-        if (lead.replies && lead.replies.length > 0) {
-            let hasUnread = false;
-            for (let i = 0; i < lead.replies.length; i++) {
-                if (lead.replies[i].from === 'customer' && !lead.replies[i].read) {
-                    lead.replies[i].read = true;
-                    hasUnread = true;
-                }
-            }
-            if (hasUnread) {
-                await lead.save();
-            }
+        // ✅ NEW: Reset unreadCount to 0 when chat is opened
+        if (lead.unreadCount > 0) {
+            lead.unreadCount = 0;
+            await lead.save();
         }
 
         let allMessages = lead.replies || [];
