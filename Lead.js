@@ -15,7 +15,6 @@ const LeadSchema = new mongoose.Schema({
         type: String, 
         required: true, 
         index: true,
-        // ✅ Encrypt when saving, decrypt when reading
         get: function(value) {
             if (!value) return null;
             try { return decrypt(value); } catch { return value; }
@@ -57,6 +56,13 @@ const LeadSchema = new mongoose.Schema({
         from: { type: String, enum: ['lead', 'ai', 'customer'] },
         emailId: String
     }],
+
+    // ✅ UNREAD COUNT — WhatsApp-style dedicated field
+    unreadCount: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
 
     // ✅ THREAD ID - For tracking email conversations
     threadId: {
@@ -107,21 +113,19 @@ const LeadSchema = new mongoose.Schema({
     },
     confidenceColor: {
         type: String,
-        default: '#ef4444' // Red
+        default: '#ef4444'
     },
 
     createdAt: { type: Date, default: Date.now }
 }, {
-    // Enable getters
     toJSON: { getters: true },
     toObject: { getters: true }
 });
 
 LeadSchema.index({ nextActionDate: 1, status: 1 });
 LeadSchema.index({ autoFollowUpEnabled: 1, followUpScheduledDate: 1 });
-LeadSchema.index({ threadId: 1 }); // ✅ Index for fast lookups
+LeadSchema.index({ threadId: 1 });
 
-// Add this before module.exports in Lead.js
 LeadSchema.pre('save', function(next) {
     if (this.isModified('lastContactDate') || this.isModified('replies')) {
         console.log('💾 [MODEL-LEAD] Saving Lead:', this._id, 'Name:', this.name);
