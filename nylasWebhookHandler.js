@@ -283,6 +283,7 @@ async function handleMessageCreated(eventData) {
         safeThreadIdForStorage = s || null;
       }
       
+      // ✅ NEW: Set unreadCount to 1 for new leads with customer message
       lead = new Lead({
         userId: userId,
         name: displayName,
@@ -290,12 +291,12 @@ async function handleMessageCreated(eventData) {
         company: '',
         status: 'New',
         threadId: safeThreadIdForStorage,
+        unreadCount: 1,
         replies: [{
           from: 'customer',
           content: body || snippet || '(No content)',
           subject: typeof subject === 'string' ? subject.substring(0, 200) : '(no subject)',
           date: new Date(),
-          read: false,
           messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null
         }],
         lastContactDate: new Date(),
@@ -341,6 +342,7 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   return null;
 }
 
+// ✅ UPDATED: Increments unreadCount atomically
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   try {
     lead.status = 'Replied';
@@ -356,9 +358,11 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       content: replyContent,
       subject: replySubject,
       date: new Date(),
-      messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null,
-      read: false
+      messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null
     });
+    
+    // ✅ NEW: Increment unreadCount
+    lead.unreadCount = (lead.unreadCount || 0) + 1;
     
     await lead.save();
 
@@ -393,7 +397,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('⚠️ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
 
-    // ✅ SSE: Push new message to user's browser INSTANTLY via sseManager (no circular dep)
+    // ✅ SSE: Push new message to user's browser INSTANTLY via sseManager
     try {
       sseManager.notifyUser(userId, {
         type: 'new_message',
@@ -472,7 +476,6 @@ async function handleMessageSent(eventData) {
         
         await lead.save();
 
-        // ✅ SSE: Push sent message via sseManager
         try {
           sseManager.notifyUser(userId, {
             type: 'new_message',
@@ -537,7 +540,6 @@ async function handleGrantExpired(eventData) {
         console.warn('⚠️ [WEBHOOK] Failed to create expiry notification:', notifErr.message);
       }
 
-      // ✅ SSE: Notify user via sseManager
       try {
         sseManager.notifyUser(emailAccount.userId, {
           type: 'connection_expired',
@@ -628,7 +630,6 @@ async function generateAndSendAutoReply(lead, userId) {
       
       await lead.save();
 
-      // ✅ SSE: Push auto-reply via sseManager
       try {
         sseManager.notifyUser(userId, {
           type: 'new_message',
@@ -652,4 +653,4 @@ async function generateAndSendAutoReply(lead, userId) {
   } catch (error) {
     console.error(' [AUTO-REPLY] Error:', error.message);
   }
-}
+  }
