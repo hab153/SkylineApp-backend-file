@@ -155,7 +155,8 @@ const getConversations = async (req, res) => {
                 ? stripHtmlTags(rawContent).substring(0, 50)
                 : 'No messages yet';
 
-            const unreadCount = replies.filter(r => r.from === 'lead' && !r.read).length || 0;
+            // ✅ FIX: Count unread CUSTOMER messages (not lead messages)
+            const unreadCount = replies.filter(r => r.from === 'customer' && !r.read).length || 0;
 
             return {
                 id: lead._id.toString(),
@@ -165,7 +166,7 @@ const getConversations = async (req, res) => {
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
-                unreadCount: unreadCount > 0 ? unreadCount : 0,
+                unreadCount: unreadCount,
                 unread: unreadCount > 0,
                 autoReplyEnabled: lead.autoReplyEnabled || false,
                 autoReplyInstructions: lead.autoReplyInstructions || ''
@@ -203,14 +204,15 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
 
+        // ✅ FIX: Mark CUSTOMER messages as read when chat is opened (not lead messages)
         if (lead.replies && lead.replies.length > 0) {
-            const unreadReplies = lead.replies.filter(r => r.from === 'lead' && !r.read);
+            const unreadReplies = lead.replies.filter(r => r.from === 'customer' && !r.read);
             if (unreadReplies.length > 0) {
                 await Lead.updateOne(
                     { _id: safeLeadId, userId: safeUserId },
                     { $set: { 'replies.$[elem].read': true } },
                     {
-                        arrayFilters: [{ 'elem.from': 'lead', 'elem.read': false }],
+                        arrayFilters: [{ 'elem.from': 'customer', 'elem.read': false }],
                         strict: false
                     }
                 );
