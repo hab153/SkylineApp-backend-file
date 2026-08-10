@@ -4,6 +4,9 @@ const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
 
+// ─── ✅ DECRYPTION IMPORT ───
+const { decrypt } = require('./encryption');
+
 // ─── ✅ SANITIZATION FUNCTIONS — ZERO REGEX ───
 
 function sanitizeEmailSubject(subject) {
@@ -109,8 +112,21 @@ function cleanupIdempotencyCache() {
 
 setInterval(cleanupIdempotencyCache, 60 * 1000);
 
+// ─── ✅ DECRYPT EMAIL HELPER ───
+function decryptEmail(email) {
+    if (!email || typeof email !== 'string') return email;
+    // If it doesn't look like encrypted data (starts with something recognizable), return as is
+    if (!email.includes('=') && email.length < 20) return email;
+    try {
+        const decrypted = decrypt(email);
+        return decrypted || email;
+    } catch (e) {
+        return email;
+    }
+}
+
 // ============================================================
-// ✅ OPTIMIZED: GET /api/conversations WITH PAGINATION
+// ✅ OPTIMIZED: GET /api/conversations WITH PAGINATION + DECRYPTED EMAILS
 // ============================================================
 const getConversations = async (req, res) => {
     try {
@@ -122,7 +138,7 @@ const getConversations = async (req, res) => {
         
         // ✅ PAGINATION: Get page and limit from query params
         const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20; // ← Only 20 at a time!
+        const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
         // ✅ Get total count for pagination metadata
@@ -134,10 +150,10 @@ const getConversations = async (req, res) => {
             .sort({ lastContactDate: -1, createdAt: -1 })
             .skip(skip)
             .limit(limit)
-            .lean() // ← FAST: Returns plain objects
+            .lean()
             .exec();
 
-        // ✅ Format conversations (fast)
+        // ✅ Format conversations with DECRYPTED emails
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
             const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
@@ -148,11 +164,14 @@ const getConversations = async (req, res) => {
 
             const unreadCount = lead.unreadCount || 0;
 
+            // ✅ DECRYPT email if it exists
+            let email = decryptEmail(lead.email || '');
+
             return {
                 id: lead._id.toString(),
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
-                email: lead.email || '',
+                email: email,  // ← DECRYPTED!
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
@@ -186,7 +205,7 @@ const getConversations = async (req, res) => {
 };
 
 // ============================================================
-// ✅ OPTIMIZED: GET /api/conversations/:leadId WITH CACHE
+// ✅ OPTIMIZED: GET /api/conversations/:leadId WITH CACHE + DECRYPTED EMAILS
 // ============================================================
 // ✅ In-memory cache for conversation (30 seconds TTL)
 const conversationCache = new Map();
@@ -256,12 +275,15 @@ const getConversationById = async (req, res) => {
             read: msg.read || false
         }));
 
+        // ✅ DECRYPT email if it exists
+        let email = decryptEmail(lead.email || '');
+
         const result = {
             success: true,
             lead: {
                 id: lead._id.toString(),
                 name: lead.name || lead.email || 'Unknown',
-                email: lead.email || '',
+                email: email,  // ← DECRYPTED!
                 company: lead.company || '',
                 status: lead.status || 'New',
                 autoReplyEnabled: lead.autoReplyEnabled || false,
