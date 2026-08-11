@@ -16,22 +16,23 @@ async function getUnreadCount(userId) {
         var cacheKey = String(userId);
         var cached = unreadCache.get(cacheKey);
         if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+            console.log('⚡ [UNREAD] Cache hit for user:', userId);
             return cached.count;
         }
 
-        // Method 1: Count from Leads (unreadCount field)
+        // ✅ Method 1: Count from Leads (unreadCount field)
         var leadCount = await Lead.countDocuments({
             userId: userId,
             unreadCount: { $gt: 0 }
         });
 
-        // Method 2: Count from Notifications
+        // ✅ Method 2: Count from Notifications
         var notifCount = await Notification.countDocuments({
             userId: userId,
             isRead: false
         });
 
-        // Method 3: Count from replies array (fallback)
+        // ✅ Method 3: Count from replies array (fallback)
         var replyCount = 0;
         try {
             var leadsWithReplies = await Lead.find({
@@ -51,12 +52,16 @@ async function getUnreadCount(userId) {
             console.warn('[UNREAD] Reply count error:', err.message);
         }
 
+        // ✅ Combine all counts
         var totalUnread = leadCount + notifCount + replyCount;
 
+        // ✅ Cache the result
         unreadCache.set(cacheKey, {
             count: totalUnread,
             timestamp: Date.now()
         });
+
+        console.log('📊 [UNREAD] User:', userId, 'Total:', totalUnread, '(Lead:', leadCount, 'Notif:', notifCount, 'Reply:', replyCount, ')');
 
         return totalUnread;
 
@@ -70,6 +75,7 @@ async function getUnreadCount(userId) {
 function clearUnreadCache(userId) {
     var cacheKey = String(userId);
     unreadCache.delete(cacheKey);
+    console.log('🧹 [UNREAD] Cache cleared for user:', userId);
 }
 
 // ─── GET /api/unread/status ───
@@ -113,25 +119,25 @@ async function clearUnread(req, res) {
             });
         }
 
-        // Clear all unread counts
+        // ✅ Clear all unread counts from Leads
         await Lead.updateMany(
             { userId: userId },
             { $set: { unreadCount: 0 } }
         );
 
-        // Mark all notifications as read
+        // ✅ Mark all notifications as read
         await Notification.updateMany(
             { userId: userId, isRead: false },
             { $set: { isRead: true } }
         );
 
-        // Mark all replies as read
+        // ✅ Mark all replies as read
         await Lead.updateMany(
             { userId: userId, 'replies.read': false },
             { $set: { 'replies.$[].read': true } }
         );
 
-        // Clear cache
+        // ✅ Clear cache
         clearUnreadCache(userId);
 
         res.json({
@@ -149,9 +155,16 @@ async function clearUnread(req, res) {
     }
 }
 
+// ─── Force refresh cache (for webhooks) ───
+function refreshUnreadCache(userId) {
+    clearUnreadCache(userId);
+    console.log('🔄 [UNREAD] Cache refreshed for user:', userId);
+}
+
 module.exports = {
     getUnreadCount,
     getUnreadStatus,
     clearUnread,
-    clearUnreadCache
+    clearUnreadCache,
+    refreshUnreadCache
 };
