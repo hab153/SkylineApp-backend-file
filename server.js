@@ -4,7 +4,7 @@ const dotenv = require('dotenv');
 const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
-const compression = require('compression'); // ✅ ADDED
+const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -95,6 +95,9 @@ const dataExportRoutes = require('./dataExportRoutes');
 
 // Data Export Cleanup Job
 const { startDataExportCleanupJob } = require('./dataExportJob');
+
+// ✅ UNREAD CONTROLLER
+const unreadController = require('./unreadController');
 
 dotenv.config();
 const app = express();
@@ -199,10 +202,9 @@ app.set('trust proxy', 1);
 
 // ✅ COMPRESSION: Enable gzip for faster response transfer
 app.use(compression({
-    level: 6,  // Balanced compression (1-9, 9 is highest but slowest)
-    threshold: 1024,  // Only compress responses > 1KB
+    level: 6,
+    threshold: 1024,
     filter: function(req, res) {
-        // Don't compress webhooks or SSE streams
         if (req.path.includes('/webhook')) return false;
         if (req.path.includes('/events/stream')) return false;
         return compression.filter(req, res);
@@ -271,7 +273,7 @@ app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
 
-// ✅ SSE: Accept token from query string for EventSource (which can't send custom headers)
+// ✅ SSE: Accept token from query string for EventSource
 app.use('/api/events/stream', function(req, res, next) {
     if (req.query.token && !req.headers.authorization) {
         req.headers.authorization = 'Bearer ' + req.query.token;
@@ -279,7 +281,6 @@ app.use('/api/events/stream', function(req, res, next) {
     next();
 });
 
-// ✅ SSE: Real-time event stream endpoint — browser connects via EventSource
 app.get('/api/events/stream', verifyToken, function(req, res) {
     var userId = String(req.userId);
 
@@ -307,7 +308,7 @@ app.get('/api/events/stream', verifyToken, function(req, res) {
     });
 });
 
-// ✅ SSE: Heartbeat every 30 seconds to keep connections alive through Render proxy
+// ✅ SSE: Heartbeat every 30 seconds
 setInterval(function() {
     var http = require('http');
     http.get('http://localhost:' + (process.env.PORT || 5001) + '/api/health', function(res) {
@@ -429,7 +430,7 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 console.log('✅ [SERVER] Payment route registered');
 
-// ─── AUTH ROUTES (WITH STRICT RATE LIMITING) ───
+// ─── AUTH ROUTES ───
 app.post('/api/auth/register', registerLimiter, validate(registerSchema), register);
 app.post('/api/auth/login', loginLimiter, validate(loginSchema), login);
 app.put('/api/auth/change-email', verifyToken, validate(changeEmailSchema), userController.changeEmail);
@@ -509,7 +510,7 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
 });
 console.log('✅ [SERVER] AI suggestion route registered');
 
-// ─── ADMIN ROUTES (SECURE TOTP) ───
+// ─── ADMIN ROUTES ───
 app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -532,10 +533,8 @@ app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
     }
 });
 
-// Step 2: Verify TOTP Code
 app.post('/api/admin/verify-2fa', require('./authController').verifyAdminTotpLogin);
 
-// Setup Endpoints (Protected)
 app.get('/api/admin/setup-2fa', verifyAdminToken, require('./authController').generateAdminTotp);
 app.post('/api/admin/enable-2fa', verifyAdminToken, require('./authController').enableAdminTotp);
 
@@ -545,7 +544,6 @@ app.use(/^\/admin/i, (req, res) => {
     res.status(404).json({ error: 'Not Found' });
 });
 
-// ✅ GET ALL USERS (KEPT - needed for admin dashboard)
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     try {
         const users = await User.find({}).select('email username isAdmin isSuspended createdAt _id');
@@ -556,7 +554,6 @@ app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     }
 });
 
-// ✅ LEGACY ADMIN ROUTES (Kept for compatibility)
 app.post('/api/admin/verify-layer-2', verifyAdminToken, adminController.adminVerifyLayer2);
 app.post('/api/admin/verify-layer-3', verifyAdminToken, adminController.adminVerifyLayer3);
 app.get('/api/admin/users/:id/details', verifyAdminToken, adminController.getUserDetails);
@@ -579,7 +576,7 @@ app.put('/api/history/pin/:sessionId', verifyToken, sessionController.pinSession
 app.delete('/api/history/delete/:sessionId', verifyToken, sessionController.deleteSession);
 console.log('✅ [SERVER] History routes registered');
 
-// ─── DEBUG ROUTES (ADMIN-ONLY) ───
+// ─── DEBUG ROUTES ───
 app.get('/api/debug/verify-messages', verifyAdminToken, async (req, res) => {
     try {
         const ChatMessage = require('./ChatMessage');
@@ -618,6 +615,20 @@ app.get('/api/debug/leads', verifyAdminToken, async (req, res) => {
         res.json({ count: leads.length, leads: leads.map(l => ({ id: l._id, name: l.name, status: l.status, repliesCount: l.replies?.length || 0, lastContactDate: l.lastContactDate, createdAt: l.createdAt })) });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
+
+// ════════════════════════════════════════════
+//  ✅ UNREAD ENDPOINTS (SINGLE SOURCE OF TRUTH)
+// ════════════════════════════════════════════
+
+// ─── Get unread status (hasUnread + count) ───
+app.get('/api/unread/status', verifyToken, unreadController.getUnreadStatus);
+
+// ─── Clear all unread messages ───
+app.post('/api/unread/clear', verifyToken, unreadController.clearUnread);
+
+console.log('✅ [UNREAD] Endpoints registered:');
+console.log('   📋 GET  /api/unread/status  - Get unread status (hasUnread + count)');
+console.log('   📋 POST /api/unread/clear   - Clear all unread messages');
 
 // ─── START SERVER ───
 const PORT = process.env.PORT || 5001;
