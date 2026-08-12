@@ -1,170 +1,158 @@
 // ============================================================
 // unreadController.js
-// SINGLE SOURCE OF TRUTH for unread messages
+// Single source of truth for unread messages
 // ============================================================
 
 const Lead = require('./Lead');
-const Notification = require('./Notification');
+const { isValidObjectId } = require('./sanitize');
 
-// ─── In-memory cache ───
-var unreadCache = new Map();
-var CACHE_TTL = 10000; // 10 seconds
-
-// ─── Get unread count ───
-async function getUnreadCount(userId) {
+// ─── ✅ GET UNREAD STATUS ───
+// Returns: { hasUnread: boolean, count: number }
+const getUnreadStatus = async (req, res) => {
     try {
-        var cacheKey = String(userId);
-        var cached = unreadCache.get(cacheKey);
-        if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-            console.log('⚡ [UNREAD] Cache hit for user:', userId);
-            return cached.count;
-        }
-
-        // ✅ Method 1: Count from Leads (unreadCount field)
-        var leadCount = await Lead.countDocuments({
-            userId: userId,
-            unreadCount: { $gt: 0 }
-        });
-
-        // ✅ Method 2: Count from Notifications
-        var notifCount = await Notification.countDocuments({
-            userId: userId,
-            isRead: false
-        });
-
-        // ✅ Method 3: Count from replies array (fallback)
-        var replyCount = 0;
-        try {
-            var leadsWithReplies = await Lead.find({
-                userId: userId,
-                'replies.read': false
-            }).select('replies').lean();
-
-            for (var i = 0; i < leadsWithReplies.length; i++) {
-                var replies = leadsWithReplies[i].replies || [];
-                for (var j = 0; j < replies.length; j++) {
-                    if (replies[j].read === false) {
-                        replyCount++;
-                    }
-                }
-            }
-        } catch (err) {
-            console.warn('[UNREAD] Reply count error:', err.message);
-        }
-
-        // ✅ Combine all counts
-        var totalUnread = leadCount + notifCount + replyCount;
-
-        // ✅ Cache the result
-        unreadCache.set(cacheKey, {
-            count: totalUnread,
-            timestamp: Date.now()
-        });
-
-        console.log('📊 [UNREAD] User:', userId, 'Total:', totalUnread, '(Lead:', leadCount, 'Notif:', notifCount, 'Reply:', replyCount, ')');
-
-        return totalUnread;
-
-    } catch (error) {
-        console.error('❌ [UNREAD] Error:', error.message);
-        return 0;
-    }
-}
-
-// ─── Clear cache ───
-function clearUnreadCache(userId) {
-    var cacheKey = String(userId);
-    unreadCache.delete(cacheKey);
-    console.log('🧹 [UNREAD] Cache cleared for user:', userId);
-}
-
-// ─── GET /api/unread/status ───
-async function getUnreadStatus(req, res) {
-    try {
-        var userId = req.userId;
-        if (!userId) {
+        if (!req.userId || !isValidObjectId(req.userId)) {
             return res.status(401).json({ 
                 success: false, 
-                error: 'Unauthorized' 
+                message: 'Unauthorized' 
             });
         }
 
-        var count = await getUnreadCount(userId);
-        
+        const userId = req.userId;
+
+        // ✅ Get total unread count from ALL leads
+        const result = await Lead.aggregate([
+            { $match: { userId: mongoose.Types.ObjectId(userId) } },
+            { $group: { _id: null, total: { $sum: '$unreadCount' } } }
+        ]);
+
+        const count = result.length > 0 ? result[0].total : 0;
+
         res.json({
             success: true,
             hasUnread: count > 0,
-            count: count,
-            timestamp: new Date().toISOString()
+            count: count
         });
 
     } catch (error) {
-        console.error('❌ [UNREAD STATUS] Error:', error.message);
-        res.status(500).json({
-            success: false,
+        console.error('❌ [getUnreadStatus] Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server Error getting unread status',
             hasUnread: false,
-            error: 'Failed to get unread status'
+            count: 0
         });
     }
-}
+};
 
-// ─── POST /api/unread/clear ───
-async function clearUnread(req, res) {
+// ─── ✅ CLEAR ALL UNREAD ───
+// Resets unreadCount to 0 for ALL leads
+const clearUnread = async (req, res) => {
     try {
-        var userId = req.userId;
-        if (!userId) {
+        if (!req.userId || !isValidObjectId(req.userId)) {
             return res.status(401).json({ 
                 success: false, 
-                error: 'Unauthorized' 
+                message: 'Unauthorized' 
             });
         }
 
-        // ✅ Clear all unread counts from Leads
-        await Lead.updateMany(
-            { userId: userId },
+        const userId = req.userId;
+
+        // ✅ Reset unreadCount for ALL leads
+        const result = await Lead.updateMany(
+            { userId: userId, unreadCount: { $gt: 0 } },
             { $set: { unreadCount: 0 } }
         );
 
-        // ✅ Mark all notifications as read
-        await Notification.updateMany(
-            { userId: userId, isRead: false },
-            { $set: { isRead: true } }
-        );
-
-        // ✅ Mark all replies as read
-        await Lead.updateMany(
-            { userId: userId, 'replies.read': false },
-            { $set: { 'replies.$[].read': true } }
-        );
-
-        // ✅ Clear cache
-        clearUnreadCache(userId);
+        console.log(`📬 [clearUnread] Cleared unread for ${result.modifiedCount} leads for user ${userId}`);
 
         res.json({
             success: true,
             message: 'All unread messages cleared',
-            timestamp: new Date().toISOString()
+            clearedCount: result.modifiedCount
         });
 
     } catch (error) {
-        console.error('❌ [UNREAD CLEAR] Error:', error.message);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to clear unread messages'
+        console.error('❌ [clearUnread] Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server Error clearing unread' 
         });
     }
-}
+};
 
-// ─── Force refresh cache (for webhooks) ───
-function refreshUnreadCache(userId) {
-    clearUnreadCache(userId);
-    console.log('🔄 [UNREAD] Cache refreshed for user:', userId);
-}
+// ─── ✅ GET LEADS WITH UNREAD ───
+// Returns list of leads with unread messages
+const getLeadsWithUnread = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ 
+                success: false, 
+                message: 'Unauthorized' 
+            });
+        }
+
+        const userId = req.userId;
+
+        const leads = await Lead.find({ 
+            userId: userId,
+            unreadCount: { $gt: 0 }
+        })
+        .select('name email unreadCount lastContactDate')
+        .sort({ lastContactDate: -1 })
+        .lean();
+
+        res.json({
+            success: true,
+            count: leads.length,
+            leads: leads
+        });
+
+    } catch (error) {
+        console.error('❌ [getLeadsWithUnread] Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server Error' 
+        });
+    }
+};
+
+// ─── ✅ GET TOTAL UNREAD COUNT (for badge) ───
+const getUnreadCount = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ 
+                success: false, 
+                message: 'Unauthorized' 
+            });
+        }
+
+        const userId = req.userId;
+
+        const result = await Lead.aggregate([
+            { $match: { userId: mongoose.Types.ObjectId(userId) } },
+            { $group: { _id: null, total: { $sum: '$unreadCount' } } }
+        ]);
+
+        const count = result.length > 0 ? result[0].total : 0;
+
+        res.json({
+            success: true,
+            count: count
+        });
+
+    } catch (error) {
+        console.error('❌ [getUnreadCount] Error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server Error',
+            count: 0
+        });
+    }
+};
 
 module.exports = {
-    getUnreadCount,
     getUnreadStatus,
     clearUnread,
-    clearUnreadCache,
-    refreshUnreadCache
+    getLeadsWithUnread,
+    getUnreadCount
 };
