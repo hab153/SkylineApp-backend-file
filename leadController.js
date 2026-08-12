@@ -115,7 +115,6 @@ setInterval(cleanupIdempotencyCache, 60 * 1000);
 // ─── ✅ DECRYPT EMAIL HELPER ───
 function decryptEmail(email) {
     if (!email || typeof email !== 'string') return email;
-    // If it doesn't look like encrypted data (starts with something recognizable), return as is
     if (!email.includes('=') && email.length < 20) return email;
     try {
         const decrypted = decrypt(email);
@@ -124,6 +123,55 @@ function decryptEmail(email) {
         return email;
     }
 }
+
+// ============================================================
+// ✅ UNREAD COUNT HELPER FUNCTIONS
+// ============================================================
+
+// ─── ✅ INCREMENT UNREAD COUNT ───
+const incrementUnreadCount = async (leadId, userId) => {
+    try {
+        const result = await Lead.findOneAndUpdate(
+            { _id: leadId, userId: userId },
+            { $inc: { unreadCount: 1 } },
+            { new: true }
+        );
+        return result;
+    } catch (error) {
+        console.error('❌ [incrementUnreadCount] Error:', error.message);
+        return null;
+    }
+};
+
+// ─── ✅ RESET UNREAD COUNT ───
+const resetUnreadCount = async (leadId, userId) => {
+    try {
+        const result = await Lead.findOneAndUpdate(
+            { _id: leadId, userId: userId },
+            { $set: { unreadCount: 0 } },
+            { new: true }
+        );
+        return result;
+    } catch (error) {
+        console.error('❌ [resetUnreadCount] Error:', error.message);
+        return null;
+    }
+};
+
+// ─── ✅ GET TOTAL UNREAD COUNT FOR USER ───
+const getTotalUnreadCount = async (userId) => {
+    try {
+        const mongoose = require('mongoose');
+        const result = await Lead.aggregate([
+            { $match: { userId: mongoose.Types.ObjectId(userId) } },
+            { $group: { _id: null, totalUnread: { $sum: '$unreadCount' } } }
+        ]);
+        return result.length > 0 ? result[0].totalUnread : 0;
+    } catch (error) {
+        console.error('❌ [getTotalUnreadCount] Error:', error.message);
+        return 0;
+    }
+};
 
 // ============================================================
 // ✅ OPTIMIZED: GET /api/conversations WITH PAGINATION + DECRYPTED EMAILS
@@ -136,15 +184,12 @@ const getConversations = async (req, res) => {
 
         const safeUserId = String(req.userId);
         
-        // ✅ PAGINATION: Get page and limit from query params
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
-        // ✅ Get total count for pagination metadata
         const total = await Lead.countDocuments({ userId: safeUserId });
 
-        // ✅ FAST: Use lean() + select() + pagination
         const leads = await Lead.find({ userId: safeUserId })
             .select('name email company status lastContactDate createdAt replies unreadCount autoReplyEnabled autoReplyInstructions')
             .sort({ lastContactDate: -1, createdAt: -1 })
@@ -153,7 +198,6 @@ const getConversations = async (req, res) => {
             .lean()
             .exec();
 
-        // ✅ Format conversations with DECRYPTED emails
         const conversations = leads.map(lead => {
             const replies = lead.replies || [];
             const lastReply = replies.length > 0 ? replies[replies.length - 1] : null;
@@ -163,15 +207,13 @@ const getConversations = async (req, res) => {
                 : 'No messages yet';
 
             const unreadCount = lead.unreadCount || 0;
-
-            // ✅ DECRYPT email if it exists
             let email = decryptEmail(lead.email || '');
 
             return {
                 id: lead._id.toString(),
                 name: lead.name || 'Unknown',
                 company: lead.company || '',
-                email: email,  // ← DECRYPTED!
+                email: email,
                 status: lead.status || 'New',
                 lastMessage: preview,
                 lastDate: lead.lastContactDate || lead.createdAt,
@@ -182,7 +224,6 @@ const getConversations = async (req, res) => {
             };
         });
 
-        // ✅ Send paginated response with metadata
         res.json({
             success: true,
             data: conversations,
@@ -207,7 +248,6 @@ const getConversations = async (req, res) => {
 // ============================================================
 // ✅ OPTIMIZED: GET /api/conversations/:leadId WITH CACHE + DECRYPTED EMAILS
 // ============================================================
-// ✅ In-memory cache for conversation (30 seconds TTL)
 const conversationCache = new Map();
 const CONVERSATION_CACHE_TTL = 30000;
 
@@ -230,7 +270,9 @@ const getConversationById = async (req, res) => {
         const safeUserId = String(req.userId);
         const safeLeadId = String(leadId);
 
-        // ✅ Check cache first
+        // ✅ RESET unreadCount to 0 when chat is opened
+        await resetUnreadCount(safeLeadId, safeUserId);
+
         const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
         const cached = conversationCache.get(cacheKey);
         if (cached && (Date.now() - cached.timestamp < CONVERSATION_CACHE_TTL)) {
@@ -238,7 +280,6 @@ const getConversationById = async (req, res) => {
             return res.json(cached.data);
         }
 
-        // ✅ FAST: Use lean() and select only needed fields
         const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId })
             .select('name email company status replies lastContactDate autoReplyEnabled autoReplyInstructions unreadCount')
             .lean()
@@ -248,14 +289,6 @@ const getConversationById = async (req, res) => {
             return res.status(404).json({ success: false, message: 'Conversation not found' });
         }
 
-        // ✅ Reset unreadCount to 0 when chat is opened
-        if (lead.unreadCount > 0) {
-            await Lead.updateOne(
-                { _id: safeLeadId, userId: safeUserId },
-                { $set: { unreadCount: 0 } }
-            );
-        }
-
         let allMessages = lead.replies || [];
         allMessages.sort((a, b) => {
             const dateA = a.date ? new Date(a.date) : new Date(0);
@@ -263,7 +296,6 @@ const getConversationById = async (req, res) => {
             return dateA - dateB;
         });
 
-        // ✅ Only get last 100 messages for performance
         const limitedMessages = allMessages.slice(-100);
 
         const cleanHistory = limitedMessages.map(msg => ({
@@ -275,7 +307,6 @@ const getConversationById = async (req, res) => {
             read: msg.read || false
         }));
 
-        // ✅ DECRYPT email if it exists
         let email = decryptEmail(lead.email || '');
 
         const result = {
@@ -283,7 +314,7 @@ const getConversationById = async (req, res) => {
             lead: {
                 id: lead._id.toString(),
                 name: lead.name || lead.email || 'Unknown',
-                email: email,  // ← DECRYPTED!
+                email: email,
                 company: lead.company || '',
                 status: lead.status || 'New',
                 autoReplyEnabled: lead.autoReplyEnabled || false,
@@ -294,7 +325,6 @@ const getConversationById = async (req, res) => {
             displayedMessages: limitedMessages.length
         };
 
-        // ✅ Store in cache
         conversationCache.set(cacheKey, {
             data: result,
             timestamp: Date.now()
@@ -332,7 +362,6 @@ const renameLead = async (req, res) => {
         lead.name = sanitizedNewName;
         await lead.save();
 
-        // ✅ Clear cache for this conversation
         const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
         conversationCache.delete(cacheKey);
 
@@ -368,7 +397,6 @@ const updateAutoReply = async (req, res) => {
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
         await lead.save();
 
-        // ✅ Clear cache for this conversation
         const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
         conversationCache.delete(cacheKey);
 
@@ -562,7 +590,23 @@ const batchSend = async (req, res) => {
 
             await targetLead.save();
 
-            // ✅ Clear cache for this conversation
+            // ✅ INCREMENT UNREAD COUNT FOR NEW MESSAGE
+            await incrementUnreadCount(targetLead._id, safeUserId);
+
+            // ✅ Send SSE event for real-time update
+            try {
+                const sseManager = require('./sseManager');
+                sseManager.sendToUser(safeUserId, {
+                    type: 'new_message',
+                    leadId: targetLead._id.toString(),
+                    leadName: targetLead.name || 'Unknown',
+                    message: msgContent,
+                    from: 'customer'
+                });
+            } catch (sseErr) {
+                // SSE error - ignore
+            }
+
             const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
             conversationCache.delete(cacheKey);
 
@@ -702,6 +746,23 @@ const batchSend = async (req, res) => {
 
                 await lead.save();
 
+                // ✅ INCREMENT UNREAD COUNT FOR NEW LEAD
+                await incrementUnreadCount(lead._id, safeUserId);
+
+                // ✅ Send SSE event for real-time update
+                try {
+                    const sseManager = require('./sseManager');
+                    sseManager.sendToUser(safeUserId, {
+                        type: 'new_message',
+                        leadId: lead._id.toString(),
+                        leadName: lead.name || 'Unknown',
+                        message: leadData.messages[0].body,
+                        from: 'customer'
+                    });
+                } catch (sseErr) {
+                    // SSE error - ignore
+                }
+
                 if (emailSent) {
                     idempotencyCache.set(idempotencyKey, {
                         timestamp: Date.now(),
@@ -821,6 +882,9 @@ const getAllLeads = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────
+//  EXPORTS
+// ──────────────────────────────────────────────────────────────
 module.exports = {
     getConversations,
     getConversationById,
@@ -828,5 +892,8 @@ module.exports = {
     updateAutoReply,
     batchSend,
     reconnectAndSend,
-    getAllLeads
+    getAllLeads,
+    incrementUnreadCount,
+    resetUnreadCount,
+    getTotalUnreadCount
 };
