@@ -1,5 +1,6 @@
 const Notification = require('./Notification');
 const Lead = require('./Lead');
+const mongoose = require('mongoose'); // ✅ FIXED - Added mongoose import
 const { isValidObjectId, sanitizeQuery } = require('./sanitize');
 const { getTotalUnreadCount } = require('./leadController');
 
@@ -58,7 +59,7 @@ const getNotificationCount = async (req, res) => {
 
         const userId = req.userId;
         
-        // ✅ Get total unread count from ALL leads
+        // ✅ FIXED: mongoose is now defined
         const totalUnread = await Lead.aggregate([
             { $match: { userId: mongoose.Types.ObjectId(userId) } },
             { $group: { _id: null, total: { $sum: '$unreadCount' } } }
