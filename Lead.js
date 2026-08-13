@@ -122,15 +122,18 @@ const LeadSchema = new mongoose.Schema({
     toObject: { getters: true }
 });
 
+// ✅ INDEXES - Added unreadCount for faster queries
 LeadSchema.index({ nextActionDate: 1, status: 1 });
 LeadSchema.index({ autoFollowUpEnabled: 1, followUpScheduledDate: 1 });
 LeadSchema.index({ threadId: 1 });
+LeadSchema.index({ userId: 1, unreadCount: -1 }); // ✅ NEW: For unread queries
 
 LeadSchema.pre('save', function(next) {
     if (this.isModified('lastContactDate') || this.isModified('replies')) {
         console.log('💾 [MODEL-LEAD] Saving Lead:', this._id, 'Name:', this.name);
         console.log('💾 [MODEL-LEAD] Status:', this.status);
         console.log('💾 [MODEL-LEAD] Replies Count:', this.replies ? this.replies.length : 0);
+        console.log('💾 [MODEL-LEAD] Unread Count:', this.unreadCount);
     }
     next();
 });
