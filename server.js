@@ -99,6 +99,12 @@ const { startDataExportCleanupJob } = require('./dataExportJob');
 // ✅ UNREAD CONTROLLER
 const unreadController = require('./unreadController');
 
+// ✅ UNREAD SCHEDULER
+const { startUnreadScheduler } = require('./unreadScheduler');
+
+// ✅ UNREAD ROUTES
+const unreadRoutes = require('./unreadRoutes');
+
 dotenv.config();
 const app = express();
 
@@ -308,14 +314,6 @@ app.get('/api/events/stream', verifyToken, function(req, res) {
     });
 });
 
-// ✅ SSE: Heartbeat every 30 seconds
-setInterval(function() {
-    var http = require('http');
-    http.get('http://localhost:' + (process.env.PORT || 5001) + '/api/health', function(res) {
-        res.resume();
-    }).on('error', function() {});
-}, 30000);
-
 // ─── WEBHOOKS ───
 console.log('🔧 [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
@@ -342,15 +340,26 @@ mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 50, serverSelectionTime
             console.log('✅ [SERVER] ChatMessage indexes created');
             await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
             await Lead.collection.createIndex({ userId: 1, email: 1 });
+            // ✅ NEW: Index for unread queries
+            await Lead.collection.createIndex({ userId: 1, unreadCount: -1 });
             console.log('✅ [SERVER] Lead indexes created');
             console.log('✅ [SERVER] All database indexes created');
         } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
+        
         startExpiryJob();
         startFollowUpJob();
         if (process.env.NODE_ENV !== 'test') startBackupJob();
         startDataExportCleanupJob();
         verifyWebhookRegistration();
         startTokenRefreshJob();
+        
+        // ✅ START UNREAD SCHEDULER (every 4 seconds)
+        startUnreadScheduler();
+        console.log('✅ [SERVER] Unread scheduler started (every 4 seconds)');
+        
+        // ✅ START SSE HEARTBEAT (every 30 seconds)
+        sseManager.startHeartbeat();
+        console.log('✅ [SERVER] SSE heartbeat started (every 30 seconds)');
     })
     .catch(err => console.log('❌ MongoDB Connection Error:', err.message));
 
@@ -620,15 +629,15 @@ app.get('/api/debug/leads', verifyAdminToken, async (req, res) => {
 //  ✅ UNREAD ENDPOINTS (SINGLE SOURCE OF TRUTH)
 // ════════════════════════════════════════════
 
-// ─── Get unread status (hasUnread + count) ───
-app.get('/api/unread/status', verifyToken, unreadController.getUnreadStatus);
-
-// ─── Clear all unread messages ───
-app.post('/api/unread/clear', verifyToken, unreadController.clearUnread);
+// ✅ Register unread routes
+app.use('/api/unread', unreadRoutes);
 
 console.log('✅ [UNREAD] Endpoints registered:');
-console.log('   📋 GET  /api/unread/status  - Get unread status (hasUnread + count)');
-console.log('   📋 POST /api/unread/clear   - Clear all unread messages');
+console.log('   📋 GET  /api/unread/status      - Get unread status');
+console.log('   📋 POST /api/unread/clear       - Clear all unread');
+console.log('   📋 GET  /api/unread/leads       - Get leads with unread');
+console.log('   📋 GET  /api/unread/lead/:id    - Get unread for lead');
+console.log('   📋 POST /api/unread/reset/:id   - Reset unread for lead');
 
 // ─── START SERVER ───
 const PORT = process.env.PORT || 5001;
