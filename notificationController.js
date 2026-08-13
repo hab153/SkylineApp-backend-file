@@ -1,6 +1,6 @@
 const Notification = require('./Notification');
 const Lead = require('./Lead');
-const mongoose = require('mongoose'); // ✅ FIXED - Added mongoose import
+const mongoose = require('mongoose');
 const { isValidObjectId, sanitizeQuery } = require('./sanitize');
 const { getTotalUnreadCount } = require('./leadController');
 
@@ -11,7 +11,6 @@ const getMyNotifications = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        // ✅ Direct filter
         const notifications = await Notification.find({ userId: req.userId })
             .sort({ createdAt: -1 });
             
@@ -30,7 +29,6 @@ const getRepliesCount = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        // ✅ Direct filter
         const repliedLeads = await Lead.find({ 
             userId: req.userId,
             status: 'Replied' 
@@ -45,8 +43,7 @@ const getRepliesCount = async (req, res) => {
 };
 
 // ============================================================
-// ✅ GET /api/notifications/count - UPDATED
-// Returns total unread messages from ALL leads (WhatsApp-style)
+// ✅ GET /api/notifications/count - FIXED
 // ============================================================
 const getNotificationCount = async (req, res) => {
     try {
@@ -59,9 +56,9 @@ const getNotificationCount = async (req, res) => {
 
         const userId = req.userId;
         
-        // ✅ FIXED: mongoose is now defined
+        // ✅ FIXED: Using 'new' keyword
         const totalUnread = await Lead.aggregate([
-            { $match: { userId: mongoose.Types.ObjectId(userId) } },
+            { $match: { userId: new mongoose.Types.ObjectId(userId) } },
             { $group: { _id: null, total: { $sum: '$unreadCount' } } }
         ]);
 
@@ -96,13 +93,11 @@ const markNotificationsRead = async (req, res) => {
 
         const userId = req.userId;
         
-        // ✅ Mark all notifications as read
         await Notification.updateMany(
             { userId: userId, isRead: false },
             { $set: { isRead: true } }
         );
 
-        // ✅ Also reset unreadCount for ALL leads
         await Lead.updateMany(
             { userId: userId, unreadCount: { $gt: 0 } },
             { $set: { unreadCount: 0 } }
@@ -136,7 +131,6 @@ const getUnreadLeadCount = async (req, res) => {
 
         const userId = req.userId;
         
-        // ✅ Get leads with unread messages
         const leadsWithUnread = await Lead.find({ 
             userId: userId,
             unreadCount: { $gt: 0 }
