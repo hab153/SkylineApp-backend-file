@@ -2,9 +2,45 @@ const Notification = require('./Notification');
 const Lead = require('./Lead');
 const mongoose = require('mongoose');
 const { isValidObjectId, sanitizeQuery } = require('./sanitize');
-const { getTotalUnreadCount } = require('./leadController');
 
-// GET /api/my-notifications - FIXED (Proper userId filtering)
+// ─── GET UNREAD COUNT ───
+// Returns: { success: true, count: number }
+// This is the SINGLE SOURCE OF TRUTH for unread count
+const getUnreadCount = async (req, res) => {
+    try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
+            });
+        }
+
+        const userId = req.userId;
+        
+        // ✅ Count unread notifications from Notification collection
+        const count = await Notification.countDocuments({
+            userId: userId,
+            isRead: false
+        });
+
+        console.log(`📬 [getUnreadCount] ${count} unread notifications for user ${userId}`);
+
+        res.json({
+            success: true,
+            count: count
+        });
+
+    } catch (error) {
+        console.error('❌ [getUnreadCount] Error:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Server Error',
+            count: 0
+        });
+    }
+};
+
+// GET /api/my-notifications
 const getMyNotifications = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
@@ -22,7 +58,7 @@ const getMyNotifications = async (req, res) => {
     }
 };
 
-// GET /api/notifications/replies - FIXED (Proper userId filtering)
+// GET /api/notifications/replies
 const getRepliesCount = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
@@ -42,128 +78,48 @@ const getRepliesCount = async (req, res) => {
     }
 };
 
-// ============================================================
-// ✅ GET /api/notifications/count - FIXED
-// ============================================================
-const getNotificationCount = async (req, res) => {
-    try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid user ID' 
-            });
-        }
-
-        const userId = req.userId;
-        
-        // ✅ FIXED: Using 'new' keyword
-        const totalUnread = await Lead.aggregate([
-            { $match: { userId: new mongoose.Types.ObjectId(userId) } },
-            { $group: { _id: null, total: { $sum: '$unreadCount' } } }
-        ]);
-
-        const count = totalUnread.length > 0 ? totalUnread[0].total : 0;
-
-        console.log(`📬 [getNotificationCount] Total unread messages: ${count} for user ${userId}`);
-        
-        res.json({
-            success: true,
-            count: count
-        });
-
-    } catch (err) {
-        console.error('❌ [getNotificationCount] Error:', err.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server Error counting notifications',
-            count: 0 
-        });
-    }
-};
-
-// ─── ✅ NEW: Mark notifications as read ───
+// ─── MARK ALL AS READ ───
 const markNotificationsRead = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid user ID' 
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
             });
         }
 
         const userId = req.userId;
         
-        await Notification.updateMany(
+        // ✅ Mark all notifications as read
+        const result = await Notification.updateMany(
             { userId: userId, isRead: false },
             { $set: { isRead: true } }
         );
 
-        await Lead.updateMany(
-            { userId: userId, unreadCount: { $gt: 0 } },
-            { $set: { unreadCount: 0 } }
-        );
-
-        console.log(`📬 [markNotificationsRead] Marked all as read for user ${userId}`);
+        console.log(`📬 [markNotificationsRead] Marked ${result.modifiedCount} notifications as read for user ${userId}`);
 
         res.json({
             success: true,
-            message: 'All notifications marked as read'
+            message: 'All notifications marked as read',
+            clearedCount: result.modifiedCount
         });
 
     } catch (err) {
         console.error('❌ [markNotificationsRead] Error:', err.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server Error marking notifications as read' 
+        res.status(500).json({
+            success: false,
+            message: 'Server Error marking notifications as read'
         });
     }
 };
 
-// ─── ✅ NEW: Get unread count from leads only ───
-const getUnreadLeadCount = async (req, res) => {
-    try {
-        if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid user ID' 
-            });
-        }
-
-        const userId = req.userId;
-        
-        const leadsWithUnread = await Lead.find({ 
-            userId: userId,
-            unreadCount: { $gt: 0 }
-        })
-        .select('name unreadCount')
-        .lean();
-
-        const totalUnread = leadsWithUnread.reduce((sum, lead) => sum + lead.unreadCount, 0);
-
-        console.log(`📬 [getUnreadLeadCount] Found ${leadsWithUnread.length} leads with unread messages (${totalUnread} total)`);
-
-        res.json({
-            success: true,
-            count: totalUnread,
-            leads: leadsWithUnread
-        });
-
-    } catch (err) {
-        console.error('❌ [getUnreadLeadCount] Error:', err.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server Error getting unread count' 
-        });
-    }
-};
-
-// ─── ✅ NEW: Get leads with unread messages ───
+// ─── GET LEADS WITH UNREAD ───
 const getLeadsWithUnread = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Invalid user ID' 
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
             });
         }
 
@@ -186,18 +142,17 @@ const getLeadsWithUnread = async (req, res) => {
 
     } catch (err) {
         console.error('❌ [getLeadsWithUnread] Error:', err.message);
-        res.status(500).json({ 
-            success: false, 
-            message: 'Server Error getting leads with unread' 
+        res.status(500).json({
+            success: false,
+            message: 'Server Error getting leads with unread'
         });
     }
 };
 
 module.exports = {
+    getUnreadCount,
     getMyNotifications,
     getRepliesCount,
-    getNotificationCount,
     markNotificationsRead,
-    getUnreadLeadCount,
     getLeadsWithUnread
 };
