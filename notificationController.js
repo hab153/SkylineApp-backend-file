@@ -5,8 +5,7 @@ const { isValidObjectId, sanitizeQuery } = require('./sanitize');
 
 // ─── GET UNREAD COUNT ───
 // Returns: { success: true, count: number }
-// This is the SINGLE SOURCE OF TRUTH for unread count
-const getUnreadCount = async (req, res) => {
+const getNotificationCount = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({
@@ -23,7 +22,7 @@ const getUnreadCount = async (req, res) => {
             isRead: false
         });
 
-        console.log(`📬 [getUnreadCount] ${count} unread notifications for user ${userId}`);
+        console.log(`📬 [getNotificationCount] ${count} unread notifications for user ${userId}`);
 
         res.json({
             success: true,
@@ -31,7 +30,7 @@ const getUnreadCount = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ [getUnreadCount] Error:', error.message);
+        console.error('❌ [getNotificationCount] Error:', error.message);
         res.status(500).json({
             success: false,
             message: 'Server Error',
@@ -150,7 +149,7 @@ const getLeadsWithUnread = async (req, res) => {
 };
 
 module.exports = {
-    getUnreadCount,
+    getNotificationCount,
     getMyNotifications,
     getRepliesCount,
     markNotificationsRead,
