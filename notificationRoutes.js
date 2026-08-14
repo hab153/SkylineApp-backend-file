@@ -19,11 +19,12 @@ router.get('/unread-count', verifyToken, notificationController.getNotificationC
 router.get('/', verifyToken, notificationController.getMyNotifications);
 
 // ─── MARK ONE NOTIFICATION AS READ ───
-// Body: { notificationId: string }
 router.patch('/:id/read', verifyToken, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.userId;
+        const Notification = require('./Notification');
+        const { isValidObjectId } = require('./sanitize');
 
         if (!isValidObjectId(id)) {
             return res.status(400).json({
