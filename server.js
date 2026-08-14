@@ -105,6 +105,9 @@ const { startUnreadScheduler } = require('./unreadScheduler');
 // ✅ UNREAD ROUTES
 const unreadRoutes = require('./unreadRoutes');
 
+// ✅ NOTIFICATION ROUTES
+const notificationRoutes = require('./notificationRoutes');
+
 dotenv.config();
 const app = express();
 
@@ -343,6 +346,13 @@ mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 50, serverSelectionTime
             // ✅ NEW: Index for unread queries
             await Lead.collection.createIndex({ userId: 1, unreadCount: -1 });
             console.log('✅ [SERVER] Lead indexes created');
+            
+            // ✅ NEW: Index for notifications
+            const Notification = require('./Notification');
+            await Notification.collection.createIndex({ userId: 1, createdAt: -1 });
+            await Notification.collection.createIndex({ userId: 1, isRead: 1 });
+            console.log('✅ [SERVER] Notification indexes created');
+            
             console.log('✅ [SERVER] All database indexes created');
         } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
         
@@ -488,9 +498,8 @@ if (typeof revenueController !== 'undefined' && revenueController.getRevenueTrac
 }
 
 // ─── NOTIFICATIONS ───
-app.get('/api/my-notifications', verifyToken, notificationController.getMyNotifications);
-app.get('/api/notifications/replies', verifyToken, notificationController.getRepliesCount);
-app.get('/api/notifications/count', verifyToken, notificationController.getNotificationCount);
+// ✅ Updated: Using notification routes
+app.use('/api/notifications', notificationRoutes);
 console.log('✅ [SERVER] Notification routes registered');
 
 // ─── CHAT & DREAMS ROUTES ───
