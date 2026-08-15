@@ -31,7 +31,7 @@ function validateSecurityAnswer(answer, fieldName) {
     return null; // Valid
 }
 
-// ✅ FIXED: Register function
+// ✅ FIXED: Register function - 3 DAY EXPIRY
 const register = async (req, res) => {
     let { username, email, password } = req.body;
     
@@ -80,7 +80,8 @@ const register = async (req, res) => {
         // ✅ SECURE: Strict secret check
         const secret = getJwtSecret();
         
-        jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
+        // ✅ CHANGED: 7d → 3d (3-day session expiry)
+        jwt.sign(payload, secret, { expiresIn: '3d' }, async (err, token) => {
             if (err) {
                 console.error("JWT Error:", err);
                 return res.status(500).json({ message: 'Token generation failed' });
@@ -113,7 +114,7 @@ const register = async (req, res) => {
     }
 };
 
-// ✅ SECURE: Login function - BACKDOOR REMOVED
+// ✅ SECURE: Login function - 3 DAY EXPIRY
 const login = async (req, res) => {
     let { identifier, password } = req.body;
     
@@ -202,7 +203,9 @@ const login = async (req, res) => {
         
         // ─── REGULAR USER LOGIN ───
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
-        jwt.sign(payload, secret, { expiresIn: '7d' }, async (err, token) => {
+        
+        // ✅ CHANGED: 7d → 3d (3-day session expiry)
+        jwt.sign(payload, secret, { expiresIn: '3d' }, async (err, token) => {
             if (err) { 
                 console.error("JWT Error:", err); 
                 return res.status(500).json({ message: 'Token generation failed' }); 
@@ -541,7 +544,8 @@ const verifyLayer3 = async (req, res) => {
                 isAdmin: true,
                 nonce: crypto.randomBytes(16).toString('hex')
             };
-            const token = jwt.sign(payload, secret, { expiresIn: '7d' });
+            // ✅ CHANGED: 7d → 3d (3-day session expiry for admin too)
+            const token = jwt.sign(payload, secret, { expiresIn: '3d' });
             return res.json({ 
                 token, 
                 message: 'Admin Access Granted', 
@@ -967,9 +971,11 @@ const verifyAdminTotpLogin = async (req, res) => {
         if (!user || !user.isAdmin || !user.adminTotpEnabled) return res.status(403).json({ success: false, message: '2FA not configured or invalid user' });
         const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
         if (verified) {
+            // ✅ CHANGED: 30m → 3d (3-day session expiry for admin after 2FA)
             const finalToken = jwt.sign(
                 { id: user._id, role: 'admin', permissions: user.permissions || ['all'] },
-                process.env.ADMIN_JWT_SECRET, { expiresIn: '30m' }
+                process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET, 
+                { expiresIn: '3d' }
             );
             res.json({ success: true, token: finalToken });
         } else {
