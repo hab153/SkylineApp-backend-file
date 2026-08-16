@@ -108,12 +108,23 @@ const unreadRoutes = require('./unreadRoutes');
 // ✅ NOTIFICATION ROUTES
 const notificationRoutes = require('./notificationRoutes');
 
+// ✅ CACHE LAYER
+const cache = require('./cache');
+
 dotenv.config();
 const app = express();
 
 console.log('🚀 [SERVER] Starting server...');
 console.log('🚀 [SERVER] NODE_ENV:', process.env.NODE_ENV || 'development');
 console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
+
+// ──────────────────────────────────────────────────────────────
+//  ✅ CACHE LAYER INITIALIZATION
+// ──────────────────────────────────────────────────────────────
+
+console.log('✅ [CACHE] Cache layer loaded');
+console.log(`   📋 Max entries: ${cache.MAX_CACHE_SIZE}`);
+console.log(`   ⏰ Default TTL: ${cache.DEFAULT_TTL / 1000}s`);
 
 // ──────────────────────────────────────────────────────────────
 //  ✅ JWT SECRET VALIDATION (ENHANCED - HARD FAILS)
@@ -657,6 +668,21 @@ app.get('/api/user/dashboard-data', verifyToken, userController.getDashboardData
 
 console.log('✅ [DASHBOARD] Endpoint registered: GET /api/user/dashboard-data');
 console.log('   📋 Combines: user profile + subscription + email status');
+
+// ════════════════════════════════════════════
+//  ✅ DEBUG CACHE STATS (Admin only)
+// ════════════════════════════════════════════
+
+app.get('/api/debug/cache-stats', verifyAdminToken, (req, res) => {
+    const stats = cache.getCacheStats();
+    res.json({
+        success: true,
+        stats: stats,
+        timestamp: new Date().toISOString()
+    });
+});
+
+console.log('✅ [DEBUG] Cache stats endpoint registered: GET /api/debug/cache-stats');
 
 // ════════════════════════════════════════════
 //  START SERVER
