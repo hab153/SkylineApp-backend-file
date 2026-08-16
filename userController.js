@@ -4,7 +4,117 @@ const { changeEmail, verifyAge } = require('./authController');
 const { isValidObjectId, sanitizeObject } = require('./sanitize');
 const { deleteAccount, deactivateAccount, restoreAccount, getDeletionStatus } = require('./deleteAccount');
 
-// GET /api/users/me
+// ─── ✅ CACHE HELPER (In-Memory) ───
+const dashboardCache = new Map();
+const CACHE_TTL = 300000; // 5 minutes
+
+function getCachedDashboard(userId) {
+    const cached = dashboardCache.get(userId);
+    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+        return cached.data;
+    }
+    return null;
+}
+
+function setCachedDashboard(userId, data) {
+    dashboardCache.set(userId, {
+        data: data,
+        timestamp: Date.now()
+    });
+}
+
+function invalidateDashboardCache(userId) {
+    dashboardCache.delete(userId);
+}
+
+// ─── ✅ NEW: GET /api/user/dashboard-data ───
+// Combines user profile, subscription, and email status into ONE call
+const getDashboardData = async (req, res) => {
+    try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+
+        const userId = req.userId;
+        
+        // ✅ Check cache first
+        const cached = getCachedDashboard(userId);
+        if (cached) {
+            console.log('⚡ [CACHE] Dashboard data hit for user:', userId);
+            return res.json(cached);
+        }
+
+        // ✅ Fetch user data
+        const user = await User.findById(userId)
+            .select('email username fullName subscriptionTier subscriptionEndDate nylasIntegration')
+            .lean();
+
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // ✅ Check email connection status
+        let emailStatus = {
+            connected: false,
+            email: null,
+            isExpired: false
+        };
+
+        if (user.nylasIntegration && user.nylasIntegration.isConnected) {
+            emailStatus.connected = true;
+            emailStatus.email = user.nylasIntegration.emailAddress || null;
+            
+            // Check if token is expired
+            if (user.nylasIntegration.tokenExpiry) {
+                emailStatus.isExpired = new Date() > new Date(user.nylasIntegration.tokenExpiry);
+            }
+        }
+
+        // ✅ Build response
+        const dashboardData = {
+            subscription: {
+                tier: user.subscriptionTier || 'free',
+                endDate: user.subscriptionEndDate || null
+            },
+            email: emailStatus,
+            user: {
+                id: user._id,
+                email: user.email,
+                username: user.username,
+                fullName: user.fullName || user.username
+            },
+            // ✅ Add usage limits for quick access
+            limits: {
+                chat: user.subscriptionTier === 'pro' ? 150 : user.subscriptionTier === 'go' ? 50 : 10,
+                email: user.subscriptionTier === 'pro' ? 100 : user.subscriptionTier === 'go' ? 25 : 5,
+                hints: user.subscriptionTier === 'pro' ? 300 : user.subscriptionTier === 'go' ? 20 : 3
+            }
+        };
+
+        // ✅ Store in cache
+        setCachedDashboard(userId, dashboardData);
+
+        console.log('✅ [DASHBOARD] Data fetched for user:', userId);
+        res.json(dashboardData);
+
+    } catch (error) {
+        console.error('❌ [getDashboardData] Error:', error.message);
+        res.status(500).json({ 
+            message: 'Server Error fetching dashboard data',
+            error: error.message 
+        });
+    }
+};
+
+// ─── ✅ NEW: Invalidate cache on profile update ───
+const invalidateCache = async (req, res, next) => {
+    if (req.userId) {
+        invalidateDashboardCache(req.userId);
+    }
+    next();
+};
+
+// ─── GET /api/users/me ───
 const getUserProfile = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
@@ -18,7 +128,7 @@ const getUserProfile = async (req, res) => {
     }
 };
 
-// PUT /api/users/me
+// ─── PUT /api/users/me ───
 const updateUserProfile = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
@@ -37,13 +147,17 @@ const updateUserProfile = async (req, res) => {
         if (bio) user.bio = bio;
         if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
+        
+        // ✅ Invalidate cache after profile update
+        invalidateDashboardCache(req.userId);
+        
         res.json(user);
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// PUT /api/auth/change-password
+// ─── PUT /api/auth/change-password ───
 const changePassword = async (req, res) => {
     const { currentPassword, newPassword } = req.body;
     try {
@@ -58,6 +172,10 @@ const changePassword = async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
+        
+        // ✅ Invalidate cache after password change
+        invalidateDashboardCache(req.userId);
+        
         res.json({ message: 'Password updated successfully' });
     } catch (err) {
         res.status(500).json({ message: 'Server Error' });
@@ -84,6 +202,9 @@ const deleteUserAccount = async (req, res) => {
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
         }
+
+        // ✅ Invalidate cache before deletion
+        invalidateDashboardCache(req.userId);
 
         // Call the deletion service
         const result = await deleteAccount(req.userId, password, req);
@@ -135,6 +256,9 @@ const deactivateUserAccount = async (req, res) => {
             return res.status(401).json({ error: 'Invalid password' });
         }
 
+        // ✅ Invalidate cache before deactivation
+        invalidateDashboardCache(req.userId);
+
         const result = await deactivateAccount(req.userId, reason, req);
         return res.json(result);
 
@@ -154,6 +278,10 @@ const deactivateUserAccount = async (req, res) => {
 const restoreUserAccount = async (req, res) => {
     try {
         const { reason = 'User requested restoration' } = req.body;
+        
+        // ✅ Invalidate cache after restoration
+        invalidateDashboardCache(req.userId);
+        
         const result = await restoreAccount(req.userId, reason);
         return res.json(result);
     } catch (error) {
@@ -191,5 +319,9 @@ module.exports = {
     deleteUserAccount,
     deactivateUserAccount,
     restoreUserAccount,
-    getDeletionStatus: getDeletionStatusHandler
+    getDeletionStatus: getDeletionStatusHandler,
+    // ✅ NEW EXPORTS
+    getDashboardData,
+    invalidateCache,
+    invalidateDashboardCache
 };
