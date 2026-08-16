@@ -4,31 +4,12 @@ const { changeEmail, verifyAge } = require('./authController');
 const { isValidObjectId, sanitizeObject } = require('./sanitize');
 const { deleteAccount, deactivateAccount, restoreAccount, getDeletionStatus } = require('./deleteAccount');
 
-// ─── ✅ CACHE HELPER (In-Memory) ───
-const dashboardCache = new Map();
-const CACHE_TTL = 300000; // 5 minutes
-
-function getCachedDashboard(userId) {
-    const cached = dashboardCache.get(userId);
-    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-        return cached.data;
-    }
-    return null;
-}
-
-function setCachedDashboard(userId, data) {
-    dashboardCache.set(userId, {
-        data: data,
-        timestamp: Date.now()
-    });
-}
-
-function invalidateDashboardCache(userId) {
-    dashboardCache.delete(userId);
-}
+// ✅ Import cache layer
+const { cache, CACHE_KEYS, getOrSet, invalidateUser } = require('./cache');
 
 // ─── ✅ NEW: GET /api/user/dashboard-data ───
 // Combines user profile, subscription, and email status into ONE call
+// Uses cache.js for intelligent caching
 const getDashboardData = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
@@ -36,65 +17,60 @@ const getDashboardData = async (req, res) => {
         }
 
         const userId = req.userId;
+        const cacheKey = CACHE_KEYS.DASHBOARD(userId);
         
-        // ✅ Check cache first
-        const cached = getCachedDashboard(userId);
-        if (cached) {
-            console.log('⚡ [CACHE] Dashboard data hit for user:', userId);
-            return res.json(cached);
-        }
-
-        // ✅ Fetch user data
-        const user = await User.findById(userId)
-            .select('email username fullName subscriptionTier subscriptionEndDate nylasIntegration')
-            .lean();
-
-        if (!user) {
-            return res.status(404).json({ message: 'User not found' });
-        }
-
-        // ✅ Check email connection status
-        let emailStatus = {
-            connected: false,
-            email: null,
-            isExpired: false
-        };
-
-        if (user.nylasIntegration && user.nylasIntegration.isConnected) {
-            emailStatus.connected = true;
-            emailStatus.email = user.nylasIntegration.emailAddress || null;
+        // ✅ Use getOrSet from cache.js
+        const dashboardData = await getOrSet(cacheKey, async () => {
+            console.log(`📡 [DASHBOARD] Fetching fresh data for user: ${userId}`);
             
-            // Check if token is expired
-            if (user.nylasIntegration.tokenExpiry) {
-                emailStatus.isExpired = new Date() > new Date(user.nylasIntegration.tokenExpiry);
+            // ✅ Fetch user data
+            const user = await User.findById(userId)
+                .select('email username fullName subscriptionTier subscriptionEndDate nylasIntegration')
+                .lean();
+
+            if (!user) {
+                throw new Error('User not found');
             }
-        }
 
-        // ✅ Build response
-        const dashboardData = {
-            subscription: {
-                tier: user.subscriptionTier || 'free',
-                endDate: user.subscriptionEndDate || null
-            },
-            email: emailStatus,
-            user: {
-                id: user._id,
-                email: user.email,
-                username: user.username,
-                fullName: user.fullName || user.username
-            },
-            // ✅ Add usage limits for quick access
-            limits: {
-                chat: user.subscriptionTier === 'pro' ? 150 : user.subscriptionTier === 'go' ? 50 : 10,
-                email: user.subscriptionTier === 'pro' ? 100 : user.subscriptionTier === 'go' ? 25 : 5,
-                hints: user.subscriptionTier === 'pro' ? 300 : user.subscriptionTier === 'go' ? 20 : 3
+            // ✅ Check email connection status
+            let emailStatus = {
+                connected: false,
+                email: null,
+                isExpired: false
+            };
+
+            if (user.nylasIntegration && user.nylasIntegration.isConnected) {
+                emailStatus.connected = true;
+                emailStatus.email = user.nylasIntegration.emailAddress || null;
+                
+                // Check if token is expired
+                if (user.nylasIntegration.tokenExpiry) {
+                    emailStatus.isExpired = new Date() > new Date(user.nylasIntegration.tokenExpiry);
+                }
             }
-        };
 
-        // ✅ Store in cache
-        setCachedDashboard(userId, dashboardData);
+            // ✅ Build response
+            return {
+                subscription: {
+                    tier: user.subscriptionTier || 'free',
+                    endDate: user.subscriptionEndDate || null
+                },
+                email: emailStatus,
+                user: {
+                    id: user._id,
+                    email: user.email,
+                    username: user.username,
+                    fullName: user.fullName || user.username
+                },
+                limits: {
+                    chat: user.subscriptionTier === 'pro' ? 150 : user.subscriptionTier === 'go' ? 50 : 10,
+                    email: user.subscriptionTier === 'pro' ? 100 : user.subscriptionTier === 'go' ? 25 : 5,
+                    hints: user.subscriptionTier === 'pro' ? 300 : user.subscriptionTier === 'go' ? 20 : 3
+                }
+            };
+        });
 
-        console.log('✅ [DASHBOARD] Data fetched for user:', userId);
+        console.log(`✅ [DASHBOARD] Data served for user: ${userId} (${cache.has(cacheKey) ? '⚡ CACHED' : '📡 FRESH'})`);
         res.json(dashboardData);
 
     } catch (error) {
@@ -106,24 +82,29 @@ const getDashboardData = async (req, res) => {
     }
 };
 
-// ─── ✅ NEW: Invalidate cache on profile update ───
-const invalidateCache = async (req, res, next) => {
-    if (req.userId) {
-        invalidateDashboardCache(req.userId);
-    }
-    next();
-};
-
-// ─── GET /api/users/me ───
+// ─── ✅ GET /api/users/me ───
 const getUserProfile = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
-        const user = await User.findById(req.userId).select('-password');
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        
+        const userId = req.userId;
+        const cacheKey = CACHE_KEYS.USER_PROFILE(userId);
+        
+        // ✅ Use cache for profile data
+        const user = await getOrSet(cacheKey, async () => {
+            console.log(`📡 [PROFILE] Fetching fresh profile for user: ${userId}`);
+            const userData = await User.findById(userId).select('-password').lean();
+            if (!userData) {
+                throw new Error('User not found');
+            }
+            return userData;
+        });
+        
         res.json(user);
     } catch (err) {
+        console.error('[getUserProfile] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -134,11 +115,14 @@ const updateUserProfile = async (req, res) => {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
+        
         // Sanitize the update data
         const sanitizedBody = sanitizeObject(req.body);
         const { fullName, primaryGoal, skillLevel, interests, country, bio, profilePicture } = sanitizedBody;
+        
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
+        
         if (fullName) user.fullName = fullName;
         if (primaryGoal) user.primaryGoal = primaryGoal;
         if (skillLevel) user.skillLevel = skillLevel;
@@ -148,11 +132,13 @@ const updateUserProfile = async (req, res) => {
         if (profilePicture) user.profilePicture = profilePicture;
         await user.save();
         
-        // ✅ Invalidate cache after profile update
-        invalidateDashboardCache(req.userId);
+        // ✅ Invalidate ALL cache for this user
+        const invalidated = invalidateUser(req.userId);
+        console.log(`🧹 [CACHE] Invalidated ${invalidated} cache entries for user: ${req.userId}`);
         
         res.json(user);
     } catch (err) {
+        console.error('[updateUserProfile] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -164,20 +150,26 @@ const changePassword = async (req, res) => {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
+        
         let user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
+        
         const isMatch = await bcrypt.compare(currentPassword, user.password);
         if (!isMatch) return res.status(400).json({ message: 'Current password is incorrect' });
+        
         if (newPassword.length < 8) return res.status(400).json({ message: 'New password must be at least 8 characters' });
+        
         const salt = await bcrypt.genSalt(10);
         user.password = await bcrypt.hash(newPassword, salt);
         await user.save();
         
-        // ✅ Invalidate cache after password change
-        invalidateDashboardCache(req.userId);
+        // ✅ Invalidate ALL cache for this user
+        const invalidated = invalidateUser(req.userId);
+        console.log(`🧹 [CACHE] Invalidated ${invalidated} cache entries for user: ${req.userId} (password change)`);
         
         res.json({ message: 'Password updated successfully' });
     } catch (err) {
+        console.error('[changePassword] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -203,8 +195,9 @@ const deleteUserAccount = async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
 
-        // ✅ Invalidate cache before deletion
-        invalidateDashboardCache(req.userId);
+        // ✅ Invalidate ALL cache for this user before deletion
+        const invalidated = invalidateUser(req.userId);
+        console.log(`🧹 [CACHE] Invalidated ${invalidated} cache entries for user: ${req.userId} (deletion)`);
 
         // Call the deletion service
         const result = await deleteAccount(req.userId, password, req);
@@ -256,8 +249,9 @@ const deactivateUserAccount = async (req, res) => {
             return res.status(401).json({ error: 'Invalid password' });
         }
 
-        // ✅ Invalidate cache before deactivation
-        invalidateDashboardCache(req.userId);
+        // ✅ Invalidate ALL cache for this user before deactivation
+        const invalidated = invalidateUser(req.userId);
+        console.log(`🧹 [CACHE] Invalidated ${invalidated} cache entries for user: ${req.userId} (deactivation)`);
 
         const result = await deactivateAccount(req.userId, reason, req);
         return res.json(result);
@@ -279,8 +273,9 @@ const restoreUserAccount = async (req, res) => {
     try {
         const { reason = 'User requested restoration' } = req.body;
         
-        // ✅ Invalidate cache after restoration
-        invalidateDashboardCache(req.userId);
+        // ✅ Invalidate cache after restoration (user might be active again)
+        const invalidated = invalidateUser(req.userId);
+        console.log(`🧹 [CACHE] Invalidated ${invalidated} cache entries for user: ${req.userId} (restoration)`);
         
         const result = await restoreAccount(req.userId, reason);
         return res.json(result);
@@ -306,6 +301,15 @@ const getDeletionStatusHandler = async (req, res) => {
     }
 };
 
+// ─── ✅ NEW: Invalidate cache via middleware ───
+const invalidateCache = async (req, res, next) => {
+    if (req.userId) {
+        const invalidated = invalidateUser(req.userId);
+        console.log(`🧹 [CACHE] Invalidated ${invalidated} cache entries for user: ${req.userId} (middleware)`);
+    }
+    next();
+};
+
 // Wrappers for authController functions (they expect (req, res) signatures)
 const changeEmailWrapper = (req, res) => changeEmail(req, res);
 const verifyAgeWrapper = (req, res) => verifyAge(req, res);
@@ -323,5 +327,5 @@ module.exports = {
     // ✅ NEW EXPORTS
     getDashboardData,
     invalidateCache,
-    invalidateDashboardCache
+    invalidateDashboardCache: invalidateUser
 };
