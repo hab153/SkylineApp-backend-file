@@ -648,7 +648,20 @@ console.log('   📋 GET  /api/unread/leads       - Get leads with unread');
 console.log('   📋 GET  /api/unread/lead/:id    - Get unread for lead');
 console.log('   📋 POST /api/unread/reset/:id   - Reset unread for lead');
 
-// ─── START SERVER ───
+// ════════════════════════════════════════════
+//  ✅ FAST DASHBOARD DATA (AGGREGATED)
+// ════════════════════════════════════════════
+
+// ✅ NEW: Aggregated dashboard endpoint - combines user, subscription, and email status
+app.get('/api/user/dashboard-data', verifyToken, userController.getDashboardData);
+
+console.log('✅ [DASHBOARD] Endpoint registered: GET /api/user/dashboard-data');
+console.log('   📋 Combines: user profile + subscription + email status');
+
+// ════════════════════════════════════════════
+//  START SERVER
+// ════════════════════════════════════════════
+
 const PORT = process.env.PORT || 5001;
 const server = app.listen(PORT, () => { 
     console.log('🚀 Server running on port ' + PORT); 
