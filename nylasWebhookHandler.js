@@ -7,6 +7,7 @@ const ChatMessage = require('./ChatMessage');
 const { generateAIReply } = require('./aiReplyGenerator');
 const { decrypt } = require('./encryption'); 
 const { isValidObjectId, sanitizeString } = require('./sanitize');
+const { sendEmail } = require('./nylasService');
 
 // ✅ SSE: Import shared SSE manager (NO circular dependency)
 const sseManager = require('./sseManager');
@@ -283,7 +284,6 @@ async function handleMessageCreated(eventData) {
         safeThreadIdForStorage = s || null;
       }
       
-      // ✅ NEW: Set unreadCount to 1 for new leads with customer message
       lead = new Lead({
         userId: userId,
         name: displayName,
@@ -342,7 +342,7 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   return null;
 }
 
-// ✅ UPDATED: Increments unreadCount atomically
+// ✅ UPDATED: Process reply AND trigger auto-reply
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   try {
     lead.status = 'Replied';
@@ -361,10 +361,14 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null
     });
     
-    // ✅ NEW: Increment unreadCount
+    // ✅ Increment unreadCount
     lead.unreadCount = (lead.unreadCount || 0) + 1;
     
     await lead.save();
+    console.log('💾 [MODEL-LEAD] Saved Lead:', lead._id, 'Name:', lead.name);
+    console.log('💾 [MODEL-LEAD] Status:', lead.status);
+    console.log('💾 [MODEL-LEAD] Replies Count:', lead.replies.length);
+    console.log('💾 [MODEL-LEAD] Unread Count:', lead.unreadCount);
 
     try {
       const chatMessage = new ChatMessage({
@@ -380,11 +384,12 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('️ [WEBHOOK] Failed to save ChatMessage:', chatErr.message);
     }
 
+    // ✅ FIXED: Notification - removed 'system' role (invalid enum)
     try {
       const notification = new Message({
         userId: String(userId),
         sessionId: 'lead-reply-notification',
-        role: 'system',
+        role: 'user',  // ✅ FIXED: 'system' was invalid
         title: `${sanitizeString(String(lead.name || 'Lead'))} replied`,
         content: snippet ? String(snippet).substring(0, 200) : 'New reply from lead',
         notificationType: 'lead_reply',
@@ -397,7 +402,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       console.warn('⚠️ [WEBHOOK] Failed to create notification:', notifErr.message);
     }
 
-    // ✅ SSE: Push new message to user's browser INSTANTLY via sseManager
+    // ✅ SSE: Push new message to user's browser
     try {
       sseManager.notifyUser(userId, {
         type: 'new_message',
@@ -411,8 +416,108 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
         date: new Date().toISOString(),
         messageId: messageId || ''
       });
+      console.log('📡 [SSE] Pushed event to user', userId);
     } catch (sseErr) {
       console.warn('⚠️ [SSE] Failed to push notification:', sseErr.message);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // ✅ AUTO-REPLY: Check if enabled and trigger
+    // ════════════════════════════════════════════════════════════
+    
+    // ✅ Refresh lead to get latest autoReplyEnabled
+    const freshLead = await Lead.findOne({ _id: lead._id, userId: userId });
+    
+    if (freshLead && freshLead.autoReplyEnabled && freshLead.autoReplyInstructions) {
+      console.log('🤖 [AUTO-REPLY] Auto-reply is enabled for lead:', freshLead._id);
+      console.log('📝 [AUTO-REPLY] Instructions:', freshLead.autoReplyInstructions);
+      
+      try {
+        // Get the last message from the lead (the one we just saved)
+        const lastMessage = freshLead.replies && freshLead.replies.length > 0 
+          ? freshLead.replies[freshLead.replies.length - 1] 
+          : null;
+        
+        if (lastMessage) {
+          console.log('💬 [AUTO-REPLY] Last message content:', lastMessage.content);
+          
+          // ✅ Generate AI reply
+          const aiResult = await generateAIReply(
+            lastMessage.content,                    // customerMessage
+            freshLead.autoReplyInstructions,        // instructions
+            freshLead.name || 'Lead',               // leadName
+            [],                                     // conversationHistory
+            { mode: 'sales' }                       // options
+          );
+          
+          console.log('🤖 [AUTO-REPLY] AI Response generated:', aiResult.reply);
+          
+          if (aiResult.reply) {
+            // ✅ Get email account
+            const emailAccount = await EmailAccount.findOne({ 
+              userId: String(userId),
+              isConnected: true
+            });
+            
+            if (emailAccount) {
+              // ✅ Send the auto-reply via Nylas
+              const emailResult = await sendEmail(
+                String(userId),
+                freshLead.email,
+                'Re: ' + (lastMessage.subject || 'Your message'),
+                aiResult.reply
+              );
+              
+              if (emailResult.success) {
+                console.log('✅ [AUTO-REPLY] Email sent successfully');
+                
+                // ✅ Save the auto-reply to lead history
+                freshLead.replies.push({
+                  date: new Date(),
+                  content: aiResult.reply,
+                  subject: 'Re: ' + (lastMessage.subject || 'Your message'),
+                  from: 'lead',
+                  status: 'sent',
+                  read: true,
+                  isAutoReply: true
+                });
+                await freshLead.save();
+                
+                // ✅ Send SSE event for auto-reply
+                try {
+                  sseManager.notifyUser(userId, {
+                    type: 'new_message',
+                    leadId: freshLead._id.toString(),
+                    leadName: freshLead.name || 'Unknown',
+                    leadEmail: freshLead.email || '',
+                    fromEmail: '',
+                    subject: 'Re: ' + (lastMessage.subject || 'Your message'),
+                    content: aiResult.reply,
+                    snippet: aiResult.reply.substring(0, 200),
+                    date: new Date().toISOString(),
+                    messageId: '',
+                    sent: true,
+                    autoReply: true
+                  });
+                  console.log('📡 [SSE] Pushed auto-reply event to user', userId);
+                } catch (sseErr) {
+                  console.warn('⚠️ [SSE] Failed to push auto-reply notification:', sseErr.message);
+                }
+                
+              } else {
+                console.error('❌ [AUTO-REPLY] Failed to send email:', emailResult.error);
+              }
+            } else {
+              console.warn('⚠️ [AUTO-REPLY] No email account found for user:', userId);
+            }
+          } else {
+            console.warn('⚠️ [AUTO-REPLY] No reply generated by AI');
+          }
+        }
+      } catch (aiError) {
+        console.error('❌ [AUTO-REPLY] AI generation failed:', aiError.message);
+        console.error('❌ [AUTO-REPLY] Stack:', aiError.stack);
+      }
     }
 
   } catch (error) {
@@ -527,7 +632,7 @@ async function handleGrantExpired(eventData) {
         const notification = new Message({
           userId: String(emailAccount.userId),
           sessionId: 'system-notification',
-          role: 'system',
+          role: 'user',  // ✅ FIXED: 'system' was invalid
           title: 'Email Connection Expired',
           content: 'Your email connection has expired. Please reconnect.',
           notificationType: 'token_expired',
@@ -578,79 +683,4 @@ async function handleGrantRefreshed(eventData) {
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling grant refreshed:', error.message);
   }
-}
-
-async function generateAndSendAutoReply(lead, userId) {
-  try {
-    const user = await User.findById(String(userId));
-    if (!user) return;
-
-    const emailAccount = await EmailAccount.findOne({ 
-      userId: String(userId),
-      isConnected: true
-    });
-
-    if (!emailAccount || !emailAccount.accessToken) return;
-
-    const aiResponse = await generateAIReply({
-      leadName: lead.name,
-      leadEmail: lead.email,
-      leadCompany: lead.company || '',
-      leadMessage: lead.replies?.[lead.replies.length - 1]?.content || '',
-      instructions: lead.autoReplyInstructions || 'Write a professional and helpful reply.',
-      userContext: {
-        name: user.fullName || 'Skyline User',
-        company: user.company || 'Skyline',
-        businessType: user.businessType || 'B2B'
-      }
-    });
-
-    if (!aiResponse) return;
-
-    const nylas = require('./nylasClient');
-    
-    const result = await nylas.sendEmail({
-      grantId: emailAccount.nylasGrantId,
-      accessToken: emailAccount.accessToken,
-      to: [lead.email],
-      subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
-      body: aiResponse
-    });
-
-    if (result && result.success) {
-      if (!lead.replies) lead.replies = [];
-      lead.replies.push({
-        from: 'lead',
-        content: aiResponse,
-        subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
-        date: new Date(),
-        autoReply: true,
-        read: true
-      });
-      
-      await lead.save();
-
-      try {
-        sseManager.notifyUser(userId, {
-          type: 'new_message',
-          leadId: String(lead._id),
-          leadName: lead.name || 'Unknown',
-          leadEmail: lead.email || '',
-          fromEmail: '',
-          subject: `Re: ${lead.replies?.[lead.replies.length - 1]?.subject || 'Your inquiry'}`,
-          content: aiResponse,
-          snippet: aiResponse.substring(0, 200),
-          date: new Date().toISOString(),
-          messageId: '',
-          sent: true,
-          autoReply: true
-        });
-      } catch (sseErr) {
-        console.warn('⚠️ [SSE] Failed to push auto-reply notification:', sseErr.message);
-      }
-    }
-
-  } catch (error) {
-    console.error(' [AUTO-REPLY] Error:', error.message);
-  }
-  }
+                   }
