@@ -12,6 +12,24 @@ const { sendEmail } = require('./nylasService');
 // ✅ SSE: Import shared SSE manager (NO circular dependency)
 const sseManager = require('./sseManager');
 
+// ─── STRIP HTML TAGS ───
+function stripHtmlTags(html) {
+    if (!html || typeof html !== 'string') return '';
+    // Remove HTML tags
+    let text = html.replace(/<[^>]*>/g, ' ');
+    // Decode HTML entities
+    text = text.replace(/&nbsp;/g, ' ')
+               .replace(/&amp;/g, '&')
+               .replace(/&lt;/g, '<')
+               .replace(/&gt;/g, '>')
+               .replace(/&quot;/g, '"')
+               .replace(/&#39;/g, "'")
+               .replace(/&[a-zA-Z]+;/g, ' ');
+    // Clean up whitespace
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+}
+
 function sanitizeEmailBody(html) {
   if (!html || typeof html !== 'string') return '';
   return html.substring(0, 10000);
@@ -207,8 +225,14 @@ async function handleMessageCreated(eventData) {
     
     const subject = message.subject || data.subject || object.subject || '(no subject)';
     const rawBody = message.body || message.text || message.snippet || data.body || data.snippet || object.body || '';
-    const body = sanitizeEmailBody(rawBody); 
+    const body = sanitizeEmailBody(rawBody);
+    
+    // ✅ STRIP HTML from body
+    const cleanBody = stripHtmlTags(body);
+    
     const snippet = message.snippet || data.snippet || object.snippet || '';
+    const cleanSnippet = stripHtmlTags(snippet);
+    
     const messageId = message.id || message.message_id || data.id || object.id || null;
     
     const safeFromEmail = sanitizeEmailAddress(fromEmail);
@@ -294,7 +318,7 @@ async function handleMessageCreated(eventData) {
         unreadCount: 1,
         replies: [{
           from: 'customer',
-          content: body || snippet || '(No content)',
+          content: cleanBody || cleanSnippet || '(No content)',
           subject: typeof subject === 'string' ? subject.substring(0, 200) : '(no subject)',
           date: new Date(),
           messageId: (messageId && typeof messageId === 'string') ? String(messageId).substring(0, 100) : null
@@ -307,7 +331,7 @@ async function handleMessageCreated(eventData) {
       console.log('✅ [WEBHOOK] Created new lead:', lead._id);
     }
 
-    await processReply(lead, safeFromEmail, subject, body, snippet, messageId, userId);
+    await processReply(lead, safeFromEmail, subject, cleanBody, cleanSnippet, messageId, userId);
 
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling message:', error.message);
@@ -342,7 +366,7 @@ async function findMatchingLead(userId, fromEmail, toEmail) {
   return null;
 }
 
-// ✅ UPDATED: Process reply AND trigger auto-reply
+// ✅ UPDATED: Process reply AND trigger auto-reply with clean text
 async function processReply(lead, fromEmail, subject, body, snippet, messageId, userId) {
   try {
     lead.status = 'Replied';
@@ -350,6 +374,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
     
     if (!lead.replies) lead.replies = [];
     
+    // ✅ Use clean body (already stripped of HTML)
     const replyContent = body || snippet || '(No content)';
     const replySubject = (typeof subject === 'string') ? subject.substring(0, 200) : '(no subject)';
     
@@ -389,7 +414,7 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
       const notification = new Message({
         userId: String(userId),
         sessionId: 'lead-reply-notification',
-        role: 'user',  // ✅ FIXED: 'system' was invalid
+        role: 'user',
         title: `${sanitizeString(String(lead.name || 'Lead'))} replied`,
         content: snippet ? String(snippet).substring(0, 200) : 'New reply from lead',
         notificationType: 'lead_reply',
@@ -439,15 +464,17 @@ async function processReply(lead, fromEmail, subject, body, snippet, messageId, 
           : null;
         
         if (lastMessage) {
-          console.log('💬 [AUTO-REPLY] Last message content:', lastMessage.content);
+          // ✅ Get clean content (already stripped of HTML)
+          const cleanContent = lastMessage.content || '';
+          console.log('💬 [AUTO-REPLY] Clean message content:', cleanContent);
           
-          // ✅ Generate AI reply
+          // ✅ Generate AI reply with CLEAN content
           const aiResult = await generateAIReply(
-            lastMessage.content,                    // customerMessage
-            freshLead.autoReplyInstructions,        // instructions
-            freshLead.name || 'Lead',               // leadName
-            [],                                     // conversationHistory
-            { mode: 'sales' }                       // options
+            cleanContent,  // ✅ PASS CLEAN TEXT, not raw HTML
+            freshLead.autoReplyInstructions,
+            freshLead.name || 'Lead',
+            [],
+            { mode: 'sales' }
           );
           
           console.log('🤖 [AUTO-REPLY] AI Response generated:', aiResult.reply);
@@ -632,7 +659,7 @@ async function handleGrantExpired(eventData) {
         const notification = new Message({
           userId: String(emailAccount.userId),
           sessionId: 'system-notification',
-          role: 'user',  // ✅ FIXED: 'system' was invalid
+          role: 'user',
           title: 'Email Connection Expired',
           content: 'Your email connection has expired. Please reconnect.',
           notificationType: 'token_expired',
@@ -683,4 +710,4 @@ async function handleGrantRefreshed(eventData) {
   } catch (error) {
     console.error('❌ [WEBHOOK] Error handling grant refreshed:', error.message);
   }
-                   }
+}
