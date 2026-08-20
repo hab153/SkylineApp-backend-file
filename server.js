@@ -478,7 +478,15 @@ console.log('✅ [SERVER] GET /api/conversations registered');
 app.get('/api/conversations/:leadId', verifyToken, leadController.getConversationById);
 console.log('✅ [SERVER] GET /api/conversations/:leadId registered');
 app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
+
+// ════════════════════════════════════════════
+//  ✅ AUTO-REPLY ROUTES — FIXED WITH getAutoReply
+// ════════════════════════════════════════════
+app.get('/api/leads/:leadId/auto-reply', verifyToken, leadController.getAutoReply);
+console.log('✅ [SERVER] GET /api/leads/:leadId/auto-reply registered');
 app.put('/api/leads/:leadId/auto-reply', verifyToken, validate(updateAutoReplySchema), leadController.updateAutoReply);
+console.log('✅ [SERVER] PUT /api/leads/:leadId/auto-reply registered');
+
 app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
