@@ -1,11 +1,12 @@
 // aiReplyGenerator.js
 // ─────────────────────────────────────────────────────────────────────────────
-// STATELESS AI autoreply engine — Production Upgraded v5.2
-// FIXES:
-//  v5.2 — NEW:
-//   FIX L : FORCED INSTRUCTION FOLLOWING — AI MUST follow instructions 100%
-//   FIX M : IMPROVED LANGUAGE DETECTION — English prioritized, Dutch false positive fixed
-//   FIX N : OUT OF SCOPE SILENCE — If message is out of scope of instructions, AI stays quiet
+// STATELESS AI autoreply engine — Production v6.0
+// RULES:
+//  1. Reply to ANY message if instructions say "any message"
+//  2. ONLY reply to messages related to instructions
+//  3. Stay quiet if completely unrelated to business
+//  4. Reply in same language as lead's message
+//  5. Follow instructions 100% — NO extra content
 // ─────────────────────────────────────────────────────────────────────────────
 const axios  = require('axios');
 const crypto = require('crypto');
@@ -101,7 +102,7 @@ const LEAD_QUALITY = {
     DEAD: 'dead',
 };
 
-// ─── FIX G: CONVERSATION RHYTHM TYPES ────────────────────────────────────────
+// ─── CONVERSATION RHYTHM TYPES ──────────────────────────────────────────────
 const RHYTHM_TYPES = {
     STATEMENT:   'statement',
     QUESTION:    'question',
@@ -142,7 +143,7 @@ const SPAM_PATTERNS = [
     /no obligation/i,
 ];
 
-// ─── FIX B (v4): RESPONSE VARIATION ENGINE ────────────────────────────────────
+// ─── RESPONSE VARIATION ENGINE ──────────────────────────────────────────────
 const OPENER_VARIATIONS = {
     friendly: [
         'Thanks for getting in touch —',
@@ -205,7 +206,7 @@ const CLOSING_VARIATIONS = [
     'What is the biggest thing slowing your pipeline right now?',
 ];
 
-// ─── FIX C (v4): QUALIFICATION QUESTIONS ─────────────────────────────────────
+// ─── QUALIFICATION QUESTIONS ──────────────────────────────────────────────────
 const QUALIFICATION_QUESTIONS = {
     volume:       'How much outreach volume is your team currently handling monthly?',
     team_size:    'How many people are managing your outreach right now?',
@@ -217,7 +218,7 @@ const QUALIFICATION_QUESTIONS = {
     goal:         'What does success look like 90 days from now for your outreach?',
 };
 
-// ─── FIX E (v4): COMPETITOR POSITIONING ──────────────────────────────────────
+// ─── COMPETITOR POSITIONING ──────────────────────────────────────────────────
 const COMPETITOR_POSITIONING = {
     default: `Most platforms automate the sending. The problem is that sending more emails is not the bottleneck for most teams — it is knowing when to follow up, what to say, and when to hand off to a human. Skyline AI focuses on the decision layer, not just the delivery layer. That means fewer wasted touchpoints and more conversations that actually convert.`,
     vs_apollo: `Apollo is built for prospecting at scale — finding contacts and building lists. Skyline AI starts where Apollo ends. Once a lead responds, Apollo does not know what to do next. Skyline handles the entire reply-to-meeting flow automatically, with AI that reads intent, handles objections, and books meetings without human input.`,
@@ -226,7 +227,7 @@ const COMPETITOR_POSITIONING = {
     vs_hiring: `Hiring a sales rep to handle outreach replies costs $3,000–$6,000 per month in salary alone — before benefits, management time, or onboarding. Skyline AI handles the same reply volume, 24/7, at a fraction of that cost. Most teams use Skyline to handle the top-of-funnel volume so their human reps can focus exclusively on closing.`,
 };
 
-// ─── FIX D (v4): OUTCOME LANGUAGE ────────────────────────────────────────────
+// ─── OUTCOME LANGUAGE ─────────────────────────────────────────────────────────
 const OUTCOME_LANGUAGE = {
     time_saved:    'hours per week your team currently spends on manual follow-up',
     pipeline:      'conversations that would have gone cold without a timely reply',
@@ -236,9 +237,7 @@ const OUTCOME_LANGUAGE = {
     cost:          'reducing the cost-per-conversation by removing manual handling from the equation',
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX H: STRONGER PRODUCT POSITIONING — worldview + philosophy
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── PRODUCT WORLDVIEW ──────────────────────────────────────────────────────
 const PRODUCT_WORLDVIEW = {
     philosophy: `Skyline AI is built on one belief: the biggest revenue leak in most businesses is not the leads they never find — it is the leads they find but lose in the gap between first contact and first conversation. Most outreach tools are built to send more. Skyline is built to convert more from what you already have.`,
     differentiation: `Unlike general AI tools that generate content, Skyline AI is a decision engine. It does not just write replies — it reads intent, routes conversations, qualifies leads, and hands off to humans at the right moment. The result is a system that scales like software but responds like a trained sales rep.`,
@@ -246,9 +245,7 @@ const PRODUCT_WORLDVIEW = {
     core_pain: `The real problem is not sending emails. It is what happens after the email lands. Most teams have no system for: reading intent in replies, knowing when to follow up, handling objections at scale, or booking meetings automatically. Skyline solves that specific problem.`,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX I: SAFE REFUSAL LIBRARY — never silent, always redirect
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── SAFE REFUSAL LIBRARY ────────────────────────────────────────────────────
 const SAFE_REFUSALS = {
     legal: `This touches on a legal or contractual matter that I am not able to address directly. I want to make sure you get the right answer here — let me connect you with the right person on our team who can speak to this properly.`,
     pricing_not_confirmed: `I want to give you accurate pricing rather than an estimate that might be off. Let me have someone from the team share the exact details — that way you have the right numbers to make a decision.`,
@@ -258,9 +255,7 @@ const SAFE_REFUSALS = {
     competitor_attack: `I am not going to speak negatively about other tools — that is not useful to you. What I can do is be clear about what Skyline does well and let you decide if it fits. What is the specific problem you are trying to solve?`,
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX J: ADVANCED SALES LOGIC — ROI estimation frameworks
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ROI FRAMEWORKS ──────────────────────────────────────────────────────────
 const ROI_FRAMEWORKS = {
     time_cost: `If your team spends even 5 hours per week on manual reply management, that is roughly 20 hours per month — or half a full-time week per quarter — on tasks Skyline handles automatically. At an average loaded cost of $25–$50/hour for that time, the math usually works out before the first month is done.`,
     lead_recovery: `Most teams we speak with are losing 20–40% of warm leads simply because follow-ups are too slow or get dropped entirely. If your team generates even 50 qualified leads per month, recovering 10–20 of those through consistent follow-up directly impacts pipeline in a measurable way.`,
@@ -269,7 +264,7 @@ const ROI_FRAMEWORKS = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX G: RHYTHM SELECTOR
+// RHYTHM SELECTOR
 // ─────────────────────────────────────────────────────────────────────────────
 function _selectRhythm(intent, conversationLength, lastRhythm) {
     const avoid = lastRhythm;
@@ -299,7 +294,7 @@ function _selectRhythm(intent, conversationLength, lastRhythm) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX F: LENGTH RESOLVER
+// LENGTH RESOLVER
 // ─────────────────────────────────────────────────────────────────────────────
 function _resolveReplyLength(replyLength, intent, conversationLength) {
     if (replyLength && replyLength !== 'auto') {
@@ -324,7 +319,7 @@ function _resolveReplyLength(replyLength, intent, conversationLength) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX J: PAIN DETECTOR
+// PAIN DETECTOR
 // ─────────────────────────────────────────────────────────────────────────────
 function _detectPainSignals(message) {
     const lower = message.toLowerCase();
@@ -347,7 +342,7 @@ function _detectPainSignals(message) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FIX J: URGENCY DETECTOR
+// URGENCY DETECTOR
 // ─────────────────────────────────────────────────────────────────────────────
 function _detectUrgencyLevel(message, messageSignals) {
     const lower = message.toLowerCase();
@@ -360,16 +355,43 @@ function _detectUrgencyLevel(message, messageSignals) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ✅ FIX M: IMPROVED LANGUAGE DETECTOR — English priority, Dutch false positive fixed
+// SIGNAL DETECTOR
+// ─────────────────────────────────────────────────────────────────────────────
+function _detectMessageSignals(message) {
+    const lower = message.toLowerCase();
+    const competitorKeywords = {
+        apollo:     ['apollo', 'apollo.io'],
+        clay:       ['clay', 'clay.com'],
+        freelancer: ['freelancer', 'hire someone', 'hire a person', 'hire a va'],
+        hiring:     ['hire a rep', 'sales rep', 'hire staff', 'employee'],
+        instantly:  ['instantly', 'instantly.ai'],
+        lemlist:    ['lemlist'],
+        smartlead:  ['smartlead'],
+        outreach:   ['outreach.io', 'salesloft'],
+    };
+    let competitor = null;
+    for (const [name, keywords] of Object.entries(competitorKeywords)) {
+        if (keywords.some(k => lower.includes(k))) { competitor = name; break; }
+    }
+    return {
+        competitor,
+        isROIQuestion: /worth it|roi|return|cost|expensive|cheaper|price|value/.test(lower),
+        isCompetitor:  competitor !== null,
+        isUrgent:      /asap|urgent|this week|right now|immediately|today/.test(lower),
+        isSkeptical:   /not sure|doubt|really work|prove|skeptical|don.?t believe/.test(lower),
+        isQualifying:  /team|company|size|budget|monthly|weekly|volume|leads/.test(lower),
+    };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ LANGUAGE DETECTOR — English priority, Dutch false positive fixed
 // ─────────────────────────────────────────────────────────────────────────────
 function _detectLanguage(message) {
     if (!message || typeof message !== 'string') return { code: 'en', name: 'English', rtl: false };
 
-    // ✅ Strip HTML tags first
     let text = message.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     if (!text) return { code: 'en', name: 'English', rtl: false };
 
-    // Script-based detection (highest confidence)
     if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text)) {
         if (/[\u0698\u06AF\u06CC\u06BE]/.test(text)) return { code: 'fa', name: 'Farsi', rtl: true };
         if (/[\u06C1\u06BE\u06D2]/.test(text)) return { code: 'ur', name: 'Urdu', rtl: true };
@@ -389,27 +411,22 @@ function _detectLanguage(message) {
 
     const lower = text.toLowerCase();
 
-    // ✅ ENGLISH WORDS — common English words (prioritized)
-    const englishWords = /\b(the|and|for|are|but|not|you|all|can|had|her|was|one|our|out|day|get|has|him|his|how|its|may|new|now|old|see|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|get|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|get|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who)\b/i;
+    const englishWords = /\b(the|and|for|are|but|not|you|all|can|had|her|was|one|our|out|day|get|has|him|his|how|its|may|new|now|old|see|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|get|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who|boy|did|yet|she|say|use|let|put|end|own|too|any|big|far|get|got|hot|lot|man|men|new|now|old|out|own|see|she|two|way|who)\b/i;
     const englishMatch = lower.match(englishWords);
     const englishCount = englishMatch ? englishMatch.length : 0;
 
-    // ✅ DUTCH WORDS — moved to separate check with lower priority
     const dutchWords = /\b(ik|jij|hij|zij|wij|jullie|mijn|jouw|zijn|haar|ons|hun|me|je|hem|haar|ons|jullie|hen|ben|bent|is|zijn|was|waren|zal|zou|heb|hebt|heeft|hebben|had|zouden|moet|kunt|kan|mogen|mag|wil|wilt|zullen|gaan|gaat|ging|kwam|komen|kwamen|zien|zag|zagen|doen|deed|deden|zeggen|zei|zeiden|vinden|vond|vonden|denken|dacht|dachten|weten|wist|wisten|krijgen|kreeg|kregen|houden|hield|hielden|spelen|speelde|speelden|lopen|liep|liepen|rijden|reed|reden|vliegen|vloog|vlogen|zwemmen|zwom|zwommen)\b/i;
     const dutchMatch = lower.match(dutchWords);
     const dutchCount = dutchMatch ? dutchMatch.length : 0;
 
-    // ✅ If English words count >= Dutch words count, it's English
     if (englishCount >= dutchCount && englishCount > 0) {
         return { code: 'en', name: 'English', rtl: false };
     }
 
-    // ✅ If Dutch words significantly outnumber English words (3:1), it's Dutch
     if (dutchCount > englishCount * 3 && dutchCount > 2) {
         return { code: 'nl', name: 'Dutch', rtl: false };
     }
 
-    // ✅ Latin-script languages — word-frequency heuristics
     const langPatterns = [
         { code: 'es', name: 'Spanish',    rtl: false, pattern: /\b(gracias|hola|por favor|cómo|está|estás|que|también|sí|no|bien|buenas|buenos días|estimado|empresa|necesito|quiero|podría|tenemos|nuestro|sistema|equipo|proceso)\b/ },
         { code: 'fr', name: 'French',     rtl: false, pattern: /\b(merci|bonjour|comment|est-ce|nous|vous|les|des|une|pour|avec|sur|mais|très|aussi|bien|notre|votre|pouvez|entreprise|besoin|système|équipe)\b/ },
@@ -447,7 +464,7 @@ function _detectLanguage(message) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIN FUNCTION
+// ✅ MAIN GENERATE FUNCTION
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateAIReply(
     customerMessage,
@@ -475,41 +492,32 @@ async function generateAIReply(
         lastRhythm           = null,
     } = options;
 
-    // ── LAYER 0: API Key Guard ────────────────────────────────────────────────
     if (!process.env.OPENAI_API_KEY) {
         console.error('❌ [AI GENERATOR] OPENAI_API_KEY is missing.');
         return _errorResult('missing_api_key', startTime);
     }
 
-    // ── LAYER 1: Input Sanitization ───────────────────────────────────────────
     const safeMessage      = _sanitizeInput(customerMessage, CONFIG.MAX_MESSAGE_CHARS);
     const safeInstructions = _sanitizeInput(instructions,    CONFIG.MAX_INSTRUCTIONS_CHARS);
     const safeBusinessCfg  = _sanitizeBusinessConfig(businessConfig);
 
-    // ── LAYER 2: Pre-AI Hard Guardrails ──────────────────────────────────────
     const guardrail = _runGuardrails(safeMessage, followUpCount, leadScore);
     if (guardrail) {
         console.warn(`🛡️ [AI GENERATOR] Guardrail hit: ${guardrail.reasoning}`);
         return { ...guardrail, durationMs: Date.now() - startTime, modelVersion: CONFIG.MODEL };
     }
 
-    // ── LAYER 3: History Trimming ─────────────────────────────────────────────
     const safeHistory = _trimHistory(conversationHistory, CONFIG.HISTORY_LIMIT);
 
-    // ── LAYER 4: Signal Detection ─────────────────────────────────────────────
     const messageSignals = _detectMessageSignals(safeMessage);
     const painSignals    = _detectPainSignals(safeMessage);
     const urgencyLevel   = _detectUrgencyLevel(safeMessage, messageSignals);
-
-    // ── FIX K: Language Detection ─────────────────────────────────────────────
     const detectedLanguage = _detectLanguage(safeMessage);
 
-    // ── LAYER 5: Resolve tone + rhythm + length ───────────────────────────────
     const resolvedTone = enableChallengerMode ? TONES.CHALLENGER : tone;
     const conversationLength = safeHistory.length;
     const resolvedLengthMode = replyLength;
 
-    // ── LAYER 6: Build Prompt ─────────────────────────────────────────────────
     const systemPrompt = _buildSystemPrompt({
         instructions:     safeInstructions,
         businessConfig:   safeBusinessCfg,
@@ -538,7 +546,6 @@ async function generateAIReply(
         { role: 'user',   content: safeMessage },
     ];
 
-    // ── LAYER 7: AI API Call with Retry ──────────────────────────────────────
     let rawContent = null;
     let tokensUsed = null;
     let lastError  = null;
@@ -580,7 +587,6 @@ async function generateAIReply(
         return _errorResult('api_call_failed', startTime);
     }
 
-    // ── LAYER 8: Parse ────────────────────────────────────────────────────────
     let aiData;
     try {
         aiData = JSON.parse(rawContent);
@@ -589,7 +595,6 @@ async function generateAIReply(
         return _errorResult('parse_failed', startTime);
     }
 
-    // ── LAYER 9: Validate ─────────────────────────────────────────────────────
     const validationError = _validateAIResponse(aiData);
     if (validationError) {
         console.error(`❌ [AI GENERATOR] Validation failed: ${validationError}`);
@@ -621,7 +626,6 @@ async function generateAIReply(
 
     console.log(`🧠 [AI GENERATOR] Intent: ${intent} | Confidence: ${confidence} | Action: ${action} | Tokens: ${tokensUsed} | Mode: ${mode} | Rhythm: ${rhythmUsed} | Language: ${detectedLanguage.code}`);
 
-    // ── LAYER 10: Post-AI Reply Validator ─────────────────────────────────────
     if (reply) {
         const replyIssue = _validateReply(reply);
         if (replyIssue) {
@@ -630,7 +634,6 @@ async function generateAIReply(
         }
     }
 
-    // ── LAYER 11: Post-AI Safety Routing ─────────────────────────────────────
     const finalAction         = _resolveAction(intent, confidence, action, mode, reply);
     const requiresHumanReview = _needsReview(finalAction, confidence, mode);
     const riskLevel           = _computeRiskLevel(intent, confidence, finalAction);
@@ -690,36 +693,7 @@ async function generateAIReply(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SIGNAL DETECTOR
-// ─────────────────────────────────────────────────────────────────────────────
-function _detectMessageSignals(message) {
-    const lower = message.toLowerCase();
-    const competitorKeywords = {
-        apollo:     ['apollo', 'apollo.io'],
-        clay:       ['clay', 'clay.com'],
-        freelancer: ['freelancer', 'hire someone', 'hire a person', 'hire a va'],
-        hiring:     ['hire a rep', 'sales rep', 'hire staff', 'employee'],
-        instantly:  ['instantly', 'instantly.ai'],
-        lemlist:    ['lemlist'],
-        smartlead:  ['smartlead'],
-        outreach:   ['outreach.io', 'salesloft'],
-    };
-    let competitor = null;
-    for (const [name, keywords] of Object.entries(competitorKeywords)) {
-        if (keywords.some(k => lower.includes(k))) { competitor = name; break; }
-    }
-    return {
-        competitor,
-        isROIQuestion: /worth it|roi|return|cost|expensive|cheaper|price|value/.test(lower),
-        isCompetitor:  competitor !== null,
-        isUrgent:      /asap|urgent|this week|right now|immediately|today/.test(lower),
-        isSkeptical:   /not sure|doubt|really work|prove|skeptical|don.?t believe/.test(lower),
-        isQualifying:  /team|company|size|budget|monthly|weekly|volume|leads/.test(lower),
-    };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ✅ FIX L & N: PROMPT BUILDER v5.2 — FORCED INSTRUCTION FOLLOWING + OUT OF SCOPE SILENCE
+// ✅ SMART PROMPT BUILDER v6.0 — EXACTLY AS YOU SPECIFIED
 // ─────────────────────────────────────────────────────────────────────────────
 function _buildSystemPrompt({
     instructions, businessConfig, leadName, leadContext,
@@ -755,72 +729,93 @@ function _buildSystemPrompt({
         chat:  'FORMAT: Chat widget. Short, conversational. No email formatting.',
     };
 
-    // ── ✅ FIX L: FORCED INSTRUCTION FOLLOWING ──
-    const forcedInstructionBlock = `
+    // ── ✅ RULE 1: REPLY TO ANY MESSAGE IF INSTRUCTIONS SAY "ANY MESSAGE" ──
+    const anyMessageRule = instructions.toLowerCase().includes('any message')
+        ? `\n⚠️ INSTRUCTIONS SAY "ANY MESSAGE" — This means EVERY message from the lead is IN SCOPE. You MUST reply to ALL messages.\n`
+        : '';
+
+    // ── ✅ RULES 2 & 3: ONLY REPLY IF RELATED TO INSTRUCTIONS ──
+    const relevanceBlock = `
 ╔══════════════════════════════════════════════════════════════════╗
-║  🔒 CRITICAL: YOU MUST FOLLOW THESE INSTRUCTIONS 100%          ║
+║  📋 CRITICAL RULES — FOLLOW EXACTLY                            ║
 ║  ══════════════════════════════════════════════════════════════ ║
-║  The user has provided INSTRUCTIONS that OVERRIDE all other    ║
-║  rules. You MUST follow them EXACTLY.                         ║
+║  RULE 1: If instructions contain "any message" →              ║
+║          Reply to EVERY message from the lead                 ║
 ║                                                                 ║
-║  USER INSTRUCTIONS:                                            ║
-║  "${instructions}"                                             ║
+║  RULE 2: ONLY reply if the message RELATES to the instructions ║
+║          Check if the message is about what the instructions   ║
+║          tell you to respond to.                              ║
 ║                                                                 ║
-║  RULES:                                                        ║
-║  1. DO NOT add extra content beyond the instructions           ║
-║  2. DO NOT change the meaning of the instructions              ║
-║  3. DO NOT ask questions unless the instructions say to        ║
-║  4. If instructions say "thank them" — ONLY thank them        ║
-║  5. If instructions say "ask about X" — ONLY ask about X      ║
-║  6. If instructions say "do not reply" — set action to STOP    ║
-║  7. Instructions ALWAYS take priority over sales/support rules ║
-║  8. If instructions are unclear, default to a simple thank you ║
+║  RULE 3: If the message is NOT related to the instructions →  ║
+║          Set action to STOP, reply to null                    ║
+║                                                                 ║
+║  RULE 4: Reply in the EXACT SAME LANGUAGE as the lead         ║
+║                                                                 ║
+║  RULE 5: Follow instructions 100% — NO extra content          ║
+║          If instructions say "thank them" → ONLY thank them   ║
+║          If instructions say "ask about X" → ONLY ask about X ║
+║          DO NOT add anything extra                            ║
 ╚══════════════════════════════════════════════════════════════════╝
+
+INSTRUCTIONS: "${instructions}"
+${anyMessageRule}
+
+EXAMPLES OF WHAT IS RELATED:
+- Instructions: "Tell him thanks in any message he sent"
+  * "How are you?" → YES (it's a message, instructions say "any message")
+  * "What does your product do?" → YES (business-related)
+  * "I want to buy" → YES (business-related)
+  
+- Instructions: "Thank them and ask about their company"
+  * "I run a SaaS company" → YES (related to company)
+  * "What's the weather?" → NO (not related to company or business)
+
+EXAMPLES OF WHAT IS NOT RELATED:
+- "What's the weather in London?" → NOT related to business
+- "Tell me a joke" → NOT related to business
+- "I like pizza" → NOT related to business
 `;
 
-    // ── ✅ FIX N: OUT OF SCOPE SILENCE ──
-    const outOfScopeBlock = `
-🔇 OUT OF SCOPE RULES — STAY QUIET IF OUTSIDE INSTRUCTIONS:
-- If the user's message is NOT related to what the instructions ask for:
-  → Set action to "STOP"
-  → Set reply to null
-  → Set reasoning to "Message is out of scope of instructions"
-- If the user asks something completely unrelated to the instructions:
-  → Set action to "STOP"
-  → Set reply to null
-- If you are uncertain whether the message is in scope:
-  → Set action to "STOP" (better to stay quiet than to reply incorrectly)
-- ONLY reply if the message DIRECTLY relates to the instructions given.
+    // ── ✅ RULE 5: FOLLOW INSTRUCTIONS 100% ──
+    const forcedInstructionBlock = `
+🔒 YOU MUST FOLLOW THE INSTRUCTIONS EXACTLY:
+- If instructions say "thank them" → ONLY thank them
+- If instructions say "ask about X" → ONLY ask about X
+- If instructions say "keep it short" → keep it short
+- If instructions say "be professional" → be professional
+- If instructions say "do not reply" → set action to STOP
+- If instructions are unclear → set action to STOP
+- NEVER add extra content beyond the instructions
+- NEVER change the meaning of the instructions
+- Instructions ALWAYS take priority over sales rules
 `;
 
     const lengthBlock = `
-REPLY LENGTH CONTROL — CRITICAL:
+REPLY LENGTH CONTROL:
 - AUTO mode is active. Select the right length for the situation:
   * BUYING or SCHEDULE intent → MINIMAL (1 sentence + next step only)
   * ROI_QUESTION or COMPETITOR → DETAILED
   * OBJECTION → MEDIUM
   * Conversation longer than 4 messages → SHORT
   * Early conversation (1–2 messages) → MEDIUM
-  * FAQ or NURTURE → MEDIUM
 - If caller specified length: ${replyLength !== 'auto' ? replyLength.toUpperCase() : 'AUTO (engine decides)'}
-- Never pad replies with filler. If you have said what needs to be said, stop.
 `;
 
     const lastRhythmNote = lastRhythm ? `LAST REPLY RHYTHM WAS: ${lastRhythm.toUpperCase()} — do NOT repeat it.` : '';
     const rhythmBlock = `
-CONVERSATION RHYTHM ENGINE — CRITICAL:
+CONVERSATION RHYTHM ENGINE:
 ${lastRhythmNote}
-Pick ONE rhythm for this reply and report it in "rhythmUsed":
-- STATEMENT   : Make a clear, confident point. No question needed.
-- QUESTION     : Ask ONE strategic question to qualify or advance.
-- REASSURANCE  : Short validation + one forward move.
-- INSIGHT      : Share a specific data point or observation.
-- CHALLENGE    : Respectfully push back or reframe an assumption.
+Pick ONE rhythm for this reply:
+- STATEMENT   : Make a clear, confident point
+- QUESTION     : Ask ONE strategic question
+- REASSURANCE  : Short validation + one forward move
+- INSIGHT      : Share a specific data point
+- CHALLENGE    : Respectfully push back
 Never use the same rhythm twice in a row.
 `;
 
     const worldviewBlock = `
-PRODUCT WORLDVIEW — WHO WE ARE AND WHY WE EXIST:
+PRODUCT WORLDVIEW:
 Philosophy: "${PRODUCT_WORLDVIEW.philosophy}"
 Differentiation: "${PRODUCT_WORLDVIEW.differentiation}"
 Core pain we solve: "${PRODUCT_WORLDVIEW.core_pain}"
@@ -828,12 +823,12 @@ Target customer: "${PRODUCT_WORLDVIEW.target_customer}"
 `;
 
     const refusalBlock = `
-SAFE REFUSAL RULES — NEVER REFUSE SILENTLY:
+SAFE REFUSAL RULES:
 If you cannot or should not answer something directly:
-1. Acknowledge the question — do NOT ignore it.
-2. Explain briefly WHY you cannot address it directly.
-3. Redirect professionally to the right next step.
-4. Set "refusalReason" in your response.
+1. Acknowledge the question
+2. Explain why you cannot address it directly
+3. Redirect professionally
+4. Set "refusalReason" in your response
 `;
 
     const advancedSalesBlock = `
@@ -844,15 +839,15 @@ ${urgencyLevel ? `Urgency level detected: ${urgencyLevel.toUpperCase()}.` : ''}
 
     const rtlNote = detectedLanguage.rtl ? `NOTE: This language (${detectedLanguage.name}) is right-to-left. Format accordingly.` : '';
     const multilingualBlock = `
-MULTILINGUAL ENGINE — CRITICAL:
-The lead's message has been detected as: ${detectedLanguage.name} (${detectedLanguage.code}).
+MULTILINGUAL ENGINE:
+Lead's message language: ${detectedLanguage.name} (${detectedLanguage.code})
 ${rtlNote}
 
-RULES — NEVER VIOLATE:
-1. ALWAYS reply in the EXACT SAME LANGUAGE as the lead's message. No exceptions.
-2. Do NOT switch to English unless the lead's message is in English.
-3. Do NOT mix languages.
-4. Set "replyLanguage" in your JSON response to the BCP-47 language code.
+RULES:
+1. Reply in EXACT SAME LANGUAGE as the lead
+2. Do NOT switch to English unless lead used English
+3. Do NOT mix languages
+4. Set "replyLanguage" in your JSON response
 `;
 
     const openers = OPENER_VARIATIONS[tone] || OPENER_VARIATIONS.friendly;
@@ -860,24 +855,24 @@ RULES — NEVER VIOLATE:
     const sampleClosings = CLOSING_VARIATIONS.slice(0, 4).join(' | ');
 
     const variationBlock = `
-RESPONSE VARIATION — CRITICAL:
-- NEVER start with "I completely understand", "I appreciate your concern", "Great question", "Certainly".
+RESPONSE VARIATION:
+- NEVER start with "I completely understand", "I appreciate your concern", "Great question", "Certainly"
 - Vary opener every time. Sample openers: ${sampleOpeners}
 - Vary closing every time. Sample closings: ${sampleClosings}
 `;
 
     const persuasionBlock = `
 PERSUASION POWER:
-- Lead with PAIN, not features. Use CONCRETE language.
-- AVOID: "improve efficiency", "streamline workflow".
-- USE: "${OUTCOME_LANGUAGE.time_saved}", "${OUTCOME_LANGUAGE.pipeline}".
+- Lead with PAIN, not features
+- AVOID: "improve efficiency", "streamline workflow"
+- USE: "${OUTCOME_LANGUAGE.time_saved}", "${OUTCOME_LANGUAGE.pipeline}"
 `;
 
     const salesControlBlock = `
 SALES CONTROL:
-- Answer briefly — then ask ONE qualifying question to advance the sale.
-- Never ask more than ONE question per reply.
-- BUYING intent → skip explanation, go to next step immediately.
+- Answer briefly — then ask ONE qualifying question
+- Never ask more than ONE question per reply
+- BUYING intent → skip explanation, go to next step immediately
 `;
 
     let competitorBlock = '';
@@ -926,8 +921,8 @@ ${industryBlock}
 ${competitorBlock}
 
 ═══════════════════════════════════════
+${relevanceBlock}
 ${forcedInstructionBlock}
-${outOfScopeBlock}
 ═══════════════════════════════════════
 
 MODE: ${mode.toUpperCase()} — ${modeRules[mode] || modeRules['full']}
@@ -965,7 +960,7 @@ RESPONSE FORMAT — return ONLY valid JSON:
   "intent":              "<intent>",
   "confidence":          <0.0–1.0>,
   "action":              "REPLY" | "ESCALATE" | "DRAFT" | "WAIT" | "STOP",
-  "reasoning":           "<1 sentence>",
+  "reasoning":           "<1 sentence explaining WHY you chose this action>",
   "reply":               "<reply text or null>",
   "ctaType":             "<cta type or null>",
   "qualifyingData":      <object or null>,
