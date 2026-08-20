@@ -372,17 +372,26 @@ const renameLead = async (req, res) => {
     }
 };
 
-// ──────────────────────────────────────────────────────────────
-//  PUT /api/leads/:leadId/auto-reply
-// ──────────────────────────────────────────────────────────────
+// ============================================================
+// ✅ DEBUG: PUT /api/leads/:leadId/auto-reply — WITH FULL LOGGING
+// ============================================================
 const updateAutoReply = async (req, res) => {
+    console.log('🟢 [DEBUG] updateAutoReply called');
+    console.log('📝 [DEBUG] req.params:', req.params);
+    console.log('📝 [DEBUG] req.body:', req.body);
+    console.log('📝 [DEBUG] req.userId:', req.userId);
+
     try {
         if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
+            console.log('❌ [DEBUG] Invalid ID format');
             return res.status(400).json({ message: 'Invalid ID' });
         }
 
         const { enabled, instructions } = req.body;
+        console.log('🔍 [DEBUG] enabled:', enabled, 'instructions:', instructions);
+
         if (typeof enabled !== 'boolean') {
+            console.log('❌ [DEBUG] enabled is not a boolean');
             return res.status(400).json({ message: 'Enabled must be a boolean' });
         }
 
@@ -390,20 +399,99 @@ const updateAutoReply = async (req, res) => {
         const safeLeadId = String(req.params.leadId);
         const sanitizedInstructions = instructions ? String(instructions).trim().slice(0, 2000) : '';
 
-        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
-        if (!lead) return res.status(404).json({ message: 'Lead not found' });
+        console.log('🔍 [DEBUG] Looking for lead:', safeLeadId, 'userId:', safeUserId);
 
+        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId });
+        if (!lead) {
+            console.log('❌ [DEBUG] Lead not found');
+            return res.status(404).json({ message: 'Lead not found' });
+        }
+
+        console.log('📦 [DEBUG] Lead found:', lead._id, lead.name);
+        console.log('📦 [DEBUG] Before update - autoReplyEnabled:', lead.autoReplyEnabled);
+
+        // ✅ Update the lead document directly (no separate AutoReplyConfig model)
         lead.autoReplyEnabled = enabled;
         if (instructions !== undefined) lead.autoReplyInstructions = sanitizedInstructions;
         await lead.save();
 
+        console.log('📦 [DEBUG] After update - autoReplyEnabled:', lead.autoReplyEnabled);
+        console.log('📦 [DEBUG] After update - autoReplyInstructions:', lead.autoReplyInstructions);
+
         const cacheKey = getConversationCacheKey(safeUserId, safeLeadId);
         conversationCache.delete(cacheKey);
 
-        res.json({ success: true, enabled: lead.autoReplyEnabled, instructions: lead.autoReplyInstructions });
+        console.log('✅ [DEBUG] Cache invalidated for key:', cacheKey);
+
+        const response = { 
+            success: true, 
+            enabled: lead.autoReplyEnabled, 
+            instructions: lead.autoReplyInstructions 
+        };
+        console.log('📤 [DEBUG] Sending response:', response);
+
+        res.json(response);
+
     } catch (err) {
-        console.error('❌ [updateAutoReply] Error:', err.message);
+        console.error('❌ [DEBUG] updateAutoReply Error:', err.message);
+        console.error('❌ [DEBUG] Stack:', err.stack);
         res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// ============================================================
+// ✅ DEBUG: GET /api/leads/:leadId/auto-reply — WITH FULL LOGGING
+// ============================================================
+const getAutoReply = async (req, res) => {
+    console.log('🟢 [DEBUG] getAutoReply called');
+    console.log('📝 [DEBUG] req.params:', req.params);
+    console.log('📝 [DEBUG] req.userId:', req.userId);
+
+    try {
+        if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
+            console.log('❌ [DEBUG] Invalid ID format');
+            return res.status(400).json({ message: 'Invalid ID' });
+        }
+
+        const safeUserId = String(req.userId);
+        const safeLeadId = String(req.params.leadId);
+
+        console.log('🔍 [DEBUG] Looking for lead:', safeLeadId, 'userId:', safeUserId);
+
+        const lead = await Lead.findOne({ _id: safeLeadId, userId: safeUserId })
+            .select('autoReplyEnabled autoReplyInstructions')
+            .lean()
+            .exec();
+
+        console.log('📦 [DEBUG] Lead found:', lead ? 'YES' : 'NO');
+
+        if (!lead) {
+            console.log('⚠️ [DEBUG] Lead not found, returning default');
+            return res.json({ 
+                enabled: false, 
+                instructions: '' 
+            });
+        }
+
+        console.log('📦 [DEBUG] autoReplyEnabled:', lead.autoReplyEnabled);
+        console.log('📦 [DEBUG] autoReplyInstructions:', lead.autoReplyInstructions);
+
+        const response = { 
+            enabled: lead.autoReplyEnabled || false, 
+            instructions: lead.autoReplyInstructions || '' 
+        };
+        console.log('📤 [DEBUG] Sending response:', response);
+
+        res.json(response);
+
+    } catch (err) {
+        console.error('❌ [DEBUG] getAutoReply Error:', err.message);
+        console.error('❌ [DEBUG] Stack:', err.stack);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Server Error',
+            error: err.message 
+        });
     }
 };
 
@@ -883,13 +971,14 @@ const getAllLeads = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  EXPORTS
+//  EXPORTS — ✅ ADDED getAutoReply
 // ──────────────────────────────────────────────────────────────
 module.exports = {
     getConversations,
     getConversationById,
     renameLead,
     updateAutoReply,
+    getAutoReply,          // ✅ ADDED — this was missing!
     batchSend,
     reconnectAndSend,
     getAllLeads,
