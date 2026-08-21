@@ -330,48 +330,85 @@ app.use(express.json());
 app.use(xssProtection);
 app.use(xssOutputProtection);
 
-// ─── MONGODB CONNECTION ───
+// ============================================================
+// ✅ FIXED: MONGODB CONNECTION — INCREASED POOL + TIMEOUTS
+// ============================================================
 console.log('🔗 [SERVER] Connecting to MongoDB...');
-mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 50, serverSelectionTimeoutMS: 5000 })
-    .then(async () => {
-        console.log('✅ MongoDB Connected');
-        try {
-            console.log('🔧 [SERVER] Creating database indexes...');
-            const ChatMessage = require('./ChatMessage');
-            await ChatMessage.collection.createIndex({ userId: 1, sessionId: 1 });
-            await ChatMessage.collection.createIndex({ userId: 1, createdAt: -1 });
-            console.log('✅ [SERVER] ChatMessage indexes created');
-            await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
-            await Lead.collection.createIndex({ userId: 1, email: 1 });
-            // ✅ NEW: Index for unread queries
-            await Lead.collection.createIndex({ userId: 1, unreadCount: -1 });
-            console.log('✅ [SERVER] Lead indexes created');
-            
-            // ✅ NEW: Index for notifications
-            const Notification = require('./Notification');
-            await Notification.collection.createIndex({ userId: 1, createdAt: -1 });
-            await Notification.collection.createIndex({ userId: 1, isRead: 1 });
-            console.log('✅ [SERVER] Notification indexes created');
-            
-            console.log('✅ [SERVER] All database indexes created');
-        } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
+mongoose.connect(process.env.MONGODB_URI, {
+    maxPoolSize: 100,              // ✅ Increased from 50
+    minPoolSize: 2,                // ✅ Keep minimum connections ready
+    serverSelectionTimeoutMS: 10000, // ✅ Increased from 5000
+    socketTimeoutMS: 45000,        // ✅ Added
+    connectTimeoutMS: 10000,       // ✅ Added
+    heartbeatFrequencyMS: 10000,   // ✅ Added — keep connections alive
+})
+.then(async () => {
+    console.log('✅ MongoDB Connected');
+    try {
+        console.log('🔧 [SERVER] Creating database indexes...');
+        const ChatMessage = require('./ChatMessage');
+        await ChatMessage.collection.createIndex({ userId: 1, sessionId: 1 });
+        await ChatMessage.collection.createIndex({ userId: 1, createdAt: -1 });
+        console.log('✅ [SERVER] ChatMessage indexes created');
+        await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
+        await Lead.collection.createIndex({ userId: 1, email: 1 });
+        // ✅ NEW: Index for unread queries
+        await Lead.collection.createIndex({ userId: 1, unreadCount: -1 });
+        console.log('✅ [SERVER] Lead indexes created');
         
-        startExpiryJob();
-        startFollowUpJob();
-        if (process.env.NODE_ENV !== 'test') startBackupJob();
-        startDataExportCleanupJob();
-        verifyWebhookRegistration();
-        startTokenRefreshJob();
+        // ✅ NEW: Index for notifications
+        const Notification = require('./Notification');
+        await Notification.collection.createIndex({ userId: 1, createdAt: -1 });
+        await Notification.collection.createIndex({ userId: 1, isRead: 1 });
+        console.log('✅ [SERVER] Notification indexes created');
         
-        // ✅ START UNREAD SCHEDULER (every 4 seconds)
-        startUnreadScheduler();
-        console.log('✅ [SERVER] Unread scheduler started (every 4 seconds)');
-        
-        // ✅ START SSE HEARTBEAT (every 30 seconds)
-        sseManager.startHeartbeat();
-        console.log('✅ [SERVER] SSE heartbeat started (every 30 seconds)');
-    })
-    .catch(err => console.log('❌ MongoDB Connection Error:', err.message));
+        console.log('✅ [SERVER] All database indexes created');
+    } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
+    
+    // ✅ START JOBS WITH DELAY TO AVOID CONNECTION POOL ISSUES
+    startExpiryJob();
+    startFollowUpJob();
+    
+    // ✅ DELAY BACKUP TO LET CONNECTIONS STABILIZE
+    if (process.env.NODE_ENV !== 'test') {
+        setTimeout(function() {
+            console.log('⏰ [BACKUP] Starting initial backup (delayed 30s)...');
+            startBackupJob();
+        }, 30000);
+        console.log('⏰ [BACKUP] Initial backup scheduled in 30 seconds');
+    }
+    
+    startDataExportCleanupJob();
+    verifyWebhookRegistration();
+    startTokenRefreshJob();
+    
+    // ✅ START UNREAD SCHEDULER (every 4 seconds)
+    startUnreadScheduler();
+    console.log('✅ [SERVER] Unread scheduler started (every 4 seconds)');
+    
+    // ✅ START SSE HEARTBEAT (every 30 seconds)
+    sseManager.startHeartbeat();
+    console.log('✅ [SERVER] SSE heartbeat started (every 30 seconds)');
+})
+.catch(function(err) {
+    console.log('❌ MongoDB Connection Error:', err.message);
+    console.log('⚠️ [SERVER] Will retry connection in 10 seconds...');
+    setTimeout(function() {
+        console.log('🔄 [SERVER] Retrying MongoDB connection...');
+        mongoose.connect(process.env.MONGODB_URI, {
+            maxPoolSize: 100,
+            minPoolSize: 2,
+            serverSelectionTimeoutMS: 10000,
+            socketTimeoutMS: 45000,
+            connectTimeoutMS: 10000,
+            heartbeatFrequencyMS: 10000,
+        }).then(function() {
+            console.log('✅ MongoDB Connected (retry successful)');
+        }).catch(function(retryErr) {
+            console.error('❌ MongoDB Connection failed on retry:', retryErr.message);
+        });
+    }, 10000);
+});
 
 async function verifyWebhookRegistration() {
     try {
