@@ -174,7 +174,7 @@ const getTotalUnreadCount = async (userId) => {
 };
 
 // ============================================================
-// ✅ UPDATED: GET /api/conversations — NO PAGINATION (ALL LEADS)
+// ✅ FIXED: GET /api/conversations — PAGINATION RESTORED (15 per page)
 // ============================================================
 const getConversations = async (req, res) => {
     try {
@@ -184,10 +184,18 @@ const getConversations = async (req, res) => {
 
         const safeUserId = String(req.userId);
         
-        // ✅ NO PAGINATION — get ALL leads for the user in ONE request
+        // ✅ PAGINATION RESTORED — 15 leads per page
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 15;
+        const skip = (page - 1) * limit;
+
+        const total = await Lead.countDocuments({ userId: safeUserId });
+
         const leads = await Lead.find({ userId: safeUserId })
             .select('name email company status lastContactDate createdAt replies unreadCount autoReplyEnabled autoReplyInstructions')
             .sort({ lastContactDate: -1, createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
             .lean()
             .exec();
 
@@ -217,11 +225,17 @@ const getConversations = async (req, res) => {
             };
         });
 
-        // ✅ Return ALL in ONE response
+        // ✅ Return WITH pagination info
         res.json({
             success: true,
             data: conversations,
-            total: conversations.length
+            pagination: {
+                page: page,
+                limit: limit,
+                total: total,
+                pages: Math.ceil(total / limit),
+                hasMore: skip + limit < total
+            }
         });
 
     } catch (err) {
