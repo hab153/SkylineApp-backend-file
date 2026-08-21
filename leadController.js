@@ -174,7 +174,7 @@ const getTotalUnreadCount = async (userId) => {
 };
 
 // ============================================================
-// ✅ OPTIMIZED: GET /api/conversations WITH PAGINATION + DECRYPTED EMAILS
+// ✅ UPDATED: GET /api/conversations — RETURNS ALL LEADS (NO LIMIT)
 // ============================================================
 const getConversations = async (req, res) => {
     try {
@@ -184,17 +184,11 @@ const getConversations = async (req, res) => {
 
         const safeUserId = String(req.userId);
         
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-
-        const total = await Lead.countDocuments({ userId: safeUserId });
-
+        // ✅ NO PAGINATION — get ALL leads for the user
+        // This allows the frontend to render them progressively
         const leads = await Lead.find({ userId: safeUserId })
             .select('name email company status lastContactDate createdAt replies unreadCount autoReplyEnabled autoReplyInstructions')
             .sort({ lastContactDate: -1, createdAt: -1 })
-            .skip(skip)
-            .limit(limit)
             .lean()
             .exec();
 
@@ -224,16 +218,11 @@ const getConversations = async (req, res) => {
             };
         });
 
+        // ✅ Return ALL conversations with total count
         res.json({
             success: true,
             data: conversations,
-            pagination: {
-                page: page,
-                limit: limit,
-                total: total,
-                pages: Math.ceil(total / limit),
-                hasMore: skip + limit < total
-            }
+            total: conversations.length
         });
 
     } catch (err) {
@@ -971,14 +960,14 @@ const getAllLeads = async (req, res) => {
 };
 
 // ──────────────────────────────────────────────────────────────
-//  EXPORTS — ✅ ADDED getAutoReply
+//  EXPORTS
 // ──────────────────────────────────────────────────────────────
 module.exports = {
     getConversations,
     getConversationById,
     renameLead,
     updateAutoReply,
-    getAutoReply,          // ✅ ADDED — this was missing!
+    getAutoReply,
     batchSend,
     reconnectAndSend,
     getAllLeads,
