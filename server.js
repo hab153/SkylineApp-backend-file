@@ -84,9 +84,6 @@ const {
     dreamRefineSchema
 } = require('./validationSchemas');
 
-// Backup job
-const { startBackupJob } = require('./backupJob');
-
 // XSS protection
 const { xssProtection, xssOutputProtection } = require('./xssMiddleware');
 
@@ -170,23 +167,6 @@ if (missingEnvVars.length > 0) {
     process.exit(1);
 }
 console.log('✅ All required environment variables are configured');
-
-// ─── BACKUP CHECK ───
-const fs = require('fs-extra');
-const backupDir = process.env.BACKUP_DIR || './backups';
-try {
-    if (fs.existsSync(backupDir)) {
-        const backups = fs.readdirSync(backupDir).filter(f => f.endsWith('.zip'));
-        if (backups.length === 0) console.warn('⚠️ [BACKUP] No backups found.');
-        else {
-            const latest = backups.sort().pop();
-            const stats = fs.statSync(path.join(backupDir, latest));
-            const days = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
-            if (days > 7) console.warn('⚠️ [BACKUP] Last backup was ' + days.toFixed(1) + ' days ago.');
-            else console.log('✅ [BACKUP] Recent backup found: ' + latest);
-        }
-    } else console.warn('⚠️ [BACKUP] Backup directory not found.');
-} catch (err) { console.warn('⚠️ [BACKUP] Could not check backup status:', err.message); }
 
 // ─── SECURITY MIDDLEWARE ───
 app.use(helmet({
@@ -335,12 +315,12 @@ app.use(xssOutputProtection);
 // ============================================================
 console.log('🔗 [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
-    maxPoolSize: 100,              // ✅ Increased from 50
-    minPoolSize: 2,                // ✅ Keep minimum connections ready
-    serverSelectionTimeoutMS: 10000, // ✅ Increased from 5000
-    socketTimeoutMS: 45000,        // ✅ Added
-    connectTimeoutMS: 10000,       // ✅ Added
-    heartbeatFrequencyMS: 10000,   // ✅ Added — keep connections alive
+    maxPoolSize: 100,
+    minPoolSize: 2,
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    connectTimeoutMS: 10000,
+    heartbeatFrequencyMS: 10000,
 })
 .then(async () => {
     console.log('✅ MongoDB Connected');
@@ -352,11 +332,9 @@ mongoose.connect(process.env.MONGODB_URI, {
         console.log('✅ [SERVER] ChatMessage indexes created');
         await Lead.collection.createIndex({ userId: 1, lastContactDate: -1 });
         await Lead.collection.createIndex({ userId: 1, email: 1 });
-        // ✅ NEW: Index for unread queries
         await Lead.collection.createIndex({ userId: 1, unreadCount: -1 });
         console.log('✅ [SERVER] Lead indexes created');
         
-        // ✅ NEW: Index for notifications
         const Notification = require('./Notification');
         await Notification.collection.createIndex({ userId: 1, createdAt: -1 });
         await Notification.collection.createIndex({ userId: 1, isRead: 1 });
@@ -365,19 +343,9 @@ mongoose.connect(process.env.MONGODB_URI, {
         console.log('✅ [SERVER] All database indexes created');
     } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
     
-    // ✅ START JOBS WITH DELAY TO AVOID CONNECTION POOL ISSUES
+    // ✅ START JOBS — BACKUP REMOVED
     startExpiryJob();
     startFollowUpJob();
-    
-    // ✅ DELAY BACKUP TO LET CONNECTIONS STABILIZE
-    if (process.env.NODE_ENV !== 'test') {
-        setTimeout(function() {
-            console.log('⏰ [BACKUP] Starting initial backup (delayed 30s)...');
-            startBackupJob();
-        }, 30000);
-        console.log('⏰ [BACKUP] Initial backup scheduled in 30 seconds');
-    }
-    
     startDataExportCleanupJob();
     verifyWebhookRegistration();
     startTokenRefreshJob();
@@ -517,7 +485,7 @@ console.log('✅ [SERVER] GET /api/conversations/:leadId registered');
 app.put('/api/leads/:leadId/rename', verifyToken, validate(renameLeadSchema), leadController.renameLead);
 
 // ════════════════════════════════════════════
-//  ✅ AUTO-REPLY ROUTES — FIXED WITH getAutoReply
+//  ✅ AUTO-REPLY ROUTES
 // ════════════════════════════════════════════
 app.get('/api/leads/:leadId/auto-reply', verifyToken, leadController.getAutoReply);
 console.log('✅ [SERVER] GET /api/leads/:leadId/auto-reply registered');
@@ -543,7 +511,6 @@ if (typeof revenueController !== 'undefined' && revenueController.getRevenueTrac
 }
 
 // ─── NOTIFICATIONS ───
-// ✅ Updated: Using notification routes
 app.use('/api/notifications', notificationRoutes);
 console.log('✅ [SERVER] Notification routes registered');
 
@@ -601,7 +568,6 @@ app.post('/api/admin/verify-2fa', require('./authController').verifyAdminTotpLog
 app.get('/api/admin/setup-2fa', verifyAdminToken, require('./authController').generateAdminTotp);
 app.post('/api/admin/enable-2fa', verifyAdminToken, require('./authController').enableAdminTotp);
 
-// Honeypot: Block all other /admin* paths with 404
 app.use(/^\/admin/i, (req, res) => {
     console.warn('[SECURITY] Suspicious scan from ' + req.ip);
     res.status(404).json({ error: 'Not Found' });
@@ -680,10 +646,9 @@ app.get('/api/debug/leads', verifyAdminToken, async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-//  ✅ UNREAD ENDPOINTS (SINGLE SOURCE OF TRUTH)
+//  ✅ UNREAD ENDPOINTS
 // ════════════════════════════════════════════
 
-// ✅ Register unread routes
 app.use('/api/unread', unreadRoutes);
 
 console.log('✅ [UNREAD] Endpoints registered:');
@@ -694,10 +659,9 @@ console.log('   📋 GET  /api/unread/lead/:id    - Get unread for lead');
 console.log('   📋 POST /api/unread/reset/:id   - Reset unread for lead');
 
 // ════════════════════════════════════════════
-//  ✅ FAST DASHBOARD DATA (AGGREGATED)
+//  ✅ FAST DASHBOARD DATA
 // ════════════════════════════════════════════
 
-// ✅ NEW: Aggregated dashboard endpoint - combines user, subscription, and email status
 app.get('/api/user/dashboard-data', verifyToken, userController.getDashboardData);
 
 console.log('✅ [DASHBOARD] Endpoint registered: GET /api/user/dashboard-data');
