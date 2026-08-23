@@ -105,6 +105,9 @@ const unreadRoutes = require('./unreadRoutes');
 // ✅ NOTIFICATION ROUTES
 const notificationRoutes = require('./notificationRoutes');
 
+// ✅ COMPOSE CONTROLLER (NEW)
+const composeController = require('./composeController');
+
 dotenv.config();
 const app = express();
 
@@ -666,6 +669,24 @@ app.get('/api/user/dashboard-data', verifyToken, userController.getDashboardData
 
 console.log('✅ [DASHBOARD] Endpoint registered: GET /api/user/dashboard-data');
 console.log('   📋 Combines: user profile + subscription + email status');
+
+// ════════════════════════════════════════════
+//  ✅ COMPOSE ROUTES (NEW)
+// ════════════════════════════════════════════
+
+console.log('📧 [COMPOSE] Registering compose routes...');
+
+// Send compose email
+app.post('/api/compose/send', verifyToken, composeController.sendComposeEmail);
+console.log('✅ [COMPOSE] POST /api/compose/send registered');
+
+// Get lead suggestions for autocomplete
+app.get('/api/compose/suggestions', verifyToken, composeController.getLeadSuggestions);
+console.log('✅ [COMPOSE] GET /api/compose/suggestions registered');
+
+// Get recent leads for quick select
+app.get('/api/compose/recent-leads', verifyToken, composeController.getRecentLeads);
+console.log('✅ [COMPOSE] GET /api/compose/recent-leads registered');
 
 // ════════════════════════════════════════════
 //  START SERVER
