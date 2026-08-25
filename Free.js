@@ -20,27 +20,30 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const understanding = await Understanding.understand(message);
         console.log('📋 [FREE] Understanding result:', understanding);
 
-        // ── Step 2: Generate simple response ──
-        const reply = `I understood your request: "${message}". Working on it...`;
-
-        // ── Return result ──
+        // ── Step 2: Return the understanding result AS-IS ──
+        // No modification - send the raw specification
         return {
-            reply: reply,
+            reply: understanding,  // ← Returns the full spec object
             updatedHistory: [
                 ...(history || []),
                 { role: 'user', content: message },
-                { role: 'assistant', content: reply }
+                { role: 'assistant', content: JSON.stringify(understanding, null, 2) }
             ],
             _meta: {
                 tier: 'free',
-                understanding: understanding
+                understanding: understanding,
+                status: understanding.status
             }
         };
 
     } catch (error) {
         console.error('❌ [FREE] Error:', error.message);
         return {
-            reply: 'Sorry, something went wrong. Please try again.',
+            reply: { 
+                status: 'invalid', 
+                error: error.message,
+                message: 'Sorry, something went wrong. Please try again.'
+            },
             updatedHistory: history || [],
             _meta: { error: error.message }
         };
