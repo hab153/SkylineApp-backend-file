@@ -1,104 +1,87 @@
 // ──────────────────────────────────────────────────────────────
 // UNDERSTANDING.JS — Lead Request Understanding Engine
-// Phase 4: Lead Intelligence — Stage 1
+// Layer 1: Convert human intent → precise, validated contract
+// 
+// RESPONSIBILITIES:
+// - Interpret natural language
+// - Normalize terminology
+// - Detect ambiguity
+// - NEVER invent requirements
+// - Output clean, predictable structure
 // ──────────────────────────────────────────────────────────────
 
 const { v4: uuidv4 } = require('uuid');
-const OpenAI = require('openai');  // ← ADDED
+const OpenAI = require('openai');
 
 // ──────────────────────────────────────────────────────────────
-// 1. SCHEMA DEFINITION
+// 1. OUTPUT CONTRACT — The exact shape Layer 2 expects
 // ──────────────────────────────────────────────────────────────
 
-const LEAD_SPECIFICATION_SCHEMA = {
-  requestId: { type: 'string', required: true },
+/**
+ * The Understanding contract is the single source of truth
+ * for what the user actually requested.
+ * 
+ * Important: "Not specified" means null/empty, NOT a default.
+ * Defaults belong in Search Planning, NOT Understanding.
+ */
+const CONTRACT_SCHEMA = {
   target: {
-    type: 'object',
-    required: true,
-    properties: {
-      type: { type: 'string', required: true, enum: ['company', 'contact', 'both'] },
-      quantity: { type: 'number', required: false, min: 1 },
-      quantityMode: { type: 'string', required: false, enum: ['requested', 'maximum_available'] }
-    }
-  },
-  location: {
-    type: 'object',
-    required: false,
-    properties: {
-      include: { type: 'array', items: { type: 'string' } },
-      exclude: { type: 'array', items: { type: 'string' } },
-      countries: { type: 'array', items: { type: 'string' } },
-      regions: { type: 'array', items: { type: 'string' } },
-      cities: { type: 'array', items: { type: 'string' } }
-    }
+    type: 'company' | 'contact' | 'both',  // What to find
+    role: 'string | null',                   // Specific role if contact
+    quantity: 'number | null'                // How many (null = as many as possible)
   },
   company: {
-    type: 'object',
-    required: false,
-    properties: {
-      industries: { type: 'array', items: { type: 'string' } },
-      employeeRange: {
-        type: 'object',
-        required: false,
-        properties: {
-          min: { type: 'number' },
-          max: { type: 'number' }
-        }
-      },
-      revenueRange: {
-        type: 'object',
-        required: false,
-        properties: {
-          min: { type: 'number' },
-          max: { type: 'number' }
-        }
-      },
-      businessTypes: { type: 'array', items: { type: 'string' } },
-      technologies: { type: 'array', items: { type: 'string' } }
+    industry: ['string'],                     // What they do
+    size: {
+      value: 'string | null',                 // "any", "small", "medium", "large", "enterprise"
+      restricted: 'boolean'                   // true = user specified, false = not specified
+    },
+    age: {
+      value: 'string | null',                // "any", "startup", "established"
+      restricted: 'boolean'
+    },
+    funding: {
+      value: 'string | null',                // "any", "bootstrapped", "seed", "series_a", etc.
+      restricted: 'boolean'
+    },
+    businessType: ['string'],                // B2B, B2C, agency, enterprise, etc.
+    technologies: ['string']                  // Stack they use
+  },
+  location: {
+    city: 'string | null',
+    region: 'string | null',
+    country: 'string | null',                // Normalized to full country name
+    countryCode: 'string | null',            // ISO 2-letter code
+    restrictions: {
+      type: 'include' | 'exclude',           // include = must be in location, exclude = must NOT be
+      value: 'string | null'
     }
   },
-  contact: {
-    type: 'object',
-    required: false,
-    properties: {
-      required: { type: 'boolean', required: true },
-      intent: { type: 'string', required: false, enum: ['decision_maker', 'influencer', 'end_user', null] },
-      roles: { type: 'array', items: { type: 'string' } }
-    }
+  requirements: {
+    hard: ['string'],       // MUST have — non-negotiable
+    soft: ['string'],       // Nice to have — preferences
+    excluded: ['string']    // MUST NOT have
   },
-  data: {
-    type: 'object',
-    required: false,
-    properties: {
-      requiredFields: { type: 'array', items: { type: 'string' } },
-      email: { type: 'boolean' },
-      businessEmail: { type: 'boolean' },
-      emailVerification: { type: 'boolean' },
-      linkedin: { type: 'boolean' },
-      phone: { type: 'boolean' }
+  contact_required: 'boolean',  // true = needs a person, false = company only
+  status: 'ready' | 'needs_clarification' | 'invalid',
+  ambiguities: [
+    {
+      field: 'string',
+      reason: 'string',
+      clarification_question: 'string | null'  // Question to ask the user
     }
-  },
-  hardRequirements: { type: 'array', items: { type: 'string' } },
-  preferences: { type: 'array', items: { type: 'string' } },
-  exclusions: { type: 'array', items: { type: 'string' } },
-  ambiguities: {
-    type: 'array',
-    items: {
-      type: 'object',
-      properties: {
-        field: { type: 'string' },
-        reason: { type: 'string' }
-      }
-    }
-  },
-  status: { type: 'string', required: true, enum: ['ready', 'needs_clarification', 'invalid'] }
+  ],
+  originalRequest: 'string',
+  requestId: 'string',
+  processedAt: 'string'
 };
 
 // ──────────────────────────────────────────────────────────────
 // 2. NORMALIZATION MAPPINGS
 // ──────────────────────────────────────────────────────────────
 
-const COUNTRY_MAPPINGS = {
+// Country normalization — full names → ISO codes
+const COUNTRY_TO_CODE = {
   'germany': 'DE',
   'german': 'DE',
   'deutschland': 'DE',
@@ -107,6 +90,7 @@ const COUNTRY_MAPPINGS = {
   'united kingdom': 'GB',
   'uk': 'GB',
   'britain': 'GB',
+  'england': 'GB',
   'nigeria': 'NG',
   'usa': 'US',
   'united states': 'US',
@@ -116,9 +100,47 @@ const COUNTRY_MAPPINGS = {
   'india': 'IN',
   'china': 'CN',
   'japan': 'JP',
-  'singapore': 'SG'
+  'singapore': 'SG',
+  'spain': 'ES',
+  'italy': 'IT',
+  'netherlands': 'NL',
+  'sweden': 'SE',
+  'norway': 'NO',
+  'denmark': 'DK',
+  'finland': 'FI',
+  'ireland': 'IE',
+  'south africa': 'ZA',
+  'brazil': 'BR',
+  'mexico': 'MX'
 };
 
+// Code → Full name (for display)
+const CODE_TO_COUNTRY = {
+  'DE': 'Germany',
+  'FR': 'France',
+  'GB': 'United Kingdom',
+  'NG': 'Nigeria',
+  'US': 'United States',
+  'CA': 'Canada',
+  'AU': 'Australia',
+  'IN': 'India',
+  'CN': 'China',
+  'JP': 'Japan',
+  'SG': 'Singapore',
+  'ES': 'Spain',
+  'IT': 'Italy',
+  'NL': 'Netherlands',
+  'SE': 'Sweden',
+  'NO': 'Norway',
+  'DK': 'Denmark',
+  'FI': 'Finland',
+  'IE': 'Ireland',
+  'ZA': 'South Africa',
+  'BR': 'Brazil',
+  'MX': 'Mexico'
+};
+
+// Industry normalization
 const INDUSTRY_MAPPINGS = {
   'saas': 'SaaS',
   'software as a service': 'SaaS',
@@ -136,220 +158,158 @@ const INDUSTRY_MAPPINGS = {
   'ai': 'AI',
   'artificial intelligence': 'AI',
   'machine learning': 'Machine Learning',
+  'ml': 'Machine Learning',
   'blockchain': 'Blockchain',
   'real estate': 'Real Estate',
   'education': 'Education',
   'edtech': 'EdTech',
   'hr': 'HR',
-  'human resources': 'HR'
+  'human resources': 'HR',
+  'marketing': 'Marketing',
+  'adtech': 'AdTech',
+  'insurance': 'Insurance',
+  'insurtech': 'InsurTech',
+  'legal': 'Legal',
+  'legaltech': 'LegalTech',
+  'energy': 'Energy',
+  'cleantech': 'CleanTech',
+  'agriculture': 'Agriculture',
+  'agritech': 'AgriTech'
 };
 
-const BUSINESS_TYPE_MAPPINGS = {
-  'startup': 'Startup',
-  'start-up': 'Startup',
-  'start up': 'Startup',
-  'agency': 'Agency',
-  'enterprise': 'Enterprise',
-  'public company': 'Public',
-  'private company': 'Private',
-  'public': 'Public',
-  'private': 'Private',
-  'b2b': 'B2B',
-  'b2c': 'B2C'
-};
-
+// Role normalization
 const ROLE_MAPPINGS = {
   'ceo': 'CEO',
-  'cfo': 'CFO',
-  'cto': 'CTO',
-  'ciso': 'CISO',
-  'cmo': 'CMO',
-  'coo': 'COO',
+  'chief executive officer': 'CEO',
+  'chief exec': 'CEO',
   'founder': 'Founder',
   'co-founder': 'Co-Founder',
-  'director': 'Director',
+  'cofounder': 'Co-Founder',
+  'cto': 'CTO',
+  'chief technology officer': 'CTO',
+  'cfo': 'CFO',
+  'chief financial officer': 'CFO',
+  'ciso': 'CISO',
+  'chief information security officer': 'CISO',
+  'cmo': 'CMO',
+  'chief marketing officer': 'CMO',
+  'coo': 'COO',
+  'chief operating officer': 'COO',
   'vp': 'VP',
   'vice president': 'VP',
+  'director': 'Director',
   'head': 'Head',
   'manager': 'Manager',
   'owner': 'Owner',
-  'president': 'President'
+  'president': 'President',
+  'executive': 'Executive',
+  'decision maker': 'Decision Maker',
+  'decision-maker': 'Decision Maker'
+};
+
+// Company size normalization
+const SIZE_MAPPINGS = {
+  'any': 'any',
+  'small': 'small',
+  'medium': 'medium',
+  'large': 'large',
+  'enterprise': 'enterprise',
+  'startup': 'startup',
+  'sme': 'sme',
+  'solo': 'solo',
+  'freelancer': 'solo'
+};
+
+const SIZE_TO_RANGE = {
+  'solo': { min: 1, max: 1 },
+  'small': { min: 2, max: 50 },
+  'medium': { min: 51, max: 200 },
+  'sme': { min: 2, max: 200 },
+  'large': { min: 201, max: 1000 },
+  'enterprise': { min: 1001, max: null },
+  'startup': { min: 2, max: 100 },
+  'any': { min: null, max: null }
 };
 
 // ──────────────────────────────────────────────────────────────
-// 3. HELPER FUNCTIONS
+// 3. AMBIGUITY DETECTION — Rule-Based, Not AI
 // ──────────────────────────────────────────────────────────────
 
-function normalizeCountry(input) {
-  if (!input) return input;
-  const normalized = input.trim().toLowerCase();
-  return COUNTRY_MAPPINGS[normalized] || input;
-}
-
-function normalizeIndustry(input) {
-  if (!input) return input;
-  const normalized = input.trim().toLowerCase();
-  return INDUSTRY_MAPPINGS[normalized] || input;
-}
-
-function normalizeBusinessType(input) {
-  if (!input) return input;
-  const normalized = input.trim().toLowerCase();
-  return BUSINESS_TYPE_MAPPINGS[normalized] || input;
-}
-
-function normalizeRole(input) {
-  if (!input) return input;
-  const normalized = input.trim().toLowerCase();
-  return ROLE_MAPPINGS[normalized] || input;
-}
-
-function normalizeArray(arr, mappingFn) {
-  if (!arr || !Array.isArray(arr)) return [];
-  return arr.map(item => mappingFn(item)).filter(Boolean);
-}
-
-function extractNumberFromString(text, pattern) {
-  if (!text) return null;
-  const match = text.match(pattern);
-  if (match) return parseInt(match[1], 10);
-  return null;
-}
-
-function isValidLeadSpec(spec) {
-  try {
-    if (!spec.requestId || !spec.target || !spec.target.type) return false;
-    if (!spec.status || !['ready', 'needs_clarification', 'invalid'].includes(spec.status)) return false;
-    if (!['company', 'contact', 'both'].includes(spec.target.type)) return false;
-    if (spec.target.quantity !== null && spec.target.quantity !== undefined) {
-      if (typeof spec.target.quantity !== 'number' || spec.target.quantity < 1) return false;
-    }
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
-function generateRequestId() {
-  return `lead-${uuidv4().substring(0, 8)}`;
-}
-
 /**
- * Detect TRUE ambiguity — language that cannot be safely interpreted
- * (doc §16). This is distinct from unspecified/unknown information
- * (doc §15), which should stay as null/[] WITHOUT being flagged here.
- * Missing location or missing quantity are not, by themselves,
- * ambiguous — they're just unknown, and inventing a flag for every
- * unspecified field would make "needs_clarification" fire on nearly
- * every request.
+ * Detect ambiguities in the request.
+ * 
+ * IMPORTANT: Only flag TRUE ambiguities — things that could
+ * mean multiple different things. Do NOT flag unspecified
+ * information as ambiguous.
+ * 
+ * Example TRUE ambiguity: "technology" could mean SaaS, hardware, AI, etc.
+ * Example NOT ambiguous: missing company size — that's just unspecified.
  */
-function detectAmbiguity(spec) {
+function detectAmbiguities(originalRequest, parsed) {
   const ambiguities = [];
+  const lower = originalRequest.toLowerCase();
 
-  // Check for vague "need" language — cannot be safely interpreted
-  // without more context (security needs? hiring needs? something else?)
-  if (spec.originalRequest && /\bneed(s|ed)?\b/i.test(spec.originalRequest)) {
+  // ── Industry ambiguity ──
+  // "technology" is too broad
+  if (lower.includes('technology') && !lower.includes('saas') && !lower.includes('software')) {
+    ambiguities.push({
+      field: 'company.industry',
+      reason: '"Technology" is a broad category. Could mean SaaS, hardware, AI, cybersecurity, or IT services.',
+      clarification_question: 'What type of technology companies are you looking for? (e.g., SaaS, AI, cybersecurity, hardware, IT services)'
+    });
+  }
+
+  // ── "tech" shorthand ──
+  if (lower.includes('tech') && !lower.includes('saas') && !lower.includes('software')) {
+    ambiguities.push({
+      field: 'company.industry',
+      reason: '"Tech" is ambiguous. Could mean software, hardware, or other technology sectors.',
+      clarification_question: 'What specific technology sector? (e.g., SaaS, AI, cybersecurity, fintech)'
+    });
+  }
+
+  // ── "business" ambiguity ──
+  if (lower.includes('business') && !lower.includes('saas') && !lower.includes('software')) {
+    ambiguities.push({
+      field: 'company.industry',
+      reason: '"Business" is too broad. Could refer to any industry.',
+      clarification_question: 'What industry are you targeting?'
+    });
+  }
+
+  // ── "need" ambiguity ──
+  if (/\bneed(s|ed)?\b/i.test(lower) && !lower.includes('leads') && !lower.includes('find')) {
     ambiguities.push({
       field: 'intent',
-      reason: 'The word "need" is ambiguous. Could mean security needs, hiring needs, or other requirements.'
+      reason: 'The word "need" is ambiguous without context. Are you looking for leads, security, hiring, or something else?',
+      clarification_question: 'What exactly are you looking for? (e.g., leads, contacts, company information)'
     });
   }
 
-  // Missing/invalid target type is a genuine ambiguity — target is a
-  // required field the rest of the pipeline cannot proceed without.
-  if (!spec.target || !spec.target.type) {
-    ambiguities.push({
-      field: 'target',
-      reason: 'Target type not specified. Defaulting to "company".'
-    });
+  // ── Location ambiguity ──
+  // "London" alone is clear, but "US" or "UK" can have multiple interpretations
+  if (lower.includes('us') || lower.includes('usa') || lower.includes('united states')) {
+    // This is actually fine — US is clear enough
+  }
+
+  // ── Contact vs Company ambiguity ──
+  if (!lower.includes('ceo') && !lower.includes('founder') && !lower.includes('contact') && !lower.includes('decision')) {
+    // If they don't mention a person, they might want companies OR contacts
+    if (lower.includes('leads') && !lower.includes('companies')) {
+      // "leads" implies contacts, but could be companies
+      ambiguities.push({
+        field: 'target.type',
+        reason: 'The word "leads" could mean companies or contacts. Which are you looking for?',
+        clarification_question: 'Are you looking for companies or specific people (e.g., CEOs, founders)?'
+      });
+    }
   }
 
   return ambiguities;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. AI PARSER PROMPT CONSTRUCTION
-// ──────────────────────────────────────────────────────────────
-
-function buildUnderstandingPrompt(userRequest) {
-  return `
-You are Skyline AA-1's Lead Request Understanding Engine.
-Convert the user's natural language request into a structured Lead Search Specification.
-
-**RULES (CRITICAL):**
-1. NEVER invent missing requirements — if not specified, use null or []
-2. Separate hard requirements from preferences
-3. Distinguish between company leads and contact leads
-4. Detect ambiguity and flag it
-5. Normalize terminology (Germany → DE, SaaS → SaaS)
-6. Extract: Target, Location, Company Requirements, Contact Requirements, Data Requirements, Quantity
-
-**OUTPUT FORMAT (JSON only, no markdown):**
-{
-  "target": { 
-    "type": "company|contact|both", 
-    "quantity": null, 
-    "quantityMode": "requested" 
-  },
-  "location": { 
-    "include": [], 
-    "exclude": [], 
-    "countries": [], 
-    "regions": [], 
-    "cities": [] 
-  },
-  "company": { 
-    "industries": [], 
-    "employeeRange": null, 
-    "revenueRange": null, 
-    "businessTypes": [], 
-    "technologies": [] 
-  },
-  "contact": { 
-    "required": false, 
-    "intent": null, 
-    "roles": [] 
-  },
-  "data": { 
-    "requiredFields": [], 
-    "email": false, 
-    "businessEmail": false, 
-    "emailVerification": false, 
-    "linkedin": false, 
-    "phone": false 
-  },
-  "hardRequirements": [],
-  "preferences": [],
-  "exclusions": [],
-  "ambiguities": [],
-  "status": "ready"
-}
-
-**EXAMPLES:**
-
-User: "Find 300 cybersecurity companies in Germany with 50-500 employees. I want decision makers and their verified business emails."
-Output: {
-  "target": { "type": "company", "quantity": 300, "quantityMode": "requested" },
-  "location": { "include": ["DE"], "exclude": [], "countries": [], "regions": [], "cities": [] },
-  "company": { "industries": ["Cybersecurity"], "employeeRange": { "min": 50, "max": 500 }, "revenueRange": null, "businessTypes": [], "technologies": [] },
-  "contact": { "required": true, "intent": "decision_maker", "roles": [] },
-  "data": { "requiredFields": ["companyName", "email", "contactName", "jobTitle"], "email": true, "businessEmail": true, "emailVerification": true, "linkedin": false, "phone": false },
-  "hardRequirements": ["Germany", "Cybersecurity", "50-500 employees", "Decision maker contact"],
-  "preferences": [],
-  "exclusions": [],
-  "ambiguities": [],
-  "status": "ready"
-}
-
-**User Request:**
-"${userRequest}"
-
-**OUTPUT ONLY JSON. NO MARKDOWN, NO EXPLANATIONS.**
-`;
-}
-
-// ──────────────────────────────────────────────────────────────
-// 5. MAIN UNDERSTANDING ENGINE
+// 4. MAIN UNDERSTANDING ENGINE
 // ──────────────────────────────────────────────────────────────
 
 class LeadUnderstandingEngine {
@@ -358,249 +318,278 @@ class LeadUnderstandingEngine {
   }
 
   /**
-   * Process a natural language lead request
-   * @param {string} userRequest - Natural language request from user
-   * @param {object} options - Optional overrides
-   * @returns {Promise<object>} Validated Lead Search Specification
+   * Process natural language request → structured specification
    */
-  async processRequest(userRequest, options = {}) {
+  async processRequest(userRequest) {
+    console.log(`[UNDERSTANDING] Processing: "${userRequest}"`);
+
     try {
-      console.log(`[UNDERSTANDING] Processing: "${userRequest}"`);
-
-      // Step 1: Get AI interpretation
-      const aiOutput = await this.getAIInterpretation(userRequest);
-
-      // Step 2: Add original request for context
-      aiOutput.originalRequest = userRequest;
-
-      // Step 3: Normalize the output
-      const normalized = this.normalizeSpecification(aiOutput);
-
-      // Step 4: Validate schema + detect ambiguity + resolve status
-      const validated = this.validateSpecification(normalized);
-
-      // Step 5: Add request ID and metadata
-      const finalSpec = this.enrichSpecification(validated, userRequest);
-
-      // Step 6: Deterministic gate — never let a malformed spec leave
-      // this stage (doc §17: AI is not the final authority on structure)
-      if (!isValidLeadSpec(finalSpec)) {
-        console.error('[UNDERSTANDING] Final spec failed validation gate:', finalSpec.requestId);
-        return this.createErrorSpecification(userRequest, 'Specification failed final schema validation.');
-      }
-
-      console.log(`[UNDERSTANDING] Status: ${finalSpec.status}, RequestId: ${finalSpec.requestId}`);
-      return finalSpec;
+      // Step 1: Parse with AI
+      const parsed = await this.parseWithAI(userRequest);
+      
+      // Step 2: Normalize values
+      const normalized = this.normalize(parsed);
+      
+      // Step 3: Detect ambiguities (rule-based, not AI)
+      const ambiguities = detectAmbiguities(userRequest, normalized);
+      
+      // Step 4: Build the contract
+      const spec = this.buildContract(userRequest, normalized, ambiguities);
+      
+      // Step 5: Validate the contract
+      const validated = this.validateContract(spec);
+      
+      console.log(`[UNDERSTANDING] Status: ${validated.status}, RequestId: ${validated.requestId}`);
+      return validated;
+      
     } catch (error) {
-      console.error('[UNDERSTANDING] Error processing request:', error);
-      return this.createErrorSpecification(userRequest, error.message);
+      console.error('[UNDERSTANDING] Error:', error.message);
+      return this.buildErrorSpec(userRequest, error.message);
     }
   }
 
   /**
-   * Get AI interpretation of the request
+   * Parse with AI — returns raw parsed data
    */
-  async getAIInterpretation(userRequest) {
-    try {
-      const prompt = buildUnderstandingPrompt(userRequest);
+  async parseWithAI(userRequest) {
+    const prompt = `
+You are Skyline AA-1's Lead Request Understanding Engine.
+Convert the user's request into structured data.
 
-      const response = await this.aiClient.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a lead request understanding engine. Output only valid JSON. Never invent missing data.'
-          },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 800,
-        temperature: 0.2,
-        response_format: { type: 'json_object' }
-      });
+**RULES:**
+1. NEVER invent requirements — if not specified, use null or []
+2. "Any" or not specified = null
+3. Normalize terminology
 
-      const content = response.choices[0].message.content;
-      return JSON.parse(content);
-    } catch (error) {
-      console.error('[UNDERSTANDING] AI parsing failed:', error);
-      throw new Error(`Failed to parse lead request: ${error.message}`);
-    }
+**Output JSON:**
+{
+  "target": { "type": "company|contact|both", "role": "string|null", "quantity": "number|null" },
+  "company": { 
+    "industry": ["string"], 
+    "size": "string|null",
+    "age": "string|null",
+    "funding": "string|null",
+    "businessType": ["string"],
+    "technologies": ["string"]
+  },
+  "location": { "city": "string|null", "region": "string|null", "country": "string|null" },
+  "raw": "string"
+}
+
+**Examples:**
+
+User: "Find CEOs of SaaS companies in London"
+Output: {
+  "target": { "type": "contact", "role": "CEO", "quantity": null },
+  "company": { "industry": ["SaaS"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "location": { "city": "London", "region": null, "country": null },
+  "raw": "Find CEOs of SaaS companies in London"
+}
+
+User: "I need 50 cybersecurity companies in Germany with 100+ employees"
+Output: {
+  "target": { "type": "company", "role": null, "quantity": 50 },
+  "company": { "industry": ["Cybersecurity"], "size": "medium", "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "location": { "city": null, "region": null, "country": "Germany" },
+  "raw": "I need 50 cybersecurity companies in Germany with 100+ employees"
+}
+
+User: "Find me tech businesses in London"
+Output: {
+  "target": { "type": "company", "role": null, "quantity": null },
+  "company": { "industry": ["Technology"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "location": { "city": "London", "region": null, "country": null },
+  "raw": "Find me tech businesses in London"
+}
+
+**User Request:**
+"${userRequest}"
+
+**OUTPUT ONLY JSON. NO MARKDOWN.**
+`;
+
+    const response = await this.aiClient.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You extract structured data from lead requests. Output only JSON.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.2,
+      max_tokens: 600,
+      response_format: { type: 'json_object' }
+    });
+
+    return JSON.parse(response.choices[0].message.content);
   }
 
   /**
-   * Normalize the specification
+   * Normalize values
    */
-  normalizeSpecification(spec) {
-    const normalized = { ...spec };
+  normalize(parsed) {
+    const result = JSON.parse(JSON.stringify(parsed));
 
     // Normalize location
-    if (normalized.location) {
-      if (normalized.location.include) {
-        normalized.location.include = normalized.location.include
-          .map(c => normalizeCountry(c))
-          .filter(Boolean);
-      }
-      if (normalized.location.countries) {
-        normalized.location.countries = normalized.location.countries
-          .map(c => normalizeCountry(c))
-          .filter(Boolean);
-      }
-      if (normalized.location.exclude) {
-        normalized.location.exclude = normalized.location.exclude
-          .map(c => normalizeCountry(c))
-          .filter(Boolean);
-      }
-      if (normalized.location.regions) {
-        normalized.location.regions = normalized.location.regions
-          .map(r => r.trim())
-          .filter(Boolean);
-      }
-      if (normalized.location.cities) {
-        normalized.location.cities = normalized.location.cities
-          .map(c => c.trim())
-          .filter(Boolean);
+    if (result.location) {
+      if (result.location.country) {
+        const countryLower = result.location.country.toLowerCase();
+        const code = COUNTRY_TO_CODE[countryLower];
+        if (code) {
+          result.location.countryCode = code;
+          result.location.country = CODE_TO_COUNTRY[code] || result.location.country;
+        }
       }
     }
 
-    // Normalize company
-    if (normalized.company) {
-      if (normalized.company.industries) {
-        normalized.company.industries = normalized.company.industries
-          .map(i => normalizeIndustry(i))
-          .filter(Boolean);
-      }
-      if (normalized.company.businessTypes) {
-        normalized.company.businessTypes = normalized.company.businessTypes
-          .map(b => normalizeBusinessType(b))
-          .filter(Boolean);
-      }
-      if (normalized.company.technologies) {
-        normalized.company.technologies = normalized.company.technologies
-          .map(t => t.trim())
-          .filter(Boolean);
-      }
+    // Normalize industry
+    if (result.company && result.company.industry) {
+      result.company.industry = result.company.industry.map(i => {
+        const normalized = INDUSTRY_MAPPINGS[i.toLowerCase()];
+        return normalized || i;
+      });
     }
 
-    // Normalize contact roles
-    if (normalized.contact && normalized.contact.roles) {
-      normalized.contact.roles = normalized.contact.roles
-        .map(r => normalizeRole(r))
-        .filter(Boolean);
+    // Normalize role
+    if (result.target && result.target.role) {
+      const normalized = ROLE_MAPPINGS[result.target.role.toLowerCase()];
+      if (normalized) result.target.role = normalized;
     }
 
-    return normalized;
+    // Normalize size
+    if (result.company && result.company.size) {
+      const sizeLower = result.company.size.toLowerCase();
+      result.company.size = SIZE_MAPPINGS[sizeLower] || sizeLower;
+    }
+
+    return result;
   }
 
   /**
-   * Validate the specification against the schema, detect ambiguity,
-   * and resolve the final status from what was actually found.
+   * Build the contract
    */
-  validateSpecification(spec) {
-    // Ensure all required fields exist
-    spec.target = spec.target || { type: 'company', quantity: null, quantityMode: 'requested' };
-    spec.location = spec.location || { include: [], exclude: [], countries: [], regions: [], cities: [] };
-    spec.company = spec.company || { industries: [], employeeRange: null, revenueRange: null, businessTypes: [], technologies: [] };
-    spec.contact = spec.contact || { required: false, intent: null, roles: [] };
-    spec.data = spec.data || { requiredFields: [], email: false, businessEmail: false, emailVerification: false, linkedin: false, phone: false };
-    spec.hardRequirements = spec.hardRequirements || [];
-    spec.preferences = spec.preferences || [];
-    spec.exclusions = spec.exclusions || [];
-    spec.ambiguities = spec.ambiguities || [];
+  buildContract(userRequest, normalized, ambiguities) {
+    const spec = {
+      target: {
+        type: normalized.target?.type || 'company',
+        role: normalized.target?.role || null,
+        quantity: normalized.target?.quantity || null
+      },
+      company: {
+        industry: normalized.company?.industry || [],
+        size: {
+          value: normalized.company?.size || null,
+          restricted: !!normalized.company?.size
+        },
+        age: {
+          value: normalized.company?.age || null,
+          restricted: !!normalized.company?.age
+        },
+        funding: {
+          value: normalized.company?.funding || null,
+          restricted: !!normalized.company?.funding
+        },
+        businessType: normalized.company?.businessType || [],
+        technologies: normalized.company?.technologies || []
+      },
+      location: {
+        city: normalized.location?.city || null,
+        region: normalized.location?.region || null,
+        country: normalized.location?.country || null,
+        countryCode: normalized.location?.countryCode || null,
+        restrictions: {
+          type: 'include',
+          value: null
+        }
+      },
+      requirements: {
+        hard: [],
+        soft: [],
+        excluded: []
+      },
+      contact_required: normalized.target?.type === 'contact' || normalized.target?.type === 'both',
+      ambiguities: ambiguities,
+      originalRequest: userRequest,
+      requestId: `lead-${uuidv4().substring(0, 8)}`,
+      processedAt: new Date().toISOString()
+    };
 
-    // Validate target type
-    if (!['company', 'contact', 'both'].includes(spec.target.type)) {
-      spec.target.type = 'company';
-      spec.ambiguities.push({
-        field: 'target.type',
-        reason: 'Invalid target type. Defaulted to "company".'
-      });
+    // Build hard requirements
+    if (spec.company.industry.length > 0) {
+      spec.requirements.hard.push(`Industry: ${spec.company.industry.join(', ')}`);
+    }
+    if (spec.location.city) {
+      spec.requirements.hard.push(`Location: ${spec.location.city}`);
+    }
+    if (spec.location.country) {
+      spec.requirements.hard.push(`Location: ${spec.location.country}`);
+    }
+    if (spec.target.role) {
+      spec.requirements.hard.push(`Role: ${spec.target.role}`);
+    }
+    if (spec.company.size.value && spec.company.size.restricted) {
+      spec.requirements.hard.push(`Company Size: ${spec.company.size.value}`);
     }
 
-    // Validate quantity
-    if (spec.target.quantity && (typeof spec.target.quantity !== 'number' || spec.target.quantity < 1)) {
-      spec.target.quantity = null;
-      spec.ambiguities.push({
-        field: 'target.quantity',
-        reason: 'Invalid quantity. Defaulted to null (as many as possible).'
-      });
-    }
-
-    // Detect additional true ambiguities (doc §16) — kept separate from
-    // "unknown information" (doc §15), which is never flagged here.
-    const detectedAmbiguities = detectAmbiguity(spec);
-    spec.ambiguities = [...spec.ambiguities, ...detectedAmbiguities];
-
-    // Resolve status from what was actually found, per doc §20.
-    // Don't downgrade a status the AI already marked "invalid".
-    if (spec.status !== 'invalid') {
-      spec.status = spec.ambiguities.length > 0 ? 'needs_clarification' : 'ready';
-    }
-    if (!['ready', 'needs_clarification', 'invalid'].includes(spec.status)) {
-      spec.status = spec.ambiguities.length > 0 ? 'needs_clarification' : 'ready';
+    // Set status
+    if (ambiguities.length > 0) {
+      spec.status = 'needs_clarification';
+    } else {
+      spec.status = 'ready';
     }
 
     return spec;
   }
 
   /**
-   * Enrich with metadata
+   * Validate the contract
    */
-  enrichSpecification(spec, userRequest) {
-    return {
-      ...spec,
-      requestId: generateRequestId(),
-      originalRequest: userRequest,
-      processedAt: new Date().toISOString(),
-      version: '1.0.0'
-    };
+  validateContract(spec) {
+    // Ensure required fields exist
+    const validated = JSON.parse(JSON.stringify(spec));
+    validated.target = validated.target || { type: 'company', role: null, quantity: null };
+    validated.company = validated.company || { industry: [], size: { value: null, restricted: false }, age: { value: null, restricted: false }, funding: { value: null, restricted: false }, businessType: [], technologies: [] };
+    validated.location = validated.location || { city: null, region: null, country: null, countryCode: null, restrictions: { type: 'include', value: null } };
+    validated.requirements = validated.requirements || { hard: [], soft: [], excluded: [] };
+    validated.ambiguities = validated.ambiguities || [];
+    validated.status = validated.status || 'ready';
+
+    // Validate status is one of allowed values
+    if (!['ready', 'needs_clarification', 'invalid'].includes(validated.status)) {
+      validated.status = 'ready';
+    }
+
+    // Validate target type
+    if (!['company', 'contact', 'both'].includes(validated.target.type)) {
+      validated.target.type = 'company';
+    }
+
+    return validated;
   }
 
   /**
-   * Create an error specification
+   * Build error specification
    */
-  createErrorSpecification(userRequest, errorMessage) {
+  buildErrorSpec(userRequest, errorMessage) {
     return {
-      requestId: generateRequestId(),
-      target: { type: 'company', quantity: null, quantityMode: 'requested' },
-      location: { include: [], exclude: [], countries: [], regions: [], cities: [] },
-      company: { industries: [], employeeRange: null, revenueRange: null, businessTypes: [], technologies: [] },
-      contact: { required: false, intent: null, roles: [] },
-      data: { requiredFields: [], email: false, businessEmail: false, emailVerification: false, linkedin: false, phone: false },
-      hardRequirements: [],
-      preferences: [],
-      exclusions: [],
-      ambiguities: [{ field: 'error', reason: errorMessage }],
+      target: { type: 'company', role: null, quantity: null },
+      company: { industry: [], size: { value: null, restricted: false }, age: { value: null, restricted: false }, funding: { value: null, restricted: false }, businessType: [], technologies: [] },
+      location: { city: null, region: null, country: null, countryCode: null, restrictions: { type: 'include', value: null } },
+      requirements: { hard: [], soft: [], excluded: [] },
+      contact_required: false,
       status: 'invalid',
+      ambiguities: [{ field: 'error', reason: errorMessage, clarification_question: 'Please try rephrasing your request.' }],
       originalRequest: userRequest,
-      processedAt: new Date().toISOString(),
-      version: '1.0.0'
+      requestId: `lead-${uuidv4().substring(0, 8)}`,
+      processedAt: new Date().toISOString()
     };
-  }
-
-  /**
-   * Helper: Quick parse for testing
-   */
-  async quickParse(userRequest) {
-    return await this.processRequest(userRequest);
-  }
-
-  /**
-   * Helper: Get schema
-   */
-  getSchema() {
-    return LEAD_SPECIFICATION_SCHEMA;
   }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. CONVENIENCE FUNCTION
+// 5. CONVENIENCE FUNCTION
 // ──────────────────────────────────────────────────────────────
 
 /**
- * Quick helper function - creates engine and processes request
- * This makes Understanding.understand() work!
- * 
- * @param {string} userRequest - Natural language request
- * @returns {Promise<object>} Validated Lead Search Specification
+ * Quick helper: create engine, process request
  */
 async function understand(userRequest) {
   const openai = new OpenAI({
@@ -611,32 +600,18 @@ async function understand(userRequest) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 7. EXPORT
+// 6. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
-  // Class
   LeadUnderstandingEngine,
-  
-  // Helper functions
-  normalizeCountry,
-  normalizeIndustry,
-  normalizeBusinessType,
-  normalizeRole,
-  normalizeArray,
-  extractNumberFromString,
-  isValidLeadSpec,
-  generateRequestId,
-  buildUnderstandingPrompt,
-  detectAmbiguity,
-  
-  // ⭐ NEW: Convenience function
-  understand,  // ← This makes Understanding.understand() work!
-  
-  // Schemas and mappings
-  LEAD_SPECIFICATION_SCHEMA,
-  COUNTRY_MAPPINGS,
+  understand,
+  CONTRACT_SCHEMA,
+  COUNTRY_TO_CODE,
+  CODE_TO_COUNTRY,
   INDUSTRY_MAPPINGS,
-  BUSINESS_TYPE_MAPPINGS,
-  ROLE_MAPPINGS
+  ROLE_MAPPINGS,
+  SIZE_MAPPINGS,
+  SIZE_TO_RANGE,
+  detectAmbiguities
 };
