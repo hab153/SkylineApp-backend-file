@@ -5,6 +5,7 @@
 // ────────────────────────────────────────────────────────────────
 
 const axios = require('axios');
+const Understanding = require('./Understanding');
 
 // ────────────────────────────────────────────────────────────────
 // 2. MAIN FUNCTION
@@ -14,10 +15,14 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
     try {
         console.log('🚀 [FREE] Generating response for:', message);
 
-        // ── Simple response ──
-        const reply = `I received your message: "${message}". This is the free tier response. For lead generation, please upgrade to Go or Pro.`;
+        // ── Step 1: Understand the request ──
+        const understanding = await Understanding.understand(message, userProfile);
+        console.log('📋 [FREE] Understanding result:', understanding);
 
-        // ── Return simple result ──
+        // ── Step 2: Generate response based on understanding ──
+        const reply = `I understood your request: "${understanding.intent}". Working on it...`;
+
+        // ── Return result ──
         return {
             reply: reply,
             updatedHistory: [
@@ -26,7 +31,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 { role: 'assistant', content: reply }
             ],
             _meta: {
-                tier: 'free'
+                tier: 'free',
+                understanding: understanding
             }
         };
 
@@ -41,7 +47,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 4. EXPORTS
+// 3. EXPORTS
 // ────────────────────────────────────────────────────────────────
 
 module.exports = {
