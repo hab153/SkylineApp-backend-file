@@ -7,13 +7,7 @@
 const axios = require('axios');
 
 // ────────────────────────────────────────────────────────────────
-// 2. CONFIG
-// ────────────────────────────────────────────────────────────────
-
-const MAX_LEADS_RETURNED = 5;
-
-// ────────────────────────────────────────────────────────────────
-// 3. MAIN FUNCTION
+// 2. MAIN FUNCTION
 // ────────────────────────────────────────────────────────────────
 
 async function generateFreeResponse(message, history, userProfile, onProgress) {
@@ -32,8 +26,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 { role: 'assistant', content: reply }
             ],
             _meta: {
-                tier: 'free',
-                maxLeads: MAX_LEADS_RETURNED
+                tier: 'free'
             }
         };
 
