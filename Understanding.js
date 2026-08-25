@@ -4,6 +4,7 @@
 // ──────────────────────────────────────────────────────────────
 
 const { v4: uuidv4 } = require('uuid');
+const OpenAI = require('openai');  // ← ADDED
 
 // ──────────────────────────────────────────────────────────────
 // 1. SCHEMA DEFINITION
@@ -591,11 +592,33 @@ class LeadUnderstandingEngine {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. EXPORT
+// 6. CONVENIENCE FUNCTION
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Quick helper function - creates engine and processes request
+ * This makes Understanding.understand() work!
+ * 
+ * @param {string} userRequest - Natural language request
+ * @returns {Promise<object>} Validated Lead Search Specification
+ */
+async function understand(userRequest) {
+  const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+  });
+  const engine = new LeadUnderstandingEngine(openai);
+  return await engine.processRequest(userRequest);
+}
+
+// ──────────────────────────────────────────────────────────────
+// 7. EXPORT
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
+  // Class
   LeadUnderstandingEngine,
+  
+  // Helper functions
   normalizeCountry,
   normalizeIndustry,
   normalizeBusinessType,
@@ -606,6 +629,11 @@ module.exports = {
   generateRequestId,
   buildUnderstandingPrompt,
   detectAmbiguity,
+  
+  // ⭐ NEW: Convenience function
+  understand,  // ← This makes Understanding.understand() work!
+  
+  // Schemas and mappings
   LEAD_SPECIFICATION_SCHEMA,
   COUNTRY_MAPPINGS,
   INDUSTRY_MAPPINGS,
