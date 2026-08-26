@@ -526,22 +526,48 @@ Output: {
     return JSON.parse(response.choices[0].message.content);
   }
 
+  /**
+   * Normalize values — FIXED: Proper country normalization
+   */
   normalize(parsed) {
     const result = JSON.parse(JSON.stringify(parsed));
 
-    // Normalize location
-    if (result.location) {
-      if (result.location.country) {
-        const countryLower = result.location.country.toLowerCase();
-        const code = COUNTRY_TO_CODE[countryLower];
-        if (code) {
-          result.location.countryCode = code;
-          result.location.country = CODE_TO_COUNTRY[code] || result.location.country;
+    // ── Normalize location ──
+    if (result.location && result.location.country) {
+        const countryInput = result.location.country.trim();
+        const upperInput = countryInput.toUpperCase();
+        const lowerInput = countryInput.toLowerCase();
+
+        // Check if it's already a valid code (e.g., "GB", "DE", "NG")
+        if (CODE_TO_COUNTRY[upperInput]) {
+            result.location.country = CODE_TO_COUNTRY[upperInput];
+            result.location.countryCode = upperInput;
         }
-      }
+        // Check if it's a name we can map to a code (e.g., "United Kingdom", "Germany")
+        else if (COUNTRY_TO_CODE[lowerInput]) {
+            const code = COUNTRY_TO_CODE[lowerInput];
+            result.location.country = CODE_TO_COUNTRY[code];
+            result.location.countryCode = code;
+        }
+        // Try partial match (e.g., "UK" → "United Kingdom")
+        else {
+            let found = false;
+            for (const [key, code] of Object.entries(COUNTRY_TO_CODE)) {
+                if (lowerInput.includes(key) || key.includes(lowerInput)) {
+                    result.location.country = CODE_TO_COUNTRY[code];
+                    result.location.countryCode = code;
+                    found = true;
+                    break;
+                }
+            }
+            // If still not found, keep as-is but set code to null
+            if (!found) {
+                result.location.countryCode = null;
+            }
+        }
     }
 
-    // Normalize industry
+    // ── Normalize industry ──
     if (result.company && result.company.industry) {
       result.company.industry = result.company.industry.map(i => {
         const normalized = INDUSTRY_MAPPINGS[i.toLowerCase()];
@@ -549,19 +575,19 @@ Output: {
       });
     }
 
-    // Normalize role
+    // ── Normalize role ──
     if (result.target && result.target.role) {
       const normalized = ROLE_MAPPINGS[result.target.role.toLowerCase()];
       if (normalized) result.target.role = normalized;
     }
 
-    // Normalize size
+    // ── Normalize size ──
     if (result.company && result.company.size) {
       const sizeLower = result.company.size.toLowerCase();
       result.company.size = SIZE_MAPPINGS[sizeLower] || sizeLower;
     }
 
-    // Normalize "preferably" → soft requirement
+    // ── Normalize "preferably" → soft requirement ──
     if (result.requirements && result.requirements.soft) {
       result.requirements.soft = result.requirements.soft.map(req => {
         if (req.toLowerCase().includes('startup')) {
