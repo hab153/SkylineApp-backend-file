@@ -17,7 +17,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         // ── Step 1: Understand the request ──
         const understanding = await Understanding.understand(message);
-        console.log('📋 [FREE] Understanding result:', understanding);
+        console.log('📋 [FREE] Understanding result:', JSON.stringify(understanding, null, 2));
 
         // ── Step 2: Build a user-friendly summary ──
         const summary = buildLeadSummary(understanding);
@@ -25,7 +25,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         // ── Step 3: Return the summary as a string ──
         return {
-            reply: summary,  // ← Returns a STRING, not an object
+            reply: summary,
             updatedHistory: [
                 ...(history || []),
                 { role: 'user', content: message },
@@ -49,7 +49,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 3. HELPER: Build User-Friendly Summary
+// 3. HELPER: Build User-Friendly Summary — COMPLETE VERSION
 // ────────────────────────────────────────────────────────────────
 
 function buildLeadSummary(spec) {
@@ -62,54 +62,94 @@ function buildLeadSummary(spec) {
         if (spec.ambiguities && spec.ambiguities.length > 0) {
             spec.ambiguities.forEach(a => {
                 msg += `• ${a.reason}\n`;
+                if (a.clarification_question) {
+                    msg += `  → ${a.clarification_question}\n`;
+                }
             });
         }
         msg += '\nCould you please provide more details?';
         return msg;
     }
 
-    // ✅ Build a nice summary
+    // ✅ Build a complete summary
     let summary = '📋 **Lead Request Summary**\n\n';
 
-    // Target
+    // ── Target ──
     const targetType = spec.target?.type || 'company';
+    const role = spec.target?.role ? ` (${spec.target.role})` : '';
     const quantity = spec.target?.quantity ? ` up to ${spec.target.quantity}` : '';
-    summary += `**Target:** ${targetType}${quantity}\n`;
+    summary += `**Target:** ${targetType}${role}${quantity}\n`;
 
-    // Location
+    // ── Location ──
     if (spec.location) {
         const locations = [];
-        if (spec.location.countries?.length) locations.push(`Countries: ${spec.location.countries.join(', ')}`);
-        if (spec.location.cities?.length) locations.push(`Cities: ${spec.location.cities.join(', ')}`);
-        if (spec.location.regions?.length) locations.push(`Regions: ${spec.location.regions.join(', ')}`);
-        if (locations.length) summary += `**Location:** ${locations.join(' | ')}\n`;
-    }
-
-    // Company
-    if (spec.company) {
-        if (spec.company.industries?.length) summary += `**Industry:** ${spec.company.industries.join(', ')}\n`;
-        if (spec.company.employeeRange) {
-            const { min, max } = spec.company.employeeRange;
-            summary += `**Company Size:** ${min || '0'} - ${max || 'Unlimited'} employees\n`;
+        if (spec.location.country) locations.push(`Country: ${spec.location.country}`);
+        if (spec.location.city) locations.push(`City: ${spec.location.city}`);
+        if (spec.location.region) locations.push(`Region: ${spec.location.region}`);
+        if (spec.location.countryCode) locations.push(`Code: ${spec.location.countryCode}`);
+        if (locations.length) {
+            summary += `**Location:** ${locations.join(' | ')}\n`;
         }
-        if (spec.company.businessTypes?.length) summary += `**Business Type:** ${spec.company.businessTypes.join(', ')}\n`;
     }
 
-    // Contact
-    if (spec.contact) {
-        if (spec.contact.required) summary += `**Contact Required:** Yes\n`;
-        if (spec.contact.roles?.length) summary += `**Roles:** ${spec.contact.roles.join(', ')}\n`;
-        if (spec.contact.intent) summary += `**Intent:** ${spec.contact.intent}\n`;
+    // ── Company ──
+    if (spec.company) {
+        if (spec.company.industry && spec.company.industry.length > 0) {
+            summary += `**Industry:** ${spec.company.industry.join(', ')}\n`;
+        }
+        if (spec.company.size && spec.company.size.value) {
+            const restricted = spec.company.size.restricted ? ' (specified)' : ' (any)';
+            summary += `**Company Size:** ${spec.company.size.value}${restricted}\n`;
+        }
+        if (spec.company.businessType && spec.company.businessType.length > 0) {
+            summary += `**Business Type:** ${spec.company.businessType.join(', ')}\n`;
+        }
+        if (spec.company.technologies && spec.company.technologies.length > 0) {
+            summary += `**Technologies:** ${spec.company.technologies.join(', ')}\n`;
+        }
+        if (spec.company.age && spec.company.age.value) {
+            const restricted = spec.company.age.restricted ? ' (specified)' : ' (any)';
+            summary += `**Company Age:** ${spec.company.age.value}${restricted}\n`;
+        }
+        if (spec.company.funding && spec.company.funding.value) {
+            const restricted = spec.company.funding.restricted ? ' (specified)' : ' (any)';
+            summary += `**Funding:** ${spec.company.funding.value}${restricted}\n`;
+        }
     }
 
-    // Hard Requirements
-    if (spec.hardRequirements?.length) {
-        summary += `\n**🔒 Hard Requirements:**\n`;
-        spec.hardRequirements.forEach(r => summary += `• ${r}\n`);
+    // ── Contact ──
+    if (spec.contact_required) {
+        summary += `**Contact Required:** ✅ Yes\n`;
+    } else {
+        summary += `**Contact Required:** ❌ No (company only)\n`;
     }
 
-    // Status
-    summary += `\n**Status:** ✅ ${spec.status.toUpperCase()}`;
+    // ── Hard Requirements ──
+    if (spec.requirements && spec.requirements.hard && spec.requirements.hard.length > 0) {
+        summary += `\n**🔒 Requirements:**\n`;
+        spec.requirements.hard.forEach(r => summary += `• ${r}\n`);
+    }
+
+    // ── Soft Requirements ──
+    if (spec.requirements && spec.requirements.soft && spec.requirements.soft.length > 0) {
+        summary += `\n**💡 Preferences:**\n`;
+        spec.requirements.soft.forEach(r => summary += `• ${r}\n`);
+    }
+
+    // ── Exclusions ──
+    if (spec.requirements && spec.requirements.excluded && spec.requirements.excluded.length > 0) {
+        summary += `\n**🚫 Excluded:**\n`;
+        spec.requirements.excluded.forEach(r => summary += `• ${r}\n`);
+    }
+
+    // ── Status ──
+    const statusEmoji = spec.status === 'ready' ? '✅' : spec.status === 'needs_clarification' ? '⚠️' : '❌';
+    summary += `\n**Status:** ${statusEmoji} ${spec.status.toUpperCase()}`;
+
+    // ── Request ID (for debugging) ──
+    if (spec.requestId) {
+        summary += `\n**Request ID:** \`${spec.requestId}\``;
+    }
 
     return summary;
 }
