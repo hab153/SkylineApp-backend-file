@@ -5,9 +5,11 @@
 // RESPONSIBILITIES:
 // - Interpret natural language
 // - Normalize terminology
-// - Detect ambiguity
+// - Separate hard/soft/excluded requirements
+// - Detect genuine ambiguity
+// - Detect contradictions
 // - NEVER invent requirements
-// - Output clean, predictable structure
+// - Output clean, predictable, validated contract
 // ──────────────────────────────────────────────────────────────
 
 const { v4: uuidv4 } = require('uuid');
@@ -26,54 +28,73 @@ const OpenAI = require('openai');
  */
 const CONTRACT_SCHEMA = {
   target: {
-    type: 'company' | 'contact' | 'both',  // What to find
-    role: 'string | null',                   // Specific role if contact
-    quantity: 'number | null'                // How many (null = as many as possible)
+    type: 'company' | 'contact' | 'both' | null,  // What to find
+    role: 'string | null',                        // Specific role if contact
+    quantity: 'number | null'                     // How many (null = as many as possible)
   },
   company: {
-    industry: ['string'],                     // What they do
+    industry: ['string'],                         // What they do
     size: {
-      value: 'string | null',                 // "any", "small", "medium", "large", "enterprise"
-      restricted: 'boolean'                   // true = user specified, false = not specified
+      value: 'string | null',                     // "any", "small", "medium", "large", "enterprise"
+      restricted: 'boolean'                       // true = user specified, false = not specified
     },
     age: {
-      value: 'string | null',                // "any", "startup", "established"
+      value: 'string | null',                     // "any", "startup", "established"
       restricted: 'boolean'
     },
     funding: {
-      value: 'string | null',                // "any", "bootstrapped", "seed", "series_a", etc.
+      value: 'string | null',                     // "any", "bootstrapped", "seed", "series_a", etc.
       restricted: 'boolean'
     },
-    businessType: ['string'],                // B2B, B2C, agency, enterprise, etc.
-    technologies: ['string']                  // Stack they use
+    businessType: ['string'],                     // B2B, B2C, agency, enterprise, etc.
+    technologies: ['string']                      // Stack they use
   },
   location: {
     city: 'string | null',
     region: 'string | null',
-    country: 'string | null',                // Normalized to full country name
-    countryCode: 'string | null',            // ISO 2-letter code
+    country: 'string | null',                     // Normalized to full country name
+    countryCode: 'string | null',                 // ISO 2-letter code
     restrictions: {
-      type: 'include' | 'exclude',           // include = must be in location, exclude = must NOT be
+      type: 'include' | 'exclude' | null,
       value: 'string | null'
     }
   },
   requirements: {
-    hard: ['string'],       // MUST have — non-negotiable
-    soft: ['string'],       // Nice to have — preferences
-    excluded: ['string']    // MUST NOT have
+    hard: ['string'],                             // MUST have — non-negotiable
+    soft: ['string'],                             // Nice to have — preferences
+    excluded: ['string']                          // MUST NOT have
   },
-  contact_required: 'boolean',  // true = needs a person, false = company only
+  contact_required: 'boolean',                    // true = needs a person, false = company only
+  interpretation: {
+    confidence: 'number',                         // 0.0 - 1.0
+    assumptions: [
+      {
+        type: 'normalization' | 'inference' | 'default',
+        input: 'string',
+        interpretedAs: 'string',
+        reason: 'string'
+      }
+    ]
+  },
   status: 'ready' | 'needs_clarification' | 'invalid',
   ambiguities: [
     {
       field: 'string',
       reason: 'string',
-      clarification_question: 'string | null'  // Question to ask the user
+      clarification_question: 'string | null'
+    }
+  ],
+  contradictions: [
+    {
+      field: 'string',
+      reason: 'string',
+      suggestion: 'string | null'
     }
   ],
   originalRequest: 'string',
   requestId: 'string',
-  processedAt: 'string'
+  processedAt: 'string',
+  version: 'string'
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -250,7 +271,6 @@ function detectAmbiguities(originalRequest, parsed) {
   const lower = originalRequest.toLowerCase();
 
   // ── Industry ambiguity ──
-  // "technology" is too broad
   if (lower.includes('technology') && !lower.includes('saas') && !lower.includes('software')) {
     ambiguities.push({
       field: 'company.industry',
@@ -259,7 +279,6 @@ function detectAmbiguities(originalRequest, parsed) {
     });
   }
 
-  // ── "tech" shorthand ──
   if (lower.includes('tech') && !lower.includes('saas') && !lower.includes('software')) {
     ambiguities.push({
       field: 'company.industry',
@@ -268,7 +287,6 @@ function detectAmbiguities(originalRequest, parsed) {
     });
   }
 
-  // ── "business" ambiguity ──
   if (lower.includes('business') && !lower.includes('saas') && !lower.includes('software')) {
     ambiguities.push({
       field: 'company.industry',
@@ -286,17 +304,9 @@ function detectAmbiguities(originalRequest, parsed) {
     });
   }
 
-  // ── Location ambiguity ──
-  // "London" alone is clear, but "US" or "UK" can have multiple interpretations
-  if (lower.includes('us') || lower.includes('usa') || lower.includes('united states')) {
-    // This is actually fine — US is clear enough
-  }
-
   // ── Contact vs Company ambiguity ──
   if (!lower.includes('ceo') && !lower.includes('founder') && !lower.includes('contact') && !lower.includes('decision')) {
-    // If they don't mention a person, they might want companies OR contacts
     if (lower.includes('leads') && !lower.includes('companies')) {
-      // "leads" implies contacts, but could be companies
       ambiguities.push({
         field: 'target.type',
         reason: 'The word "leads" could mean companies or contacts. Which are you looking for?',
@@ -305,11 +315,75 @@ function detectAmbiguities(originalRequest, parsed) {
     }
   }
 
+  // ── Location ambiguity ──
+  if (lower.includes('around') || lower.includes('near') || lower.includes('close to')) {
+    ambiguities.push({
+      field: 'location',
+      reason: 'Location terms like "around" or "near" are vague. Do you mean within the city, the region, or the country?',
+      clarification_question: 'Can you specify the exact location? (e.g., city, region, or country)'
+    });
+  }
+
   return ambiguities;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. MAIN UNDERSTANDING ENGINE
+// 4. CONTRADICTION DETECTION
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Detect contradictions in the request.
+ * 
+ * Example: "small companies with more than 1,000 employees"
+ * Example: "companies in Nigeria and exclude Nigeria"
+ */
+function detectContradictions(originalRequest, parsed) {
+  const contradictions = [];
+  const lower = originalRequest.toLowerCase();
+
+  // ── Size contradiction ──
+  // "small" vs "1000+ employees"
+  if (parsed.company && parsed.company.size) {
+    const size = parsed.company.size.toLowerCase();
+    if (size === 'small' && lower.includes('1000')) {
+      contradictions.push({
+        field: 'company.size',
+        reason: '"Small company" contradicts "1000+ employees". Small companies typically have fewer than 50 employees.',
+        suggestion: 'Would you like to search for small companies (1-50 employees) or large companies (1000+ employees)?'
+      });
+    }
+    if (size === 'large' && lower.includes('10 employees')) {
+      contradictions.push({
+        field: 'company.size',
+        reason: '"Large company" contradicts "10 employees". Large companies typically have 200+ employees.',
+        suggestion: 'Would you like to search for small companies (1-50 employees) or large companies (200+ employees)?'
+      });
+    }
+  }
+
+  // ── Location contradiction ──
+  if (lower.includes('nigeria') && lower.includes('exclude nigeria')) {
+    contradictions.push({
+      field: 'location',
+      reason: 'You asked for companies in Nigeria but also said to exclude Nigeria. This is contradictory.',
+      suggestion: 'Would you like to search in Nigeria or exclude Nigeria?'
+    });
+  }
+
+  // ── Contact contradiction ──
+  if (parsed.target && parsed.target.type === 'contact' && lower.includes('no contact')) {
+    contradictions.push({
+      field: 'target.type',
+      reason: 'You asked for contacts but also said "no contact". This is contradictory.',
+      suggestion: 'Are you looking for companies only or companies with contacts?'
+    });
+  }
+
+  return contradictions;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 5. MAIN UNDERSTANDING ENGINE
 // ──────────────────────────────────────────────────────────────
 
 class LeadUnderstandingEngine {
@@ -330,13 +404,19 @@ class LeadUnderstandingEngine {
       // Step 2: Normalize values
       const normalized = this.normalize(parsed);
       
-      // Step 3: Detect ambiguities (rule-based, not AI)
+      // Step 3: Detect ambiguities (rule-based)
       const ambiguities = detectAmbiguities(userRequest, normalized);
       
-      // Step 4: Build the contract
-      const spec = this.buildContract(userRequest, normalized, ambiguities);
+      // Step 4: Detect contradictions (rule-based)
+      const contradictions = detectContradictions(userRequest, normalized);
       
-      // Step 5: Validate the contract
+      // Step 5: Classify requirements
+      const classified = this.classifyRequirements(userRequest, normalized);
+      
+      // Step 6: Build the contract
+      const spec = this.buildContract(userRequest, normalized, ambiguities, contradictions, classified);
+      
+      // Step 7: Validate the contract
       const validated = this.validateContract(spec);
       
       console.log(`[UNDERSTANDING] Status: ${validated.status}, RequestId: ${validated.requestId}`);
@@ -356,10 +436,17 @@ class LeadUnderstandingEngine {
 You are Skyline AA-1's Lead Request Understanding Engine.
 Convert the user's request into structured data.
 
-**RULES:**
+**RULES (CRITICAL — DO NOT BREAK):**
+
 1. NEVER invent requirements — if not specified, use null or []
-2. "Any" or not specified = null
-3. Normalize terminology
+2. "Any" means the user EXPLICITLY said "any" — otherwise use null
+3. Normalize terminology (CEO → CEO, SaaS → SaaS, Germany → DE)
+4. Distinguish between:
+   - "must have" (hard requirements)
+   - "nice to have" (preferences)
+   - "must not have" (exclusions)
+5. If a phrase has multiple meanings, flag it as ambiguous
+6. If the request contradicts itself, flag it as contradictory
 
 **Output JSON:**
 {
@@ -373,6 +460,8 @@ Convert the user's request into structured data.
     "technologies": ["string"]
   },
   "location": { "city": "string|null", "region": "string|null", "country": "string|null" },
+  "requirements": { "hard": ["string"], "soft": ["string"], "excluded": ["string"] },
+  "confidence": 0.0,
   "raw": "string"
 }
 
@@ -383,23 +472,29 @@ Output: {
   "target": { "type": "contact", "role": "CEO", "quantity": null },
   "company": { "industry": ["SaaS"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
   "location": { "city": "London", "region": null, "country": null },
+  "requirements": { "hard": ["Industry: SaaS", "Location: London", "Role: CEO"], "soft": [], "excluded": [] },
+  "confidence": 0.99,
   "raw": "Find CEOs of SaaS companies in London"
 }
 
-User: "I need 50 cybersecurity companies in Germany with 100+ employees"
+User: "I need 50 cybersecurity companies in Germany with 100+ employees. I want decision makers and their verified business emails."
 Output: {
-  "target": { "type": "company", "role": null, "quantity": 50 },
+  "target": { "type": "contact", "role": "Decision Maker", "quantity": 50 },
   "company": { "industry": ["Cybersecurity"], "size": "medium", "age": null, "funding": null, "businessType": [], "technologies": [] },
   "location": { "city": null, "region": null, "country": "Germany" },
-  "raw": "I need 50 cybersecurity companies in Germany with 100+ employees"
+  "requirements": { "hard": ["Industry: Cybersecurity", "Location: Germany", "Company Size: medium", "Role: Decision Maker"], "soft": [], "excluded": [] },
+  "confidence": 0.98,
+  "raw": "I need 50 cybersecurity companies in Germany with 100+ employees. I want decision makers and their verified business emails."
 }
 
-User: "Find me tech businesses in London"
+User: "Find me tech businesses in London, preferably startups"
 Output: {
   "target": { "type": "company", "role": null, "quantity": null },
-  "company": { "industry": ["Technology"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "company": { "industry": ["Technology"], "size": null, "age": "startup", "funding": null, "businessType": [], "technologies": [] },
   "location": { "city": "London", "region": null, "country": null },
-  "raw": "Find me tech businesses in London"
+  "requirements": { "hard": ["Location: London"], "soft": ["Company Age: startup"], "excluded": [] },
+  "confidence": 0.85,
+  "raw": "Find me tech businesses in London, preferably startups"
 }
 
 **User Request:**
@@ -411,11 +506,11 @@ Output: {
     const response = await this.aiClient.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: 'You extract structured data from lead requests. Output only JSON.' },
+        { role: 'system', content: 'You extract structured data from lead requests. Distinguish hard vs soft requirements. Output only JSON.' },
         { role: 'user', content: prompt }
       ],
       temperature: 0.2,
-      max_tokens: 600,
+      max_tokens: 800,
       response_format: { type: 'json_object' }
     });
 
@@ -460,16 +555,157 @@ Output: {
       result.company.size = SIZE_MAPPINGS[sizeLower] || sizeLower;
     }
 
+    // Normalize "preferably" → soft requirement
+    if (result.requirements && result.requirements.soft) {
+      result.requirements.soft = result.requirements.soft.map(req => {
+        if (req.toLowerCase().includes('startup')) {
+          return 'Company Age: startup (preferred)';
+        }
+        return req;
+      });
+    }
+
     return result;
+  }
+
+  /**
+   * Classify requirements — separate hard vs soft vs excluded
+   */
+  classifyRequirements(userRequest, parsed) {
+    const hard = [];
+    const soft = [];
+    const excluded = [];
+    const lower = userRequest.toLowerCase();
+
+    // ── Industry ──
+    if (parsed.company && parsed.company.industry && parsed.company.industry.length > 0) {
+      hard.push(`Industry: ${parsed.company.industry.join(', ')}`);
+    }
+
+    // ── Location ──
+    if (parsed.location) {
+      if (parsed.location.country) {
+        hard.push(`Location: ${parsed.location.country}`);
+      }
+      if (parsed.location.city) {
+        hard.push(`Location: ${parsed.location.city}`);
+      }
+      if (parsed.location.region) {
+        hard.push(`Location: ${parsed.location.region}`);
+      }
+    }
+
+    // ── Role ──
+    if (parsed.target && parsed.target.role) {
+      hard.push(`Role: ${parsed.target.role}`);
+    }
+
+    // ── Quantity ──
+    if (parsed.target && parsed.target.quantity) {
+      hard.push(`Quantity: ${parsed.target.quantity}`);
+    }
+
+    // ── Size ──
+    if (parsed.company && parsed.company.size) {
+      // Check if it's a preference or hard requirement
+      if (lower.includes('prefer') || lower.includes('preferably') || lower.includes('ideally')) {
+        soft.push(`Company Size: ${parsed.company.size} (preferred)`);
+      } else {
+        hard.push(`Company Size: ${parsed.company.size}`);
+      }
+    }
+
+    // ── Age ──
+    if (parsed.company && parsed.company.age) {
+      if (lower.includes('prefer') || lower.includes('preferably') || lower.includes('ideally')) {
+        soft.push(`Company Age: ${parsed.company.age} (preferred)`);
+      } else {
+        hard.push(`Company Age: ${parsed.company.age}`);
+      }
+    }
+
+    // ── Funding ──
+    if (parsed.company && parsed.company.funding) {
+      if (lower.includes('prefer') || lower.includes('preferably') || lower.includes('ideally')) {
+        soft.push(`Funding: ${parsed.company.funding} (preferred)`);
+      } else {
+        hard.push(`Funding: ${parsed.company.funding}`);
+      }
+    }
+
+    // ── Business Type ──
+    if (parsed.company && parsed.company.businessType && parsed.company.businessType.length > 0) {
+      parsed.company.businessType.forEach(type => {
+        if (lower.includes('exclude') || lower.includes('not')) {
+          excluded.push(`Business Type: ${type}`);
+        } else if (lower.includes('prefer') || lower.includes('preferably') || lower.includes('ideally')) {
+          soft.push(`Business Type: ${type} (preferred)`);
+        } else {
+          hard.push(`Business Type: ${type}`);
+        }
+      });
+    }
+
+    // ── Technologies ──
+    if (parsed.company && parsed.company.technologies && parsed.company.technologies.length > 0) {
+      parsed.company.technologies.forEach(tech => {
+        if (lower.includes('exclude') || lower.includes('not')) {
+          excluded.push(`Technology: ${tech}`);
+        } else if (lower.includes('prefer') || lower.includes('preferably') || lower.includes('ideally')) {
+          soft.push(`Technology: ${tech} (preferred)`);
+        } else {
+          hard.push(`Technology: ${tech}`);
+        }
+      });
+    }
+
+    return { hard, soft, excluded };
   }
 
   /**
    * Build the contract
    */
-  buildContract(userRequest, normalized, ambiguities) {
+  buildContract(userRequest, normalized, ambiguities, contradictions, classified) {
+    // Determine status
+    let status = 'ready';
+    if (contradictions.length > 0) {
+      status = 'invalid';
+    } else if (ambiguities.length > 0) {
+      status = 'needs_clarification';
+    }
+
+    // Determine contact_required
+    const contact_required = normalized.target?.type === 'contact' || 
+                            normalized.target?.type === 'both' ||
+                            (normalized.target?.role && normalized.target.role !== '');
+
+    // Build confidence
+    let confidence = normalized.confidence || 0.85;
+    if (ambiguities.length > 0) confidence -= 0.15;
+    if (contradictions.length > 0) confidence = 0;
+
+    // Build assumptions
+    const assumptions = [];
+    if (normalized.location && normalized.location.country && normalized.location.countryCode) {
+      assumptions.push({
+        type: 'normalization',
+        input: normalized.location.country,
+        interpretedAs: normalized.location.countryCode,
+        reason: 'Country name normalized to ISO code'
+      });
+    }
+    if (normalized.target && normalized.target.role) {
+      assumptions.push({
+        type: 'normalization',
+        input: normalized.target.role,
+        interpretedAs: normalized.target.role,
+        reason: 'Role normalized to standard title'
+      });
+    }
+
     const spec = {
       target: {
-        type: normalized.target?.type || 'company',
+        type: normalized.target?.type || null,
         role: normalized.target?.role || null,
         quantity: normalized.target?.quantity || null
       },
@@ -501,91 +737,123 @@ Output: {
         }
       },
       requirements: {
-        hard: [],
-        soft: [],
-        excluded: []
+        hard: classified.hard || [],
+        soft: classified.soft || [],
+        excluded: classified.excluded || []
       },
-      contact_required: normalized.target?.type === 'contact' || normalized.target?.type === 'both',
+      contact_required: contact_required,
+      interpretation: {
+        confidence: Math.min(1, Math.max(0, confidence)),
+        assumptions: assumptions
+      },
+      status: status,
       ambiguities: ambiguities,
+      contradictions: contradictions,
       originalRequest: userRequest,
       requestId: `lead-${uuidv4().substring(0, 8)}`,
-      processedAt: new Date().toISOString()
+      processedAt: new Date().toISOString(),
+      version: '2.0.0'
     };
-
-    // Build hard requirements
-    if (spec.company.industry.length > 0) {
-      spec.requirements.hard.push(`Industry: ${spec.company.industry.join(', ')}`);
-    }
-    if (spec.location.city) {
-      spec.requirements.hard.push(`Location: ${spec.location.city}`);
-    }
-    if (spec.location.country) {
-      spec.requirements.hard.push(`Location: ${spec.location.country}`);
-    }
-    if (spec.target.role) {
-      spec.requirements.hard.push(`Role: ${spec.target.role}`);
-    }
-    if (spec.company.size.value && spec.company.size.restricted) {
-      spec.requirements.hard.push(`Company Size: ${spec.company.size.value}`);
-    }
-
-    // Set status
-    if (ambiguities.length > 0) {
-      spec.status = 'needs_clarification';
-    } else {
-      spec.status = 'ready';
-    }
 
     return spec;
   }
 
   /**
-   * Validate the contract
+   * Validate the contract — strict final validation
    */
   validateContract(spec) {
-    // Ensure required fields exist
     const validated = JSON.parse(JSON.stringify(spec));
-    validated.target = validated.target || { type: 'company', role: null, quantity: null };
-    validated.company = validated.company || { industry: [], size: { value: null, restricted: false }, age: { value: null, restricted: false }, funding: { value: null, restricted: false }, businessType: [], technologies: [] };
-    validated.location = validated.location || { city: null, region: null, country: null, countryCode: null, restrictions: { type: 'include', value: null } };
-    validated.requirements = validated.requirements || { hard: [], soft: [], excluded: [] };
-    validated.ambiguities = validated.ambiguities || [];
-    validated.status = validated.status || 'ready';
 
-    // Validate status is one of allowed values
+    // ── Validate target ──
+    if (!validated.target || !validated.target.type) {
+      validated.status = 'invalid';
+      validated.ambiguities.push({
+        field: 'target.type',
+        reason: 'Target type is required but was not specified.',
+        clarification_question: 'Are you looking for companies, contacts, or both?'
+      });
+    } else if (!['company', 'contact', 'both'].includes(validated.target.type)) {
+      validated.target.type = null;
+      validated.status = 'invalid';
+      validated.ambiguities.push({
+        field: 'target.type',
+        reason: `Invalid target type: "${spec.target.type}". Must be "company", "contact", or "both".`,
+        clarification_question: 'Are you looking for companies, contacts, or both?'
+      });
+    }
+
+    // ── Validate quantity ──
+    if (validated.target && validated.target.quantity !== null) {
+      if (typeof validated.target.quantity !== 'number' || validated.target.quantity < 1) {
+        validated.target.quantity = null;
+        validated.ambiguities.push({
+          field: 'target.quantity',
+          reason: 'Quantity must be a positive number.',
+          clarification_question: 'How many leads would you like?'
+        });
+      }
+    }
+
+    // ── Validate status ──
     if (!['ready', 'needs_clarification', 'invalid'].includes(validated.status)) {
       validated.status = 'ready';
     }
 
-    // Validate target type
-    if (!['company', 'contact', 'both'].includes(validated.target.type)) {
-      validated.target.type = 'company';
+    // ── If contradictions exist, status must be invalid ──
+    if (validated.contradictions && validated.contradictions.length > 0) {
+      validated.status = 'invalid';
     }
+
+    // ── If ambiguities exist and no contradictions, status is needs_clarification ──
+    if (validated.ambiguities && validated.ambiguities.length > 0 && validated.status !== 'invalid') {
+      validated.status = 'needs_clarification';
+    }
+
+    // ── Ensure required fields exist ──
+    validated.target = validated.target || { type: null, role: null, quantity: null };
+    validated.company = validated.company || { industry: [], size: { value: null, restricted: false }, age: { value: null, restricted: false }, funding: { value: null, restricted: false }, businessType: [], technologies: [] };
+    validated.location = validated.location || { city: null, region: null, country: null, countryCode: null, restrictions: { type: 'include', value: null } };
+    validated.requirements = validated.requirements || { hard: [], soft: [], excluded: [] };
+    validated.ambiguities = validated.ambiguities || [];
+    validated.contradictions = validated.contradictions || [];
+    validated.interpretation = validated.interpretation || { confidence: 0.5, assumptions: [] };
 
     return validated;
   }
 
   /**
-   * Build error specification
+   * Build error specification — safe failure, no guessing
    */
   buildErrorSpec(userRequest, errorMessage) {
     return {
-      target: { type: 'company', role: null, quantity: null },
+      target: { type: null, role: null, quantity: null },
       company: { industry: [], size: { value: null, restricted: false }, age: { value: null, restricted: false }, funding: { value: null, restricted: false }, businessType: [], technologies: [] },
-      location: { city: null, region: null, country: null, countryCode: null, restrictions: { type: 'include', value: null } },
+      location: { city: null, region: null, country: null, countryCode: null, restrictions: { type: null, value: null } },
       requirements: { hard: [], soft: [], excluded: [] },
       contact_required: false,
+      interpretation: {
+        confidence: 0,
+        assumptions: []
+      },
       status: 'invalid',
-      ambiguities: [{ field: 'error', reason: errorMessage, clarification_question: 'Please try rephrasing your request.' }],
+      ambiguities: [
+        { 
+          field: 'error', 
+          reason: errorMessage, 
+          clarification_question: 'Please try rephrasing your request.' 
+        }
+      ],
+      contradictions: [],
       originalRequest: userRequest,
       requestId: `lead-${uuidv4().substring(0, 8)}`,
-      processedAt: new Date().toISOString()
+      processedAt: new Date().toISOString(),
+      version: '2.0.0'
     };
   }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 5. CONVENIENCE FUNCTION
+// 6. CONVENIENCE FUNCTION
 // ──────────────────────────────────────────────────────────────
 
 /**
@@ -600,7 +868,7 @@ async function understand(userRequest) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. EXPORTS
+// 7. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -613,5 +881,6 @@ module.exports = {
   ROLE_MAPPINGS,
   SIZE_MAPPINGS,
   SIZE_TO_RANGE,
-  detectAmbiguities
+  detectAmbiguities,
+  detectContradictions
 };
