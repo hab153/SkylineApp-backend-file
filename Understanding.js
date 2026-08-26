@@ -256,16 +256,6 @@ const SIZE_TO_RANGE = {
 // 3. AMBIGUITY DETECTION — Rule-Based, Not AI
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Detect ambiguities in the request.
- * 
- * IMPORTANT: Only flag TRUE ambiguities — things that could
- * mean multiple different things. Do NOT flag unspecified
- * information as ambiguous.
- * 
- * Example TRUE ambiguity: "technology" could mean SaaS, hardware, AI, etc.
- * Example NOT ambiguous: missing company size — that's just unspecified.
- */
 function detectAmbiguities(originalRequest, parsed) {
   const ambiguities = [];
   const lower = originalRequest.toLowerCase();
@@ -331,18 +321,11 @@ function detectAmbiguities(originalRequest, parsed) {
 // 4. CONTRADICTION DETECTION
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Detect contradictions in the request.
- * 
- * Example: "small companies with more than 1,000 employees"
- * Example: "companies in Nigeria and exclude Nigeria"
- */
 function detectContradictions(originalRequest, parsed) {
   const contradictions = [];
   const lower = originalRequest.toLowerCase();
 
   // ── Size contradiction ──
-  // "small" vs "1000+ employees"
   if (parsed.company && parsed.company.size) {
     const size = parsed.company.size.toLowerCase();
     if (size === 'small' && lower.includes('1000')) {
@@ -391,9 +374,6 @@ class LeadUnderstandingEngine {
     this.aiClient = aiClient;
   }
 
-  /**
-   * Process natural language request → structured specification
-   */
   async processRequest(userRequest) {
     console.log(`[UNDERSTANDING] Processing: "${userRequest}"`);
 
@@ -428,25 +408,41 @@ class LeadUnderstandingEngine {
     }
   }
 
-  /**
-   * Parse with AI — returns raw parsed data
-   */
   async parseWithAI(userRequest) {
     const prompt = `
 You are Skyline AA-1's Lead Request Understanding Engine.
 Convert the user's request into structured data.
 
-**RULES (CRITICAL — DO NOT BREAK):**
+**CRITICAL RULES — DO NOT BREAK:**
 
-1. NEVER invent requirements — if not specified, use null or []
-2. "Any" means the user EXPLICITLY said "any" — otherwise use null
-3. Normalize terminology (CEO → CEO, SaaS → SaaS, Germany → DE)
-4. Distinguish between:
-   - "must have" (hard requirements)
-   - "nice to have" (preferences)
-   - "must not have" (exclusions)
-5. If a phrase has multiple meanings, flag it as ambiguous
-6. If the request contradicts itself, flag it as contradictory
+1. TARGET INTERPRETATION RULE:
+   Determine what the user wants Skyline to RETURN.
+   
+   - If the user asks for people (CEOs, founders, CTOs, CFOs, owners, managers, decision makers, contacts):
+     target.type = "contact"
+     
+   - A company mentioned as the environment, industry, qualification, or employer of that person 
+     does NOT make the target type "both".
+     
+   - Use "both" ONLY when the user explicitly requests BOTH company entities AND contact/person entities as outputs.
+   
+   Examples:
+   "Find CEOs of SaaS companies in Nigeria" → target.type = "contact", target.role = "CEO"
+   "Find SaaS companies in Nigeria" → target.type = "company"
+   "Find SaaS companies in Nigeria and give me their CEOs" → target.type = "both"
+
+2. QUANTITY RULE:
+   - Extract explicit quantity whenever provided.
+   - "Find 39 CEOs" → quantity = 39
+   - "I need 100 leads" → quantity = 100
+   - "Find fifty companies" → quantity = 50
+   - "Find CEOs of SaaS companies" → quantity = null
+   - NEVER invent a quantity.
+   - NEVER convert unspecified quantity into a default.
+
+3. NEVER invent requirements — if not specified, use null or []
+4. "Any" means the user EXPLICITLY said "any" — otherwise use null
+5. Normalize terminology (CEO → CEO, SaaS → SaaS, Germany → DE)
 
 **Output JSON:**
 {
@@ -465,36 +461,46 @@ Convert the user's request into structured data.
   "raw": "string"
 }
 
-**Examples:**
+**EXAMPLES:**
 
-User: "Find CEOs of SaaS companies in London"
+User: "Find CEOs of SaaS companies in Nigeria"
 Output: {
   "target": { "type": "contact", "role": "CEO", "quantity": null },
   "company": { "industry": ["SaaS"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
-  "location": { "city": "London", "region": null, "country": null },
-  "requirements": { "hard": ["Industry: SaaS", "Location: London", "Role: CEO"], "soft": [], "excluded": [] },
+  "location": { "city": null, "region": null, "country": "Nigeria" },
+  "requirements": { "hard": ["Industry: SaaS", "Location: Nigeria", "Role: CEO"], "soft": [], "excluded": [] },
   "confidence": 0.99,
-  "raw": "Find CEOs of SaaS companies in London"
+  "raw": "Find CEOs of SaaS companies in Nigeria"
 }
 
-User: "I need 50 cybersecurity companies in Germany with 100+ employees. I want decision makers and their verified business emails."
+User: "Find 39 CEOs of SaaS companies in Nigeria"
 Output: {
-  "target": { "type": "contact", "role": "Decision Maker", "quantity": 50 },
-  "company": { "industry": ["Cybersecurity"], "size": "medium", "age": null, "funding": null, "businessType": [], "technologies": [] },
-  "location": { "city": null, "region": null, "country": "Germany" },
-  "requirements": { "hard": ["Industry: Cybersecurity", "Location: Germany", "Company Size: medium", "Role: Decision Maker"], "soft": [], "excluded": [] },
+  "target": { "type": "contact", "role": "CEO", "quantity": 39 },
+  "company": { "industry": ["SaaS"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "location": { "city": null, "region": null, "country": "Nigeria" },
+  "requirements": { "hard": ["Industry: SaaS", "Location: Nigeria", "Role: CEO", "Quantity: 39"], "soft": [], "excluded": [] },
+  "confidence": 0.99,
+  "raw": "Find 39 CEOs of SaaS companies in Nigeria"
+}
+
+User: "Find 50 SaaS companies in Nigeria and give me their CEOs"
+Output: {
+  "target": { "type": "both", "role": "CEO", "quantity": 50 },
+  "company": { "industry": ["SaaS"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "location": { "city": null, "region": null, "country": "Nigeria" },
+  "requirements": { "hard": ["Industry: SaaS", "Location: Nigeria", "Role: CEO", "Quantity: 50"], "soft": [], "excluded": [] },
+  "confidence": 0.99,
+  "raw": "Find 50 SaaS companies in Nigeria and give me their CEOs"
+}
+
+User: "I want 39 leads in Nigeria with great intelligence in SaaS company and their CEO contact"
+Output: {
+  "target": { "type": "contact", "role": "CEO", "quantity": 39 },
+  "company": { "industry": ["SaaS"], "size": null, "age": null, "funding": null, "businessType": [], "technologies": [] },
+  "location": { "city": null, "region": null, "country": "Nigeria" },
+  "requirements": { "hard": ["Industry: SaaS", "Location: Nigeria", "Role: CEO", "Quantity: 39"], "soft": [], "excluded": [] },
   "confidence": 0.98,
-  "raw": "I need 50 cybersecurity companies in Germany with 100+ employees. I want decision makers and their verified business emails."
-}
-
-User: "Find me tech businesses in London, preferably startups"
-Output: {
-  "target": { "type": "company", "role": null, "quantity": null },
-  "company": { "industry": ["Technology"], "size": null, "age": "startup", "funding": null, "businessType": [], "technologies": [] },
-  "location": { "city": "London", "region": null, "country": null },
-  "requirements": { "hard": ["Location: London"], "soft": ["Company Age: startup"], "excluded": [] },
-  "confidence": 0.85,
-  "raw": "Find me tech businesses in London, preferably startups"
+  "raw": "I want 39 leads in Nigeria with great intelligence in SaaS company and their CEO contact"
 }
 
 **User Request:**
@@ -506,7 +512,10 @@ Output: {
     const response = await this.aiClient.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: 'You extract structured data from lead requests. Distinguish hard vs soft requirements. Output only JSON.' },
+        { 
+          role: 'system', 
+          content: 'You extract structured data from lead requests. Distinguish hard vs soft requirements. Output only JSON. Remember: target.type = "contact" for people, "company" for companies, "both" only when user explicitly wants both.' 
+        },
         { role: 'user', content: prompt }
       ],
       temperature: 0.2,
@@ -517,9 +526,6 @@ Output: {
     return JSON.parse(response.choices[0].message.content);
   }
 
-  /**
-   * Normalize values
-   */
   normalize(parsed) {
     const result = JSON.parse(JSON.stringify(parsed));
 
@@ -568,9 +574,6 @@ Output: {
     return result;
   }
 
-  /**
-   * Classify requirements — separate hard vs soft vs excluded
-   */
   classifyRequirements(userRequest, parsed) {
     const hard = [];
     const soft = [];
@@ -607,7 +610,6 @@ Output: {
 
     // ── Size ──
     if (parsed.company && parsed.company.size) {
-      // Check if it's a preference or hard requirement
       if (lower.includes('prefer') || lower.includes('preferably') || lower.includes('ideally')) {
         soft.push(`Company Size: ${parsed.company.size} (preferred)`);
       } else {
@@ -662,9 +664,6 @@ Output: {
     return { hard, soft, excluded };
   }
 
-  /**
-   * Build the contract
-   */
   buildContract(userRequest, normalized, ambiguities, contradictions, classified) {
     // Determine status
     let status = 'ready';
@@ -758,9 +757,6 @@ Output: {
     return spec;
   }
 
-  /**
-   * Validate the contract — strict final validation
-   */
   validateContract(spec) {
     const validated = JSON.parse(JSON.stringify(spec));
 
@@ -821,9 +817,6 @@ Output: {
     return validated;
   }
 
-  /**
-   * Build error specification — safe failure, no guessing
-   */
   buildErrorSpec(userRequest, errorMessage) {
     return {
       target: { type: null, role: null, quantity: null },
@@ -856,9 +849,6 @@ Output: {
 // 6. CONVENIENCE FUNCTION
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Quick helper: create engine, process request
- */
 async function understand(userRequest) {
   const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
