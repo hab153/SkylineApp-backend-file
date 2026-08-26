@@ -7,9 +7,10 @@
 const axios = require('axios');
 const Understanding = require('./Understanding');
 const Planning = require('./Planning');
+const Searching = require('./Searching');
 
 // ────────────────────────────────────────────────────────────────
-// 2. MAIN FUNCTION — RETURNS RAW PLAN FOR DEBUGGING
+// 2. MAIN FUNCTION
 // ────────────────────────────────────────────────────────────────
 
 async function generateFreeResponse(message, history, userProfile, onProgress) {
@@ -24,20 +25,25 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const plan = await Planning.plan(understanding);
         console.log('📋 [FREE] Planning result:', JSON.stringify(plan, null, 2));
 
-        // ── Step 3: Return RAW PLAN as string ──
-        const rawPlan = JSON.stringify(plan, null, 2);
+        // ── Step 3: Execute the search ──
+        const searchResults = await Searching.execute(plan);
+        console.log('📋 [FREE] Search results:', JSON.stringify(searchResults, null, 2));
+
+        // ── Step 4: Return results as string ──
+        const resultsString = JSON.stringify(searchResults, null, 2);
 
         return {
-            reply: rawPlan,  // ← Returns raw plan JSON
+            reply: resultsString,
             updatedHistory: [
                 ...(history || []),
                 { role: 'user', content: message },
-                { role: 'assistant', content: rawPlan }
+                { role: 'assistant', content: resultsString }
             ],
             _meta: {
                 tier: 'free',
                 understanding: understanding,
                 plan: plan,
+                searchResults: searchResults,
                 status: understanding.status
             }
         };
