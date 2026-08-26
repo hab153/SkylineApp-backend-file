@@ -6,6 +6,7 @@
 
 const axios = require('axios');
 const Understanding = require('./Understanding');
+const Planning = require('./Planning');
 
 // ────────────────────────────────────────────────────────────────
 // 2. MAIN FUNCTION
@@ -19,11 +20,15 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const understanding = await Understanding.understand(message);
         console.log('📋 [FREE] Understanding result:', JSON.stringify(understanding, null, 2));
 
-        // ── Step 2: Build a user-friendly summary ──
-        const summary = buildLeadSummary(understanding);
+        // ── Step 2: Plan the search ──
+        const plan = await Planning.plan(understanding);
+        console.log('📋 [FREE] Planning result:', JSON.stringify(plan, null, 2));
+
+        // ── Step 3: Build a user-friendly summary ──
+        const summary = buildLeadSummary(understanding, plan);
         console.log('📋 [FREE] Summary:', summary);
 
-        // ── Step 3: Return the summary as a string ──
+        // ── Step 4: Return the summary as a string ──
         return {
             reply: summary,
             updatedHistory: [
@@ -34,6 +39,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             _meta: {
                 tier: 'free',
                 understanding: understanding,
+                plan: plan,
                 status: understanding.status
             }
         };
@@ -52,7 +58,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 // 3. HELPER: Build User-Friendly Summary — COMPLETE VERSION
 // ────────────────────────────────────────────────────────────────
 
-function buildLeadSummary(spec) {
+function buildLeadSummary(spec, plan) {
     if (!spec || spec.status === 'invalid') {
         return '❌ I couldn\'t understand your request. Please try being more specific.';
     }
@@ -176,6 +182,26 @@ function buildLeadSummary(spec) {
                 summary += `  → ${c.suggestion}\n`;
             }
         });
+    }
+
+    // ── Search Plan ──
+    if (plan) {
+        summary += `\n**🔍 Search Plan:**\n`;
+        if (plan.sources && plan.sources.length > 0) {
+            summary += `• Sources: ${plan.sources.join(', ')}\n`;
+        }
+        if (plan.queries && plan.queries.length > 0) {
+            summary += `• Queries:\n`;
+            plan.queries.forEach(q => {
+                summary += `  - ${q}\n`;
+            });
+        }
+        if (plan.strategy) {
+            summary += `• Strategy: ${plan.strategy}\n`;
+        }
+        if (plan.estimatedLeads) {
+            summary += `• Estimated Leads: ${plan.estimatedLeads}\n`;
+        }
     }
 
     // ── Status ──
