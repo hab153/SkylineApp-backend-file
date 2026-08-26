@@ -75,7 +75,7 @@ function buildLeadSummary(spec) {
     let summary = '📋 **Lead Request Summary**\n\n';
 
     // ── Target ──
-    const targetType = spec.target?.type || 'company';
+    const targetType = spec.target?.type || 'Unknown';
     const role = spec.target?.role ? ` (${spec.target.role})` : '';
     const quantity = spec.target?.quantity ? ` up to ${spec.target.quantity}` : '';
     summary += `**Target:** ${targetType}${role}${quantity}\n`;
@@ -130,7 +130,7 @@ function buildLeadSummary(spec) {
         spec.requirements.hard.forEach(r => summary += `• ${r}\n`);
     }
 
-    // ── Soft Requirements ──
+    // ── Soft Requirements (Preferences) ──
     if (spec.requirements && spec.requirements.soft && spec.requirements.soft.length > 0) {
         summary += `\n**💡 Preferences:**\n`;
         spec.requirements.soft.forEach(r => summary += `• ${r}\n`);
@@ -142,13 +142,54 @@ function buildLeadSummary(spec) {
         spec.requirements.excluded.forEach(r => summary += `• ${r}\n`);
     }
 
+    // ── Confidence ──
+    if (spec.interpretation && spec.interpretation.confidence !== undefined) {
+        const confidencePercent = Math.round(spec.interpretation.confidence * 100);
+        summary += `\n**Confidence:** ${confidencePercent}%`;
+    }
+
+    // ── Assumptions (Normalizations) ──
+    if (spec.interpretation && spec.interpretation.assumptions && spec.interpretation.assumptions.length > 0) {
+        summary += `\n**🔧 Normalized:**\n`;
+        spec.interpretation.assumptions.forEach(a => {
+            summary += `• ${a.input} → ${a.interpretedAs} (${a.reason})\n`;
+        });
+    }
+
+    // ── Ambiguities ──
+    if (spec.ambiguities && spec.ambiguities.length > 0) {
+        summary += `\n**⚠️ Ambiguities:**\n`;
+        spec.ambiguities.forEach(a => {
+            summary += `• ${a.reason}\n`;
+            if (a.clarification_question) {
+                summary += `  → ${a.clarification_question}\n`;
+            }
+        });
+    }
+
+    // ── Contradictions ──
+    if (spec.contradictions && spec.contradictions.length > 0) {
+        summary += `\n**❌ Contradictions:**\n`;
+        spec.contradictions.forEach(c => {
+            summary += `• ${c.reason}\n`;
+            if (c.suggestion) {
+                summary += `  → ${c.suggestion}\n`;
+            }
+        });
+    }
+
     // ── Status ──
     const statusEmoji = spec.status === 'ready' ? '✅' : spec.status === 'needs_clarification' ? '⚠️' : '❌';
     summary += `\n**Status:** ${statusEmoji} ${spec.status.toUpperCase()}`;
 
-    // ── Request ID (for debugging) ──
+    // ── Request ID ──
     if (spec.requestId) {
         summary += `\n**Request ID:** \`${spec.requestId}\``;
+    }
+
+    // ── Version ──
+    if (spec.version) {
+        summary += `\n**Version:** ${spec.version}`;
     }
 
     return summary;
