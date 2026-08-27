@@ -1,5 +1,16 @@
 // ──────────────────────────────────────────────────────────────
-// SEARCHING.JS — Layer 3: Discovery Engine v2.0
+// SEARCHING.JS — Layer 3: Discovery Engine v3.0.0
+// 
+// RESPONSIBILITIES:
+// - Execute Layer 2 search plan using Tavily
+// - Use GPT-4o-mini to extract legitimate candidates
+// - Reject garbage (article titles, lists, fragments)
+// - Enforce role matching (CEO ≠ CMO)
+// - Preserve discovery evidence and source provenance
+// - Remove obvious duplicates
+// - Return structured discovery pool to Layer 4
+// - NEVER verify, score, rank, or enrich leads
+// - NEVER invent missing information
 // ──────────────────────────────────────────────────────────────
 
 const axios = require('axios');
@@ -17,10 +28,45 @@ const CONFIG = {
     AI_MODEL: 'gpt-4o-mini',
     AI_TEMPERATURE: 0.2,
     AI_MAX_TOKENS: 800,
+    AI_BATCH_SIZE: 5,
 };
 
 // ──────────────────────────────────────────────────────────────
-// 2. TAVILY CLIENT
+// 2. ROLE MATCHING CONFIGURATION
+// ──────────────────────────────────────────────────────────────
+
+const ROLE_MATCHING = {
+    // Exact matches (accepted)
+    exact: {
+        'ceo': 'CEO',
+        'chief executive officer': 'CEO',
+        'founder & ceo': 'CEO',
+        'co-founder & ceo': 'CEO',
+        'founder and ceo': 'CEO',
+        'co-founder and ceo': 'CEO',
+    },
+    // Partial matches (accepted with caution)
+    partial: {
+        'founder': 'Founder',
+        'co-founder': 'Co-Founder',
+        'owner': 'Owner',
+        'president': 'President',
+    },
+    // Role aliases (accepted for specific requested roles)
+    aliases: {
+        'ceo': ['ceo', 'chief executive officer', 'founder & ceo', 'co-founder & ceo', 'founder and ceo', 'co-founder and ceo'],
+        'founder': ['founder', 'co-founder', 'founder & ceo', 'co-founder & ceo'],
+        'cto': ['cto', 'chief technology officer', 'chief technical officer'],
+        'cfo': ['cfo', 'chief financial officer'],
+        'cmo': ['cmo', 'chief marketing officer'],
+        'coo': ['coo', 'chief operating officer'],
+    },
+    // Rejected roles (never accepted)
+    rejected: ['cmo', 'cto', 'cfo', 'coo', 'employee', 'intern', 'associate', 'analyst', 'coordinator', 'assistant'],
+};
+
+// ──────────────────────────────────────────────────────────────
+// 3. TAVILY CLIENT
 // ──────────────────────────────────────────────────────────────
 
 class TavilyClient {
@@ -86,7 +132,68 @@ class TavilyClient {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. AI EXTRACTOR
+// 4. ROLE MATCHING ENGINE
+// ──────────────────────────────────────────────────────────────
+
+class RoleMatcher {
+    /**
+     * Check if a discovered role matches the requested role
+     * @param {string} requestedRole - The role requested by the user
+     * @param {string} discoveredRole - The role discovered from search
+     * @returns {Object} { match: boolean, confidence: number, normalizedRole: string }
+     */
+    matchRole(requestedRole, discoveredRole) {
+        if (!requestedRole || !discoveredRole) {
+            return { match: false, confidence: 0, normalizedRole: null };
+        }
+
+        const req = requestedRole.toLowerCase().trim();
+        const dis = discoveredRole.toLowerCase().trim();
+
+        // ── Check exact match ──
+        if (ROLE_MATCHING.exact[dis] && ROLE_MATCHING.exact[dis].toLowerCase() === req) {
+            return { match: true, confidence: 1.0, normalizedRole: ROLE_MATCHING.exact[dis] };
+        }
+
+        // ── Check if discovered role is in the requested role's aliases ──
+        if (ROLE_MATCHING.aliases[req]) {
+            for (const alias of ROLE_MATCHING.aliases[req]) {
+                if (dis.includes(alias) || alias.includes(dis)) {
+                    return { match: true, confidence: 0.9, normalizedRole: requestedRole };
+                }
+            }
+        }
+
+        // ── Check partial matches (founder for CEO, etc.) ──
+        if (req === 'ceo' && ROLE_MATCHING.partial['founder'] && dis.includes('founder')) {
+            return { match: true, confidence: 0.7, normalizedRole: 'Founder' };
+        }
+
+        // ── Check rejected roles ──
+        for (const rejected of ROLE_MATCHING.rejected) {
+            if (dis.includes(rejected)) {
+                return { match: false, confidence: 0, normalizedRole: null };
+            }
+        }
+
+        // ── No match found ──
+        return { match: false, confidence: 0, normalizedRole: null };
+    }
+
+    /**
+     * Normalize a role to standard format
+     */
+    normalizeRole(role) {
+        if (!role) return null;
+        const lower = role.toLowerCase().trim();
+        if (ROLE_MATCHING.exact[lower]) return ROLE_MATCHING.exact[lower];
+        if (ROLE_MATCHING.partial[lower]) return ROLE_MATCHING.partial[lower];
+        return role;
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 5. AI EXTRACTOR
 // ──────────────────────────────────────────────────────────────
 
 class AIExtractor {
@@ -97,20 +204,21 @@ class AIExtractor {
         this.model = CONFIG.AI_MODEL;
         this.temperature = CONFIG.AI_TEMPERATURE;
         this.maxTokens = CONFIG.AI_MAX_TOKENS;
+        this.roleMatcher = new RoleMatcher();
     }
 
     isConfigured() {
         return !!process.env.OPENAI_API_KEY;
     }
 
-    async extractCandidates(tavilyResults, query, branch) {
+    async extractCandidates(tavilyResults, query, branch, requestedRole) {
         if (!this.isConfigured()) {
             console.warn('[AI] OpenAI API key missing. Using fallback extraction.');
-            return this.fallbackExtraction(tavilyResults, query, branch);
+            return this.fallbackExtraction(tavilyResults, query, branch, requestedRole);
         }
 
         try {
-            const prompt = this.buildExtractionPrompt(tavilyResults, query, branch);
+            const prompt = this.buildExtractionPrompt(tavilyResults, query, branch, requestedRole);
             
             const response = await this.openai.chat.completions.create({
                 model: this.model,
@@ -121,7 +229,7 @@ class AIExtractor {
 
 Your job is to extract real candidate companies and people from web search results.
 
-RULES — NEVER BREAK:
+CRITICAL RULES — NEVER BREAK:
 1. NEVER invent information.
 2. NEVER treat an article title as a company.
 3. NEVER treat a category, industry, list, ranking, sentence fragment, or search phrase as a company or person.
@@ -129,6 +237,12 @@ RULES — NEVER BREAK:
 5. If information is missing, return null.
 6. Do not perform final verification.
 7. Return JSON only.
+
+ROLE MATCHING RULE:
+- The requested role is: "${requestedRole || 'Any'}"
+- Only extract candidates where the discovered role matches the requested role.
+- If no role is specified, extract any relevant role.
+- Return null if the role doesn't match.
 
 Output format:
 {
@@ -139,10 +253,10 @@ Output format:
       "companyIndustry": "SaaS" or null,
       "companyLocation": "London" or null,
       "personName": "John Smith" or null,
-      "personRole": "Founder" or null,
+      "personRole": "CEO" or null,
       "email": null,
       "linkedinUrl": null,
-      "evidenceSnippet": "...",
+      "evidenceSnippet": "Text that proves this extraction",
       "confidence": 0.92
     }
   ]
@@ -161,21 +275,53 @@ Output format:
             const content = response.choices[0].message.content;
             const parsed = JSON.parse(content);
             
-            console.log(`[AI] Extracted ${parsed.candidates?.length || 0} candidates`);
-            return parsed.candidates || [];
+            // ── Post-process with role matching ──
+            const candidates = parsed.candidates || [];
+            const filtered = this.filterByRole(candidates, requestedRole);
+            
+            console.log(`[AI] Extracted ${candidates.length} candidates, ${filtered.length} after role filtering`);
+            return filtered;
 
         } catch (error) {
             console.error('[AI] Extraction failed:', error.message);
-            return this.fallbackExtraction(tavilyResults, query, branch);
+            return this.fallbackExtraction(tavilyResults, query, branch, requestedRole);
         }
     }
 
-    buildExtractionPrompt(tavilyResults, query, branch) {
+    filterByRole(candidates, requestedRole) {
+        if (!requestedRole) return candidates;
+        
+        const matcher = new RoleMatcher();
+        const filtered = [];
+
+        for (const candidate of candidates) {
+            const role = candidate.personRole || candidate.role || null;
+            if (!role) {
+                // No role found, but keep if we have company and person
+                if (candidate.companyName && candidate.personName) {
+                    filtered.push(candidate);
+                }
+                continue;
+            }
+
+            const result = matcher.matchRole(requestedRole, role);
+            if (result.match) {
+                // Update role to normalized version
+                candidate.personRole = result.normalizedRole || role;
+                candidate.confidence = (candidate.confidence || 0.5) * result.confidence;
+                filtered.push(candidate);
+            }
+        }
+
+        return filtered;
+    }
+
+    buildExtractionPrompt(tavilyResults, query, branch, requestedRole) {
         const results = tavilyResults.results || [];
         const industry = branch.industry || 'unknown';
 
         let resultsText = '';
-        for (let i = 0; i < Math.min(results.length, 10); i++) {
+        for (let i = 0; i < Math.min(results.length, CONFIG.AI_BATCH_SIZE); i++) {
             const item = results[i];
             resultsText += `
 Result ${i + 1}:
@@ -187,16 +333,18 @@ Content: ${(item.content || '').substring(0, 600)}
 
         return `Analyze search results for: "${query}"
 Target industry: ${industry}
+Requested role: ${requestedRole || 'Any'}
 
 ${resultsText}
 
 Return JSON only. Extract real companies/people with evidence. Never invent.`;
     }
 
-    fallbackExtraction(tavilyResults, query, branch) {
+    fallbackExtraction(tavilyResults, query, branch, requestedRole) {
         console.log('[AI] Using fallback deterministic extraction');
         const candidates = [];
         const results = tavilyResults.results || [];
+        const matcher = new RoleMatcher();
 
         for (const item of results) {
             const content = item.content || '';
@@ -204,21 +352,47 @@ Return JSON only. Extract real companies/people with evidence. Never invent.`;
             
             const companyMatch = content.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:is|was|are|has|provides|offers)/i);
             const personMatch = content.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s+(?:is|was|said|founded|founded by)/i);
-            const roleMatch = content.match(/(?:founder|ceo|cto|director|manager)\s+([A-Z][a-z]+)/i);
+            let roleMatch = content.match(/(?:founder|ceo|cto|director|manager|president)\s+([A-Z][a-z]+)/i);
+            
+            if (roleMatch) {
+                roleMatch = roleMatch[1];
+            } else {
+                // Try to find role directly
+                const roleRegex = /\b(founder|ceo|cto|cfo|cmo|coo|director|vp|president|owner)\b/i;
+                const roleFound = content.match(roleRegex);
+                if (roleFound) {
+                    roleMatch = roleFound[1];
+                }
+            }
 
             if (companyMatch || personMatch) {
-                candidates.push({
-                    companyName: companyMatch ? companyMatch[1] : null,
-                    companyDomain: null,
-                    companyIndustry: branch.industry || null,
-                    companyLocation: null,
-                    personName: personMatch ? personMatch[1] : null,
-                    personRole: roleMatch ? roleMatch[1] : null,
-                    email: null,
-                    linkedinUrl: null,
-                    evidenceSnippet: content.substring(0, 200),
-                    confidence: 0.5,
-                });
+                const discoveredRole = roleMatch || null;
+                let matched = true;
+                let normalizedRole = discoveredRole;
+
+                if (requestedRole && discoveredRole) {
+                    const matchResult = matcher.matchRole(requestedRole, discoveredRole);
+                    if (!matchResult.match) {
+                        matched = false;
+                    } else {
+                        normalizedRole = matchResult.normalizedRole || discoveredRole;
+                    }
+                }
+
+                if (matched) {
+                    candidates.push({
+                        companyName: companyMatch ? companyMatch[1] : null,
+                        companyDomain: null,
+                        companyIndustry: branch.industry || null,
+                        companyLocation: null,
+                        personName: personMatch ? personMatch[1] : null,
+                        personRole: normalizedRole || null,
+                        email: null,
+                        linkedinUrl: null,
+                        evidenceSnippet: content.substring(0, 200),
+                        confidence: 0.5,
+                    });
+                }
             }
         }
 
@@ -227,7 +401,7 @@ Return JSON only. Extract real companies/people with evidence. Never invent.`;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. CANDIDATE BUILDER
+// 6. CANDIDATE BUILDER
 // ──────────────────────────────────────────────────────────────
 
 class CandidateBuilder {
@@ -235,10 +409,16 @@ class CandidateBuilder {
         const candidates = [];
 
         for (const ai of aiCandidates) {
-            if (!ai.companyName && !ai.personName) continue;
-            if (ai.companyName && this.isGarbageCompanyName(ai.companyName)) continue;
+            // Must have company AND person for contact targets
+            if (!ai.companyName || !ai.personName) {
+                continue;
+            }
 
-            candidates.push({
+            if (ai.companyName && this.isGarbageCompanyName(ai.companyName)) {
+                continue;
+            }
+
+            const candidate = {
                 candidateId: `candidate-${uuidv4().substring(0, 8)}`,
                 company: {
                     name: ai.companyName || null,
@@ -261,15 +441,64 @@ class CandidateBuilder {
                     query: query,
                     sourceUrl: sourceUrl || null,
                     sourceTitle: sourceTitle || null,
-                    sourceSnippet: ai.evidenceSnippet || (sourceSnippet || '').substring(0, 200),
+                    sourceSnippet: ai.evidenceSnippet || (sourceSnippet || '').substring(0, 300),
                     discoveredAt: new Date().toISOString(),
                 },
-                evidence: [],
+                evidence: this.buildEvidence(ai, sourceUrl, sourceTitle),
                 discoveryConfidence: ai.confidence || 0.5,
-            });
+            };
+
+            candidates.push(candidate);
         }
 
         return candidates;
+    }
+
+    buildEvidence(ai, sourceUrl, sourceTitle) {
+        const evidence = [];
+
+        if (ai.companyName) {
+            evidence.push({
+                type: 'company_identity',
+                sourceUrl: sourceUrl || null,
+                sourceTitle: sourceTitle || null,
+                snippet: ai.evidenceSnippet || '',
+            });
+        }
+        if (ai.personName) {
+            evidence.push({
+                type: 'person_identity',
+                sourceUrl: sourceUrl || null,
+                sourceTitle: sourceTitle || null,
+                snippet: ai.evidenceSnippet || '',
+            });
+        }
+        if (ai.personRole) {
+            evidence.push({
+                type: 'role',
+                sourceUrl: sourceUrl || null,
+                sourceTitle: sourceTitle || null,
+                snippet: ai.personRole,
+            });
+        }
+        if (ai.companyIndustry) {
+            evidence.push({
+                type: 'industry',
+                sourceUrl: sourceUrl || null,
+                sourceTitle: sourceTitle || null,
+                snippet: ai.companyIndustry,
+            });
+        }
+        if (ai.companyLocation) {
+            evidence.push({
+                type: 'location',
+                sourceUrl: sourceUrl || null,
+                sourceTitle: sourceTitle || null,
+                snippet: ai.companyLocation,
+            });
+        }
+
+        return evidence;
     }
 
     isGarbageCompanyName(name) {
@@ -288,7 +517,7 @@ class CandidateBuilder {
         const lower = locationStr.toLowerCase();
         const location = { city: null, region: null, country: null, countryCode: null };
 
-        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja'];
+        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco', 'los angeles', 'chicago', 'toronto', 'vancouver', 'sydney', 'melbourne'];
         const countries = {
             'uk': { name: 'United Kingdom', code: 'GB' },
             'united kingdom': { name: 'United Kingdom', code: 'GB' },
@@ -315,7 +544,7 @@ class CandidateBuilder {
 
         for (const city of cities) {
             if (lower.includes(city)) {
-                location.city = city.charAt(0).toUpperCase() + city.slice(1);
+                location.city = city.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
                 break;
             }
         }
@@ -333,7 +562,7 @@ class CandidateBuilder {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 5. DEDUPLICATION ENGINE
+// 7. DEDUPLICATION ENGINE
 // ──────────────────────────────────────────────────────────────
 
 class DeduplicationEngine {
@@ -344,10 +573,13 @@ class DeduplicationEngine {
         for (const candidate of candidates) {
             const domain = candidate.company?.domain;
             const name = candidate.company?.name;
+            const personName = candidate.contact?.name;
 
             let key = null;
             if (domain) {
                 key = domain.toLowerCase();
+            } else if (name && personName) {
+                key = `${name.toLowerCase().replace(/[^a-zA-Z0-9]/g, '')}_${personName.toLowerCase().replace(/[^a-zA-Z0-9]/g, '')}`;
             } else if (name) {
                 key = name.toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
             }
@@ -355,11 +587,18 @@ class DeduplicationEngine {
             if (key) {
                 if (seen.has(key)) {
                     const existing = seen.get(key);
-                    if (candidate.contact?.name && !existing.contact?.name) {
-                        existing.contact.name = candidate.contact.name;
+                    // Merge evidence
+                    if (candidate.evidence && candidate.evidence.length > 0) {
+                        existing.evidence = [...existing.evidence, ...candidate.evidence];
                     }
                     if (candidate.contact?.email && !existing.contact?.email) {
                         existing.contact.email = candidate.contact.email;
+                    }
+                    if (candidate.contact?.linkedinUrl && !existing.contact?.linkedinUrl) {
+                        existing.contact.linkedinUrl = candidate.contact.linkedinUrl;
+                    }
+                    if (candidate.contact?.role && !existing.contact?.role) {
+                        existing.contact.role = candidate.contact.role;
                     }
                     continue;
                 }
@@ -375,7 +614,7 @@ class DeduplicationEngine {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. MAIN SEARCHING ENGINE — FIXED WITH PROPER ERROR HANDLING
+// 8. MAIN SEARCHING ENGINE
 // ──────────────────────────────────────────────────────────────
 
 class SearchingEngine {
@@ -404,10 +643,14 @@ class SearchingEngine {
             // ── Prepare context ──
             const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
             const searchBranches = plan.searchBranches || [];
+            const requestedRole = plan.objective?.role || null;
+            const targetType = plan.objective?.targetType || 'contact';
 
             console.log(`[DISCOVERY] Request: ${requestId}`);
             console.log(`[DISCOVERY] Branches: ${searchBranches.length}`);
             console.log(`[DISCOVERY] Provider: Tavily`);
+            console.log(`[DISCOVERY] Requested Role: ${requestedRole || 'Any'}`);
+            console.log(`[DISCOVERY] Target Type: ${targetType}`);
 
             // ── Execute searches ──
             const allCandidates = [];
@@ -425,7 +668,7 @@ class SearchingEngine {
             const errors = [];
 
             for (const branch of searchBranches) {
-                const branchResults = await this.executeBranch(branch, errors, searchSummary);
+                const branchResults = await this.executeBranch(branch, requestedRole, errors, searchSummary);
                 searchSummary.branchesExecuted++;
                 searchSummary.queriesExecuted += branchResults.queriesExecuted || 0;
                 searchSummary.rawResultsFound += branchResults.rawResultsFound || 0;
@@ -440,7 +683,9 @@ class SearchingEngine {
 
             console.log(`[DISCOVERY] Branches executed: ${searchSummary.branchesExecuted}`);
             console.log(`[DISCOVERY] Queries executed: ${searchSummary.queriesExecuted}`);
+            console.log(`[DISCOVERY] Raw results found: ${searchSummary.rawResultsFound}`);
             console.log(`[DISCOVERY] Candidates extracted: ${searchSummary.candidatesExtracted}`);
+            console.log(`[DISCOVERY] Invalid candidates rejected: ${searchSummary.invalidCandidatesRejected}`);
 
             // ── Deduplicate ──
             const dedupResult = this.deduplicationEngine.deduplicate(allCandidates);
@@ -448,6 +693,7 @@ class SearchingEngine {
             searchSummary.duplicatesRemoved = dedupResult.duplicatesRemoved;
             searchSummary.candidatesForNextLayer = dedupResult.uniqueCandidates.length;
 
+            console.log(`[DISCOVERY] Duplicates removed: ${dedupResult.duplicatesRemoved}`);
             console.log(`[DISCOVERY] Candidates for Layer 4: ${dedupResult.uniqueCandidates.length}`);
 
             // ── Determine status ──
@@ -462,7 +708,7 @@ class SearchingEngine {
 
             // ── Build result ──
             return {
-                discoveryVersion: '2.0.0',
+                discoveryVersion: '3.0.0',
                 requestId: requestId,
                 status: status,
                 searchProvider: {
@@ -487,7 +733,7 @@ class SearchingEngine {
         }
     }
 
-    async executeBranch(branch, errors, searchSummary) {
+    async executeBranch(branch, requestedRole, errors, searchSummary) {
         const results = {
             candidates: [],
             queriesExecuted: 0,
@@ -515,7 +761,12 @@ class SearchingEngine {
                 // ── Extract with AI ──
                 let aiCandidates = [];
                 try {
-                    aiCandidates = await this.aiExtractor.extractCandidates(tavilyResult, query, branch);
+                    aiCandidates = await this.aiExtractor.extractCandidates(
+                        tavilyResult,
+                        query,
+                        branch,
+                        requestedRole
+                    );
                 } catch (aiError) {
                     console.error('[DISCOVERY] AI extraction error:', aiError.message);
                 }
@@ -556,7 +807,7 @@ class SearchingEngine {
 
     buildErrorResult(errorCode, message, plan) {
         return {
-            discoveryVersion: '2.0.0',
+            discoveryVersion: '3.0.0',
             requestId: plan?.requestId || `error-${uuidv4().substring(0, 8)}`,
             status: 'failed',
             searchProvider: {
@@ -581,7 +832,7 @@ class SearchingEngine {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 7. CONVENIENCE FUNCTION
+// 9. CONVENIENCE FUNCTION
 // ──────────────────────────────────────────────────────────────
 
 async function execute(plan) {
@@ -591,7 +842,7 @@ async function execute(plan) {
     } catch (error) {
         console.error('[SEARCHING] Fatal execute error:', error.message);
         return {
-            discoveryVersion: '2.0.0',
+            discoveryVersion: '3.0.0',
             requestId: `error-${uuidv4().substring(0, 8)}`,
             status: 'failed',
             error: { code: 'EXECUTE_ERROR', message: error.message },
@@ -603,7 +854,7 @@ async function execute(plan) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. EXPORTS
+// 10. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -613,5 +864,7 @@ module.exports = {
     AIExtractor,
     CandidateBuilder,
     DeduplicationEngine,
+    RoleMatcher,
     CONFIG,
+    ROLE_MATCHING,
 };
