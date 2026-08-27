@@ -2,11 +2,12 @@
 // SEARCHING.JS — Layer 3: Discovery & Search Execution Engine
 // 
 // RESPONSIBILITIES:
-// - Execute search plan using Tavily
-// - Extract candidates from search results
-// - Preserve evidence for each discovery
-// - Remove obvious duplicates
-// - Return structured discovery results
+// - Execute Layer 2 search plan using Tavily
+// - Collect raw candidates (possible companies/people)
+// - Preserve discovery evidence and source provenance
+// - Perform basic URL-level deduplication only
+// - Return raw discovery pool to Layer 4
+// - NEVER verify, score, rank, or enrich leads
 // - NEVER invent missing information
 // ──────────────────────────────────────────────────────────────
 
@@ -21,7 +22,6 @@ const CONFIG = {
     TAVILY_API_URL: 'https://api.tavily.com/search',
     MAX_RESULTS_PER_QUERY: 20,
     SEARCH_TIMEOUT_MS: 15000,
-    DEDUPLICATION_KEYS: ['normalized_domain', 'company_name'],
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -91,12 +91,13 @@ class TavilyClient {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. CANDIDATE EXTRACTOR
+// 3. CANDIDATE EXTRACTOR — Simplified, "Possible" Only
 // ──────────────────────────────────────────────────────────────
 
 class CandidateExtractor {
     /**
-     * Extract candidates from Tavily search results
+     * Extract raw candidates from Tavily search results
+     * All fields are "possible" — NOT verified
      */
     extractFromTavilyResults(results, query, branch) {
         const candidates = [];
@@ -113,7 +114,8 @@ class CandidateExtractor {
     }
 
     /**
-     * Extract a single candidate from a Tavily result
+     * Extract a single raw candidate from a Tavily result
+     * Everything is marked as "possible" — NOT verified
      */
     extractCandidate(item, query, branch) {
         // Skip if no useful content
@@ -124,143 +126,86 @@ class CandidateExtractor {
         const content = item.content || '';
         const title = item.title || '';
         const url = item.url || '';
-        const domain = this.extractDomain(url);
 
-        // ── Extract company name ──
-        let companyName = this.extractCompanyName(title, content, domain);
-        if (!companyName) {
-            companyName = domain || 'Unknown Company';
-        }
+        // ── Extract possible signals (not verified) ──
+        const possibleCompany = this.extractPossibleCompany(title, content);
+        const possiblePerson = this.extractPossiblePerson(title, content);
+        const possibleRole = this.extractPossibleRole(title, content);
+        const possibleIndustry = this.extractPossibleIndustry(title, content);
+        const possibleLocation = this.extractPossibleLocation(title, content);
 
-        // ── Extract person name ──
-        const personName = this.extractPersonName(title, content);
-
-        // ── Extract role ──
-        const role = this.extractRole(title, content);
-
-        // ── Extract industry ──
-        const industry = this.extractIndustry(title, content);
-
-        // ── Extract location ──
-        const location = this.extractLocation(title, content);
-
-        // ── Extract email ──
-        const email = this.extractEmail(content);
-
-        // ── Extract LinkedIn URL ──
-        const linkedinUrl = this.extractLinkedIn(content);
-
-        // ── Build candidate ──
+        // ── Build raw candidate ──
         return {
             candidateId: `candidate-${uuidv4().substring(0, 8)}`,
-            company: {
-                name: companyName,
-                domain: domain,
-                industry: industry || null,
-                location: {
-                    city: location?.city || null,
-                    region: location?.region || null,
-                    country: location?.country || null,
-                    countryCode: location?.countryCode || null,
-                },
-                employeeCount: null,
-                revenue: null,
-                funding: null,
+            
+            // ── Possible fields (unverified) ──
+            possibleCompany: possibleCompany || null,
+            possiblePerson: possiblePerson || null,
+            possibleRole: possibleRole || null,
+            possibleIndustry: possibleIndustry || null,
+            possibleLocation: possibleLocation || null,
+            
+            // ── Discovery provenance ──
+            branch: branch.industry || 'unknown',
+            query: query,
+            source: {
+                url: url,
+                title: title,
+                snippet: content.substring(0, 500),
             },
-            contact: {
-                name: personName || null,
-                role: role || null,
-                email: email || null,
-                phone: null,
-                linkedinUrl: linkedinUrl || null,
-            },
-            discovery: {
-                branch: branch.industry || 'unknown',
-                query: query,
-                sourceUrl: url,
-                sourceTitle: title,
-                sourceSnippet: content.substring(0, 500),
-                discoveredAt: new Date().toISOString(),
-            },
+            
+            // ── Raw evidence ──
             evidence: [
                 {
-                    type: 'company_identity',
+                    type: 'discovery_source',
                     sourceUrl: url,
                     sourceTitle: title,
                     snippet: content.substring(0, 300),
                 }
             ],
-            rawData: item,
-            confidence: 0.5, // Base confidence, will be updated by Layer 4
+            
+            // ── Metadata ──
+            discoveredAt: new Date().toISOString(),
+            rawData: item, // Preserve full raw data for later layers
         };
     }
 
-    // ─── Helper extraction methods ───
+    // ─── Simple extraction helpers (all "possible") ───
 
-    extractDomain(url) {
-        if (!url) return null;
-        try {
-            const parsed = new URL(url);
-            let domain = parsed.hostname;
-            if (domain.startsWith('www.')) {
-                domain = domain.substring(4);
-            }
-            return domain;
-        } catch {
-            return null;
-        }
-    }
-
-    extractCompanyName(title, content, domain) {
-        // Try to find company name in title
+    extractPossibleCompany(title, content) {
+        const combined = `${title || ''} ${content || ''}`;
+        
+        // Try title first
         if (title) {
-            // Remove common suffixes
             let cleaned = title
-                .replace(/\s*[-|]\s*.*$/, '') // Remove after separator
+                .replace(/\s*[-|]\s*.*$/, '')
                 .replace(/\s*(About|Home|Contact|Blog|Careers|Team|Company|Homepage)$/i, '')
                 .trim();
-            
             if (cleaned.length > 2 && cleaned.length < 60) {
                 return cleaned;
             }
         }
 
-        // Try to find in content
-        if (content) {
-            // Look for "Company Name is" or "About Company Name"
-            const patterns = [
-                /company\s+(?:name\s+is\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})/i,
-                /about\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})(?:\s+company)/i,
-                /welcome to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})/i,
-                /(?:^|\s)([A-Z][A-Za-z]+(?:\s+[A-Za-z]+){0,3})(?:\s+is\s+a\s+)/i,
-            ];
+        // Try content patterns
+        const patterns = [
+            /company\s+(?:name\s+is\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})/i,
+            /about\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})(?:\s+company)/i,
+            /welcome to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})/i,
+        ];
 
-            for (const pattern of patterns) {
-                const match = content.match(pattern);
-                if (match && match[1]) {
-                    return match[1].trim();
-                }
+        for (const pattern of patterns) {
+            const match = combined.match(pattern);
+            if (match && match[1]) {
+                return match[1].trim();
             }
-        }
-
-        // Fallback to domain
-        if (domain) {
-            return domain
-                .split('.')[0]
-                .replace(/^www\./, '')
-                .replace(/[-_]/g, ' ')
-                .split(' ')
-                .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                .join(' ');
         }
 
         return null;
     }
 
-    extractPersonName(title, content) {
+    extractPossiblePerson(title, content) {
         const combined = `${title || ''} ${content || ''}`;
         
-        // Look for "Name is" or "by Name" or "Name - Title"
         const patterns = [
             /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s+(?:is|was|said|-)/i,
             /(?:founder|ceo|cto|director|manager|president)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})/i,
@@ -281,7 +226,7 @@ class CandidateExtractor {
         return null;
     }
 
-    extractRole(title, content) {
+    extractPossibleRole(title, content) {
         const combined = `${title || ''} ${content || ''}`.toLowerCase();
         const roles = ['founder', 'ceo', 'co-founder', 'cto', 'cfo', 'cmo', 'coo', 'director', 'vp', 'manager', 'president', 'executive', 'owner'];
 
@@ -294,7 +239,7 @@ class CandidateExtractor {
         return null;
     }
 
-    extractIndustry(title, content) {
+    extractPossibleIndustry(title, content) {
         const combined = `${title || ''} ${content || ''}`.toLowerCase();
         const industries = {
             'saas': 'SaaS',
@@ -324,14 +269,13 @@ class CandidateExtractor {
         return null;
     }
 
-    extractLocation(title, content) {
-        const combined = `${title || ''} ${content || ''}`;
-        const countries = {
-            'nigeria': 'Nigeria',
-            'nigeria': 'Nigeria',
+    extractPossibleLocation(title, content) {
+        const combined = `${title || ''} ${content || ''}`.toLowerCase();
+        const locations = {
             'london': 'London',
             'uk': 'United Kingdom',
             'united kingdom': 'United Kingdom',
+            'nigeria': 'Nigeria',
             'germany': 'Germany',
             'usa': 'United States',
             'united states': 'United States',
@@ -347,115 +291,56 @@ class CandidateExtractor {
             'ireland': 'Ireland',
             'south africa': 'South Africa',
             'brazil': 'Brazil',
-            'mexico': 'Mexico',
             'australia': 'Australia',
             'india': 'India',
-            'china': 'China',
-            'japan': 'Japan',
             'singapore': 'Singapore',
         };
 
-        const lower = combined.toLowerCase();
-        for (const [key, value] of Object.entries(countries)) {
-            if (lower.includes(key)) {
-                const isCity = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam'].includes(key);
-                return {
-                    city: isCity ? value : null,
-                    country: isCity ? null : value,
-                };
+        for (const [key, value] of Object.entries(locations)) {
+            if (combined.includes(key)) {
+                return value;
             }
         }
 
         return null;
     }
-
-    extractEmail(content) {
-        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-        const match = content.match(emailRegex);
-        return match ? match[0] : null;
-    }
-
-    extractLinkedIn(content) {
-        const linkedinRegex = /(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[a-zA-Z0-9-]+/;
-        const match = content.match(linkedinRegex);
-        return match ? match[0] : null;
-    }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. DEDUPLICATION ENGINE
+// 4. DEDUPLICATION ENGINE — URL/Result Level Only
 // ──────────────────────────────────────────────────────────────
 
 class DeduplicationEngine {
     /**
-     * Remove obvious duplicates from candidates
+     * Remove only obvious duplicates (same URL or same result)
+     * Sophisticated identity resolution belongs to Layer 4
      */
     deduplicate(candidates) {
-        const uniqueMap = new Map();
-        const duplicates = [];
+        const seenUrls = new Set();
+        const uniqueCandidates = [];
 
         for (const candidate of candidates) {
-            const domain = candidate.company?.domain;
-            const name = candidate.company?.name?.toLowerCase().trim();
-
-            let key = null;
-
-            // Prefer domain as primary key
-            if (domain) {
-                key = domain;
-            } else if (name) {
-                // Normalize company name
-                const normalized = this.normalizeCompanyName(name);
-                key = normalized;
+            const url = candidate.source?.url;
+            
+            // Skip if we've seen this URL before
+            if (url) {
+                if (seenUrls.has(url)) {
+                    continue;
+                }
+                seenUrls.add(url);
             }
-
-            if (!key) {
-                // No key found, keep as unique
-                uniqueMap.set(candidate.candidateId, candidate);
-                continue;
-            }
-
-            if (uniqueMap.has(key)) {
-                // Duplicate found
-                duplicates.push({
-                    originalId: uniqueMap.get(key).candidateId,
-                    duplicateId: candidate.candidateId,
-                    key: key,
-                });
-                // Merge evidence
-                const existing = uniqueMap.get(key);
-                if (candidate.evidence && candidate.evidence.length > 0) {
-                    existing.evidence = [...existing.evidence, ...candidate.evidence];
-                }
-                // Keep the better contact info
-                if (candidate.contact?.name && !existing.contact?.name) {
-                    existing.contact.name = candidate.contact.name;
-                }
-                if (candidate.contact?.email && !existing.contact?.email) {
-                    existing.contact.email = candidate.contact.email;
-                }
-                if (candidate.contact?.role && !existing.contact?.role) {
-                    existing.contact.role = candidate.contact.role;
-                }
-            } else {
-                uniqueMap.set(key, candidate);
-            }
+            
+            uniqueCandidates.push(candidate);
         }
 
-        return {
-            uniqueCandidates: Array.from(uniqueMap.values()),
-            duplicates: duplicates,
-            totalDuplicates: duplicates.length,
-        };
-    }
+        const duplicatesRemoved = candidates.length - uniqueCandidates.length;
 
-    normalizeCompanyName(name) {
-        if (!name) return '';
-        return name
-            .toLowerCase()
-            .replace(/(ltd|limited|inc|llc|corp|corporation|gmbh|plc|co|company)\s*$/i, '')
-            .replace(/[^a-zA-Z0-9]/g, '')
-            .trim();
+        console.log(`[DEDUPE] Removed ${duplicatesRemoved} duplicate URLs`);
+
+        return {
+            uniqueCandidates: uniqueCandidates,
+            duplicatesRemoved: duplicatesRemoved,
+        };
     }
 }
 
@@ -476,7 +361,7 @@ class SearchingEngine {
      * @returns {Object} Discovery Result
      */
     async execute(plan) {
-        console.log('[SEARCHING] Starting discovery execution...');
+        console.log('[DISCOVERY] Starting discovery execution...');
 
         // ── Step 1: Validate input ──
         if (!plan || plan.status === 'invalid') {
@@ -489,62 +374,80 @@ class SearchingEngine {
 
         // ── Step 2: Check Tavily API key ──
         if (!this.tavilyClient.isConfigured()) {
-            console.error('[SEARCHING] Tavily API key missing');
+            console.error('[DISCOVERY] Tavily API key missing');
             return this.buildErrorResult('TAVILY_API_KEY_MISSING', 'Tavily API key is not configured');
         }
 
         // ── Step 3: Prepare search context ──
         const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
         const searchBranches = plan.searchBranches || [];
-        const quantity = plan.quantity?.requested || 0;
+        const requestedQuantity = plan.quantity?.requested || 0;
 
-        console.log(`[SEARCHING] Executing ${searchBranches.length} search branches for request ${requestId}`);
+        console.log(`[DISCOVERY] Request ID: ${requestId}`);
+        console.log(`[DISCOVERY] Branches: ${searchBranches.length}`);
+        console.log(`[DISCOVERY] Provider: Tavily`);
+        console.log(`[DISCOVERY] Requested quantity: ${requestedQuantity}`);
 
         // ── Step 4: Execute searches ──
         const allCandidates = [];
-        const searchStats = {
+        const searchSummary = {
+            branchesPlanned: searchBranches.length,
             branchesExecuted: 0,
             queriesExecuted: 0,
-            rawResultsFound: 0,
-            candidatesExtracted: 0,
-            duplicatesDetected: 0,
-            duplicatesRemoved: 0,
-            candidatesForVerification: 0,
+            resultsCollected: 0,
+            candidatesDiscovered: 0,
         };
 
+        const errors = [];
+
         for (const branch of searchBranches) {
-            const branchResults = await this.executeBranch(branch, plan);
-            searchStats.branchesExecuted++;
-            searchStats.queriesExecuted += branchResults.queriesExecuted || 0;
-            searchStats.rawResultsFound += branchResults.rawResultsFound || 0;
+            const branchResults = await this.executeBranch(branch, plan, errors);
+            searchSummary.branchesExecuted++;
+            searchSummary.queriesExecuted += branchResults.queriesExecuted || 0;
+            searchSummary.resultsCollected += branchResults.resultsCollected || 0;
             
             if (branchResults.candidates) {
                 allCandidates.push(...branchResults.candidates);
             }
         }
 
-        searchStats.candidatesExtracted = allCandidates.length;
+        searchSummary.candidatesDiscovered = allCandidates.length;
 
-        // ── Step 5: Deduplicate ──
+        console.log(`[DISCOVERY] Branches executed: ${searchSummary.branchesExecuted}`);
+        console.log(`[DISCOVERY] Queries executed: ${searchSummary.queriesExecuted}`);
+        console.log(`[DISCOVERY] Results collected: ${searchSummary.resultsCollected}`);
+        console.log(`[DISCOVERY] Candidates discovered: ${searchSummary.candidatesDiscovered}`);
+
+        // ── Step 5: Deduplicate at URL level only ──
         const dedupResult = this.deduplicationEngine.deduplicate(allCandidates);
-        searchStats.duplicatesDetected = dedupResult.totalDuplicates;
-        searchStats.duplicatesRemoved = dedupResult.totalDuplicates;
-        searchStats.candidatesForVerification = dedupResult.uniqueCandidates.length;
 
-        console.log(`[SEARCHING] Deduplicated: ${dedupResult.totalDuplicates} duplicates removed`);
-        console.log(`[SEARCHING] ${searchStats.candidatesForVerification} candidates for verification`);
+        console.log(`[DISCOVERY] Deduplicated: ${dedupResult.duplicatesRemoved} removed`);
+        console.log(`[DISCOVERY] ${dedupResult.uniqueCandidates.length} candidates for Layer 4`);
 
-        // ── Step 6: Build result ──
+        // ── Step 6: Determine status ──
+        let status = 'ready';
+        if (dedupResult.uniqueCandidates.length === 0) {
+            status = 'no_results';
+        }
+        if (errors.length > 0 && dedupResult.uniqueCandidates.length === 0) {
+            status = 'error';
+        }
+        if (errors.length > 0 && dedupResult.uniqueCandidates.length > 0) {
+            status = 'partial';
+        }
+
+        // ── Step 7: Build result ──
         return {
             discoveryVersion: '1.0.0',
             requestId: requestId,
-            status: 'completed',
-            searchProvider: {
+            status: status,
+            provider: {
                 name: 'tavily',
                 configured: this.tavilyClient.isConfigured(),
             },
-            searchStatistics: searchStats,
+            searchSummary: searchSummary,
             candidates: dedupResult.uniqueCandidates,
+            errors: errors,
             createdBy: 'Searching.js',
             createdAt: new Date().toISOString(),
         };
@@ -553,25 +456,27 @@ class SearchingEngine {
     /**
      * Execute a single search branch
      */
-    async executeBranch(branch, plan) {
+    async executeBranch(branch, plan, errors) {
         const results = {
             candidates: [],
             queriesExecuted: 0,
-            rawResultsFound: 0,
+            resultsCollected: 0,
         };
 
         const hypotheses = branch.hypotheses || [];
         const industry = branch.industry || 'unknown';
 
-        console.log(`[SEARCHING] Executing branch: ${industry} (${hypotheses.length} hypotheses)`);
+        console.log(`[DISCOVERY] Executing branch: ${industry}`);
 
         for (const query of hypotheses) {
             try {
+                console.log(`[DISCOVERY] Query: ${query}`);
+                
                 const tavilyResult = await this.tavilyClient.search(query);
                 results.queriesExecuted++;
-                results.rawResultsFound += tavilyResult.results?.length || 0;
+                results.resultsCollected += tavilyResult.results?.length || 0;
 
-                // Extract candidates from this search
+                // Extract raw candidates from this search
                 const candidates = this.candidateExtractor.extractFromTavilyResults(
                     tavilyResult,
                     query,
@@ -580,12 +485,17 @@ class SearchingEngine {
 
                 if (candidates && candidates.length > 0) {
                     results.candidates.push(...candidates);
+                    console.log(`[DISCOVERY] Results received: ${tavilyResult.results?.length || 0}`);
+                    console.log(`[DISCOVERY] Candidates discovered: ${candidates.length}`);
                 }
 
-                console.log(`[SEARCHING] Query "${query}" → ${candidates?.length || 0} candidates`);
-
             } catch (error) {
-                console.error(`[SEARCHING] Query "${query}" failed:`, error.message);
+                console.error(`[DISCOVERY] Query "${query}" failed:`, error.message);
+                errors.push({
+                    query: query,
+                    branch: industry,
+                    error: error.message,
+                });
                 // Continue with other queries - don't stop on one failure
             }
         }
@@ -600,16 +510,17 @@ class SearchingEngine {
         return {
             discoveryVersion: '1.0.0',
             requestId: `error-${uuidv4().substring(0, 8)}`,
-            status: 'failed',
+            status: 'error',
+            provider: {
+                name: 'tavily',
+                configured: this.tavilyClient.isConfigured(),
+            },
             error: {
                 code: errorCode,
                 message: message,
             },
-            searchProvider: {
-                name: 'tavily',
-                configured: this.tavilyClient.isConfigured(),
-            },
             candidates: [],
+            errors: [{ error: message }],
             createdBy: 'Searching.js',
             createdAt: new Date().toISOString(),
         };
