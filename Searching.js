@@ -4,13 +4,13 @@
 // RESPONSIBILITIES:
 // - Execute Layer 2 search plan using Tavily
 // - Use GPT-4o-mini to extract legitimate candidates
-// - Reject garbage (article titles, lists, fragments)
+// - Evidence-first extraction (NEVER invent)
 // - Enforce role matching (CEO ≠ CMO)
+// - Require person + company + role + evidence
 // - Preserve discovery evidence and source provenance
 // - Remove obvious duplicates
 // - Return structured discovery pool to Layer 4
 // - NEVER verify, score, rank, or enrich leads
-// - NEVER invent missing information
 // ──────────────────────────────────────────────────────────────
 
 const axios = require('axios');
@@ -36,7 +36,6 @@ const CONFIG = {
 // ──────────────────────────────────────────────────────────────
 
 const ROLE_MATCHING = {
-    // Exact matches (accepted)
     exact: {
         'ceo': 'CEO',
         'chief executive officer': 'CEO',
@@ -45,14 +44,12 @@ const ROLE_MATCHING = {
         'founder and ceo': 'CEO',
         'co-founder and ceo': 'CEO',
     },
-    // Partial matches (accepted with caution)
     partial: {
         'founder': 'Founder',
         'co-founder': 'Co-Founder',
         'owner': 'Owner',
         'president': 'President',
     },
-    // Role aliases (accepted for specific requested roles)
     aliases: {
         'ceo': ['ceo', 'chief executive officer', 'founder & ceo', 'co-founder & ceo', 'founder and ceo', 'co-founder and ceo'],
         'founder': ['founder', 'co-founder', 'founder & ceo', 'co-founder & ceo'],
@@ -61,7 +58,6 @@ const ROLE_MATCHING = {
         'cmo': ['cmo', 'chief marketing officer'],
         'coo': ['coo', 'chief operating officer'],
     },
-    // Rejected roles (never accepted)
     rejected: ['cmo', 'cto', 'cfo', 'coo', 'employee', 'intern', 'associate', 'analyst', 'coordinator', 'assistant'],
 };
 
@@ -136,12 +132,6 @@ class TavilyClient {
 // ──────────────────────────────────────────────────────────────
 
 class RoleMatcher {
-    /**
-     * Check if a discovered role matches the requested role
-     * @param {string} requestedRole - The role requested by the user
-     * @param {string} discoveredRole - The role discovered from search
-     * @returns {Object} { match: boolean, confidence: number, normalizedRole: string }
-     */
     matchRole(requestedRole, discoveredRole) {
         if (!requestedRole || !discoveredRole) {
             return { match: false, confidence: 0, normalizedRole: null };
@@ -155,18 +145,13 @@ class RoleMatcher {
             return { match: true, confidence: 1.0, normalizedRole: ROLE_MATCHING.exact[dis] };
         }
 
-        // ── Check if discovered role is in the requested role's aliases ──
+        // ── Check aliases ──
         if (ROLE_MATCHING.aliases[req]) {
             for (const alias of ROLE_MATCHING.aliases[req]) {
                 if (dis.includes(alias) || alias.includes(dis)) {
                     return { match: true, confidence: 0.9, normalizedRole: requestedRole };
                 }
             }
-        }
-
-        // ── Check partial matches (founder for CEO, etc.) ──
-        if (req === 'ceo' && ROLE_MATCHING.partial['founder'] && dis.includes('founder')) {
-            return { match: true, confidence: 0.7, normalizedRole: 'Founder' };
         }
 
         // ── Check rejected roles ──
@@ -176,13 +161,14 @@ class RoleMatcher {
             }
         }
 
-        // ── No match found ──
+        // ── Partial match (founder for CEO) ──
+        if (req === 'ceo' && dis.includes('founder')) {
+            return { match: true, confidence: 0.7, normalizedRole: 'Founder' };
+        }
+
         return { match: false, confidence: 0, normalizedRole: null };
     }
 
-    /**
-     * Normalize a role to standard format
-     */
     normalizeRole(role) {
         if (!role) return null;
         const lower = role.toLowerCase().trim();
@@ -193,7 +179,7 @@ class RoleMatcher {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 5. AI EXTRACTOR
+// 5. AI EXTRACTOR — EVIDENCE-FIRST
 // ──────────────────────────────────────────────────────────────
 
 class AIExtractor {
@@ -213,8 +199,8 @@ class AIExtractor {
 
     async extractCandidates(tavilyResults, query, branch, requestedRole) {
         if (!this.isConfigured()) {
-            console.warn('[AI] OpenAI API key missing. Using fallback extraction.');
-            return this.fallbackExtraction(tavilyResults, query, branch, requestedRole);
+            console.warn('[AI] OpenAI API key missing.');
+            return [];
         }
 
         try {
@@ -225,24 +211,19 @@ class AIExtractor {
                 messages: [
                     {
                         role: 'system',
-                        content: `You are Skyline AA-1 Layer 3 Discovery Assistant.
-
-Your job is to extract real candidate companies and people from web search results.
+                        content: `You are Skyline AA-1 Layer 3 Discovery Assistant — Evidence-First Extractor.
 
 CRITICAL RULES — NEVER BREAK:
 1. NEVER invent information.
 2. NEVER treat an article title as a company.
 3. NEVER treat a category, industry, list, ranking, sentence fragment, or search phrase as a company or person.
-4. Only extract an entity when the source provides evidence that the entity actually exists.
-5. If information is missing, return null.
-6. Do not perform final verification.
-7. Return JSON only.
+4. ONLY extract an entity when the source provides EVIDENCE that the entity actually exists.
+5. A VALID candidate MUST have: person + company + requested role + evidence connecting them.
+6. If a field is missing, return null.
+7. Do NOT use outside knowledge to fill missing fields.
+8. Return JSON only.
 
-ROLE MATCHING RULE:
-- The requested role is: "${requestedRole || 'Any'}"
-- Only extract candidates where the discovered role matches the requested role.
-- If no role is specified, extract any relevant role.
-- Return null if the role doesn't match.
+Requested role: ${requestedRole || 'Any'}
 
 Output format:
 {
@@ -275,45 +256,79 @@ Output format:
             const content = response.choices[0].message.content;
             const parsed = JSON.parse(content);
             
-            // ── Post-process with role matching ──
             const candidates = parsed.candidates || [];
-            const filtered = this.filterByRole(candidates, requestedRole);
+            const filtered = this.filterAndValidate(candidates, requestedRole);
             
-            console.log(`[AI] Extracted ${candidates.length} candidates, ${filtered.length} after role filtering`);
+            console.log(`[AI] Extracted ${candidates.length}, validated ${filtered.length}`);
             return filtered;
 
         } catch (error) {
             console.error('[AI] Extraction failed:', error.message);
-            return this.fallbackExtraction(tavilyResults, query, branch, requestedRole);
+            return [];
         }
     }
 
-    filterByRole(candidates, requestedRole) {
-        if (!requestedRole) return candidates;
-        
+    filterAndValidate(candidates, requestedRole) {
+        const validated = [];
         const matcher = new RoleMatcher();
-        const filtered = [];
 
-        for (const candidate of candidates) {
-            const role = candidate.personRole || candidate.role || null;
-            if (!role) {
-                // No role found, but keep if we have company and person
-                if (candidate.companyName && candidate.personName) {
-                    filtered.push(candidate);
-                }
+        for (const c of candidates) {
+            // ── MUST have person AND company ──
+            if (!c.personName || !c.companyName) {
                 continue;
             }
 
-            const result = matcher.matchRole(requestedRole, role);
-            if (result.match) {
-                // Update role to normalized version
-                candidate.personRole = result.normalizedRole || role;
-                candidate.confidence = (candidate.confidence || 0.5) * result.confidence;
-                filtered.push(candidate);
+            // ── Validate person name (not a fragment) ──
+            if (this.isGarbageName(c.personName)) {
+                continue;
             }
+
+            // ── Validate company name (not a fragment) ──
+            if (this.isGarbageCompanyName(c.companyName)) {
+                continue;
+            }
+
+            // ── Role validation ──
+            if (requestedRole && c.personRole) {
+                const match = matcher.matchRole(requestedRole, c.personRole);
+                if (!match.match) {
+                    continue;
+                }
+                c.personRole = match.normalizedRole || c.personRole;
+                c.confidence = (c.confidence || 0.5) * match.confidence;
+            }
+
+            // ── Evidence check ──
+            if (!c.evidenceSnippet || c.evidenceSnippet.length < 10) {
+                continue;
+            }
+
+            validated.push(c);
         }
 
-        return filtered;
+        return validated;
+    }
+
+    isGarbageName(name) {
+        if (!name) return true;
+        const garbage = ['consulting', 'services', 'the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'garage', 'started', 'which', 'that', 'this', 'those', 'these'];
+        const lower = name.toLowerCase().trim();
+        if (lower.length < 2) return true;
+        for (const word of garbage) {
+            if (lower === word || lower.includes(word + ' ')) return true;
+        }
+        return false;
+    }
+
+    isGarbageCompanyName(name) {
+        if (!name) return true;
+        const garbage = ['top', 'best', 'list', 'rank', 'guide', 'how to', 'what is', 'the best', 'companies', 'industry', 'sector', 'market', 'trend', 'analysis', 'report', 'article', 'blog', 'news', 'update', 'directory', 'category', 'page', 'search', 'result', 'and is', 'and', 'for', 'with', 'from'];
+        const lower = name.toLowerCase().trim();
+        if (lower.length < 2) return true;
+        for (const word of garbage) {
+            if (lower.includes(word) && lower.length < 10) return true;
+        }
+        return false;
     }
 
     buildExtractionPrompt(tavilyResults, query, branch, requestedRole) {
@@ -337,66 +352,7 @@ Requested role: ${requestedRole || 'Any'}
 
 ${resultsText}
 
-Return JSON only. Extract real companies/people with evidence. Never invent.`;
-    }
-
-    fallbackExtraction(tavilyResults, query, branch, requestedRole) {
-        console.log('[AI] Using fallback deterministic extraction');
-        const candidates = [];
-        const results = tavilyResults.results || [];
-        const matcher = new RoleMatcher();
-
-        for (const item of results) {
-            const content = item.content || '';
-            const title = item.title || '';
-            
-            const companyMatch = content.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:is|was|are|has|provides|offers)/i);
-            const personMatch = content.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s+(?:is|was|said|founded|founded by)/i);
-            let roleMatch = content.match(/(?:founder|ceo|cto|director|manager|president)\s+([A-Z][a-z]+)/i);
-            
-            if (roleMatch) {
-                roleMatch = roleMatch[1];
-            } else {
-                // Try to find role directly
-                const roleRegex = /\b(founder|ceo|cto|cfo|cmo|coo|director|vp|president|owner)\b/i;
-                const roleFound = content.match(roleRegex);
-                if (roleFound) {
-                    roleMatch = roleFound[1];
-                }
-            }
-
-            if (companyMatch || personMatch) {
-                const discoveredRole = roleMatch || null;
-                let matched = true;
-                let normalizedRole = discoveredRole;
-
-                if (requestedRole && discoveredRole) {
-                    const matchResult = matcher.matchRole(requestedRole, discoveredRole);
-                    if (!matchResult.match) {
-                        matched = false;
-                    } else {
-                        normalizedRole = matchResult.normalizedRole || discoveredRole;
-                    }
-                }
-
-                if (matched) {
-                    candidates.push({
-                        companyName: companyMatch ? companyMatch[1] : null,
-                        companyDomain: null,
-                        companyIndustry: branch.industry || null,
-                        companyLocation: null,
-                        personName: personMatch ? personMatch[1] : null,
-                        personRole: normalizedRole || null,
-                        email: null,
-                        linkedinUrl: null,
-                        evidenceSnippet: content.substring(0, 200),
-                        confidence: 0.5,
-                    });
-                }
-            }
-        }
-
-        return candidates;
+Return JSON only. Extract ONLY evidence-supported candidates. Never invent.`;
     }
 }
 
@@ -409,14 +365,8 @@ class CandidateBuilder {
         const candidates = [];
 
         for (const ai of aiCandidates) {
-            // Must have company AND person for contact targets
-            if (!ai.companyName || !ai.personName) {
-                continue;
-            }
-
-            if (ai.companyName && this.isGarbageCompanyName(ai.companyName)) {
-                continue;
-            }
+            // Must have company AND person
+            if (!ai.companyName || !ai.personName) continue;
 
             const candidate = {
                 candidateId: `candidate-${uuidv4().substring(0, 8)}`,
@@ -501,23 +451,13 @@ class CandidateBuilder {
         return evidence;
     }
 
-    isGarbageCompanyName(name) {
-        if (!name) return true;
-        const garbage = ['top', 'best', 'list', 'rank', 'guide', 'how to', 'what is', 'the best', 'companies', 'industry', 'sector', 'market', 'trend', 'analysis', 'report', 'article', 'blog', 'news', 'update', 'directory', 'category', 'page', 'search', 'result'];
-        const lower = name.toLowerCase();
-        for (const word of garbage) {
-            if (lower.includes(word)) return true;
-        }
-        return false;
-    }
-
     parseLocation(locationStr) {
         if (!locationStr) return { city: null, region: null, country: null, countryCode: null };
 
         const lower = locationStr.toLowerCase();
         const location = { city: null, region: null, country: null, countryCode: null };
 
-        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco', 'los angeles', 'chicago', 'toronto', 'vancouver', 'sydney', 'melbourne'];
+        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco'];
         const countries = {
             'uk': { name: 'United Kingdom', code: 'GB' },
             'united kingdom': { name: 'United Kingdom', code: 'GB' },
@@ -587,15 +527,11 @@ class DeduplicationEngine {
             if (key) {
                 if (seen.has(key)) {
                     const existing = seen.get(key);
-                    // Merge evidence
-                    if (candidate.evidence && candidate.evidence.length > 0) {
+                    if (candidate.evidence) {
                         existing.evidence = [...existing.evidence, ...candidate.evidence];
                     }
                     if (candidate.contact?.email && !existing.contact?.email) {
                         existing.contact.email = candidate.contact.email;
-                    }
-                    if (candidate.contact?.linkedinUrl && !existing.contact?.linkedinUrl) {
-                        existing.contact.linkedinUrl = candidate.contact.linkedinUrl;
                     }
                     if (candidate.contact?.role && !existing.contact?.role) {
                         existing.contact.role = candidate.contact.role;
@@ -634,13 +570,11 @@ class SearchingEngine {
                 return this.buildErrorResult('INVALID_PLAN', 'Invalid or unclear search plan', plan);
             }
 
-            // ── Check Tavily API key ──
             if (!this.tavilyClient.isConfigured()) {
                 console.error('[DISCOVERY] Tavily API key missing');
                 return this.buildErrorResult('TAVILY_API_KEY_MISSING', 'Tavily API key is not configured', plan);
             }
 
-            // ── Prepare context ──
             const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
             const searchBranches = plan.searchBranches || [];
             const requestedRole = plan.objective?.role || null;
@@ -648,11 +582,8 @@ class SearchingEngine {
 
             console.log(`[DISCOVERY] Request: ${requestId}`);
             console.log(`[DISCOVERY] Branches: ${searchBranches.length}`);
-            console.log(`[DISCOVERY] Provider: Tavily`);
             console.log(`[DISCOVERY] Requested Role: ${requestedRole || 'Any'}`);
-            console.log(`[DISCOVERY] Target Type: ${targetType}`);
 
-            // ── Execute searches ──
             const allCandidates = [];
             const searchSummary = {
                 branchesExecuted: 0,
@@ -682,10 +613,8 @@ class SearchingEngine {
             }
 
             console.log(`[DISCOVERY] Branches executed: ${searchSummary.branchesExecuted}`);
-            console.log(`[DISCOVERY] Queries executed: ${searchSummary.queriesExecuted}`);
-            console.log(`[DISCOVERY] Raw results found: ${searchSummary.rawResultsFound}`);
             console.log(`[DISCOVERY] Candidates extracted: ${searchSummary.candidatesExtracted}`);
-            console.log(`[DISCOVERY] Invalid candidates rejected: ${searchSummary.invalidCandidatesRejected}`);
+            console.log(`[DISCOVERY] Invalid rejected: ${searchSummary.invalidCandidatesRejected}`);
 
             // ── Deduplicate ──
             const dedupResult = this.deduplicationEngine.deduplicate(allCandidates);
@@ -693,7 +622,6 @@ class SearchingEngine {
             searchSummary.duplicatesRemoved = dedupResult.duplicatesRemoved;
             searchSummary.candidatesForNextLayer = dedupResult.uniqueCandidates.length;
 
-            console.log(`[DISCOVERY] Duplicates removed: ${dedupResult.duplicatesRemoved}`);
             console.log(`[DISCOVERY] Candidates for Layer 4: ${dedupResult.uniqueCandidates.length}`);
 
             // ── Determine status ──
@@ -706,7 +634,6 @@ class SearchingEngine {
                 status = 'partial';
             }
 
-            // ── Build result ──
             return {
                 discoveryVersion: '3.0.0',
                 requestId: requestId,
@@ -758,7 +685,7 @@ class SearchingEngine {
 
                 const rawResults = tavilyResult.results || [];
 
-                // ── Extract with AI ──
+                // ── Extract with AI (evidence-first) ──
                 let aiCandidates = [];
                 try {
                     aiCandidates = await this.aiExtractor.extractCandidates(
@@ -790,7 +717,8 @@ class SearchingEngine {
                     }
                 }
 
-                console.log(`[DISCOVERY] Results: ${rawResults.length}, Candidates: ${results.candidates.length}`);
+                results.invalidCandidatesRejected = results.aiResultsAnalyzed - results.candidatesExtracted;
+                console.log(`[DISCOVERY] Results: ${rawResults.length}, Valid Candidates: ${results.candidates.length}`);
 
             } catch (error) {
                 console.error(`[DISCOVERY] Query "${query}" failed:`, error.message);
