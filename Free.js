@@ -26,12 +26,32 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log('📋 [FREE] Planning result:', JSON.stringify(plan, null, 2));
 
         // ── Step 3: Execute the search ──
-        const searchResults = await Searching.execute(plan);
-        console.log('📋 [FREE] Search results:', JSON.stringify(searchResults, null, 2));
+        let searchResults;
+        try {
+            searchResults = await Searching.execute(plan);
+            console.log('📋 [FREE] Search results:', JSON.stringify(searchResults, null, 2));
+        } catch (searchError) {
+            console.error('❌ [FREE] Search execution failed:', searchError.message);
+            searchResults = {
+                status: 'failed',
+                error: { code: 'SEARCH_FAILED', message: searchError.message },
+                candidates: [],
+            };
+        }
 
-        // ── Step 4: Return results as string ──
-        const resultsString = JSON.stringify(searchResults, null, 2);
+        // ── Step 4: Build response string ──
+        let resultsString;
+        if (searchResults && searchResults.status !== 'failed') {
+            resultsString = JSON.stringify(searchResults, null, 2);
+        } else {
+            resultsString = JSON.stringify({
+                status: 'failed',
+                message: searchResults?.error?.message || 'Search could not be completed',
+                candidates: [],
+            }, null, 2);
+        }
 
+        // ── Step 5: ALWAYS return a reply string ──
         return {
             reply: resultsString,
             updatedHistory: [
@@ -51,7 +71,11 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
     } catch (error) {
         console.error('❌ [FREE] Error:', error.message);
         return {
-            reply: 'Sorry, something went wrong. Please try again.',
+            reply: JSON.stringify({
+                status: 'error',
+                message: 'Sorry, something went wrong. Please try again.',
+                error: error.message
+            }, null, 2),
             updatedHistory: history || [],
             _meta: { error: error.message }
         };
