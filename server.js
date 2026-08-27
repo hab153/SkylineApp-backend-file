@@ -302,12 +302,15 @@ app.get('/api/events/stream', verifyToken, function(req, res) {
 
 // ─── WEBHOOKS ───
 console.log('🔧 [SERVER] Registering webhook routes...');
-app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json' }), flutterwaveWebhook);
-app.all('/api/nylas/webhook', express.raw({ type: 'application/json' }), handleWebhook);
+app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json', limit: '10mb' }), flutterwaveWebhook);
+app.all('/api/nylas/webhook', express.raw({ type: 'application/json', limit: '10mb' }), handleWebhook);
 console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 
-// ─── JSON PARSER ───
-app.use(express.json());
+// ════════════════════════════════════════════
+//  ✅ JSON PARSER — INCREASED LIMIT FOR LARGE SEARCH RESULTS
+// ════════════════════════════════════════════
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ─── XSS PROTECTION ───
 app.use(xssProtection);
