@@ -1,16 +1,15 @@
 // ──────────────────────────────────────────────────────────────
 // SEARCHING.JS — Layer 3: Discovery Engine v3.0.0
-// 
+//
 // RESPONSIBILITIES:
 // - Execute Layer 2 search plan using Tavily
-// - Use GPT-4o-mini to extract legitimate candidates
-// - Evidence-first extraction (NEVER invent)
-// - Enforce role matching (CEO ≠ CMO)
-// - Require person + company + role + evidence
-// - Preserve discovery evidence and source provenance
-// - Remove obvious duplicates
-// - Return structured discovery pool to Layer 4
-// - NEVER verify, score, rank, or enrich leads
+// - Use GPT-4o-mini for evidence-based extraction ONLY
+// - Enforce strict deterministic validation
+// - Person + Company + Role + Evidence required
+// - NEVER invent, guess, or infer missing information
+// - Preserve source evidence and discovery provenance
+// - Remove duplicates and merge evidence
+// - Return clean, evidence-backed candidates to Layer 4
 // ──────────────────────────────────────────────────────────────
 
 const axios = require('axios');
@@ -32,10 +31,11 @@ const CONFIG = {
 };
 
 // ──────────────────────────────────────────────────────────────
-// 2. ROLE MATCHING CONFIGURATION
+// 2. ROLE MATCHING
 // ──────────────────────────────────────────────────────────────
 
 const ROLE_MATCHING = {
+    // Accepted exact matches
     exact: {
         'ceo': 'CEO',
         'chief executive officer': 'CEO',
@@ -43,22 +43,27 @@ const ROLE_MATCHING = {
         'co-founder & ceo': 'CEO',
         'founder and ceo': 'CEO',
         'co-founder and ceo': 'CEO',
+        'chief executive': 'CEO',
     },
+    // Accepted partial matches
     partial: {
         'founder': 'Founder',
         'co-founder': 'Co-Founder',
         'owner': 'Owner',
         'president': 'President',
+        'managing director': 'Managing Director',
     },
+    // Aliases per role
     aliases: {
-        'ceo': ['ceo', 'chief executive officer', 'founder & ceo', 'co-founder & ceo', 'founder and ceo', 'co-founder and ceo'],
+        'ceo': ['ceo', 'chief executive officer', 'founder & ceo', 'co-founder & ceo', 'chief executive'],
         'founder': ['founder', 'co-founder', 'founder & ceo', 'co-founder & ceo'],
-        'cto': ['cto', 'chief technology officer', 'chief technical officer'],
-        'cfo': ['cfo', 'chief financial officer'],
-        'cmo': ['cmo', 'chief marketing officer'],
-        'coo': ['coo', 'chief operating officer'],
+        'cto': ['cto', 'chief technology officer', 'chief technical officer', 'vp engineering'],
+        'cfo': ['cfo', 'chief financial officer', 'finance director'],
+        'cmo': ['cmo', 'chief marketing officer', 'marketing director'],
+        'coo': ['coo', 'chief operating officer', 'operations director'],
     },
-    rejected: ['cmo', 'cto', 'cfo', 'coo', 'employee', 'intern', 'associate', 'analyst', 'coordinator', 'assistant'],
+    // NEVER accept these for CEO/Founder roles
+    rejected: ['cmo', 'cto', 'cfo', 'coo', 'employee', 'intern', 'associate', 'analyst', 'coordinator', 'assistant', 'developer', 'engineer', 'manager', 'director', 'vp'],
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -85,7 +90,7 @@ class TavilyClient {
 
         try {
             console.log(`[TAVILY] Searching: "${query}"`);
-            
+
             const response = await axios.post(
                 this.apiUrl,
                 {
@@ -93,8 +98,6 @@ class TavilyClient {
                     search_depth: 'advanced',
                     max_results: maxResults,
                     include_answer: false,
-                    include_domains: options.includeDomains || [],
-                    exclude_domains: options.excludeDomains || [],
                 },
                 {
                     headers: {
@@ -105,30 +108,24 @@ class TavilyClient {
                 }
             );
 
-            console.log(`[TAVILY] Found ${response.data.results?.length || 0} results for "${query}"`);
+            console.log(`[TAVILY] Found ${response.data.results?.length || 0} results`);
             return response.data;
 
         } catch (error) {
             if (error.response) {
                 console.error(`[TAVILY] API Error ${error.response.status}:`, error.response.data);
-                if (error.response.status === 401) {
-                    throw new Error('TAVILY_API_KEY_INVALID');
-                }
-                if (error.response.status === 429) {
-                    throw new Error('TAVILY_RATE_LIMITED');
-                }
+                if (error.response.status === 401) throw new Error('TAVILY_API_KEY_INVALID');
+                if (error.response.status === 429) throw new Error('TAVILY_RATE_LIMITED');
                 throw new Error('TAVILY_SEARCH_FAILED');
             }
-            if (error.code === 'ECONNABORTED') {
-                throw new Error('TAVILY_TIMEOUT');
-            }
+            if (error.code === 'ECONNABORTED') throw new Error('TAVILY_TIMEOUT');
             throw error;
         }
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. ROLE MATCHING ENGINE
+// 4. ROLE MATCHER
 // ──────────────────────────────────────────────────────────────
 
 class RoleMatcher {
@@ -140,28 +137,28 @@ class RoleMatcher {
         const req = requestedRole.toLowerCase().trim();
         const dis = discoveredRole.toLowerCase().trim();
 
-        // ── Check exact match ──
+        // Exact match
         if (ROLE_MATCHING.exact[dis] && ROLE_MATCHING.exact[dis].toLowerCase() === req) {
             return { match: true, confidence: 1.0, normalizedRole: ROLE_MATCHING.exact[dis] };
         }
 
-        // ── Check aliases ──
+        // Check aliases
         if (ROLE_MATCHING.aliases[req]) {
             for (const alias of ROLE_MATCHING.aliases[req]) {
-                if (dis.includes(alias) || alias.includes(dis)) {
+                if (dis === alias || dis.includes(alias) || alias.includes(dis)) {
                     return { match: true, confidence: 0.9, normalizedRole: requestedRole };
                 }
             }
         }
 
-        // ── Check rejected roles ──
+        // Rejected roles
         for (const rejected of ROLE_MATCHING.rejected) {
-            if (dis.includes(rejected)) {
+            if (dis.includes(rejected) && !dis.includes('founder') && !dis.includes('ceo')) {
                 return { match: false, confidence: 0, normalizedRole: null };
             }
         }
 
-        // ── Partial match (founder for CEO) ──
+        // Partial match (founder for CEO)
         if (req === 'ceo' && dis.includes('founder')) {
             return { match: true, confidence: 0.7, normalizedRole: 'Founder' };
         }
@@ -179,7 +176,7 @@ class RoleMatcher {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 5. AI EXTRACTOR — EVIDENCE-FIRST
+// 5. AI EXTRACTOR — Evidence-First
 // ──────────────────────────────────────────────────────────────
 
 class AIExtractor {
@@ -199,29 +196,28 @@ class AIExtractor {
 
     async extractCandidates(tavilyResults, query, branch, requestedRole) {
         if (!this.isConfigured()) {
-            console.warn('[AI] OpenAI API key missing.');
+            console.warn('[AI] OpenAI API key missing. Returning empty.');
             return [];
         }
 
         try {
             const prompt = this.buildExtractionPrompt(tavilyResults, query, branch, requestedRole);
-            
+
             const response = await this.openai.chat.completions.create({
                 model: this.model,
                 messages: [
                     {
                         role: 'system',
-                        content: `You are Skyline AA-1 Layer 3 Discovery Assistant — Evidence-First Extractor.
+                        content: `You are Skyline AA-1 Evidence-First Discovery Extractor.
 
 CRITICAL RULES — NEVER BREAK:
-1. NEVER invent information.
-2. NEVER treat an article title as a company.
-3. NEVER treat a category, industry, list, ranking, sentence fragment, or search phrase as a company or person.
-4. ONLY extract an entity when the source provides EVIDENCE that the entity actually exists.
-5. A VALID candidate MUST have: person + company + requested role + evidence connecting them.
-6. If a field is missing, return null.
-7. Do NOT use outside knowledge to fill missing fields.
-8. Return JSON only.
+1. NEVER invent information. If not in source → null.
+2. NEVER treat article titles, lists, categories, or search phrases as companies/people.
+3. ONLY extract what the source explicitly states with evidence.
+4. For contact candidates: MUST have person + company + role + evidence.
+5. If ANY required field is missing → return null for that candidate.
+6. Do NOT use outside knowledge to fill missing fields.
+7. Return JSON only.
 
 Requested role: ${requestedRole || 'Any'}
 
@@ -235,10 +231,8 @@ Output format:
       "companyLocation": "London" or null,
       "personName": "John Smith" or null,
       "personRole": "CEO" or null,
-      "email": null,
-      "linkedinUrl": null,
-      "evidenceSnippet": "Text that proves this extraction",
-      "confidence": 0.92
+      "evidenceSnippet": "Exact text proving this extraction",
+      "confidence": 0.95
     }
   ]
 }`
@@ -253,14 +247,14 @@ Output format:
                 response_format: { type: 'json_object' }
             });
 
-            const content = response.choices[0].message.content;
-            const parsed = JSON.parse(content);
-            
+            const parsed = JSON.parse(response.choices[0].message.content);
             const candidates = parsed.candidates || [];
-            const filtered = this.filterAndValidate(candidates, requestedRole);
-            
-            console.log(`[AI] Extracted ${candidates.length}, validated ${filtered.length}`);
-            return filtered;
+
+            // Apply deterministic validation
+            const validated = this.validateCandidates(candidates, requestedRole);
+
+            console.log(`[AI] Extracted ${candidates.length}, validated ${validated.length}`);
+            return validated;
 
         } catch (error) {
             console.error('[AI] Extraction failed:', error.message);
@@ -268,38 +262,37 @@ Output format:
         }
     }
 
-    filterAndValidate(candidates, requestedRole) {
+    validateCandidates(candidates, requestedRole) {
         const validated = [];
         const matcher = new RoleMatcher();
 
         for (const c of candidates) {
-            // ── MUST have person AND company ──
-            if (!c.personName || !c.companyName) {
-                continue;
-            }
+            // ── CRITICAL: Must have person AND company ──
+            if (!c.personName || !c.companyName) continue;
 
-            // ── Validate person name (not a fragment) ──
-            if (this.isGarbageName(c.personName)) {
-                continue;
-            }
+            // ── Validate person name (not garbage) ──
+            if (this.isGarbage(c.personName)) continue;
 
-            // ── Validate company name (not a fragment) ──
-            if (this.isGarbageCompanyName(c.companyName)) {
-                continue;
-            }
+            // ── Validate company name (not garbage) ──
+            if (this.isGarbage(c.companyName)) continue;
 
             // ── Role validation ──
             if (requestedRole && c.personRole) {
                 const match = matcher.matchRole(requestedRole, c.personRole);
-                if (!match.match) {
-                    continue;
-                }
+                if (!match.match) continue;
                 c.personRole = match.normalizedRole || c.personRole;
                 c.confidence = (c.confidence || 0.5) * match.confidence;
+            } else if (requestedRole && !c.personRole) {
+                // No role found → reject (role is required for contact targets)
+                continue;
             }
 
             // ── Evidence check ──
-            if (!c.evidenceSnippet || c.evidenceSnippet.length < 10) {
+            if (!c.evidenceSnippet || c.evidenceSnippet.length < 15) continue;
+
+            // ── Evidence must mention both person and company ──
+            const snippetLower = c.evidenceSnippet.toLowerCase();
+            if (!snippetLower.includes(c.personName.toLowerCase()) || !snippetLower.includes(c.companyName.toLowerCase())) {
                 continue;
             }
 
@@ -309,24 +302,13 @@ Output format:
         return validated;
     }
 
-    isGarbageName(name) {
-        if (!name) return true;
-        const garbage = ['consulting', 'services', 'the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'garage', 'started', 'which', 'that', 'this', 'those', 'these'];
-        const lower = name.toLowerCase().trim();
+    isGarbage(text) {
+        if (!text) return true;
+        const garbage = ['top', 'best', 'list', 'rank', 'guide', 'how to', 'what is', 'the best', 'companies', 'industry', 'sector', 'market', 'trend', 'analysis', 'report', 'article', 'blog', 'news', 'update', 'directory', 'category', 'page', 'search', 'result', 'and is', 'consulting', 'services', 'the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'garage', 'started', 'which', 'that', 'this', 'those', 'these'];
+        const lower = text.toLowerCase().trim();
         if (lower.length < 2) return true;
         for (const word of garbage) {
-            if (lower === word || lower.includes(word + ' ')) return true;
-        }
-        return false;
-    }
-
-    isGarbageCompanyName(name) {
-        if (!name) return true;
-        const garbage = ['top', 'best', 'list', 'rank', 'guide', 'how to', 'what is', 'the best', 'companies', 'industry', 'sector', 'market', 'trend', 'analysis', 'report', 'article', 'blog', 'news', 'update', 'directory', 'category', 'page', 'search', 'result', 'and is', 'and', 'for', 'with', 'from'];
-        const lower = name.toLowerCase().trim();
-        if (lower.length < 2) return true;
-        for (const word of garbage) {
-            if (lower.includes(word) && lower.length < 10) return true;
+            if (lower === word || (lower.includes(word) && lower.length < 12)) return true;
         }
         return false;
     }
@@ -342,7 +324,7 @@ Output format:
 Result ${i + 1}:
 Title: ${item.title || 'No title'}
 URL: ${item.url || 'No URL'}
-Content: ${(item.content || '').substring(0, 600)}
+Content: ${(item.content || '').substring(0, 700)}
 ---`;
         }
 
@@ -352,7 +334,7 @@ Requested role: ${requestedRole || 'Any'}
 
 ${resultsText}
 
-Return JSON only. Extract ONLY evidence-supported candidates. Never invent.`;
+Extract ONLY evidence-supported candidates. Return JSON only. Never invent.`;
     }
 }
 
@@ -365,7 +347,6 @@ class CandidateBuilder {
         const candidates = [];
 
         for (const ai of aiCandidates) {
-            // Must have company AND person
             if (!ai.companyName || !ai.personName) continue;
 
             const candidate = {
@@ -382,9 +363,9 @@ class CandidateBuilder {
                 contact: {
                     name: ai.personName || null,
                     role: ai.personRole || null,
-                    email: ai.email || null,
+                    email: null,
                     phone: null,
-                    linkedinUrl: ai.linkedinUrl || null,
+                    linkedinUrl: null,
                 },
                 discovery: {
                     branch: branch.industry || 'unknown',
@@ -396,6 +377,11 @@ class CandidateBuilder {
                 },
                 evidence: this.buildEvidence(ai, sourceUrl, sourceTitle),
                 discoveryConfidence: ai.confidence || 0.5,
+                rawData: {
+                    url: sourceUrl,
+                    title: sourceTitle,
+                    snippet: (sourceSnippet || '').substring(0, 200),
+                },
             };
 
             candidates.push(candidate);
@@ -448,6 +434,16 @@ class CandidateBuilder {
             });
         }
 
+        // Person-company association evidence
+        if (ai.evidenceSnippet && ai.personName && ai.companyName) {
+            evidence.push({
+                type: 'person_company_association',
+                sourceUrl: sourceUrl || null,
+                sourceTitle: sourceTitle || null,
+                snippet: ai.evidenceSnippet,
+            });
+        }
+
         return evidence;
     }
 
@@ -457,7 +453,7 @@ class CandidateBuilder {
         const lower = locationStr.toLowerCase();
         const location = { city: null, region: null, country: null, countryCode: null };
 
-        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco'];
+        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco', 'los angeles', 'chicago', 'toronto', 'vancouver', 'sydney', 'melbourne'];
         const countries = {
             'uk': { name: 'United Kingdom', code: 'GB' },
             'united kingdom': { name: 'United Kingdom', code: 'GB' },
@@ -527,11 +523,15 @@ class DeduplicationEngine {
             if (key) {
                 if (seen.has(key)) {
                     const existing = seen.get(key);
-                    if (candidate.evidence) {
+                    // Merge evidence
+                    if (candidate.evidence && candidate.evidence.length > 0) {
                         existing.evidence = [...existing.evidence, ...candidate.evidence];
                     }
                     if (candidate.contact?.email && !existing.contact?.email) {
                         existing.contact.email = candidate.contact.email;
+                    }
+                    if (candidate.contact?.linkedinUrl && !existing.contact?.linkedinUrl) {
+                        existing.contact.linkedinUrl = candidate.contact.linkedinUrl;
                     }
                     if (candidate.contact?.role && !existing.contact?.role) {
                         existing.contact.role = candidate.contact.role;
@@ -578,11 +578,10 @@ class SearchingEngine {
             const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
             const searchBranches = plan.searchBranches || [];
             const requestedRole = plan.objective?.role || null;
-            const targetType = plan.objective?.targetType || 'contact';
 
             console.log(`[DISCOVERY] Request: ${requestId}`);
             console.log(`[DISCOVERY] Branches: ${searchBranches.length}`);
-            console.log(`[DISCOVERY] Requested Role: ${requestedRole || 'Any'}`);
+            console.log(`[DISCOVERY] Role: ${requestedRole || 'Any'}`);
 
             const allCandidates = [];
             const searchSummary = {
@@ -596,10 +595,18 @@ class SearchingEngine {
                 duplicatesRemoved: 0,
                 candidatesForNextLayer: 0,
             };
+            const rejectionStats = {
+                missingPerson: 0,
+                missingCompany: 0,
+                roleMismatch: 0,
+                insufficientEvidence: 0,
+                invalidCompany: 0,
+                invalidPerson: 0,
+            };
             const errors = [];
 
             for (const branch of searchBranches) {
-                const branchResults = await this.executeBranch(branch, requestedRole, errors, searchSummary);
+                const branchResults = await this.executeBranch(branch, requestedRole, errors, searchSummary, rejectionStats);
                 searchSummary.branchesExecuted++;
                 searchSummary.queriesExecuted += branchResults.queriesExecuted || 0;
                 searchSummary.rawResultsFound += branchResults.rawResultsFound || 0;
@@ -612,7 +619,6 @@ class SearchingEngine {
                 }
             }
 
-            console.log(`[DISCOVERY] Branches executed: ${searchSummary.branchesExecuted}`);
             console.log(`[DISCOVERY] Candidates extracted: ${searchSummary.candidatesExtracted}`);
             console.log(`[DISCOVERY] Invalid rejected: ${searchSummary.invalidCandidatesRejected}`);
 
@@ -648,6 +654,7 @@ class SearchingEngine {
                     configured: this.aiExtractor.isConfigured(),
                 },
                 searchStatistics: searchSummary,
+                rejectionStatistics: rejectionStats,
                 candidates: dedupResult.uniqueCandidates,
                 errors: errors,
                 createdBy: 'Searching.js',
@@ -660,7 +667,7 @@ class SearchingEngine {
         }
     }
 
-    async executeBranch(branch, requestedRole, errors, searchSummary) {
+    async executeBranch(branch, requestedRole, errors, searchSummary, rejectionStats) {
         const results = {
             candidates: [],
             queriesExecuted: 0,
@@ -700,7 +707,7 @@ class SearchingEngine {
 
                 results.aiResultsAnalyzed += rawResults.length;
 
-                // ── Build candidates ──
+                // ── Build candidates from validated AI output ──
                 for (const item of rawResults) {
                     const builtCandidates = this.candidateBuilder.buildCandidates(
                         aiCandidates,
@@ -718,7 +725,7 @@ class SearchingEngine {
                 }
 
                 results.invalidCandidatesRejected = results.aiResultsAnalyzed - results.candidatesExtracted;
-                console.log(`[DISCOVERY] Results: ${rawResults.length}, Valid Candidates: ${results.candidates.length}`);
+                console.log(`[DISCOVERY] Valid candidates: ${results.candidates.length}`);
 
             } catch (error) {
                 console.error(`[DISCOVERY] Query "${query}" failed:`, error.message);
