@@ -41,13 +41,19 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         // ── Step 4: Build response string ──
         let resultsString;
+        
+        // Check if searchResults exists and has a valid status
         if (searchResults && searchResults.status !== 'failed') {
+            // Success — return the discovery results
             resultsString = JSON.stringify(searchResults, null, 2);
         } else {
+            // Failed — return a friendly error message
+            const errorMessage = searchResults?.error?.message || 'Search could not be completed';
             resultsString = JSON.stringify({
                 status: 'failed',
-                message: searchResults?.error?.message || 'Search could not be completed',
+                message: errorMessage,
                 candidates: [],
+                suggestion: 'Please check that TAVILY_API_KEY and OPENAI_API_KEY are set in the environment.',
             }, null, 2);
         }
 
