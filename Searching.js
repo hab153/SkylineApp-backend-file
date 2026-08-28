@@ -1,15 +1,14 @@
 // ──────────────────────────────────────────────────────────────
 // SEARCHING.JS — Layer 3: Discovery Engine v3.0.0
 //
-// RESPONSIBILITIES:
-// - Execute Layer 2 search plan using Tavily
-// - Use GPT-4o-mini for evidence-based extraction ONLY
-// - Enforce strict deterministic validation
-// - Person + Company + Role + Evidence required
-// - NEVER invent, guess, or infer missing information
-// - Preserve source evidence and discovery provenance
-// - Remove duplicates and merge evidence
-// - Return clean, evidence-backed candidates to Layer 4
+// CONTRACT (per "Skyline AA-1 — Layer 3: Discovery Engine v3.0"):
+//
+// Layer 3 discovers credible, evidence-backed candidates and hands
+// them to Layer 4. It does NOT verify, does NOT invent missing
+// fields, and does NOT let AI confidence override deterministic
+// validation. GPT-4o-mini is an assistant inside Layer 3, not the
+// judge of truth. The judge is: Layer 2 requirements + source
+// evidence + deterministic validation + deduplication rules.
 // ──────────────────────────────────────────────────────────────
 
 const axios = require('axios');
@@ -26,48 +25,88 @@ const CONFIG = {
     SEARCH_TIMEOUT_MS: 15000,
     AI_MODEL: 'gpt-4o-mini',
     AI_TEMPERATURE: 0.2,
-    AI_MAX_TOKENS: 800,
+    AI_MAX_TOKENS: 1200,
     AI_BATCH_SIZE: 5,
+    MIN_EVIDENCE_SNIPPET_LENGTH: 10,
 };
 
 // ──────────────────────────────────────────────────────────────
-// 2. ROLE MATCHING
+// 2. ROLE MATCHING CONFIGURATION (Section 6, 16, 46)
 // ──────────────────────────────────────────────────────────────
 
 const ROLE_MATCHING = {
-    // Accepted exact matches
-    exact: {
+    // Discovered-role phrasing → normalized canonical role.
+    // Only used when the requested role is CEO.
+    ceoAcceptable: {
         'ceo': 'CEO',
         'chief executive officer': 'CEO',
         'founder & ceo': 'CEO',
         'co-founder & ceo': 'CEO',
         'founder and ceo': 'CEO',
         'co-founder and ceo': 'CEO',
-        'chief executive': 'CEO',
+        'co-founder & chief executive officer': 'CEO',
+        'co-founder and chief executive officer': 'CEO',
+        'founder & chief executive officer': 'CEO',
+        'founder and chief executive officer': 'CEO',
     },
-    // Accepted partial matches
-    partial: {
-        'founder': 'Founder',
-        'co-founder': 'Co-Founder',
-        'owner': 'Owner',
-        'president': 'President',
-        'managing director': 'Managing Director',
-    },
-    // Aliases per role
-    aliases: {
-        'ceo': ['ceo', 'chief executive officer', 'founder & ceo', 'co-founder & ceo', 'chief executive'],
-        'founder': ['founder', 'co-founder', 'founder & ceo', 'co-founder & ceo'],
-        'cto': ['cto', 'chief technology officer', 'chief technical officer', 'vp engineering'],
-        'cfo': ['cfo', 'chief financial officer', 'finance director'],
-        'cmo': ['cmo', 'chief marketing officer', 'marketing director'],
-        'coo': ['coo', 'chief operating officer', 'operations director'],
-    },
-    // NEVER accept these for CEO/Founder roles
-    rejected: ['cmo', 'cto', 'cfo', 'coo', 'employee', 'intern', 'associate', 'analyst', 'coordinator', 'assistant', 'developer', 'engineer', 'manager', 'director', 'vp'],
+    // Roles that must NEVER satisfy a request unless explicitly
+    // permitted by the requester.
+    alwaysRejectedUnlessRequested: [
+        'cmo', 'chief marketing officer',
+        'cto', 'chief technology officer', 'chief technical officer',
+        'coo', 'chief operating officer',
+        'cfo', 'chief financial officer',
+        'employee', 'advisor', 'investor', 'board member',
+        'intern', 'associate', 'analyst', 'coordinator', 'assistant',
+    ],
 };
 
 // ──────────────────────────────────────────────────────────────
-// 3. TAVILY CLIENT
+// 3. REJECTION REASONS (Section 27)
+// ──────────────────────────────────────────────────────────────
+
+const REJECTION_REASONS = {
+    MISSING_PERSON: 'MISSING_PERSON',
+    MISSING_COMPANY: 'MISSING_COMPANY',
+    MISSING_PERSON_COMPANY_ASSOCIATION: 'MISSING_PERSON_COMPANY_ASSOCIATION',
+    ROLE_MISMATCH: 'ROLE_MISMATCH',
+    INDUSTRY_MISMATCH: 'INDUSTRY_MISMATCH',
+    LOCATION_MISMATCH: 'LOCATION_MISMATCH',
+    COMPANY_SIZE_MISMATCH: 'COMPANY_SIZE_MISMATCH',
+    INSUFFICIENT_EVIDENCE: 'INSUFFICIENT_EVIDENCE',
+    INVALID_COMPANY_ENTITY: 'INVALID_COMPANY_ENTITY',
+    INVALID_PERSON_ENTITY: 'INVALID_PERSON_ENTITY',
+    SOURCE_NOT_SUPPORTING_CLAIM: 'SOURCE_NOT_SUPPORTING_CLAIM',
+    AI_UNCERTAIN: 'AI_UNCERTAIN',
+    DUPLICATE: 'DUPLICATE',
+};
+
+function emptyRejectionStatistics() {
+    return {
+        missingPerson: 0,
+        missingCompany: 0,
+        roleMismatch: 0,
+        industryMismatch: 0,
+        locationMismatch: 0,
+        insufficientEvidence: 0,
+        invalidCompany: 0,
+        invalidPerson: 0,
+    };
+}
+
+const REJECTION_TO_STAT_KEY = {
+    MISSING_PERSON: 'missingPerson',
+    MISSING_COMPANY: 'missingCompany',
+    ROLE_MISMATCH: 'roleMismatch',
+    INDUSTRY_MISMATCH: 'industryMismatch',
+    LOCATION_MISMATCH: 'locationMismatch',
+    INSUFFICIENT_EVIDENCE: 'insufficientEvidence',
+    INVALID_COMPANY_ENTITY: 'invalidCompany',
+    INVALID_PERSON_ENTITY: 'invalidPerson',
+};
+
+// ──────────────────────────────────────────────────────────────
+// 4. TAVILY CLIENT (Section 4, 7)
 // ──────────────────────────────────────────────────────────────
 
 class TavilyClient {
@@ -83,21 +122,21 @@ class TavilyClient {
 
     async search(query, options = {}) {
         if (!this.isConfigured()) {
-            throw new Error('TAVILY_API_KEY_MISSING');
+            throw new Error('TAVILY_NOT_CONFIGURED');
         }
 
         const maxResults = options.maxResults || CONFIG.MAX_RESULTS_PER_QUERY;
 
         try {
-            console.log(`[TAVILY] Searching: "${query}"`);
-
             const response = await axios.post(
                 this.apiUrl,
                 {
-                    query: query,
+                    query,
                     search_depth: 'advanced',
                     max_results: maxResults,
                     include_answer: false,
+                    include_domains: options.includeDomains || [],
+                    exclude_domains: options.excludeDomains || [],
                 },
                 {
                     headers: {
@@ -108,12 +147,9 @@ class TavilyClient {
                 }
             );
 
-            console.log(`[TAVILY] Found ${response.data.results?.length || 0} results`);
             return response.data;
-
         } catch (error) {
             if (error.response) {
-                console.error(`[TAVILY] API Error ${error.response.status}:`, error.response.data);
                 if (error.response.status === 401) throw new Error('TAVILY_API_KEY_INVALID');
                 if (error.response.status === 429) throw new Error('TAVILY_RATE_LIMITED');
                 throw new Error('TAVILY_SEARCH_FAILED');
@@ -125,338 +161,491 @@ class TavilyClient {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. ROLE MATCHER
-// ──────────────────────────────────────────────────────────────
-
-class RoleMatcher {
-    matchRole(requestedRole, discoveredRole) {
-        if (!requestedRole || !discoveredRole) {
-            return { match: false, confidence: 0, normalizedRole: null };
-        }
-
-        const req = requestedRole.toLowerCase().trim();
-        const dis = discoveredRole.toLowerCase().trim();
-
-        // Exact match
-        if (ROLE_MATCHING.exact[dis] && ROLE_MATCHING.exact[dis].toLowerCase() === req) {
-            return { match: true, confidence: 1.0, normalizedRole: ROLE_MATCHING.exact[dis] };
-        }
-
-        // Check aliases
-        if (ROLE_MATCHING.aliases[req]) {
-            for (const alias of ROLE_MATCHING.aliases[req]) {
-                if (dis === alias || dis.includes(alias) || alias.includes(dis)) {
-                    return { match: true, confidence: 0.9, normalizedRole: requestedRole };
-                }
-            }
-        }
-
-        // Rejected roles
-        for (const rejected of ROLE_MATCHING.rejected) {
-            if (dis.includes(rejected) && !dis.includes('founder') && !dis.includes('ceo')) {
-                return { match: false, confidence: 0, normalizedRole: null };
-            }
-        }
-
-        // Partial match (founder for CEO)
-        if (req === 'ceo' && dis.includes('founder')) {
-            return { match: true, confidence: 0.7, normalizedRole: 'Founder' };
-        }
-
-        return { match: false, confidence: 0, normalizedRole: null };
-    }
-
-    normalizeRole(role) {
-        if (!role) return null;
-        const lower = role.toLowerCase().trim();
-        if (ROLE_MATCHING.exact[lower]) return ROLE_MATCHING.exact[lower];
-        if (ROLE_MATCHING.partial[lower]) return ROLE_MATCHING.partial[lower];
-        return role;
-    }
-}
-
-// ──────────────────────────────────────────────────────────────
-// 5. AI EXTRACTOR — Evidence-First
+// 5. AI EXTRACTOR — GPT-4o-mini SEMANTIC ASSISTANT (Section 8-10, 25)
+//
+// This class's job is ONLY to answer: "what entities and
+// relationships are actually supported by this source?" It is
+// explicitly allowed to return zero candidates (NO_VALID_CANDIDATE).
+// It is NOT the final authority — everything it returns still goes
+// through DeterministicValidator.
 // ──────────────────────────────────────────────────────────────
 
 class AIExtractor {
     constructor() {
-        this.openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-        });
+        this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
         this.model = CONFIG.AI_MODEL;
-        this.temperature = CONFIG.AI_TEMPERATURE;
-        this.maxTokens = CONFIG.AI_MAX_TOKENS;
-        this.roleMatcher = new RoleMatcher();
     }
 
     isConfigured() {
         return !!process.env.OPENAI_API_KEY;
     }
 
-    async extractCandidates(tavilyResults, query, branch, requestedRole) {
+    /**
+     * @returns {Array} raw AI candidates (schema per Section 9),
+     *                  possibly empty (NO_VALID_CANDIDATE).
+     */
+    async extractCandidates(rawResult, query, branch, objective) {
         if (!this.isConfigured()) {
-            console.warn('[AI] OpenAI API key missing. Returning empty.');
-            return [];
+            throw new Error('OPENAI_NOT_CONFIGURED');
         }
 
-        try {
-            const prompt = this.buildExtractionPrompt(tavilyResults, query, branch, requestedRole);
+        const prompt = this.buildExtractionPrompt(rawResult, query, branch, objective);
 
+        try {
             const response = await this.openai.chat.completions.create({
                 model: this.model,
+                temperature: CONFIG.AI_TEMPERATURE,
+                max_tokens: CONFIG.AI_MAX_TOKENS,
+                response_format: { type: 'json_object' },
                 messages: [
-                    {
-                        role: 'system',
-                        content: `You are Skyline AA-1 Evidence-First Discovery Extractor.
+                    { role: 'system', content: this.systemPrompt(objective) },
+                    { role: 'user', content: prompt },
+                ],
+            });
 
-CRITICAL RULES — NEVER BREAK:
-1. NEVER invent information. If not in source → null.
-2. NEVER treat article titles, lists, categories, or search phrases as companies/people.
-3. ONLY extract what the source explicitly states with evidence.
-4. For contact candidates: MUST have person + company + role + evidence.
-5. If ANY required field is missing → return null for that candidate.
-6. Do NOT use outside knowledge to fill missing fields.
-7. Return JSON only.
+            const parsed = JSON.parse(response.choices[0].message.content || '{}');
+            const candidates = Array.isArray(parsed.candidates) ? parsed.candidates : [];
 
-Requested role: ${requestedRole || 'Any'}
+            return candidates.map((c) => this.normalizeAIShape(c, rawResult));
+        } catch (error) {
+            console.error(`[AI] Extraction failed for "${query}":`, error.message);
+            // A failed AI call yields zero candidates for this result,
+            // not a fabricated one.
+            return [];
+        }
+    }
 
-Output format:
+    systemPrompt(objective) {
+        return `You are the Skyline AA-1 Layer 3 semantic extraction assistant.
+
+Your ONLY job: identify what entities and relationships are ACTUALLY
+SUPPORTED by the provided source text. You are not the final authority —
+a separate deterministic validator will reject anything you cannot
+support with evidence, so you must be conservative.
+
+ABSOLUTE RULES:
+1. NEVER invent information. If the source does not say it, return null.
+2. NEVER treat a page title, article title, search-results page,
+   directory page, category, list, ranking, event, or community as a
+   company. A company must be an actual organization.
+3. NEVER treat an arbitrary person mentioned on a page (e.g. an article
+   author who is not stated to hold the role) as the requested contact.
+4. NEVER treat a job vacancy listing as identifying the current holder
+   of that role.
+5. A person↔company relationship may only be reported when the source
+   text explicitly establishes it (e.g. "James Gill, CEO of GoSquared").
+   If the source does not connect them, leave company null.
+6. Do not invent emails, phone numbers, LinkedIn URLs, employee counts,
+   revenue, or funding. Only report them if the source states them.
+7. It is correct and expected to return an empty "candidates" array when
+   no source-supported candidate exists (NO_VALID_CANDIDATE). Do not
+   force an extraction.
+8. One source may yield zero, one, or multiple candidates. Extract every
+   distinct company/person the source actually supports.
+9. Preserve the exact requested role (${objective.role || 'any'}) — do
+   not substitute a different role.
+
+Requested context:
+- targetType: ${objective.targetType || 'contact'}
+- role: ${objective.role || 'any'}
+- industries: ${(objective.industries || []).join(', ') || 'any'}
+- location: ${objective.locationLabel || 'any'}
+- companySize: ${objective.companySizeLabel || 'not specified'}
+
+Return JSON only, in this exact shape:
 {
   "candidates": [
     {
-      "companyName": "ExampleSoft" or null,
-      "companyDomain": "examplesoft.com" or null,
-      "companyIndustry": "SaaS" or null,
-      "companyLocation": "London" or null,
-      "personName": "John Smith" or null,
-      "personRole": "CEO" or null,
-      "evidenceSnippet": "Exact text proving this extraction",
-      "confidence": 0.95
+      "company": {
+        "name": string|null,
+        "domain": string|null,
+        "industry": string|null,
+        "location": string|null
+      },
+      "contact": {
+        "name": string|null,
+        "role": string|null
+      },
+      "relationship": {
+        "confirmed": boolean,
+        "statement": string|null
+      },
+      "companySizeEvidence": string|null,
+      "evidence": [
+        { "type": "company_identity"|"person_identity"|"role"|"person_company_association"|"industry"|"location"|"company_size", "quote": string }
+      ]
     }
   ]
-}`
-                    },
-                    {
-                        role: 'user',
-                        content: prompt
-                    }
-                ],
-                temperature: this.temperature,
-                max_tokens: this.maxTokens,
-                response_format: { type: 'json_object' }
-            });
-
-            const parsed = JSON.parse(response.choices[0].message.content);
-            const candidates = parsed.candidates || [];
-
-            // Apply deterministic validation
-            const validated = this.validateCandidates(candidates, requestedRole);
-
-            console.log(`[AI] Extracted ${candidates.length}, validated ${validated.length}`);
-            return validated;
-
-        } catch (error) {
-            console.error('[AI] Extraction failed:', error.message);
-            return [];
-        }
+}`;
     }
 
-    validateCandidates(candidates, requestedRole) {
-        const validated = [];
-        const matcher = new RoleMatcher();
+    buildExtractionPrompt(rawResult, query, branch, objective) {
+        return `Search query: "${query}"
+Search branch industry: ${branch.industry || 'unknown'}
 
-        for (const c of candidates) {
-            // ── CRITICAL: Must have person AND company ──
-            if (!c.personName || !c.companyName) continue;
+Source:
+Title: ${rawResult.title || 'No title'}
+URL: ${rawResult.url || 'No URL'}
+Content:
+${(rawResult.content || '').substring(0, 2000)}
 
-            // ── Validate person name (not garbage) ──
-            if (this.isGarbage(c.personName)) continue;
-
-            // ── Validate company name (not garbage) ──
-            if (this.isGarbage(c.companyName)) continue;
-
-            // ── Role validation ──
-            if (requestedRole && c.personRole) {
-                const match = matcher.matchRole(requestedRole, c.personRole);
-                if (!match.match) continue;
-                c.personRole = match.normalizedRole || c.personRole;
-                c.confidence = (c.confidence || 0.5) * match.confidence;
-            } else if (requestedRole && !c.personRole) {
-                // No role found → reject (role is required for contact targets)
-                continue;
-            }
-
-            // ── Evidence check ──
-            if (!c.evidenceSnippet || c.evidenceSnippet.length < 15) continue;
-
-            // ── Evidence must mention both person and company ──
-            const snippetLower = c.evidenceSnippet.toLowerCase();
-            if (!snippetLower.includes(c.personName.toLowerCase()) || !snippetLower.includes(c.companyName.toLowerCase())) {
-                continue;
-            }
-
-            validated.push(c);
-        }
-
-        return validated;
+Extract only candidates this source text actually supports. Return
+{"candidates": []} if nothing qualifies.`;
     }
 
-    isGarbage(text) {
-        if (!text) return true;
-        const garbage = ['top', 'best', 'list', 'rank', 'guide', 'how to', 'what is', 'the best', 'companies', 'industry', 'sector', 'market', 'trend', 'analysis', 'report', 'article', 'blog', 'news', 'update', 'directory', 'category', 'page', 'search', 'result', 'and is', 'consulting', 'services', 'the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'garage', 'started', 'which', 'that', 'this', 'those', 'these'];
-        const lower = text.toLowerCase().trim();
-        if (lower.length < 2) return true;
-        for (const word of garbage) {
-            if (lower === word || (lower.includes(word) && lower.length < 12)) return true;
-        }
-        return false;
-    }
-
-    buildExtractionPrompt(tavilyResults, query, branch, requestedRole) {
-        const results = tavilyResults.results || [];
-        const industry = branch.industry || 'unknown';
-
-        let resultsText = '';
-        for (let i = 0; i < Math.min(results.length, CONFIG.AI_BATCH_SIZE); i++) {
-            const item = results[i];
-            resultsText += `
-Result ${i + 1}:
-Title: ${item.title || 'No title'}
-URL: ${item.url || 'No URL'}
-Content: ${(item.content || '').substring(0, 700)}
----`;
-        }
-
-        return `Analyze search results for: "${query}"
-Target industry: ${industry}
-Requested role: ${requestedRole || 'Any'}
-
-${resultsText}
-
-Extract ONLY evidence-supported candidates. Return JSON only. Never invent.`;
+    normalizeAIShape(c, rawResult) {
+        const company = c.company || {};
+        const contact = c.contact || {};
+        const relationship = c.relationship || {};
+        return {
+            companyName: company.name || null,
+            companyDomain: company.domain || null,
+            companyIndustry: company.industry || null,
+            companyLocation: company.location || null,
+            companySizeEvidence: c.companySizeEvidence || null,
+            personName: contact.name || null,
+            personRole: contact.role || null,
+            relationshipConfirmed: relationship.confirmed === true,
+            relationshipStatement: relationship.statement || null,
+            evidence: Array.isArray(c.evidence) ? c.evidence : [],
+            sourceUrl: rawResult.url || null,
+            sourceTitle: rawResult.title || null,
+            // Raw data preservation for debugging (Section 37): lets us
+            // later determine whether Tavily, GPT extraction,
+            // deterministic validation, or deduplication was the point
+            // of failure for any given candidate.
+            rawData: {
+                url: rawResult.url || null,
+                title: rawResult.title || null,
+                content: (rawResult.content || '').substring(0, 2000),
+                score: typeof rawResult.score === 'number' ? rawResult.score : null,
+            },
+        };
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. CANDIDATE BUILDER
+// 6. ENTITY-QUALITY HELPERS (Section 11, 12, 45)
+// ──────────────────────────────────────────────────────────────
+
+const COMPANY_ENTITY_BLOCKLIST_PHRASES = [
+    'top ', 'best ', ' list', 'ranking', 'ranked', 'guide to', 'how to',
+    'what is', 'companies in', 'software companies', 'directory',
+    'category', 'search results', 'jobs in', ' jobs', 'vacanc',
+    'community', 'meetup', 'conference', 'summit', 'local london',
+    'event', 'score', 'report', 'article', 'blog', 'news', 'update',
+];
+
+const PERSON_NAME_BLOCKLIST_WORDS = new Set([
+    'the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'this',
+    'that', 'those', 'these', 'which', 'consulting', 'services',
+    'companies', 'community', 'score', 'local', 'london', 'team',
+    'in', 'of', 'on', 'to', 'saastock', 'stock', 'seedtable', 'index',
+    'awards', 'summit', 'conference', 'meetup', 'network', 'jobs',
+    'directory', 'guide', 'list', 'top', 'best',
+]);
+
+function looksLikeListOrPageTitle(name) {
+    if (!name) return true;
+    const lower = name.toLowerCase().trim();
+    if (lower.length < 2) return true;
+    return COMPANY_ENTITY_BLOCKLIST_PHRASES.some((p) => lower.includes(p));
+}
+
+function looksLikeGarbagePersonName(name) {
+    if (!name) return true;
+    const trimmed = name.trim();
+    if (trimmed.length < 2) return true;
+    const words = trimmed.toLowerCase().split(/\s+/);
+    // A real person's name is normally 2-4 tokens and shouldn't contain
+    // any word that marks the string as a phrase, page, category, or
+    // organization/event name rather than an individual (Section 12:
+    // reject "Companies in London", "The Seedtable Score",
+    // "SaaStock Local London", etc.).
+    if (words.length > 6) return true;
+    if (words.some((w) => PERSON_NAME_BLOCKLIST_WORDS.has(w))) return true;
+    // Reject names that are really phrases/sentences.
+    if (/[.:;]/.test(trimmed)) return true;
+    return false;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 7. DETERMINISTIC VALIDATOR (Section 11-23, 26)
+//
+// Every AI-extracted candidate must pass this pipeline in order.
+// AI confidence NEVER overrides these checks (Section 32).
+// ──────────────────────────────────────────────────────────────
+
+class DeterministicValidator {
+    /**
+     * @returns {{ ok: true, normalized: object } | { ok: false, reason: string }}
+     */
+    validate(ai, objective) {
+        const targetType = objective.targetType || 'contact';
+
+        // 1. Schema validation (Section 26, step 1) — malformed AI output
+        // never reaches entity-level checks.
+        if (!this.validateSchema(ai)) {
+            return this.reject(REJECTION_REASONS.AI_UNCERTAIN);
+        }
+
+        // 2. Company identity (Section 11)
+        if (!ai.companyName) {
+            return this.reject(REJECTION_REASONS.MISSING_COMPANY);
+        }
+        if (looksLikeListOrPageTitle(ai.companyName)) {
+            return this.reject(REJECTION_REASONS.INVALID_COMPANY_ENTITY);
+        }
+
+        if (targetType === 'contact') {
+            // 3. Person identity (Section 12)
+            if (!ai.personName) {
+                return this.reject(REJECTION_REASONS.MISSING_PERSON);
+            }
+            if (looksLikeGarbagePersonName(ai.personName)) {
+                return this.reject(REJECTION_REASONS.INVALID_PERSON_ENTITY);
+            }
+
+            // 4. Person-company association (Section 13, 14, 22)
+            if (!ai.relationshipConfirmed || !ai.relationshipStatement) {
+                return this.reject(REJECTION_REASONS.MISSING_PERSON_COMPANY_ASSOCIATION);
+            }
+
+            // 5. Role validation (Section 6, 16, 46)
+            const roleResult = this.validateRole(objective.role, ai.personRole);
+            if (!roleResult.ok) {
+                return this.reject(REJECTION_REASONS.ROLE_MISMATCH);
+            }
+            ai.personRole = roleResult.normalizedRole;
+        }
+
+        // 6. Industry validation (Section 17, 47)
+        if (objective.industries && objective.industries.length > 0) {
+            const industryResult = this.validateIndustry(objective.industries, ai.companyIndustry);
+            if (!industryResult.ok) {
+                return this.reject(REJECTION_REASONS.INDUSTRY_MISMATCH);
+            }
+        }
+
+        // 7. Location validation (Section 18, 19)
+        if (objective.locationLabel) {
+            const locationResult = this.validateLocation(objective, ai.companyLocation);
+            if (!locationResult.ok) {
+                return this.reject(REJECTION_REASONS.LOCATION_MISMATCH);
+            }
+        }
+
+        // 8. Hard constraint: company size (Section 20)
+        let sizeUnconfirmed = false;
+        if (objective.companySize && objective.companySize.restricted) {
+            const sizeResult = this.validateCompanySize(objective.companySize.value, ai.companySizeEvidence);
+            if (sizeResult.status === 'mismatch') {
+                return this.reject(REJECTION_REASONS.COMPANY_SIZE_MISMATCH);
+            }
+            if (sizeResult.status === 'unconfirmed') {
+                // Strict pipeline: do not claim a hard constraint is
+                // satisfied without evidence (Section 20). Reject rather
+                // than silently pass it through as verified.
+                return this.reject(REJECTION_REASONS.COMPANY_SIZE_MISMATCH);
+            }
+        }
+
+        // 9. Evidence validation (Section 21, 22)
+        const evidenceResult = this.validateEvidence(ai, targetType);
+        if (!evidenceResult.ok) {
+            return this.reject(REJECTION_REASONS.INSUFFICIENT_EVIDENCE);
+        }
+
+        // 10. Source validation (Section 23)
+        if (!ai.sourceUrl) {
+            return this.reject(REJECTION_REASONS.SOURCE_NOT_SUPPORTING_CLAIM);
+        }
+
+        return { ok: true, normalized: ai, sizeUnconfirmed };
+    }
+
+    reject(reason) {
+        return { ok: false, reason };
+    }
+
+    // Step 1 of the pipeline (Section 26): reject malformed AI output
+    // before any entity-level interpretation happens.
+    validateSchema(ai) {
+        if (!ai || typeof ai !== 'object') return false;
+        const isNullableString = (v) => v == null || typeof v === 'string';
+        if (!isNullableString(ai.companyName)) return false;
+        if (!isNullableString(ai.companyDomain)) return false;
+        if (!isNullableString(ai.companyIndustry)) return false;
+        if (!isNullableString(ai.companyLocation)) return false;
+        if (!isNullableString(ai.personName)) return false;
+        if (!isNullableString(ai.personRole)) return false;
+        if (ai.relationshipConfirmed != null && typeof ai.relationshipConfirmed !== 'boolean') return false;
+        if (ai.evidence != null && !Array.isArray(ai.evidence)) return false;
+        return true;
+    }
+
+    validateRole(requestedRole, discoveredRole) {
+        if (!requestedRole) return { ok: true, normalizedRole: discoveredRole || null };
+        if (!discoveredRole) return { ok: false, normalizedRole: null };
+
+        const req = requestedRole.toLowerCase().trim();
+        const dis = discoveredRole.toLowerCase().trim();
+
+        if (req === 'ceo') {
+            for (const [phrase, canonical] of Object.entries(ROLE_MATCHING.ceoAcceptable)) {
+                if (dis === phrase || dis.includes(phrase)) {
+                    return { ok: true, normalizedRole: canonical };
+                }
+            }
+            return { ok: false, normalizedRole: null };
+        }
+
+        // Generic requested role: reject known-incompatible C-suite/other
+        // roles unless they textually match the request, exact or
+        // substring match required.
+        if (ROLE_MATCHING.alwaysRejectedUnlessRequested.some((r) => dis.includes(r)) && !dis.includes(req)) {
+            return { ok: false, normalizedRole: null };
+        }
+
+        if (dis === req || dis.includes(req) || req.includes(dis)) {
+            return { ok: true, normalizedRole: discoveredRole };
+        }
+
+        return { ok: false, normalizedRole: null };
+    }
+
+    validateIndustry(requestedIndustries, discoveredIndustry) {
+        if (!discoveredIndustry) return { ok: false };
+        const dis = discoveredIndustry.toLowerCase();
+        const match = requestedIndustries.some((req) => {
+            const r = req.toLowerCase();
+            return dis.includes(r) || r.includes(dis);
+        });
+        return { ok: match };
+    }
+
+    validateLocation(objective, discoveredLocation) {
+        if (!discoveredLocation) return { ok: false };
+        const dis = discoveredLocation.toLowerCase();
+        const city = (objective.city || '').toLowerCase();
+        const country = (objective.country || '').toLowerCase();
+
+        // Strong evidence must reference the specific city (if the
+        // request specified one) rather than only the country/region
+        // (Section 18-19).
+        if (city) {
+            return { ok: dis.includes(city) };
+        }
+        if (country) {
+            return { ok: dis.includes(country) };
+        }
+        return { ok: true };
+    }
+
+    validateCompanySize(requestedRange, evidenceText) {
+        if (!evidenceText) return { status: 'unconfirmed' };
+        const normalized = evidenceText.replace(/\s+/g, '').toLowerCase();
+        const requestedNormalized = (requestedRange || '').replace(/\s+/g, '').toLowerCase();
+        if (normalized.includes(requestedNormalized)) {
+            return { status: 'match' };
+        }
+        return { status: 'unconfirmed' };
+    }
+
+    validateEvidence(ai, targetType) {
+        if (!Array.isArray(ai.evidence) || ai.evidence.length === 0) {
+            return { ok: false };
+        }
+        const types = new Set(ai.evidence.map((e) => e.type));
+        const requiredAlways = ['company_identity'];
+        const requiredForContact = ['person_identity', 'role', 'person_company_association'];
+
+        const required = targetType === 'contact'
+            ? [...requiredAlways, ...requiredForContact]
+            : requiredAlways;
+
+        for (const type of required) {
+            if (!types.has(type)) return { ok: false };
+        }
+
+        for (const e of ai.evidence) {
+            if (!e.quote || e.quote.length < CONFIG.MIN_EVIDENCE_SNIPPET_LENGTH) {
+                return { ok: false };
+            }
+        }
+
+        return { ok: true };
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 8. CANDIDATE BUILDER (Section 34)
 // ──────────────────────────────────────────────────────────────
 
 class CandidateBuilder {
-    buildCandidates(aiCandidates, query, branch, sourceUrl, sourceTitle, sourceSnippet) {
-        const candidates = [];
-
-        for (const ai of aiCandidates) {
-            if (!ai.companyName || !ai.personName) continue;
-
-            const candidate = {
-                candidateId: `candidate-${uuidv4().substring(0, 8)}`,
-                company: {
-                    name: ai.companyName || null,
-                    domain: ai.companyDomain || null,
-                    industry: ai.companyIndustry || null,
-                    location: this.parseLocation(ai.companyLocation),
-                    employeeCount: null,
-                    revenue: null,
-                    funding: null,
-                },
-                contact: {
-                    name: ai.personName || null,
-                    role: ai.personRole || null,
-                    email: null,
-                    phone: null,
-                    linkedinUrl: null,
-                },
-                discovery: {
-                    branch: branch.industry || 'unknown',
-                    query: query,
-                    sourceUrl: sourceUrl || null,
-                    sourceTitle: sourceTitle || null,
-                    sourceSnippet: ai.evidenceSnippet || (sourceSnippet || '').substring(0, 300),
-                    discoveredAt: new Date().toISOString(),
-                },
-                evidence: this.buildEvidence(ai, sourceUrl, sourceTitle),
-                discoveryConfidence: ai.confidence || 0.5,
-                rawData: {
-                    url: sourceUrl,
-                    title: sourceTitle,
-                    snippet: (sourceSnippet || '').substring(0, 200),
-                },
-            };
-
-            candidates.push(candidate);
-        }
-
-        return candidates;
+    build(normalized, query, branch) {
+        return {
+            candidateId: `candidate-${uuidv4().substring(0, 8)}`,
+            company: {
+                name: normalized.companyName || null,
+                domain: normalized.companyDomain || null,
+                industry: normalized.companyIndustry || null,
+                location: this.parseLocation(normalized.companyLocation),
+                employeeCount: null,
+                revenue: null,
+                funding: null,
+            },
+            contact: {
+                name: normalized.personName || null,
+                role: normalized.personRole || null,
+                email: null,
+                phone: null,
+                linkedinUrl: null,
+            },
+            discovery: {
+                branch: branch.industry || 'unknown',
+                query,
+                sourceUrl: normalized.sourceUrl || null,
+                sourceTitle: normalized.sourceTitle || null,
+                sourceSnippet: (normalized.relationshipStatement || '').substring(0, 300) || null,
+                discoveredAt: new Date().toISOString(),
+            },
+            evidence: (normalized.evidence || []).map((e) => ({
+                type: e.type,
+                sourceUrl: normalized.sourceUrl || null,
+                sourceTitle: normalized.sourceTitle || null,
+                snippet: e.quote || '',
+            })),
+            discoveryConfidence: this.estimateConfidence(normalized),
+            rawData: normalized.rawData || null,
+        };
     }
 
-    buildEvidence(ai, sourceUrl, sourceTitle) {
-        const evidence = [];
-
-        if (ai.companyName) {
-            evidence.push({
-                type: 'company_identity',
-                sourceUrl: sourceUrl || null,
-                sourceTitle: sourceTitle || null,
-                snippet: ai.evidenceSnippet || '',
-            });
-        }
-        if (ai.personName) {
-            evidence.push({
-                type: 'person_identity',
-                sourceUrl: sourceUrl || null,
-                sourceTitle: sourceTitle || null,
-                snippet: ai.evidenceSnippet || '',
-            });
-        }
-        if (ai.personRole) {
-            evidence.push({
-                type: 'role',
-                sourceUrl: sourceUrl || null,
-                sourceTitle: sourceTitle || null,
-                snippet: ai.personRole,
-            });
-        }
-        if (ai.companyIndustry) {
-            evidence.push({
-                type: 'industry',
-                sourceUrl: sourceUrl || null,
-                sourceTitle: sourceTitle || null,
-                snippet: ai.companyIndustry,
-            });
-        }
-        if (ai.companyLocation) {
-            evidence.push({
-                type: 'location',
-                sourceUrl: sourceUrl || null,
-                sourceTitle: sourceTitle || null,
-                snippet: ai.companyLocation,
-            });
-        }
-
-        // Person-company association evidence
-        if (ai.evidenceSnippet && ai.personName && ai.companyName) {
-            evidence.push({
-                type: 'person_company_association',
-                sourceUrl: sourceUrl || null,
-                sourceTitle: sourceTitle || null,
-                snippet: ai.evidenceSnippet,
-            });
-        }
-
-        return evidence;
+    estimateConfidence(normalized) {
+        // Confidence reflects evidence completeness (Section 33), it
+        // never substitutes for validation which has already occurred
+        // by the time this runs.
+        let score = 0.5;
+        if (normalized.relationshipConfirmed) score += 0.2;
+        if (normalized.companyIndustry) score += 0.1;
+        if (normalized.companyLocation) score += 0.1;
+        if ((normalized.evidence || []).length >= 4) score += 0.1;
+        return Math.min(1, Math.round(score * 100) / 100);
     }
 
     parseLocation(locationStr) {
-        if (!locationStr) return { city: null, region: null, country: null, countryCode: null };
+        const location = { city: null, region: null, country: null, countryCode: null };
+        if (!locationStr) return location;
 
         const lower = locationStr.toLowerCase();
-        const location = { city: null, region: null, country: null, countryCode: null };
 
-        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco', 'los angeles', 'chicago', 'toronto', 'vancouver', 'sydney', 'melbourne'];
+        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam',
+            'lagos', 'abuja', 'new york', 'san francisco'];
         const countries = {
             'uk': { name: 'United Kingdom', code: 'GB' },
             'united kingdom': { name: 'United Kingdom', code: 'GB' },
+            'great britain': { name: 'United Kingdom', code: 'GB' },
+            'england': { name: 'United Kingdom', code: 'GB' },
             'nigeria': { name: 'Nigeria', code: 'NG' },
             'germany': { name: 'Germany', code: 'DE' },
             'usa': { name: 'United States', code: 'US' },
@@ -480,11 +669,10 @@ class CandidateBuilder {
 
         for (const city of cities) {
             if (lower.includes(city)) {
-                location.city = city.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                location.city = city.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
                 break;
             }
         }
-
         for (const [key, value] of Object.entries(countries)) {
             if (lower.includes(key)) {
                 location.country = value.name;
@@ -492,274 +680,255 @@ class CandidateBuilder {
                 break;
             }
         }
-
         return location;
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 7. DEDUPLICATION ENGINE
+// 9. DEDUPLICATION ENGINE (Section 28-31)
 // ──────────────────────────────────────────────────────────────
 
 class DeduplicationEngine {
     deduplicate(candidates) {
         const seen = new Map();
         const unique = [];
+        let duplicatesRemoved = 0;
 
         for (const candidate of candidates) {
-            const domain = candidate.company?.domain;
-            const name = candidate.company?.name;
-            const personName = candidate.contact?.name;
+            const key = this.identityKey(candidate);
 
-            let key = null;
-            if (domain) {
-                key = domain.toLowerCase();
-            } else if (name && personName) {
-                key = `${name.toLowerCase().replace(/[^a-zA-Z0-9]/g, '')}_${personName.toLowerCase().replace(/[^a-zA-Z0-9]/g, '')}`;
-            } else if (name) {
-                key = name.toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+            if (key && seen.has(key)) {
+                const existing = seen.get(key);
+                this.mergeEvidence(existing, candidate);
+                duplicatesRemoved++;
+                continue;
             }
 
-            if (key) {
-                if (seen.has(key)) {
-                    const existing = seen.get(key);
-                    // Merge evidence
-                    if (candidate.evidence && candidate.evidence.length > 0) {
-                        existing.evidence = [...existing.evidence, ...candidate.evidence];
-                    }
-                    if (candidate.contact?.email && !existing.contact?.email) {
-                        existing.contact.email = candidate.contact.email;
-                    }
-                    if (candidate.contact?.linkedinUrl && !existing.contact?.linkedinUrl) {
-                        existing.contact.linkedinUrl = candidate.contact.linkedinUrl;
-                    }
-                    if (candidate.contact?.role && !existing.contact?.role) {
-                        existing.contact.role = candidate.contact.role;
-                    }
-                    continue;
-                }
-                seen.set(key, candidate);
-            }
+            if (key) seen.set(key, candidate);
             unique.push(candidate);
         }
 
-        const removed = candidates.length - unique.length;
-        console.log(`[DEDUPE] Removed ${removed} duplicates`);
-        return { uniqueCandidates: unique, duplicatesRemoved: removed };
+        return { uniqueCandidates: unique, duplicatesRemoved };
+    }
+
+    identityKey(candidate) {
+        const domain = candidate.company?.domain;
+        const companyName = candidate.company?.name;
+        const personName = candidate.contact?.name;
+
+        const normalizedCompany = domain
+            ? domain.toLowerCase().trim()
+            : (companyName ? companyName.toLowerCase().replace(/[^a-z0-9]/g, '') : null);
+
+        if (!normalizedCompany) return null;
+
+        if (personName) {
+            // Person identity keyed by name + company — do NOT merge two
+            // different people who share a name at different companies
+            // (Section 31), and do not merge two different companies
+            // that happen to share a person's name.
+            const normalizedPerson = personName.toLowerCase().replace(/[^a-z0-9]/g, '');
+            return `person:${normalizedPerson}@company:${normalizedCompany}`;
+        }
+
+        return `company:${normalizedCompany}`;
+    }
+
+    mergeEvidence(existing, incoming) {
+        const existingSnippets = new Set(existing.evidence.map((e) => `${e.type}::${e.snippet}`));
+        for (const e of incoming.evidence) {
+            const key = `${e.type}::${e.snippet}`;
+            if (!existingSnippets.has(key)) {
+                existing.evidence.push(e);
+                existingSnippets.add(key);
+            }
+        }
+        if (!existing.contact.email && incoming.contact.email) existing.contact.email = incoming.contact.email;
+        if (!existing.contact.role && incoming.contact.role) existing.contact.role = incoming.contact.role;
+        if (!existing.contact.linkedinUrl && incoming.contact.linkedinUrl) {
+            existing.contact.linkedinUrl = incoming.contact.linkedinUrl;
+        }
+        if (incoming.discoveryConfidence > existing.discoveryConfidence) {
+            existing.discoveryConfidence = incoming.discoveryConfidence;
+        }
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. MAIN SEARCHING ENGINE
+// 10. MAIN SEARCHING ENGINE (Section 5, 39-42)
 // ──────────────────────────────────────────────────────────────
 
 class SearchingEngine {
     constructor() {
         this.tavilyClient = new TavilyClient();
         this.aiExtractor = new AIExtractor();
+        this.validator = new DeterministicValidator();
         this.candidateBuilder = new CandidateBuilder();
         this.deduplicationEngine = new DeduplicationEngine();
     }
 
     async execute(plan) {
-        console.log('[DISCOVERY] Starting Layer 3 discovery...');
-
-        try {
-            // ── Validate input ──
-            if (!plan || plan.status === 'invalid' || plan.status === 'needs_clarification') {
-                return this.buildErrorResult('INVALID_PLAN', 'Invalid or unclear search plan', plan);
-            }
-
-            if (!this.tavilyClient.isConfigured()) {
-                console.error('[DISCOVERY] Tavily API key missing');
-                return this.buildErrorResult('TAVILY_API_KEY_MISSING', 'Tavily API key is not configured', plan);
-            }
-
-            const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
-            const searchBranches = plan.searchBranches || [];
-            const requestedRole = plan.objective?.role || null;
-
-            console.log(`[DISCOVERY] Request: ${requestId}`);
-            console.log(`[DISCOVERY] Branches: ${searchBranches.length}`);
-            console.log(`[DISCOVERY] Role: ${requestedRole || 'Any'}`);
-
-            const allCandidates = [];
-            const searchSummary = {
-                branchesExecuted: 0,
-                queriesExecuted: 0,
-                rawResultsFound: 0,
-                aiResultsAnalyzed: 0,
-                candidatesExtracted: 0,
-                invalidCandidatesRejected: 0,
-                duplicatesDetected: 0,
-                duplicatesRemoved: 0,
-                candidatesForNextLayer: 0,
-            };
-            const rejectionStats = {
-                missingPerson: 0,
-                missingCompany: 0,
-                roleMismatch: 0,
-                insufficientEvidence: 0,
-                invalidCompany: 0,
-                invalidPerson: 0,
-            };
-            const errors = [];
-
-            for (const branch of searchBranches) {
-                const branchResults = await this.executeBranch(branch, requestedRole, errors, searchSummary, rejectionStats);
-                searchSummary.branchesExecuted++;
-                searchSummary.queriesExecuted += branchResults.queriesExecuted || 0;
-                searchSummary.rawResultsFound += branchResults.rawResultsFound || 0;
-                searchSummary.aiResultsAnalyzed += branchResults.aiResultsAnalyzed || 0;
-                searchSummary.candidatesExtracted += branchResults.candidatesExtracted || 0;
-                searchSummary.invalidCandidatesRejected += branchResults.invalidCandidatesRejected || 0;
-
-                if (branchResults.candidates) {
-                    allCandidates.push(...branchResults.candidates);
-                }
-            }
-
-            console.log(`[DISCOVERY] Candidates extracted: ${searchSummary.candidatesExtracted}`);
-            console.log(`[DISCOVERY] Invalid rejected: ${searchSummary.invalidCandidatesRejected}`);
-
-            // ── Deduplicate ──
-            const dedupResult = this.deduplicationEngine.deduplicate(allCandidates);
-            searchSummary.duplicatesDetected = dedupResult.duplicatesRemoved;
-            searchSummary.duplicatesRemoved = dedupResult.duplicatesRemoved;
-            searchSummary.candidatesForNextLayer = dedupResult.uniqueCandidates.length;
-
-            console.log(`[DISCOVERY] Candidates for Layer 4: ${dedupResult.uniqueCandidates.length}`);
-
-            // ── Determine status ──
-            let status = 'completed';
-            if (dedupResult.uniqueCandidates.length === 0 && errors.length === 0) {
-                status = 'no_results';
-            } else if (dedupResult.uniqueCandidates.length === 0 && errors.length > 0) {
-                status = 'failed';
-            } else if (dedupResult.uniqueCandidates.length > 0 && errors.length > 0) {
-                status = 'partial';
-            }
-
-            return {
-                discoveryVersion: '3.0.0',
-                requestId: requestId,
-                status: status,
-                searchProvider: {
-                    name: 'tavily',
-                    configured: this.tavilyClient.isConfigured(),
-                },
-                aiExtractor: {
-                    provider: 'openai',
-                    model: CONFIG.AI_MODEL,
-                    configured: this.aiExtractor.isConfigured(),
-                },
-                searchStatistics: searchSummary,
-                rejectionStatistics: rejectionStats,
-                candidates: dedupResult.uniqueCandidates,
-                errors: errors,
-                createdBy: 'Searching.js',
-                createdAt: new Date().toISOString(),
-            };
-
-        } catch (error) {
-            console.error('[DISCOVERY] Fatal error:', error.message);
-            return this.buildErrorResult('FATAL_ERROR', error.message, plan);
+        // ── Startup validation (Section 3) ──
+        if (!this.tavilyClient.isConfigured()) {
+            return this.configErrorResult('TAVILY_NOT_CONFIGURED', plan);
         }
-    }
+        if (!this.aiExtractor.isConfigured()) {
+            return this.configErrorResult('OPENAI_NOT_CONFIGURED', plan);
+        }
+        if (!plan || plan.status === 'invalid' || plan.status === 'needs_clarification') {
+            return this.configErrorResult('INVALID_PLAN', plan);
+        }
 
-    async executeBranch(branch, requestedRole, errors, searchSummary, rejectionStats) {
-        const results = {
-            candidates: [],
+        const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
+        const objective = this.normalizeObjective(plan.objective || {});
+        const searchBranches = plan.searchBranches || [];
+
+        const searchStatistics = {
+            branchesExecuted: 0,
             queriesExecuted: 0,
             rawResultsFound: 0,
             aiResultsAnalyzed: 0,
             candidatesExtracted: 0,
             invalidCandidatesRejected: 0,
+            duplicatesDetected: 0,
+            duplicatesRemoved: 0,
+            candidatesForNextLayer: 0,
         };
+        const rejectionStatistics = emptyRejectionStatistics();
+        const errors = [];
+        const allCandidates = [];
 
-        const hypotheses = branch.hypotheses || [];
-        const industry = branch.industry || 'unknown';
-
-        console.log(`[DISCOVERY] Executing branch: ${industry}`);
-
-        for (const query of hypotheses) {
-            try {
-                console.log(`[DISCOVERY] Query: ${query}`);
-
-                const tavilyResult = await this.tavilyClient.search(query);
-                results.queriesExecuted++;
-                results.rawResultsFound += tavilyResult.results?.length || 0;
-
-                const rawResults = tavilyResult.results || [];
-
-                // ── Extract with AI (evidence-first) ──
-                let aiCandidates = [];
-                try {
-                    aiCandidates = await this.aiExtractor.extractCandidates(
-                        tavilyResult,
-                        query,
-                        branch,
-                        requestedRole
-                    );
-                } catch (aiError) {
-                    console.error('[DISCOVERY] AI extraction error:', aiError.message);
-                }
-
-                results.aiResultsAnalyzed += rawResults.length;
-
-                // ── Build candidates from validated AI output ──
-                for (const item of rawResults) {
-                    const builtCandidates = this.candidateBuilder.buildCandidates(
-                        aiCandidates,
-                        query,
-                        branch,
-                        item.url,
-                        item.title,
-                        item.content
-                    );
-
-                    if (builtCandidates.length > 0) {
-                        results.candidates.push(...builtCandidates);
-                        results.candidatesExtracted += builtCandidates.length;
-                    }
-                }
-
-                results.invalidCandidatesRejected = results.aiResultsAnalyzed - results.candidatesExtracted;
-                console.log(`[DISCOVERY] Valid candidates: ${results.candidates.length}`);
-
-            } catch (error) {
-                console.error(`[DISCOVERY] Query "${query}" failed:`, error.message);
-                errors.push({
-                    query: query,
-                    branch: industry,
-                    error: error.message,
-                });
-            }
+        for (const branch of searchBranches) {
+            const branchOutcome = await this.executeBranch(branch, objective, errors, searchStatistics, rejectionStatistics);
+            searchStatistics.branchesExecuted++;
+            allCandidates.push(...branchOutcome.candidates);
         }
 
-        return results;
-    }
+        // ── Deduplication + evidence merge (Section 28-31) ──
+        const dedupResult = this.deduplicationEngine.deduplicate(allCandidates);
+        searchStatistics.duplicatesDetected = dedupResult.duplicatesRemoved;
+        searchStatistics.duplicatesRemoved = dedupResult.duplicatesRemoved;
+        searchStatistics.candidatesForNextLayer = dedupResult.uniqueCandidates.length;
 
-    buildErrorResult(errorCode, message, plan) {
+        // ── Status determination (Section 40) ──
+        let status = 'completed';
+        if (searchStatistics.queriesExecuted === 0) {
+            status = 'failed';
+        } else if (errors.length > 0 && dedupResult.uniqueCandidates.length > 0) {
+            status = 'partial';
+        } else if (errors.length > 0 && dedupResult.uniqueCandidates.length === 0) {
+            status = errors.length >= searchStatistics.queriesExecuted ? 'failed' : 'partial';
+        }
+
         return {
             discoveryVersion: '3.0.0',
-            requestId: plan?.requestId || `error-${uuidv4().substring(0, 8)}`,
-            status: 'failed',
-            searchProvider: {
-                name: 'tavily',
-                configured: this.tavilyClient.isConfigured(),
-            },
+            requestId,
+            status,
+            searchProvider: { name: 'tavily', configured: this.tavilyClient.isConfigured() },
             aiExtractor: {
                 provider: 'openai',
                 model: CONFIG.AI_MODEL,
                 configured: this.aiExtractor.isConfigured(),
             },
-            error: {
-                code: errorCode,
-                message: message,
+            searchStatistics,
+            rejectionStatistics,
+            candidates: dedupResult.uniqueCandidates,
+            errors,
+            createdBy: 'Searching.js',
+            createdAt: new Date().toISOString(),
+        };
+    }
+
+    normalizeObjective(objective) {
+        const location = objective.location || {};
+        const locationLabel = [location.city, location.country].filter(Boolean).join(', ') || null;
+        return {
+            targetType: objective.targetType || 'contact',
+            role: objective.role || null,
+            industries: objective.industries || [],
+            city: location.city || null,
+            country: location.country || null,
+            countryCode: location.countryCode || null,
+            locationLabel,
+            companySize: objective.companySize || null,
+            companySizeLabel: objective.companySize?.value || null,
+        };
+    }
+
+    async executeBranch(branch, objective, errors, searchStatistics, rejectionStatistics) {
+        const candidates = [];
+        const hypotheses = branch.hypotheses || [];
+
+        for (const query of hypotheses) {
+            try {
+                const tavilyResult = await this.tavilyClient.search(query);
+                searchStatistics.queriesExecuted++;
+
+                const rawResults = tavilyResult.results || [];
+                searchStatistics.rawResultsFound += rawResults.length;
+
+                for (const rawResult of rawResults) {
+                    const rawResultTagged = { ...rawResult, query, branch: branch.industry };
+
+                    let aiCandidates = [];
+                    try {
+                        aiCandidates = await this.aiExtractor.extractCandidates(
+                            rawResultTagged,
+                            query,
+                            branch,
+                            objective
+                        );
+                    } catch (aiError) {
+                        errors.push({ query, branch: branch.industry, error: aiError.message });
+                        continue;
+                    }
+
+                    searchStatistics.aiResultsAnalyzed++;
+
+                    // One result can yield 0, 1, or many candidates
+                    // (Section 24) — never forced to exactly one.
+                    for (const ai of aiCandidates) {
+                        const validation = this.validator.validate(ai, objective);
+                        if (!validation.ok) {
+                            searchStatistics.invalidCandidatesRejected++;
+                            const statKey = REJECTION_TO_STAT_KEY[validation.reason];
+                            if (statKey) rejectionStatistics[statKey]++;
+                            continue;
+                        }
+
+                        const built = this.candidateBuilder.build(validation.normalized, query, branch);
+                        candidates.push(built);
+                        searchStatistics.candidatesExtracted++;
+                    }
+                }
+            } catch (error) {
+                errors.push({ query, branch: branch.industry, error: error.message });
+            }
+        }
+
+        return { candidates };
+    }
+
+    configErrorResult(code, plan) {
+        return {
+            status: 'failed',
+            error: { code },
+            discoveryVersion: '3.0.0',
+            requestId: plan?.requestId || `error-${uuidv4().substring(0, 8)}`,
+            searchProvider: { name: 'tavily', configured: this.tavilyClient.isConfigured() },
+            aiExtractor: {
+                provider: 'openai',
+                model: CONFIG.AI_MODEL,
+                configured: this.aiExtractor.isConfigured(),
             },
+            searchStatistics: {
+                branchesExecuted: 0, queriesExecuted: 0, rawResultsFound: 0,
+                aiResultsAnalyzed: 0, candidatesExtracted: 0, invalidCandidatesRejected: 0,
+                duplicatesDetected: 0, duplicatesRemoved: 0, candidatesForNextLayer: 0,
+            },
+            rejectionStatistics: emptyRejectionStatistics(),
             candidates: [],
-            errors: [{ error: message }],
+            errors: [{ error: code }],
             createdBy: 'Searching.js',
             createdAt: new Date().toISOString(),
         };
@@ -767,21 +936,22 @@ class SearchingEngine {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 9. CONVENIENCE FUNCTION
+// 11. CONVENIENCE ENTRY POINT
 // ──────────────────────────────────────────────────────────────
 
 async function execute(plan) {
+    const engine = new SearchingEngine();
     try {
-        const engine = new SearchingEngine();
         return await engine.execute(plan);
     } catch (error) {
-        console.error('[SEARCHING] Fatal execute error:', error.message);
+        console.error('[SEARCHING] Fatal error:', error.message);
         return {
             discoveryVersion: '3.0.0',
             requestId: `error-${uuidv4().substring(0, 8)}`,
             status: 'failed',
-            error: { code: 'EXECUTE_ERROR', message: error.message },
+            error: { code: 'FATAL_ERROR', message: error.message },
             candidates: [],
+            errors: [{ error: error.message }],
             createdBy: 'Searching.js',
             createdAt: new Date().toISOString(),
         };
@@ -789,7 +959,7 @@ async function execute(plan) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 10. EXPORTS
+// 12. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -797,9 +967,10 @@ module.exports = {
     SearchingEngine,
     TavilyClient,
     AIExtractor,
+    DeterministicValidator,
     CandidateBuilder,
     DeduplicationEngine,
-    RoleMatcher,
     CONFIG,
     ROLE_MATCHING,
+    REJECTION_REASONS,
 };
