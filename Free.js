@@ -8,6 +8,7 @@ const axios = require('axios');
 const Understanding = require('./Understanding');
 const Planning = require('./Planning');
 const Searching = require('./Searching');
+const Validating = require('./Validating');
 
 // ────────────────────────────────────────────────────────────────
 // 2. MAIN FUNCTION
@@ -39,25 +40,39 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        // ── Step 4: Build response string ──
+        // ── Step 4: Validate the search results ──
+        let validatedResults;
+        try {
+            validatedResults = await Validating.validate(searchResults, plan);
+            console.log('📋 [FREE] Validated results:', JSON.stringify(validatedResults, null, 2));
+        } catch (validateError) {
+            console.error('❌ [FREE] Validation failed:', validateError.message);
+            validatedResults = {
+                status: 'failed',
+                error: { code: 'VALIDATION_FAILED', message: validateError.message },
+                candidates: [],
+            };
+        }
+
+        // ── Step 5: Build response string ──
         let resultsString;
         
-        // Check if searchResults exists and has a valid status
-        if (searchResults && searchResults.status !== 'failed') {
-            // Success — return the discovery results
-            resultsString = JSON.stringify(searchResults, null, 2);
+        // Check if validatedResults exists and has a valid status
+        if (validatedResults && validatedResults.status !== 'failed') {
+            // Success — return the validated results
+            resultsString = JSON.stringify(validatedResults, null, 2);
         } else {
             // Failed — return a friendly error message
-            const errorMessage = searchResults?.error?.message || 'Search could not be completed';
+            const errorMessage = validatedResults?.error?.message || 'Validation could not be completed';
             resultsString = JSON.stringify({
                 status: 'failed',
                 message: errorMessage,
                 candidates: [],
-                suggestion: 'Please check that TAVILY_API_KEY and OPENAI_API_KEY are set in the environment.',
+                suggestion: 'Please check that the search results are valid.',
             }, null, 2);
         }
 
-        // ── Step 5: ALWAYS return a reply string ──
+        // ── Step 6: ALWAYS return a reply string ──
         return {
             reply: resultsString,
             updatedHistory: [
@@ -70,6 +85,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                 understanding: understanding,
                 plan: plan,
                 searchResults: searchResults,
+                validatedResults: validatedResults,
                 status: understanding.status
             }
         };
