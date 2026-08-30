@@ -34,7 +34,7 @@ const CONFIG = {
  * @param {Object} plan - The search plan from Layer 2
  * @returns {Object} Validated and classified leads
  */
-async function validate(searchResults, plan) {
+async function validateCandidates(searchResults, plan) {
     console.log('[VALIDATING] Starting Layer 4 validation...');
 
     try {
@@ -279,12 +279,17 @@ REMEMBER:
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. CONVENIENCE FUNCTION
+// 6. CONVENIENCE FUNCTION — FIXED (no recursion)
 // ──────────────────────────────────────────────────────────────
 
+/**
+ * Main entry point for validation
+ * @param {Object} searchResults - Raw output from Layer 3
+ * @param {Object} plan - The search plan from Layer 2
+ * @returns {Promise<Object>} Validated and classified leads
+ */
 async function validate(searchResults, plan) {
-    // Re-export the main function for cleaner imports
-    return validate(searchResults, plan);
+    return validateCandidates(searchResults, plan);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -293,6 +298,7 @@ async function validate(searchResults, plan) {
 
 module.exports = {
     validate,
+    validateCandidates,
     extractRequirements,
     processBatch,
     buildValidationPrompt,
