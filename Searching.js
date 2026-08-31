@@ -1,40 +1,128 @@
 // ──────────────────────────────────────────────────────────────
-// SEARCHING.JS — Layer 3: Discovery Engine v5.0.0
+// SEARCHING.JS — Stage 2: People Discovery
+// Skyline AA-1 Lead Generation System
 //
 // RESPONSIBILITIES:
-// - Execute up to 5 Tavily searches intelligently allocated
-// - Extract ALL useful candidates from each search result
-// - Preserve evidence for every extracted candidate
-// - Remove obvious duplicates only
-// - NEVER reject candidates due to missing information
-// - Pass raw candidates to Layer 4 for verification
+// - Accept clean Stage 1 contract
+// - Build targeted search queries
+// - Execute Tavily searches (with fallback tiers, capped)
+// - Extract people from search results with GPT (Luna, cascading to Terra)
+// - De-duplicate candidates
+// - Return validated people list
+// - NEVER fail the whole stage if one query fails
 // ──────────────────────────────────────────────────────────────
 
-const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const OpenAI = require('openai');
+const axios = require('axios');
 
 // ──────────────────────────────────────────────────────────────
 // 1. CONFIGURATION
 // ──────────────────────────────────────────────────────────────
 
 const CONFIG = {
+    // Tavily settings
     TAVILY_API_URL: 'https://api.tavily.com/search',
-    MAX_RESULTS_PER_QUERY: 20,
-    SEARCH_TIMEOUT_MS: 15000,
-    MAX_TAVILY_SEARCHES: 5,
-    QUERY_SIMILARITY_THRESHOLD: 0.7,
-    MAX_SOURCE_CONTENT_CHARS: 2000,
+    TAVILY_MAX_RESULTS_PER_QUERY: 20,
+    TAVILY_SEARCH_TIMEOUT_MS: 15000,
+    MAX_TAVILY_SEARCHES_PER_TIER: 3,
+    MAX_TAVILY_SEARCHES_TOTAL: 9, // 3 tiers × 3 searches each — hard ceiling, enforced below
+
+    // AI extraction settings
+    // Primary model per system plan: GPT-5.6 Luna (cheap, sufficient for structured extraction).
+    // Escalates to Terra only when Luna's output is empty/invalid — see PeopleExtractor.extractBatch.
+    AI_MODEL: 'gpt-5.6-luna',
+    AI_MODEL_FALLBACK: 'gpt-5.6-terra',
+    AI_TEMPERATURE: 0.2,
+    AI_MAX_TOKENS: 1000,
+    AI_BATCH_SIZE: 5,
+
+    // Fallback tiers
+    MIN_POOL_SIZE_MULTIPLIER: 1.5, // Requested × 1.5 = min pool size
+
+    // Confidence levels
+    CONFIDENCE: {
+        HIGH: 'high',
+        MEDIUM: 'medium',
+        LOW: 'low',
+    },
+
+    // Discovery tiers
+    DISCOVERY_TIERS: {
+        TIER_1: 'tier1',
+        TIER_2: 'tier2',
+        TIER_3: 'tier3',
+    },
 };
 
 // ──────────────────────────────────────────────────────────────
-// 2. TAVILY CLIENT
+// 2. OUTPUT CONTRACT — People Candidate
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Each candidate represents a real person discovered.
+ * Stage 3 (Pattern Memory) consumes this directly.
+ */
+const CANDIDATE_SCHEMA = {
+    name: 'string (required)',
+    title: 'string (required)',
+    companyName: 'string (required)',
+    domain: 'string (required)',
+    sourceUrl: 'string (required)',
+    confidence: 'high | medium | low (required)',
+    discoveredVia: 'tier1 | tier2 | tier3 (required)',
+};
+
+// ──────────────────────────────────────────────────────────────
+// 3. QUERY BUILDER
+// ──────────────────────────────────────────────────────────────
+
+function buildSearchQueries(params) {
+    const { companyName, domain, role, seniority, location, industry } = params;
+    const queries = [];
+
+    // ── Tier 1: Most specific ──
+    // Full role + seniority + location + company
+    if (role && seniority) {
+        queries.push(`${seniority} ${role} ${companyName}`);
+        queries.push(`${companyName} ${role} ${location}`);
+        queries.push(`${companyName} team ${role}`);
+    } else if (role) {
+        queries.push(`${companyName} ${role}`);
+        queries.push(`${role} at ${companyName}`);
+        queries.push(`${companyName} team ${role}`);
+    }
+
+    // ── Company "About/Team" pages ──
+    queries.push(`${companyName} team`);
+    queries.push(`${companyName} about us`);
+    queries.push(`${companyName} leadership`);
+
+    // ── Location-specific ──
+    if (location) {
+        queries.push(`${companyName} ${location} team`);
+        queries.push(`${companyName} employees ${location}`);
+    }
+
+    // ── Industry-specific ──
+    if (industry) {
+        queries.push(`${companyName} ${industry} team`);
+    }
+
+    // ── Remove duplicates ──
+    const unique = [...new Set(queries)];
+    return unique.slice(0, CONFIG.MAX_TAVILY_SEARCHES_PER_TIER * 2);
+}
+
+// ──────────────────────────────────────────────────────────────
+// 4. TAVILY CLIENT
 // ──────────────────────────────────────────────────────────────
 
 class TavilyClient {
     constructor() {
         this.apiKey = process.env.TAVILY_API_KEY;
         this.apiUrl = CONFIG.TAVILY_API_URL;
-        this.timeout = CONFIG.SEARCH_TIMEOUT_MS;
+        this.timeout = CONFIG.TAVILY_SEARCH_TIMEOUT_MS;
     }
 
     isConfigured() {
@@ -46,16 +134,18 @@ class TavilyClient {
             throw new Error('TAVILY_NOT_CONFIGURED');
         }
 
-        const maxResults = options.maxResults || CONFIG.MAX_RESULTS_PER_QUERY;
+        const maxResults = options.maxResults || CONFIG.TAVILY_MAX_RESULTS_PER_QUERY;
 
         try {
             const response = await axios.post(
                 this.apiUrl,
                 {
-                    query,
+                    query: query,
                     search_depth: 'advanced',
                     max_results: maxResults,
                     include_answer: false,
+                    include_domains: options.includeDomains || [],
+                    exclude_domains: options.excludeDomains || [],
                 },
                 {
                     headers: {
@@ -80,693 +170,430 @@ class TavilyClient {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. QUERY SELECTOR — Maximum 5 diverse searches
+// 5. AI EXTRACTOR — Extracts people from search results
 // ──────────────────────────────────────────────────────────────
 
-class QuerySelector {
-    constructor(maxSearches = CONFIG.MAX_TAVILY_SEARCHES) {
-        this.maxSearches = maxSearches;
-        this.stopwords = new Set(['the', 'a', 'an', 'in', 'of', 'and', 'or', 'for', 'with', 'to', 'on', 'at', 'by', 'is', 'are']);
+class PeopleExtractor {
+    constructor() {
+        this.openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY,
+        });
+        this.model = CONFIG.AI_MODEL;
+        this.fallbackModel = CONFIG.AI_MODEL_FALLBACK;
+        this.temperature = CONFIG.AI_TEMPERATURE;
+        this.maxTokens = CONFIG.AI_MAX_TOKENS;
     }
 
-    select(searchBranches) {
-        const branches = (Array.isArray(searchBranches) ? searchBranches : [])
-            .map((b, i) => ({
-                industry: b.industry || `branch-${i}`,
-                hypotheses: Array.isArray(b.hypotheses) ? [...b.hypotheses] : [],
-                priority: typeof b.priority === 'number' ? b.priority : i + 1,
-                _cursor: 0,
-            }))
-            .filter((b) => b.hypotheses.length > 0)
-            .sort((a, b) => a.priority - b.priority);
+    isConfigured() {
+        return !!process.env.OPENAI_API_KEY;
+    }
 
-        if (branches.length === 0) return [];
-
-        const selected = [];
-        const selectedWordSets = [];
-
-        let madeProgressThisPass = true;
-        while (selected.length < this.maxSearches && madeProgressThisPass) {
-            madeProgressThisPass = false;
-
-            for (const branch of branches) {
-                if (selected.length >= this.maxSearches) break;
-
-                const picked = this.pickNextNonDuplicate(branch, selectedWordSets);
-                if (picked) {
-                    selected.push({ query: picked.query, branchIndustry: branch.industry });
-                    selectedWordSets.push(picked.wordSet);
-                    madeProgressThisPass = true;
-                }
-            }
+    async extractPeople(searchResults, query, domain) {
+        if (!this.isConfigured()) {
+            console.warn('[EXTRACTOR] OpenAI not configured');
+            return [];
         }
 
-        return selected;
-    }
+        const results = searchResults.results || [];
+        if (results.length === 0) return [];
 
-    pickNextNonDuplicate(branch, selectedWordSets) {
-        while (branch._cursor < branch.hypotheses.length) {
-            const query = branch.hypotheses[branch._cursor++];
-            const wordSet = this.normalize(query);
-            const isDuplicate = selectedWordSets.some(
-                (existing) => this.jaccard(existing, wordSet) > CONFIG.QUERY_SIMILARITY_THRESHOLD
-            );
-            if (!isDuplicate) {
-                return { query, wordSet };
-            }
+        // Batch results
+        const batches = [];
+        for (let i = 0; i < results.length; i += CONFIG.AI_BATCH_SIZE) {
+            batches.push(results.slice(i, i + CONFIG.AI_BATCH_SIZE));
         }
-        return null;
-    }
 
-    normalize(query) {
-        const words = (query || '')
-            .toLowerCase()
-            .replace(/[^a-z0-9\s]/g, '')
-            .split(/\s+/)
-            .filter((w) => w && !this.stopwords.has(w));
-        return new Set(words);
-    }
-
-    jaccard(setA, setB) {
-        if (setA.size === 0 && setB.size === 0) return 1;
-        let intersection = 0;
-        for (const w of setA) {
-            if (setB.has(w)) intersection++;
+        const allCandidates = [];
+        for (const batch of batches) {
+            const candidates = await this.extractBatch(batch, query, domain);
+            allCandidates.push(...candidates);
         }
-        const union = new Set([...setA, ...setB]).size;
-        return union === 0 ? 0 : intersection / union;
+
+        return allCandidates;
+    }
+
+    /**
+     * Extracts people from one batch of search results using the primary
+     * model (Luna). If Luna returns nothing usable — empty result or a
+     * parse/API failure — retries once with the fallback model (Terra)
+     * before giving up on this batch, per the cascade rule in the spec.
+     */
+    async extractBatch(results, query, domain) {
+        const primaryAttempt = await this.callModel(this.model, results, query, domain);
+
+        if (primaryAttempt.ok && primaryAttempt.people.length > 0) {
+            return primaryAttempt.people;
+        }
+
+        // Escalate to Terra only when Luna produced nothing usable.
+        console.warn(`[EXTRACTOR] Luna returned no usable result for query "${query}" — escalating to ${this.fallbackModel}`);
+        const fallbackAttempt = await this.callModel(this.fallbackModel, results, query, domain);
+
+        return fallbackAttempt.ok ? fallbackAttempt.people : [];
+    }
+
+    /**
+     * Single model call. Returns { ok, people } — ok is false on API error
+     * or invalid JSON, so the caller can decide whether to escalate.
+     */
+    async callModel(model, results, query, domain) {
+        const prompt = this.buildExtractionPrompt(results, query, domain);
+
+        try {
+            const response = await this.openai.chat.completions.create({
+                model: model,
+                temperature: this.temperature,
+                max_tokens: this.maxTokens,
+                response_format: { type: 'json_object' },
+                messages: [
+                    {
+                        role: 'system',
+                        content: `You are Skyline AA-1 People Discovery Assistant.
+
+Your job is to extract real people from search results.
+
+RULES:
+1. ONLY extract people who are clearly identified with a name and title.
+2. The title must be a real job title.
+3. If a person's name or title is unclear, skip them.
+4. Extract the sourceUrl where this person was found.
+5. Return JSON only.
+
+Output format:
+{
+  "people": [
+    {
+      "name": "Jane Doe",
+      "title": "Marketing Director",
+      "sourceUrl": "https://example.com/team/jane-doe"
+    }
+  ]
+}`
+                    },
+                    {
+                        role: 'user',
+                        content: prompt
+                    }
+                ]
+            });
+
+            const content = response.choices[0].message.content;
+            const parsed = JSON.parse(content || '{"people": []}');
+            return { ok: true, people: parsed.people || [] };
+
+        } catch (error) {
+            console.error(`[EXTRACTOR] ${model} batch error:`, error.message);
+            return { ok: false, people: [] };
+        }
+    }
+
+    buildExtractionPrompt(results, query, domain) {
+        const resultsText = results.map((r, i) => {
+            const content = (r.content || '').substring(0, 1000);
+            return `
+--- Result ${i + 1} ---
+Title: ${r.title || 'No title'}
+URL: ${r.url || 'No URL'}
+Content:
+${content}`;
+        }).join('\n');
+
+        return `Extract people from these search results.
+
+Search query: "${query}"
+Target domain: ${domain}
+
+${resultsText}
+
+Extract every real person mentioned with a name and title.
+Return only people who can be clearly identified.
+Include the sourceUrl where each person was found.`;
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. CANDIDATE EXTRACTOR — High recall, no rejection
+// 6. MAIN DISCOVERY ENGINE
 // ──────────────────────────────────────────────────────────────
 
-class CandidateExtractor {
-    extractFromResults(rawResults, query, branch) {
-        const candidates = [];
+class PeopleDiscoveryEngine {
+    constructor() {
+        this.tavilyClient = new TavilyClient();
+        this.extractor = new PeopleExtractor();
+    }
 
-        for (const item of rawResults) {
-            const content = item.content || '';
-            const title = item.title || '';
-            const url = item.url || '';
+    /**
+     * Main entry point — discover people
+     * @param {Object} params - Stage 1 contract
+     * @returns {Object} Discovered people candidates
+     */
+    async discover(params) {
+        console.log('[DISCOVERY] Starting Stage 2...');
+        console.log('[DISCOVERY] Input:', JSON.stringify(params, null, 2));
 
-            if (!content && !title) continue;
+        // ── Validate input ──
+        if (params.needsClarification) {
+            return {
+                status: 'needs_clarification',
+                message: 'Stage 1 requires clarification before discovery',
+                candidates: [],
+                partialResults: false,
+            };
+        }
 
-            // Extract companies
-            const companies = this.extractCompanies(content, title);
-            // Extract persons
-            const persons = this.extractPersons(content, title);
-            // Extract roles
-            const roles = this.extractRoles(content);
-            // Extract location
-            const location = this.extractLocation(content);
-            // Extract industry
-            const industry = this.extractIndustry(content);
-            // Extract emails
-            const emails = this.extractEmails(content);
-            // Extract LinkedIn URLs
-            const linkedinUrls = this.extractLinkedIn(content);
+        if (!params.domain && !params.companyName) {
+            return {
+                status: 'failed',
+                message: 'Missing companyName or domain',
+                candidates: [],
+                partialResults: false,
+            };
+        }
 
-            // If we have companies but no persons, create company-only candidates
-            if (companies.length > 0 && persons.length === 0) {
-                for (const company of companies) {
-                    candidates.push(this.buildCandidate({
-                        companyName: company,
-                        personName: null,
-                        personRole: null,
-                        companyLocation: location,
-                        companyIndustry: industry,
-                        email: null,
-                        linkedinUrl: null,
-                        evidenceSnippet: content.substring(0, 300),
-                        sourceUrl: url,
-                        sourceTitle: title,
-                        query: query,
-                        branch: branch.industry || 'unknown',
-                    }));
+        // ── Check Tavily ──
+        if (!this.tavilyClient.isConfigured()) {
+            return {
+                status: 'failed',
+                message: 'Tavily not configured',
+                candidates: [],
+                partialResults: false,
+            };
+        }
+
+        // ── Calculate min pool size ──
+        const requestedQuantity = params.quantity || 50;
+        const minPoolSize = Math.ceil(requestedQuantity * CONFIG.MIN_POOL_SIZE_MULTIPLIER);
+        console.log(`[DISCOVERY] Min pool size: ${minPoolSize}`);
+
+        // ── Build search queries ──
+        const allQueries = buildSearchQueries(params);
+        console.log(`[DISCOVERY] Built ${allQueries.length} queries`);
+
+        // ── Execute searches with fallback tiers (capped) ──
+        const result = await this.executeWithFallback(allQueries, params, minPoolSize);
+
+        // ── De-duplicate ──
+        const deduped = this.deduplicateCandidates(result.candidates);
+
+        // ── Determine if partial results ──
+        const partialResults = deduped.length < requestedQuantity;
+
+        console.log(`[DISCOVERY] Found ${deduped.length} unique candidates (partial: ${partialResults})`);
+
+        return {
+            status: 'completed',
+            candidates: deduped,
+            partialResults: partialResults,
+            requestedQuantity: requestedQuantity,
+            foundQuantity: deduped.length,
+            searchStatistics: result.statistics,
+        };
+    }
+
+    /**
+     * Execute searches with three-tier fallback.
+     * Stops as soon as minPoolSize is met, OR the total Tavily search cap
+     * (CONFIG.MAX_TAVILY_SEARCHES_TOTAL) is reached — whichever comes first,
+     * per spec Section 4/Step 2.5.
+     */
+    async executeWithFallback(allQueries, params, minPoolSize) {
+        const allCandidates = [];
+        const statistics = {
+            tiersExecuted: 0,
+            queriesExecuted: 0,
+            totalSearches: 0,
+            resultsProcessed: 0,
+            capReached: false,
+        };
+
+        const searchBudgetRemaining = () =>
+            CONFIG.MAX_TAVILY_SEARCHES_TOTAL - statistics.totalSearches;
+
+        // ── Tier 1: Full specificity ──
+        console.log('[DISCOVERY] Executing Tier 1...');
+        const tier1Queries = allQueries
+            .slice(0, CONFIG.MAX_TAVILY_SEARCHES_PER_TIER)
+            .slice(0, Math.max(0, searchBudgetRemaining()));
+        const tier1Results = await this.executeQueries(tier1Queries, params, CONFIG.DISCOVERY_TIERS.TIER_1);
+        allCandidates.push(...tier1Results.candidates);
+        statistics.queriesExecuted += tier1Results.queriesExecuted;
+        statistics.totalSearches += tier1Results.totalSearches;
+        statistics.resultsProcessed += tier1Results.resultsProcessed;
+        statistics.tiersExecuted = 1;
+
+        let uniqueCandidates = this.deduplicateCandidates(allCandidates);
+        if (uniqueCandidates.length >= minPoolSize || searchBudgetRemaining() <= 0) {
+            if (searchBudgetRemaining() <= 0) statistics.capReached = true;
+            console.log(`[DISCOVERY] Stopping after Tier 1: pool=${uniqueCandidates.length}, capReached=${statistics.capReached}`);
+            return { candidates: uniqueCandidates, statistics };
+        }
+
+        // ── Tier 2: Drop seniority ──
+        console.log(`[DISCOVERY] Pool insufficient (${uniqueCandidates.length} < ${minPoolSize}). Executing Tier 2...`);
+        const tier2Params = { ...params, seniority: null };
+        const tier2Queries = buildSearchQueries(tier2Params)
+            .slice(0, CONFIG.MAX_TAVILY_SEARCHES_PER_TIER)
+            .slice(0, Math.max(0, searchBudgetRemaining()));
+        const tier2Results = await this.executeQueries(tier2Queries, tier2Params, CONFIG.DISCOVERY_TIERS.TIER_2);
+        allCandidates.push(...tier2Results.candidates);
+        statistics.queriesExecuted += tier2Results.queriesExecuted;
+        statistics.totalSearches += tier2Results.totalSearches;
+        statistics.resultsProcessed += tier2Results.resultsProcessed;
+        statistics.tiersExecuted = 2;
+
+        uniqueCandidates = this.deduplicateCandidates(allCandidates);
+        if (uniqueCandidates.length >= minPoolSize || searchBudgetRemaining() <= 0) {
+            if (searchBudgetRemaining() <= 0) statistics.capReached = true;
+            console.log(`[DISCOVERY] Stopping after Tier 2: pool=${uniqueCandidates.length}, capReached=${statistics.capReached}`);
+            return { candidates: uniqueCandidates, statistics };
+        }
+
+        // ── Tier 3: Broaden location/industry ──
+        console.log(`[DISCOVERY] Pool insufficient (${uniqueCandidates.length} < ${minPoolSize}). Executing Tier 3...`);
+        const tier3Params = { ...params, location: null };
+        const tier3Queries = buildSearchQueries(tier3Params)
+            .slice(0, CONFIG.MAX_TAVILY_SEARCHES_PER_TIER)
+            .slice(0, Math.max(0, searchBudgetRemaining()));
+        const tier3Results = await this.executeQueries(tier3Queries, tier3Params, CONFIG.DISCOVERY_TIERS.TIER_3);
+        allCandidates.push(...tier3Results.candidates);
+        statistics.queriesExecuted += tier3Results.queriesExecuted;
+        statistics.totalSearches += tier3Results.totalSearches;
+        statistics.resultsProcessed += tier3Results.resultsProcessed;
+        statistics.tiersExecuted = 3;
+
+        uniqueCandidates = this.deduplicateCandidates(allCandidates);
+        if (searchBudgetRemaining() <= 0) statistics.capReached = true;
+        console.log(`[DISCOVERY] Final pool: ${uniqueCandidates.length}, capReached=${statistics.capReached}`);
+
+        return {
+            candidates: uniqueCandidates,
+            statistics: statistics,
+        };
+    }
+
+    /**
+     * Execute a list of queries and extract people
+     */
+    async executeQueries(queries, params, tier) {
+        const allCandidates = [];
+        let queriesExecuted = 0;
+        let totalSearches = 0;
+        let resultsProcessed = 0;
+
+        for (const query of queries) {
+            try {
+                console.log(`[DISCOVERY] [${tier}] Searching: "${query}"`);
+                const result = await this.tavilyClient.search(query);
+                queriesExecuted++;
+                totalSearches++;
+
+                const rawResults = result.results || [];
+                resultsProcessed += rawResults.length;
+
+                // Extract people from these results
+                const people = await this.extractor.extractPeople(
+                    result,
+                    query,
+                    params.domain
+                );
+
+                // Tag each candidate
+                for (const person of people) {
+                    allCandidates.push({
+                        name: person.name,
+                        title: person.title,
+                        companyName: params.companyName,
+                        domain: params.domain,
+                        sourceUrl: person.sourceUrl || '',
+                        confidence: this.calculateConfidence(person, tier, query),
+                        discoveredVia: tier,
+                    });
+                }
+
+                console.log(`[DISCOVERY] Found ${people.length} people from query`);
+
+            } catch (error) {
+                console.error(`[DISCOVERY] Query failed: "${query}"`, error.message);
+                // Continue with next query — don't fail the whole stage
+            }
+        }
+
+        return {
+            candidates: allCandidates,
+            queriesExecuted: queriesExecuted,
+            totalSearches: totalSearches,
+            resultsProcessed: resultsProcessed,
+        };
+    }
+
+    /**
+     * Calculate confidence based on source and tier
+     */
+    calculateConfidence(person, tier, query) {
+        let confidence = CONFIG.CONFIDENCE.MEDIUM;
+
+        // ── Higher confidence for Tier 1 ──
+        if (tier === CONFIG.DISCOVERY_TIERS.TIER_1) {
+            confidence = CONFIG.CONFIDENCE.HIGH;
+        }
+
+        // ── Lower confidence for Tier 3 ──
+        if (tier === CONFIG.DISCOVERY_TIERS.TIER_3) {
+            confidence = CONFIG.CONFIDENCE.LOW;
+        }
+
+        // ── Check if sourceUrl is the company domain ──
+        if (person.sourceUrl && person.sourceUrl.includes(person.domain || '')) {
+            confidence = CONFIG.CONFIDENCE.HIGH;
+        }
+
+        return confidence;
+    }
+
+    /**
+     * De-duplicate candidates (same name + company)
+     */
+    deduplicateCandidates(candidates) {
+        const seen = new Map();
+        const unique = [];
+
+        for (const candidate of candidates) {
+            const key = `${candidate.name}_${candidate.domain}`;
+
+            if (seen.has(key)) {
+                const existing = seen.get(key);
+                // Keep the one with highest confidence
+                const confidenceOrder = { high: 3, medium: 2, low: 1 };
+                if (confidenceOrder[candidate.confidence] > confidenceOrder[existing.confidence]) {
+                    seen.set(key, candidate);
                 }
                 continue;
             }
 
-            // If we have persons, create person-company candidates
-            for (const person of persons) {
-                const associatedCompany = this.findAssociatedCompany(content, person, companies);
-                
-                candidates.push(this.buildCandidate({
-                    companyName: associatedCompany || companies[0] || null,
-                    personName: person.name || null,
-                    personRole: person.role || null,
-                    companyLocation: location,
-                    companyIndustry: industry,
-                    email: emails.length > 0 ? emails[0] : null,
-                    linkedinUrl: linkedinUrls.length > 0 ? linkedinUrls[0] : null,
-                    evidenceSnippet: content.substring(0, 300),
-                    sourceUrl: url,
-                    sourceTitle: title,
-                    query: query,
-                    branch: branch.industry || 'unknown',
-                }));
-            }
+            seen.set(key, candidate);
         }
 
-        return candidates;
-    }
-
-    buildCandidate(data) {
-        return {
-            candidateId: `candidate-${uuidv4().substring(0, 8)}`,
-            company: {
-                name: data.companyName || null,
-                domain: null,
-                industry: data.companyIndustry || null,
-                location: this.parseLocation(data.companyLocation),
-                employeeCount: null,
-                revenue: null,
-                funding: null,
-            },
-            contact: {
-                name: data.personName || null,
-                role: data.personRole || null,
-                email: data.email || null,
-                phone: null,
-                linkedinUrl: data.linkedinUrl || null,
-            },
-            discovery: {
-                branch: data.branch || 'unknown',
-                query: data.query || null,
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                sourceSnippet: data.evidenceSnippet || null,
-                discoveredAt: new Date().toISOString(),
-            },
-            evidence: this.buildEvidence(data),
-            discoveryConfidence: 0.5,
-        };
-    }
-
-    buildEvidence(data) {
-        const evidence = [];
-        if (data.companyName) {
-            evidence.push({
-                type: 'company_identity',
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                snippet: data.evidenceSnippet || '',
-            });
-        }
-        if (data.personName) {
-            evidence.push({
-                type: 'person_identity',
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                snippet: data.evidenceSnippet || '',
-            });
-        }
-        if (data.personRole) {
-            evidence.push({
-                type: 'role',
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                snippet: data.personRole,
-            });
-        }
-        if (data.companyIndustry) {
-            evidence.push({
-                type: 'industry',
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                snippet: data.companyIndustry,
-            });
-        }
-        if (data.companyLocation) {
-            evidence.push({
-                type: 'location',
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                snippet: data.companyLocation,
-            });
-        }
-        if (data.email) {
-            evidence.push({
-                type: 'email',
-                sourceUrl: data.sourceUrl || null,
-                sourceTitle: data.sourceTitle || null,
-                snippet: data.email,
-            });
-        }
-        return evidence;
-    }
-
-    parseLocation(locationStr) {
-        if (!locationStr) return { city: null, region: null, country: null, countryCode: null };
-
-        const lower = locationStr.toLowerCase();
-        const location = { city: null, region: null, country: null, countryCode: null };
-
-        const cities = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco'];
-        const countries = {
-            'uk': { name: 'United Kingdom', code: 'GB' },
-            'united kingdom': { name: 'United Kingdom', code: 'GB' },
-            'nigeria': { name: 'Nigeria', code: 'NG' },
-            'germany': { name: 'Germany', code: 'DE' },
-            'usa': { name: 'United States', code: 'US' },
-            'united states': { name: 'United States', code: 'US' },
-            'canada': { name: 'Canada', code: 'CA' },
-            'france': { name: 'France', code: 'FR' },
-            'spain': { name: 'Spain', code: 'ES' },
-            'italy': { name: 'Italy', code: 'IT' },
-            'netherlands': { name: 'Netherlands', code: 'NL' },
-            'sweden': { name: 'Sweden', code: 'SE' },
-            'norway': { name: 'Norway', code: 'NO' },
-            'denmark': { name: 'Denmark', code: 'DK' },
-            'finland': { name: 'Finland', code: 'FI' },
-            'ireland': { name: 'Ireland', code: 'IE' },
-            'south africa': { name: 'South Africa', code: 'ZA' },
-            'brazil': { name: 'Brazil', code: 'BR' },
-            'australia': { name: 'Australia', code: 'AU' },
-            'india': { name: 'India', code: 'IN' },
-            'singapore': { name: 'Singapore', code: 'SG' },
-        };
-
-        for (const city of cities) {
-            if (lower.includes(city)) {
-                location.city = city.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-                break;
-            }
-        }
-        for (const [key, value] of Object.entries(countries)) {
-            if (lower.includes(key)) {
-                location.country = value.name;
-                location.countryCode = value.code;
-                break;
-            }
-        }
-        return location;
-    }
-
-    // ─── Extraction helpers ───
-
-    extractCompanies(content, title) {
-        const combined = `${title || ''} ${content || ''}`;
-        const companies = [];
-        const seen = new Set();
-
-        const patterns = [
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:is|was|are|has|provides|offers|-|—)/gi,
-            /(?:about|at|for)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})/gi,
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\s+(?:company|inc|ltd|limited|corp|corporation)/gi,
-        ];
-
-        for (const pattern of patterns) {
-            let match;
-            while ((match = pattern.exec(combined)) !== null) {
-                const name = match[1].trim();
-                if (name.length > 2 && name.length < 50 && !this.isGarbage(name) && !seen.has(name)) {
-                    seen.add(name);
-                    companies.push(name);
-                }
-            }
-        }
-
-        return companies.slice(0, 10);
-    }
-
-    extractPersons(content, title) {
-        const combined = `${title || ''} ${content || ''}`;
-        const persons = [];
-        const seen = new Set();
-
-        const patterns = [
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\s+(?:is|was|said|founded|leads|directs|manages)/gi,
-            /(?:founder|ceo|cto|cfo|cmo|coo|director|manager|president|vp)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})/gi,
-            /by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})/gi,
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s+(?:founder|ceo|cto|cfo|cmo|coo|director|manager|president|vp)/gi,
-        ];
-
-        for (const pattern of patterns) {
-            let match;
-            while ((match = pattern.exec(combined)) !== null) {
-                const name = match[1].trim();
-                if (name.length > 2 && name.length < 40 && !this.isGarbagePerson(name) && !seen.has(name)) {
-                    seen.add(name);
-                    const role = this.extractRoleForPerson(combined, name);
-                    persons.push({ name, role });
-                }
-            }
-        }
-
-        return persons.slice(0, 10);
-    }
-
-    extractRoleForPerson(content, personName) {
-        const lower = content.toLowerCase();
-        const nameLower = personName.toLowerCase();
-        
-        const roles = ['founder', 'ceo', 'chief executive officer', 'cto', 'chief technology officer', 'cfo', 'chief financial officer', 'cmo', 'chief marketing officer', 'coo', 'chief operating officer', 'director', 'vp', 'vice president', 'manager', 'president', 'owner'];
-
-        for (const role of roles) {
-            if (lower.includes(role)) {
-                const nameIndex = lower.indexOf(nameLower);
-                const roleIndex = lower.indexOf(role);
-                if (nameIndex >= 0 && roleIndex >= 0 && Math.abs(nameIndex - roleIndex) < 100) {
-                    return role.charAt(0).toUpperCase() + role.slice(1);
-                }
-            }
-        }
-
-        return null;
-    }
-
-    extractRoles(content) {
-        const roles = [];
-        const lower = content.toLowerCase();
-        const roleMap = {
-            'founder': 'Founder',
-            'ceo': 'CEO',
-            'chief executive officer': 'CEO',
-            'cto': 'CTO',
-            'chief technology officer': 'CTO',
-            'cfo': 'CFO',
-            'chief financial officer': 'CFO',
-            'cmo': 'CMO',
-            'chief marketing officer': 'CMO',
-            'coo': 'COO',
-            'chief operating officer': 'COO',
-            'director': 'Director',
-            'vp': 'VP',
-            'vice president': 'VP',
-            'manager': 'Manager',
-            'president': 'President',
-            'owner': 'Owner',
-        };
-
-        for (const [key, value] of Object.entries(roleMap)) {
-            if (lower.includes(key)) {
-                roles.push(value);
-            }
-        }
-
-        return roles;
-    }
-
-    extractLocation(content) {
-        const lower = content.toLowerCase();
-        const locations = ['london', 'berlin', 'paris', 'madrid', 'rome', 'amsterdam', 'lagos', 'abuja', 'new york', 'san francisco', 'los angeles', 'chicago', 'toronto', 'vancouver', 'sydney', 'melbourne', 'nigeria', 'germany', 'uk', 'united kingdom', 'usa', 'united states', 'canada', 'france', 'spain', 'italy', 'netherlands', 'sweden', 'norway', 'denmark', 'finland', 'ireland', 'south africa', 'brazil', 'australia', 'india', 'singapore'];
-
-        for (const loc of locations) {
-            if (lower.includes(loc)) {
-                return loc.charAt(0).toUpperCase() + loc.slice(1);
-            }
-        }
-
-        return null;
-    }
-
-    extractIndustry(content) {
-        const lower = content.toLowerCase();
-        const industries = ['saas', 'fintech', 'cybersecurity', 'healthcare', 'ai', 'blockchain', 'real estate', 'edtech', 'insurtech', 'legaltech', 'adtech', 'cleantech', 'agritech', 'manufacturing', 'retail', 'e-commerce', 'logistics', 'energy', 'education', 'hr', 'marketing', 'insurance', 'legal'];
-
-        for (const industry of industries) {
-            if (lower.includes(industry)) {
-                return industry.charAt(0).toUpperCase() + industry.slice(1);
-            }
-        }
-
-        return null;
-    }
-
-    extractEmails(content) {
-        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-        const matches = content.match(emailRegex);
-        return matches || [];
-    }
-
-    extractLinkedIn(content) {
-        const linkedinRegex = /(?:https?:\/\/)?(?:www\.)?linkedin\.com\/in\/[a-zA-Z0-9-]+/g;
-        const matches = content.match(linkedinRegex);
-        return matches || [];
-    }
-
-    findAssociatedCompany(content, person, companies) {
-        if (!person || !companies || companies.length === 0) return null;
-        
-        const lower = content.toLowerCase();
-        const personLower = person.name.toLowerCase();
-
-        let bestCompany = null;
-        let bestDistance = Infinity;
-
-        for (const company of companies) {
-            const companyLower = company.toLowerCase();
-            const personIndex = lower.indexOf(personLower);
-            const companyIndex = lower.indexOf(companyLower);
-            
-            if (personIndex >= 0 && companyIndex >= 0) {
-                const distance = Math.abs(personIndex - companyIndex);
-                if (distance < bestDistance) {
-                    bestDistance = distance;
-                    bestCompany = company;
-                }
-            }
-        }
-
-        return bestCompany || companies[0];
-    }
-
-    isGarbage(text) {
-        const garbage = ['top', 'best', 'list', 'rank', 'guide', 'how to', 'what is', 'the best', 'companies', 'industry', 'sector', 'market', 'trend', 'analysis', 'report', 'article', 'blog', 'news', 'update', 'directory', 'category', 'page', 'search', 'result', 'and is', 'consulting', 'services', 'the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'garage', 'started', 'which', 'that', 'this', 'those', 'these'];
-        const lower = text.toLowerCase().trim();
-        if (lower.length < 2) return true;
-        for (const word of garbage) {
-            if (lower === word || (lower.includes(word) && lower.length < 12)) return true;
-        }
-        return false;
-    }
-
-    isGarbagePerson(text) {
-        const garbage = ['the', 'and', 'is', 'by', 'for', 'with', 'from', 'at', 'this', 'that', 'those', 'these', 'which', 'consulting', 'services', 'companies', 'community', 'score', 'local', 'london', 'team', 'in', 'of', 'on', 'to', 'saastock', 'stock', 'seedtable', 'index', 'awards', 'summit', 'conference', 'meetup', 'network', 'jobs', 'directory', 'guide', 'list', 'top', 'best'];
-        const lower = text.toLowerCase().trim();
-        if (lower.length < 2) return true;
-        const words = lower.split(/\s+/);
-        if (words.length > 6) return true;
-        if (words.some((w) => garbage.includes(w))) return true;
-        if (/[.:;]/.test(text)) return true;
-        return false;
-    }
-}
-
-// ──────────────────────────────────────────────────────────────
-// 5. DEDUPLICATION ENGINE — Simple, high-recall dedup
-// ──────────────────────────────────────────────────────────────
-
-class DeduplicationEngine {
-    deduplicate(candidates) {
-        const seen = new Map();
-        const unique = [];
-        let duplicatesRemoved = 0;
-
-        for (const candidate of candidates) {
-            const domain = candidate.company?.domain;
-            const companyName = candidate.company?.name;
-            const personName = candidate.contact?.name;
-
-            let key = null;
-            if (domain) {
-                key = domain.toLowerCase();
-            } else if (companyName && personName) {
-                const compKey = companyName.toLowerCase().replace(/[^a-z0-9]/g, '');
-                const persKey = personName.toLowerCase().replace(/[^a-z0-9]/g, '');
-                key = `${compKey}_${persKey}`;
-            } else if (companyName) {
-                key = companyName.toLowerCase().replace(/[^a-z0-9]/g, '');
-            }
-
-            if (key) {
-                if (seen.has(key)) {
-                    const existing = seen.get(key);
-                    if (candidate.evidence && candidate.evidence.length > 0) {
-                        existing.evidence = [...existing.evidence, ...candidate.evidence];
-                    }
-                    duplicatesRemoved++;
-                    continue;
-                }
-                seen.set(key, candidate);
-            }
+        // Convert Map values to array
+        for (const [key, candidate] of seen) {
             unique.push(candidate);
         }
 
-        return { uniqueCandidates: unique, duplicatesRemoved };
+        return unique;
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. MAIN SEARCHING ENGINE
+// 7. CONVENIENCE FUNCTION
 // ──────────────────────────────────────────────────────────────
 
-class SearchingEngine {
-    constructor() {
-        this.tavilyClient = new TavilyClient();
-        this.querySelector = new QuerySelector();
-        this.candidateExtractor = new CandidateExtractor();
-        this.deduplicationEngine = new DeduplicationEngine();
-    }
-
-    async execute(plan) {
-        // ── Startup validation ──
-        if (!this.tavilyClient.isConfigured()) {
-            return this.configErrorResult('TAVILY_NOT_CONFIGURED', plan);
-        }
-        if (!plan || plan.status === 'invalid' || plan.status === 'needs_clarification') {
-            return this.configErrorResult('INVALID_PLAN', plan);
-        }
-
-        const requestId = plan.requestId || `search-${uuidv4().substring(0, 8)}`;
-        const searchBranches = plan.searchBranches || [];
-
-        console.log(`[DISCOVERY] Starting discovery for request ${requestId}`);
-        console.log(`[DISCOVERY] Branches: ${searchBranches.length}`);
-        console.log(`[DISCOVERY] Max searches: ${CONFIG.MAX_TAVILY_SEARCHES}`);
-
-        // ── 1. Intelligent query selection ──
-        const selectedQueries = this.querySelector.select(searchBranches);
-        console.log(`[DISCOVERY] Selected ${selectedQueries.length} diverse queries`);
-
-        // ── 2. Execute Tavily searches concurrently ──
-        const allCandidates = [];
-        const errors = [];
-        const searchSummary = {
-            maxSearchesAllowed: CONFIG.MAX_TAVILY_SEARCHES,
-            searchesExecuted: 0,
-            rawResultsFound: 0,
-            candidatesExtracted: 0,
-            duplicatesRemoved: 0,
-            candidatesForNextLayer: 0,
-        };
-
-        const searchResults = await this.runSearches(selectedQueries, errors);
-        searchSummary.searchesExecuted = searchResults.filter((r) => r && r.ok).length;
-
-        // ── 3. Extract candidates from all results ──
-        for (const searchResult of searchResults) {
-            if (!searchResult || !searchResult.ok) continue;
-
-            const rawResults = searchResult.results || [];
-            searchSummary.rawResultsFound += rawResults.length;
-
-            const candidates = this.candidateExtractor.extractFromResults(
-                rawResults,
-                searchResult.query,
-                { industry: searchResult.branchIndustry }
-            );
-
-            if (candidates.length > 0) {
-                allCandidates.push(...candidates);
-                searchSummary.candidatesExtracted += candidates.length;
-                console.log(`[DISCOVERY] Query "${searchResult.query}" → ${candidates.length} candidates`);
-            }
-        }
-
-        console.log(`[DISCOVERY] Total candidates extracted: ${searchSummary.candidatesExtracted}`);
-
-        // ── 4. Deduplicate ──
-        const dedupResult = this.deduplicationEngine.deduplicate(allCandidates);
-        searchSummary.duplicatesRemoved = dedupResult.duplicatesRemoved;
-        searchSummary.candidatesForNextLayer = dedupResult.uniqueCandidates.length;
-
-        console.log(`[DISCOVERY] Duplicates removed: ${dedupResult.duplicatesRemoved}`);
-        console.log(`[DISCOVERY] Candidates for Layer 4: ${dedupResult.uniqueCandidates.length}`);
-
-        // ── 5. Determine status ──
-        let status = 'completed';
-        if (searchSummary.searchesExecuted === 0) {
-            status = 'failed';
-        } else if (dedupResult.uniqueCandidates.length === 0) {
-            status = 'no_results';
-        }
-
-        // ── 6. Build result ──
-        return {
-            discoveryVersion: '5.0.0',
-            requestId: requestId,
-            status: status,
-            searchProvider: {
-                name: 'tavily',
-                configured: this.tavilyClient.isConfigured(),
-            },
-            searchStatistics: searchSummary,
-            candidates: dedupResult.uniqueCandidates,
-            errors: errors,
-            createdBy: 'Searching.js',
-            createdAt: new Date().toISOString(),
-        };
-    }
-
-    async runSearches(selectedQueries, errors) {
-        const cappedQueries = selectedQueries.slice(0, CONFIG.MAX_TAVILY_SEARCHES);
-
-        const searchPromises = cappedQueries.map(async (sq) => {
-            try {
-                const tavilyResult = await this.tavilyClient.search(sq.query);
-                return {
-                    query: sq.query,
-                    branchIndustry: sq.branchIndustry,
-                    results: tavilyResult.results || [],
-                    ok: true,
-                };
-            } catch (error) {
-                errors.push({
-                    stage: 'tavily_search',
-                    query: sq.query,
-                    branch: sq.branchIndustry,
-                    message: error.message,
-                });
-                return { query: sq.query, branchIndustry: sq.branchIndustry, results: [], ok: false };
-            }
-        });
-
-        return Promise.all(searchPromises);
-    }
-
-    configErrorResult(code, plan) {
-        return {
-            discoveryVersion: '5.0.0',
-            requestId: plan?.requestId || `error-${uuidv4().substring(0, 8)}`,
-            status: 'failed',
-            searchProvider: {
-                name: 'tavily',
-                configured: this.tavilyClient.isConfigured(),
-            },
-            error: { code },
-            candidates: [],
-            errors: [{ error: code }],
-            createdBy: 'Searching.js',
-            createdAt: new Date().toISOString(),
-        };
-    }
-}
-
-// ──────────────────────────────────────────────────────────────
-// 7. CONVENIENCE ENTRY POINT
-// ──────────────────────────────────────────────────────────────
-
-async function execute(plan) {
-    const engine = new SearchingEngine();
-    try {
-        return await engine.execute(plan);
-    } catch (error) {
-        console.error('[SEARCHING] Fatal error:', error.message);
-        return {
-            discoveryVersion: '5.0.0',
-            requestId: `error-${uuidv4().substring(0, 8)}`,
-            status: 'failed',
-            error: { code: 'FATAL_ERROR', message: error.message },
-            candidates: [],
-            errors: [{ error: error.message }],
-            createdBy: 'Searching.js',
-            createdAt: new Date().toISOString(),
-        };
-    }
+/**
+ * Main entry point — discover people from Stage 1 contract
+ *
+ * @param {Object} params - Stage 1 contract
+ * @returns {Promise<Object>} Discovered people candidates
+ */
+async function discover(params) {
+    const engine = new PeopleDiscoveryEngine();
+    return engine.discover(params);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -774,11 +601,11 @@ async function execute(plan) {
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
-    execute,
-    SearchingEngine,
-    QuerySelector,
+    discover,
+    PeopleDiscoveryEngine,
     TavilyClient,
-    CandidateExtractor,
-    DeduplicationEngine,
+    PeopleExtractor,
+    buildSearchQueries,
     CONFIG,
+    CANDIDATE_SCHEMA,
 };
