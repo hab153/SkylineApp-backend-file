@@ -11,6 +11,7 @@
 // - Output clean, predictable contract for Stage 2
 // - NEVER invent requirements
 // - NEVER use AI/Tavily when not strictly necessary
+// - NEVER silently conflate "AI parsing failed" with "user request was vague"
 // ──────────────────────────────────────────────────────────────
 
 const { v4: uuidv4 } = require('uuid');
@@ -27,6 +28,7 @@ const CONFIG = {
     // Confirm exact API model string against OpenAI's current docs before deploying —
     // marketing names (e.g. "Luna") don't always match the literal API model string.
     AI_MODEL: 'gpt-5.6-luna',
+    AI_MODEL_FALLBACK: 'gpt-5.6-terra',
     AI_TEMPERATURE: 0.2,
     AI_MAX_TOKENS: 500,
 
@@ -52,6 +54,12 @@ const CONFIG = {
  *
  * resolvedVia reflects the ORIGINAL resolution method, even on a cache hit —
  * cache is a lookup shortcut, not a resolution method in its own right.
+ *
+ * parserFailed distinguishes a system-level AI failure from a genuinely
+ * vague user request — both used to look identical (needsClarification: true,
+ * everything else null). Free.js (and any caller) MUST check parserFailed
+ * separately, since "the AI broke" and "please give us more detail" need
+ * completely different user-facing messages.
  */
 const CONTRACT_SCHEMA = {
     companyName: 'string | null',
@@ -63,6 +71,8 @@ const CONTRACT_SCHEMA = {
     quantity: 'number | null',
     resolvedVia: 'provided' | 'dns' | 'tavily' | null,
     needsClarification: 'boolean',
+    parserFailed: 'boolean',
+    parserErrorDetail: 'string | null',
     originalRequest: 'string | null',
     requestId: 'string',
     processedAt: 'string',
@@ -320,10 +330,7 @@ function extractDomainFromUrl(url) {
 // 5. FREE-TEXT PARSING (with GPT)
 // ──────────────────────────────────────────────────────────────
 
-async function parseFreeText(text, openai) {
-    console.log('[PARSER] Parsing free-text:', text);
-
-    const prompt = `
+const PARSE_PROMPT_TEMPLATE = (text) => `
 You are Skyline AA-1's Input Normalizer.
 Extract structured information from the user's request.
 
@@ -375,15 +382,34 @@ Output: {
   "quantity": null
 }
 
+User: "Find me CEOs in the Real Estate industry, located in London. Company size: Any."
+Output: {
+  "companyName": null,
+  "role": "CEO",
+  "seniority": "C-Level",
+  "industry": "Real Estate",
+  "location": "London",
+  "quantity": null
+}
+
 **User Request:**
 "${text}"
 
 **OUTPUT ONLY JSON. NO MARKDOWN.**
 `;
 
+/**
+ * Calls a single model to parse free text.
+ * Returns { ok, data, errorDetail }.
+ * ok=false means the call itself failed or returned unparseable JSON —
+ * this is a SYSTEM failure, not a comment on the user's request.
+ */
+async function callParseModel(model, text, openai) {
+    const prompt = PARSE_PROMPT_TEMPLATE(text);
+
     try {
         const response = await openai.chat.completions.create({
-            model: CONFIG.AI_MODEL,
+            model: model,
             temperature: CONFIG.AI_TEMPERATURE,
             max_tokens: CONFIG.AI_MAX_TOKENS,
             response_format: { type: 'json_object' },
@@ -397,11 +423,52 @@ Output: {
         });
 
         const content = response.choices[0].message.content;
-        return JSON.parse(content);
+        const parsed = JSON.parse(content);
+        return { ok: true, data: parsed, errorDetail: null };
+
     } catch (error) {
-        console.error('[PARSER] Error:', error.message);
-        return {};
+        // Log full detail server-side — status code, type, message — so a
+        // bad model string, auth failure, and rate limit are distinguishable
+        // in logs even though the caller only sees a generic errorDetail.
+        console.error(`[PARSER] ${model} failed:`, {
+            message: error.message,
+            status: error.status || error.response?.status,
+            type: error.type || error.code,
+        });
+        return {
+            ok: false,
+            data: null,
+            errorDetail: `${model}: ${error.message}`,
+        };
     }
+}
+
+/**
+ * Parses free text into structured fields.
+ * Tries the primary model (Luna) first; if that call fails or returns
+ * invalid JSON, retries once with the fallback model (Terra) — same
+ * cascade pattern used in Stage 2's extractor.
+ *
+ * Returns { ok, data, errorDetail }. Callers MUST check `ok` — a false
+ * value means the AI layer broke, and must NOT be silently treated as
+ * "the user gave us nothing."
+ */
+async function parseFreeText(text, openai) {
+    console.log('[PARSER] Parsing free-text:', text);
+
+    const primary = await callParseModel(CONFIG.AI_MODEL, text, openai);
+    if (primary.ok) return primary;
+
+    console.warn(`[PARSER] Primary model failed, escalating to ${CONFIG.AI_MODEL_FALLBACK}`);
+    const fallback = await callParseModel(CONFIG.AI_MODEL_FALLBACK, text, openai);
+    if (fallback.ok) return fallback;
+
+    // Both attempts failed — this is a real system failure, report it as such.
+    return {
+        ok: false,
+        data: null,
+        errorDetail: `Both models failed. Primary: ${primary.errorDetail} | Fallback: ${fallback.errorDetail}`,
+    };
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -432,10 +499,12 @@ class UnderstandingEngine {
             quantity: null,
             resolvedVia: null,
             needsClarification: false,
+            parserFailed: false,
+            parserErrorDetail: null,
             originalRequest: null,
             requestId: requestId,
             processedAt: new Date().toISOString(),
-            version: '1.0.0',
+            version: '1.1.0',
         };
 
         try {
@@ -450,7 +519,23 @@ class UnderstandingEngine {
             if (isFreeText && !isStructured) {
                 console.log('[UNDERSTANDING] Free-text input detected');
                 result.originalRequest = input.text;
-                parsed = await parseFreeText(input.text, this.openai);
+
+                const parseResult = await parseFreeText(input.text, this.openai);
+
+                if (!parseResult.ok) {
+                    // System-level failure — NOT the same as a vague request.
+                    // needsClarification stays true because we genuinely have
+                    // no structured data to proceed with, but parserFailed
+                    // tells the caller (Free.js) this needs a "try again /
+                    // something went wrong" message, not "please be more specific."
+                    result.needsClarification = true;
+                    result.parserFailed = true;
+                    result.parserErrorDetail = parseResult.errorDetail;
+                    console.log('[UNDERSTANDING] Result (parser failure):', JSON.stringify(result, null, 2));
+                    return result;
+                }
+
+                parsed = parseResult.data;
             } else {
                 console.log('[UNDERSTANDING] Structured input detected');
                 // Use structured fields directly
@@ -593,10 +678,12 @@ class UnderstandingEngine {
             quantity: null,
             resolvedVia: null,
             needsClarification: true,
+            parserFailed: true,
+            parserErrorDetail: errorMessage,
             originalRequest: input.text || JSON.stringify(input),
             requestId: requestId || `req-${uuidv4().substring(0, 8)}`,
             processedAt: new Date().toISOString(),
-            version: '1.0.0',
+            version: '1.1.0',
             _error: errorMessage,
         };
     }
