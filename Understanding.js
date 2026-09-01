@@ -27,13 +27,20 @@ const CONFIG = {
     // Model for free-text parsing only
     // Confirm exact API model string against OpenAI's current docs before deploying —
     // marketing names (e.g. "Luna") don't always match the literal API model string.
-    AI_MODEL: 'gpt-5.6-luna',
+    AI_MODEL: 'gpt-5-nano',
     AI_MODEL_FALLBACK: 'gpt-5.6-terra',
     AI_TEMPERATURE: 0.2,
-    // NOTE: GPT-5.6-tier models reject the legacy `max_tokens` param —
-    // they require `max_completion_tokens`. Keeping the config key name
-    // aligned with the real API param to avoid this breaking again.
-    AI_MAX_COMPLETION_TOKENS: 500,
+    // GPT-5-nano is a reasoning model — reasoning tokens are drawn from the
+    // same budget as max_completion_tokens. 'minimal' keeps reasoning
+    // overhead low for a simple extraction task like this; without it,
+    // nano has been observed spending 1000+ tokens "thinking" before
+    // ever emitting the JSON output, which can exhaust a small budget
+    // and produce a parse failure that looks identical to an API error.
+    AI_REASONING_EFFORT: 'minimal',
+    // Raised from 500 as a safety margin — even at minimal reasoning
+    // effort, nano's reasoning tokens are non-zero and share this budget
+    // with the actual JSON output.
+    AI_MAX_COMPLETION_TOKENS: 800,
 
     // Domain resolution
     DNS_TIMEOUT: 5000,
@@ -410,20 +417,30 @@ Output: {
 async function callParseModel(model, text, openai) {
     const prompt = PARSE_PROMPT_TEMPLATE(text);
 
+    // reasoning_effort is only meaningful for reasoning-capable models
+    // (like gpt-5-nano). Only attach it when calling the configured
+    // primary model, to avoid sending an unrecognized param to a
+    // fallback model that may not support/need it.
+    const requestBody = {
+        model: model,
+        temperature: CONFIG.AI_TEMPERATURE,
+        max_completion_tokens: CONFIG.AI_MAX_COMPLETION_TOKENS,
+        response_format: { type: 'json_object' },
+        messages: [
+            {
+                role: 'system',
+                content: 'You extract structured data from user requests. Output only JSON. Never invent missing fields.'
+            },
+            { role: 'user', content: prompt }
+        ],
+    };
+
+    if (model === CONFIG.AI_MODEL && CONFIG.AI_REASONING_EFFORT) {
+        requestBody.reasoning_effort = CONFIG.AI_REASONING_EFFORT;
+    }
+
     try {
-        const response = await openai.chat.completions.create({
-            model: model,
-            temperature: CONFIG.AI_TEMPERATURE,
-            max_completion_tokens: CONFIG.AI_MAX_COMPLETION_TOKENS,
-            response_format: { type: 'json_object' },
-            messages: [
-                {
-                    role: 'system',
-                    content: 'You extract structured data from user requests. Output only JSON. Never invent missing fields.'
-                },
-                { role: 'user', content: prompt }
-            ],
-        });
+        const response = await openai.chat.completions.create(requestBody);
 
         const content = response.choices[0].message.content;
         const parsed = JSON.parse(content);
