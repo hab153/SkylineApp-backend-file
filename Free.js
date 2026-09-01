@@ -18,7 +18,20 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         const understanding = await Understanding.understand(message);
         console.log('📋 [FREE] Understanding result:', JSON.stringify(understanding, null, 2));
 
-        // ── Step 2: Return the understanding result ──
+        // ── Step 2: Check if understanding is valid ──
+        if (!understanding) {
+            console.error('❌ [FREE] Understanding returned null/undefined');
+            return {
+                reply: JSON.stringify({
+                    status: 'error',
+                    message: 'Could not understand your request. Please try again.',
+                }, null, 2),
+                updatedHistory: history || [],
+                _meta: { error: 'Understanding returned null' }
+            };
+        }
+
+        // ── Step 3: Return the understanding result ──
         const resultsString = JSON.stringify(understanding, null, 2);
 
         return {
@@ -37,6 +50,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
     } catch (error) {
         console.error('❌ [FREE] Error:', error.message);
+        console.error('❌ [FREE] Stack:', error.stack);
         return {
             reply: JSON.stringify({
                 status: 'error',
@@ -49,9 +63,9 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
     }
 }
 
-// ────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────
 // 3. EXPORTS
-// ────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────
 
 module.exports = {
     generateFreeResponse,
