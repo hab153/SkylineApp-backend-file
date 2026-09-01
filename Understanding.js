@@ -30,7 +30,10 @@ const CONFIG = {
     AI_MODEL: 'gpt-5.6-luna',
     AI_MODEL_FALLBACK: 'gpt-5.6-terra',
     AI_TEMPERATURE: 0.2,
-    AI_MAX_TOKENS: 500,
+    // NOTE: GPT-5.6-tier models reject the legacy `max_tokens` param —
+    // they require `max_completion_tokens`. Keeping the config key name
+    // aligned with the real API param to avoid this breaking again.
+    AI_MAX_COMPLETION_TOKENS: 500,
 
     // Domain resolution
     DNS_TIMEOUT: 5000,
@@ -411,7 +414,7 @@ async function callParseModel(model, text, openai) {
         const response = await openai.chat.completions.create({
             model: model,
             temperature: CONFIG.AI_TEMPERATURE,
-            max_tokens: CONFIG.AI_MAX_TOKENS,
+            max_completion_tokens: CONFIG.AI_MAX_COMPLETION_TOKENS,
             response_format: { type: 'json_object' },
             messages: [
                 {
