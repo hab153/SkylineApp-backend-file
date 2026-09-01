@@ -31,7 +31,52 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        // ── Step 3: Return the understanding result ──
+        // ── Step 3: Distinguish a SYSTEM failure (AI parser broke) from a ──
+        // ── genuinely vague user request. These used to look identical    ──
+        // ── (needsClarification: true, everything else null) and got the  ──
+        // ── same generic message — that's misleading when the real cause  ──
+        // ── was an API/model failure, not the user's phrasing.            ──
+        if (understanding.parserFailed) {
+            console.error('❌ [FREE] Stage 1 parser failed:', understanding.parserErrorDetail);
+            return {
+                reply: JSON.stringify({
+                    status: 'error',
+                    message: "Sorry, we had trouble processing your request just now. Please try again in a moment.",
+                }, null, 2),
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: message },
+                ],
+                _meta: {
+                    tier: 'free',
+                    error: 'parser_failed',
+                    parserErrorDetail: understanding.parserErrorDetail,
+                    requestId: understanding.requestId,
+                }
+            };
+        }
+
+        // ── Step 4: Genuine "needs more detail from the user" case ──
+        if (understanding.needsClarification) {
+            console.log('ℹ️ [FREE] Request needs clarification (not a system error)');
+            const resultsString = JSON.stringify(understanding, null, 2);
+
+            return {
+                reply: resultsString,
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: message },
+                    { role: 'assistant', content: resultsString }
+                ],
+                _meta: {
+                    tier: 'free',
+                    understanding: understanding,
+                    status: 'needs_clarification'
+                }
+            };
+        }
+
+        // ── Step 5: Return the understanding result (normal, valid path) ──
         const resultsString = JSON.stringify(understanding, null, 2);
 
         return {
