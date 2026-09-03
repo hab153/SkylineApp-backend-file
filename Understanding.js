@@ -1,763 +1,1154 @@
 // ──────────────────────────────────────────────────────────────
-// UNDERSTANDING.JS — Stage 1: Input & Normalization
-// Skyline AA-1 Lead Generation System
-//
+// UNDERSTANDING.JS — Layer 1: Query Understanding Service
+// Version: v1.0.0
+// 
+// PURPOSE: Transform natural language query → validated JSON
+// 
 // RESPONSIBILITIES:
-// - Accept structured fields OR free-text input
-// - Parse free-text with GPT (only when needed)
-// - Resolve domain via DNS/Tavily (cached)
-// - Normalize all fields
-// - Validate and set needsClarification
-// - Output clean, predictable contract for Stage 2
-// - NEVER invent requirements
-// - NEVER use AI/Tavily when not strictly necessary
-// - NEVER silently conflate "AI parsing failed" with "user request was vague"
+// - Intent classification (enum)
+// - Entity extraction (typed, nullable)
+// - Ambiguity detection
+// - Query normalization
+// - Schema enforcement (strict)
+// - Retry on validation failure (max 3 attempts)
+// - Fallback behavior (no crashes)
+// - No side effects (no external calls)
+// - Structured logging (sanitized)
+// - Rate limiting (distributed-ready)
+// - Schema versioning
+// - HTTP 429 for rate limits (not fallback)
+// - Transport retries separated from schema retries
 // ──────────────────────────────────────────────────────────────
 
 const { v4: uuidv4 } = require('uuid');
 const OpenAI = require('openai');
-const dns = require('dns').promises;
-const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 // ──────────────────────────────────────────────────────────────
 // 1. CONFIGURATION
 // ──────────────────────────────────────────────────────────────
 
 const CONFIG = {
-    // Model for free-text parsing only
-    // Confirm exact API model string against OpenAI's current docs before deploying —
-    // marketing names (e.g. "Luna") don't always match the literal API model string.
-    AI_MODEL: 'gpt-4o-mini',
-    AI_MODEL_FALLBACK: 'gpt-5.6-terra',
-    AI_TEMPERATURE: 0.2,
-    // Token budget for the completion. The actual request PARAMETER NAME
-    // sent to the API differs by model family — see getTokenParamName()
-    // below. gpt-4o-mini (legacy, non-reasoning) uses `max_tokens`.
-    // gpt-5.6-terra (reasoning-capable, used only as fallback) requires
-    // `max_completion_tokens`. This value is used for both.
-    AI_MAX_COMPLETION_TOKENS: 500,
+    // ── LLM ──
+    MODEL: 'gpt-4o-mini',
+    TEMPERATURE: 0.1,
+    MAX_TOKENS: 800,
 
-    // Domain resolution
-    DNS_TIMEOUT: 5000,
-    TAVILY_API_URL: 'https://api.tavily.com/search',
-    TAVILY_MAX_RESULTS: 1,
+    // ── Schema retries (for invalid JSON/schema violations) ──
+    MAX_SCHEMA_RETRIES: 3,
+    SCHEMA_RETRY_BACKOFF_MS: 500,
 
-    // Defaults
-    DEFAULT_QUANTITY: 50,
-    MAX_QUANTITY_FREE: 50,
-    MAX_QUANTITY_GO: 200,
-    MAX_QUANTITY_PRO: 500,
+    // ── Transport retries (for network/timeout/provider errors) ──
+    MAX_TRANSPORT_RETRIES: 2,
+    TRANSPORT_RETRY_BACKOFF_MS: 1000,
+    TRANSPORT_RETRY_MULTIPLIER: 2,
+
+    // ── Input limits ──
+    MAX_QUERY_LENGTH: 2000,
+
+    // ── Performance ──
+    TIMEOUT_MS: 10000,
+
+    // ── Rate limiting ──
+    RATE_LIMIT_WINDOW_MS: 60000,
+    MAX_REQUESTS_PER_TENANT: 100,
+    MAX_REQUESTS_PER_USER: 50,
+
+    // ── Schema ──
+    SCHEMA_VERSION: 'v1',
+    SCHEMA_FILE: 'understanding.v1.json',
+
+    // ── Logging ──
+    LOG_RAW_OUTPUT: false,
+    LOG_PII: false,
 };
 
 // ──────────────────────────────────────────────────────────────
-// 2. OUTPUT CONTRACT — Stage 1 Output
+// 2. DISTRIBUTED RATE LIMITER (Redis-compatible interface)
 // ──────────────────────────────────────────────────────────────
 
-/**
- * The Stage 1 contract is the single source of truth.
- * Stage 2 (People Discovery) consumes this directly.
- *
- * resolvedVia reflects the ORIGINAL resolution method, even on a cache hit —
- * cache is a lookup shortcut, not a resolution method in its own right.
- *
- * parserFailed distinguishes a system-level AI failure from a genuinely
- * vague user request — both used to look identical (needsClarification: true,
- * everything else null). Free.js (and any caller) MUST check parserFailed
- * separately, since "the AI broke" and "please give us more detail" need
- * completely different user-facing messages.
- */
-const CONTRACT_SCHEMA = {
-    companyName: 'string | null',
-    domain: 'string | null',
-    role: 'string | null',
-    seniority: 'string | null',
-    industry: 'string | null',
-    location: 'string | null',
-    quantity: 'number | null',
-    resolvedVia: 'provided' | 'dns' | 'tavily' | null,
-    needsClarification: 'boolean',
-    parserFailed: 'boolean',
-    parserErrorDetail: 'string | null',
-    originalRequest: 'string | null',
-    requestId: 'string',
-    processedAt: 'string',
-    version: 'string',
-};
-
-// ──────────────────────────────────────────────────────────────
-// 3. NORMALIZATION MAPPINGS
-// ──────────────────────────────────────────────────────────────
-
-// Country normalization
-const COUNTRY_TO_CODE = {
-    'germany': 'DE',
-    'german': 'DE',
-    'deutschland': 'DE',
-    'france': 'FR',
-    'french': 'FR',
-    'united kingdom': 'GB',
-    'uk': 'GB',
-    'britain': 'GB',
-    'england': 'GB',
-    'nigeria': 'NG',
-    'usa': 'US',
-    'united states': 'US',
-    'america': 'US',
-    'canada': 'CA',
-    'australia': 'AU',
-    'india': 'IN',
-    'china': 'CN',
-    'japan': 'JP',
-    'singapore': 'SG',
-    'spain': 'ES',
-    'italy': 'IT',
-    'netherlands': 'NL',
-    'sweden': 'SE',
-    'norway': 'NO',
-    'denmark': 'DK',
-    'finland': 'FI',
-    'ireland': 'IE',
-    'south africa': 'ZA',
-    'brazil': 'BR',
-    'mexico': 'MX'
-};
-
-// Code → Full name
-const CODE_TO_COUNTRY = {
-    'DE': 'Germany',
-    'FR': 'France',
-    'GB': 'United Kingdom',
-    'NG': 'Nigeria',
-    'US': 'United States',
-    'CA': 'Canada',
-    'AU': 'Australia',
-    'IN': 'India',
-    'CN': 'China',
-    'JP': 'Japan',
-    'SG': 'Singapore',
-    'ES': 'Spain',
-    'IT': 'Italy',
-    'NL': 'Netherlands',
-    'SE': 'Sweden',
-    'NO': 'Norway',
-    'DK': 'Denmark',
-    'FI': 'Finland',
-    'IE': 'Ireland',
-    'ZA': 'South Africa',
-    'BR': 'Brazil',
-    'MX': 'Mexico'
-};
-
-// Industry normalization
-const INDUSTRY_MAPPINGS = {
-    'saas': 'SaaS',
-    'software as a service': 'SaaS',
-    'cybersecurity': 'Cybersecurity',
-    'cyber security': 'Cybersecurity',
-    'fintech': 'Fintech',
-    'financial technology': 'Fintech',
-    'healthcare': 'Healthcare',
-    'health care': 'Healthcare',
-    'manufacturing': 'Manufacturing',
-    'e-commerce': 'E-commerce',
-    'ecommerce': 'E-commerce',
-    'retail': 'Retail',
-    'logistics': 'Logistics',
-    'ai': 'AI',
-    'artificial intelligence': 'AI',
-    'machine learning': 'Machine Learning',
-    'ml': 'Machine Learning',
-    'blockchain': 'Blockchain',
-    'real estate': 'Real Estate',
-    'education': 'Education',
-    'edtech': 'EdTech',
-    'hr': 'HR',
-    'human resources': 'HR',
-    'marketing': 'Marketing',
-    'adtech': 'AdTech',
-    'insurance': 'Insurance',
-    'insurtech': 'InsurTech',
-    'legal': 'Legal',
-    'legaltech': 'LegalTech',
-    'energy': 'Energy',
-    'cleantech': 'CleanTech',
-    'agriculture': 'Agriculture',
-    'agritech': 'AgriTech'
-};
-
-// Role normalization
-const ROLE_MAPPINGS = {
-    'ceo': 'CEO',
-    'chief executive officer': 'CEO',
-    'chief exec': 'CEO',
-    'founder': 'Founder',
-    'co-founder': 'Co-Founder',
-    'cofounder': 'Co-Founder',
-    'cto': 'CTO',
-    'chief technology officer': 'CTO',
-    'cfo': 'CFO',
-    'chief financial officer': 'CFO',
-    'ciso': 'CISO',
-    'chief information security officer': 'CISO',
-    'cmo': 'CMO',
-    'chief marketing officer': 'CMO',
-    'coo': 'COO',
-    'chief operating officer': 'COO',
-    'vp': 'VP',
-    'vice president': 'VP',
-    'director': 'Director',
-    'head': 'Head',
-    'manager': 'Manager',
-    'owner': 'Owner',
-    'president': 'President',
-    'executive': 'Executive',
-    'decision maker': 'Decision Maker',
-    'decision-maker': 'Decision Maker'
-};
-
-// Seniority mapping
-const SENIORITY_MAPPINGS = {
-    'c-level': 'C-Level',
-    'clevel': 'C-Level',
-    'c suite': 'C-Level',
-    'executive': 'Executive',
-    'vp': 'VP',
-    'vice president': 'VP',
-    'director': 'Director',
-    'head': 'Head',
-    'manager': 'Manager',
-    'senior': 'Senior',
-    'mid': 'Mid-Level',
-    'junior': 'Junior',
-    'entry': 'Entry',
-};
-
-// ──────────────────────────────────────────────────────────────
-// 4. DOMAIN RESOLUTION (with caching)
-// ──────────────────────────────────────────────────────────────
-
-// In-memory cache for companyName → { domain, resolvedVia }
-// TODO: Replace with a MongoDB collection for persistence — an in-memory
-// Map resets on every deploy/restart, causing companies to be re-resolved
-// (and potentially re-billed via Tavily) after every deploy.
-const domainCache = new Map();
-
-/**
- * Resolves a company's domain.
- * Returns { domain, resolvedVia } or null if resolution fails.
- * resolvedVia is always the ORIGINAL method that resolved it —
- * a cache hit returns whatever method resolved it the first time.
- */
-async function resolveDomain(companyName) {
-    if (!companyName) return null;
-
-    const normalizedName = companyName.toLowerCase().trim();
-
-    // ── Check cache first ──
-    if (domainCache.has(normalizedName)) {
-        const cached = domainCache.get(normalizedName);
-        console.log(`[DOMAIN] Cache hit for: ${companyName} (originally via ${cached.resolvedVia})`);
-        return cached;
+class RateLimiter {
+    constructor(store = null) {
+        // Store can be a Redis client or in-memory Map for development
+        this.store = store || new Map();
+        this.windowMs = CONFIG.RATE_LIMIT_WINDOW_MS;
+        this.tenantLimit = CONFIG.MAX_REQUESTS_PER_TENANT;
+        this.userLimit = CONFIG.MAX_REQUESTS_PER_USER;
+        this.isDistributed = store !== null;
     }
 
-    console.log(`[DOMAIN] Resolving domain for: ${companyName}`);
+    async check(tenantId, userId) {
+        const now = Date.now();
+        const windowMs = this.windowMs;
 
-    // ── Step 1: DNS guess ──
-    const domainGuess = companyName
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, '')
-        .trim() + '.com';
-
-    try {
-        await dns.resolve(domainGuess);
-        console.log(`[DOMAIN] DNS resolved: ${domainGuess}`);
-        const resolved = { domain: domainGuess, resolvedVia: 'dns' };
-        domainCache.set(normalizedName, resolved);
-        return resolved;
-    } catch (dnsError) {
-        console.log(`[DOMAIN] DNS failed for: ${domainGuess}`);
-    }
-
-    // ── Step 2: Tavily fallback (only if DNS fails) ──
-    const tavilyApiKey = process.env.TAVILY_API_KEY;
-    if (tavilyApiKey) {
-        try {
-            const response = await axios.post(
-                CONFIG.TAVILY_API_URL,
-                {
-                    query: `${companyName} official website`,
-                    search_depth: 'basic',
-                    max_results: CONFIG.TAVILY_MAX_RESULTS,
-                    include_answer: false,
-                },
-                {
-                    headers: {
-                        'Authorization': `Bearer ${tavilyApiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    timeout: 10000,
-                }
-            );
-
-            const results = response.data.results || [];
-            if (results.length > 0) {
-                const url = results[0].url || '';
-                const domain = extractDomainFromUrl(url);
-                if (domain) {
-                    console.log(`[DOMAIN] Tavily resolved: ${domain}`);
-                    const resolved = { domain, resolvedVia: 'tavily' };
-                    domainCache.set(normalizedName, resolved);
-                    return resolved;
-                }
-            }
-        } catch (tavilyError) {
-            console.log(`[DOMAIN] Tavily fallback failed: ${tavilyError.message}`);
-        }
-    }
-
-    return null;
-}
-
-function extractDomainFromUrl(url) {
-    try {
-        const parsed = new URL(url);
-        let domain = parsed.hostname;
-        if (domain.startsWith('www.')) {
-            domain = domain.substring(4);
-        }
-        return domain;
-    } catch {
-        return null;
-    }
-}
-
-// ──────────────────────────────────────────────────────────────
-// 5. FREE-TEXT PARSING (with GPT)
-// ──────────────────────────────────────────────────────────────
-
-const PARSE_PROMPT_TEMPLATE = (text) => `
-You are Skyline AA-1's Input Normalizer.
-Extract structured information from the user's request.
-
-**RULES:**
-1. ONLY extract what is explicitly mentioned.
-2. If a field is not mentioned, return null.
-3. Normalize values (CEO → CEO, SaaS → SaaS).
-4. Return JSON only.
-
-**Output JSON:**
-{
-  "companyName": "string or null",
-  "role": "string or null",
-  "seniority": "string or null",
-  "industry": "string or null",
-  "location": "string or null",
-  "quantity": "number or null"
-}
-
-**EXAMPLES:**
-
-User: "Find me 39 SaaS companies in Nigeria"
-Output: {
-  "companyName": null,
-  "role": null,
-  "seniority": null,
-  "industry": "SaaS",
-  "location": "Nigeria",
-  "quantity": 39
-}
-
-User: "Find CEOs of SaaS companies in Nigeria"
-Output: {
-  "companyName": null,
-  "role": "CEO",
-  "seniority": "C-Level",
-  "industry": "SaaS",
-  "location": "Nigeria",
-  "quantity": null
-}
-
-User: "Get me marketing directors at Acme Corp"
-Output: {
-  "companyName": "Acme Corp",
-  "role": "marketing director",
-  "seniority": "Director",
-  "industry": null,
-  "location": null,
-  "quantity": null
-}
-
-User: "Find me CEOs in the Real Estate industry, located in London. Company size: Any."
-Output: {
-  "companyName": null,
-  "role": "CEO",
-  "seniority": "C-Level",
-  "industry": "Real Estate",
-  "location": "London",
-  "quantity": null
-}
-
-**User Request:**
-"${text}"
-
-**OUTPUT ONLY JSON. NO MARKDOWN.**
-`;
-
-/**
- * Calls a single model to parse free text.
- * Returns { ok, data, errorDetail }.
- * ok=false means the call itself failed or returned unparseable JSON —
- * this is a SYSTEM failure, not a comment on the user's request.
- */
-/**
- * Reasoning-capable model families (GPT-5.x, o1/o3/o4) require
- * `max_completion_tokens` and reject the legacy `max_tokens` param.
- * Earlier/non-reasoning families (gpt-4o, gpt-4, gpt-3.5, gpt-4.1) still
- * use `max_tokens`. This checks by prefix so the right param name is
- * sent regardless of which model — primary or fallback — is being called,
- * since this codebase may mix families (e.g. gpt-4o-mini primary,
- * gpt-5.6-terra fallback).
- */
-function getTokenParamName(model) {
-    const reasoningPrefixes = ['gpt-5', 'o1', 'o3', 'o4'];
-    const isReasoningModel = reasoningPrefixes.some(prefix => model.startsWith(prefix));
-    return isReasoningModel ? 'max_completion_tokens' : 'max_tokens';
-}
-
-async function callParseModel(model, text, openai) {
-    const prompt = PARSE_PROMPT_TEMPLATE(text);
-
-    const requestBody = {
-        model: model,
-        temperature: CONFIG.AI_TEMPERATURE,
-        response_format: { type: 'json_object' },
-        messages: [
-            {
-                role: 'system',
-                content: 'You extract structured data from user requests. Output only JSON. Never invent missing fields.'
-            },
-            { role: 'user', content: prompt }
-        ],
-    };
-
-    // Use the correct token-limit param for whichever model is being called.
-    requestBody[getTokenParamName(model)] = CONFIG.AI_MAX_COMPLETION_TOKENS;
-
-    try {
-        const response = await openai.chat.completions.create(requestBody);
-
-        const content = response.choices[0].message.content;
-        const parsed = JSON.parse(content);
-        return { ok: true, data: parsed, errorDetail: null };
-
-    } catch (error) {
-        // Log full detail server-side — status code, type, message — so a
-        // bad model string, auth failure, and rate limit are distinguishable
-        // in logs even though the caller only sees a generic errorDetail.
-        console.error(`[PARSER] ${model} failed:`, {
-            message: error.message,
-            status: error.status || error.response?.status,
-            type: error.type || error.code,
-        });
-        return {
-            ok: false,
-            data: null,
-            errorDetail: `${model}: ${error.message}`,
-        };
-    }
-}
-
-/**
- * Parses free text into structured fields.
- * Tries the primary model (Luna) first; if that call fails or returns
- * invalid JSON, retries once with the fallback model (Terra) — same
- * cascade pattern used in Stage 2's extractor.
- *
- * Returns { ok, data, errorDetail }. Callers MUST check `ok` — a false
- * value means the AI layer broke, and must NOT be silently treated as
- * "the user gave us nothing."
- */
-async function parseFreeText(text, openai) {
-    console.log('[PARSER] Parsing free-text:', text);
-
-    const primary = await callParseModel(CONFIG.AI_MODEL, text, openai);
-    if (primary.ok) return primary;
-
-    console.warn(`[PARSER] Primary model failed, escalating to ${CONFIG.AI_MODEL_FALLBACK}`);
-    const fallback = await callParseModel(CONFIG.AI_MODEL_FALLBACK, text, openai);
-    if (fallback.ok) return fallback;
-
-    // Both attempts failed — this is a real system failure, report it as such.
-    return {
-        ok: false,
-        data: null,
-        errorDetail: `Both models failed. Primary: ${primary.errorDetail} | Fallback: ${fallback.errorDetail}`,
-    };
-}
-
-// ──────────────────────────────────────────────────────────────
-// 6. MAIN UNDERSTANDING ENGINE
-// ──────────────────────────────────────────────────────────────
-
-class UnderstandingEngine {
-    constructor() {
-        this.openai = new OpenAI({
-            apiKey: process.env.OPENAI_API_KEY,
-        });
-    }
-
-    /**
-     * Process input (structured or free-text) → normalized contract
-     */
-    async processRequest(input, userPlan = 'free') {
-        console.log('[UNDERSTANDING] Processing input:', JSON.stringify(input, null, 2));
-
-        const requestId = `req-${uuidv4().substring(0, 8)}`;
-        const result = {
-            companyName: null,
-            domain: null,
-            role: null,
-            seniority: null,
-            industry: null,
-            location: null,
-            quantity: null,
-            resolvedVia: null,
-            needsClarification: false,
-            parserFailed: false,
-            parserErrorDetail: null,
-            originalRequest: null,
-            requestId: requestId,
-            processedAt: new Date().toISOString(),
-            version: '1.1.0',
-        };
-
-        try {
-            // ── Step 1: Detect input type ──
-            const isStructured = input.companyName || input.domain || input.role || input.industry || input.location;
-            const isFreeText = input.text && typeof input.text === 'string' && input.text.trim().length > 0;
-
-            // ── Step 2: Parse free-text (if needed) ──
-            let parsed = {};
-            let providedDomain = null;
-
-            if (isFreeText && !isStructured) {
-                console.log('[UNDERSTANDING] Free-text input detected');
-                result.originalRequest = input.text;
-
-                const parseResult = await parseFreeText(input.text, this.openai);
-
-                if (!parseResult.ok) {
-                    // System-level failure — NOT the same as a vague request.
-                    // needsClarification stays true because we genuinely have
-                    // no structured data to proceed with, but parserFailed
-                    // tells the caller (Free.js) this needs a "try again /
-                    // something went wrong" message, not "please be more specific."
-                    result.needsClarification = true;
-                    result.parserFailed = true;
-                    result.parserErrorDetail = parseResult.errorDetail;
-                    console.log('[UNDERSTANDING] Result (parser failure):', JSON.stringify(result, null, 2));
-                    return result;
-                }
-
-                parsed = parseResult.data;
-            } else {
-                console.log('[UNDERSTANDING] Structured input detected');
-                // Use structured fields directly
-                parsed = {
-                    companyName: input.companyName || null,
-                    role: input.role || null,
-                    seniority: input.seniority || null,
-                    industry: input.industry || null,
-                    location: input.location || null,
-                    quantity: input.quantity || null,
-                };
-                providedDomain = input.domain || null;
-                result.originalRequest = input.text || JSON.stringify(input);
-            }
-
-            // ── Step 3: Normalize values ──
-            const normalized = this.normalize(parsed);
-
-            // ── Step 4: Resolve domain ──
-            // Case A: domain was given directly by the user — use it as-is, no DNS/Tavily needed.
-            if (providedDomain) {
-                result.domain = providedDomain.toLowerCase().trim();
-                result.resolvedVia = 'provided';
-            }
-            // Case B: only companyName given — attempt resolution via cache/DNS/Tavily.
-            else if (normalized.companyName) {
-                const resolved = await resolveDomain(normalized.companyName);
-                if (resolved) {
-                    result.domain = resolved.domain;
-                    result.resolvedVia = resolved.resolvedVia;
-                } else {
-                    // Domain resolution failed — needs clarification
-                    result.needsClarification = true;
-                }
-            }
-
-            // ── Step 5: Apply defaults ──
-            const planLimits = {
-                free: CONFIG.MAX_QUANTITY_FREE,
-                go: CONFIG.MAX_QUANTITY_GO,
-                pro: CONFIG.MAX_QUANTITY_PRO,
+        // ── Tenant rate limit ──
+        const tenantKey = `rate:tenant:${this.hashId(tenantId)}`;
+        const tenantCount = await this.getCount(tenantKey, now, windowMs);
+        if (tenantCount >= this.tenantLimit) {
+            return {
+                allowed: false,
+                reason: 'Tenant rate limit exceeded',
+                limit: this.tenantLimit,
+                windowMs: windowMs,
+                resetAt: new Date(now + windowMs).toISOString()
             };
-            const maxQuantity = planLimits[userPlan] || CONFIG.MAX_QUANTITY_FREE;
+        }
+        await this.increment(tenantKey, now, windowMs);
 
-            if (normalized.quantity && normalized.quantity > maxQuantity) {
-                result.quantity = maxQuantity;
-                result.needsClarification = true;
-            } else if (normalized.quantity) {
-                result.quantity = normalized.quantity;
-            } else {
-                result.quantity = CONFIG.DEFAULT_QUANTITY;
-            }
+        // ── User rate limit ──
+        const userKey = `rate:user:${this.hashId(userId)}`;
+        const userCount = await this.getCount(userKey, now, windowMs);
+        if (userCount >= this.userLimit) {
+            return {
+                allowed: false,
+                reason: 'User rate limit exceeded',
+                limit: this.userLimit,
+                windowMs: windowMs,
+                resetAt: new Date(now + windowMs).toISOString()
+            };
+        }
+        await this.increment(userKey, now, windowMs);
 
-            // ── Step 6: Populate remaining fields ──
-            result.companyName = normalized.companyName || null;
-            result.role = normalized.role || null;
-            result.seniority = normalized.seniority || null;
-            result.industry = normalized.industry || null;
-            result.location = normalized.location || null;
+        return { allowed: true };
+    }
 
-            // ── Step 7: Validate ──
-            // A request is only invalid if it has NEITHER a company/domain
-            // NOR any criteria (role/industry/location) to search by.
-            // A companyName alone (e.g. "find contacts at Acme Corp") is a
-            // perfectly valid, specific request and must NOT be flagged.
-            const hasCompanyIdentity = !!(result.companyName || result.domain);
-            const hasCriteria = !!(result.role || result.industry || result.location);
-
-            if (!hasCompanyIdentity && !hasCriteria) {
-                result.needsClarification = true;
-            }
-
-            console.log('[UNDERSTANDING] Result:', JSON.stringify(result, null, 2));
-            return result;
-
-        } catch (error) {
-            console.error('[UNDERSTANDING] Error:', error.message);
-            return this.buildErrorSpec(input, error.message, requestId);
+    async getCount(key, now, windowMs) {
+        if (this.isDistributed && this.store.get) {
+            // Redis: use sorted set or simple counter with TTL
+            const data = await this.store.get(key);
+            if (!data) return 0;
+            const parsed = JSON.parse(data);
+            const cutoff = now - windowMs;
+            const valid = parsed.filter(t => t > cutoff);
+            return valid.length;
+        } else {
+            // In-memory fallback
+            if (!this.store.has(key)) return 0;
+            const data = this.store.get(key);
+            const cutoff = now - windowMs;
+            const valid = data.filter(t => t > cutoff);
+            this.store.set(key, valid);
+            return valid.length;
         }
     }
 
-    /**
-     * Normalize values
-     */
-    normalize(parsed) {
-        const result = { ...parsed };
-
-        // Normalize country
-        if (result.location) {
-            const lowerInput = result.location.toLowerCase().trim();
-            if (COUNTRY_TO_CODE[lowerInput]) {
-                result.location = CODE_TO_COUNTRY[COUNTRY_TO_CODE[lowerInput]];
-            } else if (CODE_TO_COUNTRY[lowerInput.toUpperCase()]) {
-                result.location = CODE_TO_COUNTRY[lowerInput.toUpperCase()];
+    async increment(key, now, windowMs) {
+        if (this.isDistributed && this.store.set) {
+            const data = await this.store.get(key);
+            let parsed = data ? JSON.parse(data) : [];
+            parsed.push(now);
+            // Keep only recent entries
+            const cutoff = now - windowMs;
+            parsed = parsed.filter(t => t > cutoff);
+            await this.store.set(key, JSON.stringify(parsed), windowMs / 1000);
+        } else {
+            if (!this.store.has(key)) {
+                this.store.set(key, []);
             }
+            const data = this.store.get(key);
+            data.push(now);
+            const cutoff = now - windowMs;
+            this.store.set(key, data.filter(t => t > cutoff));
         }
+    }
 
-        // Normalize industry
-        if (result.industry) {
-            const lowerInput = result.industry.toLowerCase().trim();
-            result.industry = INDUSTRY_MAPPINGS[lowerInput] || result.industry;
-        }
+    hashId(id) {
+        return crypto.createHash('sha256').update(id).digest('hex').substring(0, 16);
+    }
 
-        // Normalize role
-        if (result.role) {
-            const lowerInput = result.role.toLowerCase().trim();
-            result.role = ROLE_MAPPINGS[lowerInput] || result.role;
-        }
-
-        // Normalize seniority
-        if (result.seniority) {
-            const lowerInput = result.seniority.toLowerCase().trim();
-            result.seniority = SENIORITY_MAPPINGS[lowerInput] || result.seniority;
-        }
-
-        // Normalize quantity
-        if (result.quantity) {
-            const qty = parseInt(result.quantity);
-            if (!isNaN(qty) && qty > 0) {
-                result.quantity = qty;
+    // Clean up old entries (for in-memory mode)
+    cleanup() {
+        if (this.isDistributed) return;
+        const now = Date.now();
+        const windowMs = this.windowMs;
+        for (const [key, timestamps] of this.store) {
+            const filtered = timestamps.filter(t => now - t < windowMs);
+            if (filtered.length === 0) {
+                this.store.delete(key);
             } else {
-                result.quantity = null;
+                this.store.set(key, filtered);
             }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 3. JSON SCHEMA — understanding.v1 (strict)
+// ──────────────────────────────────────────────────────────────
+
+function loadSchema() {
+    try {
+        const schemaPath = path.join(__dirname, 'understanding.v1.json');
+        if (fs.existsSync(schemaPath)) {
+            return JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+        }
+    } catch (error) {
+        console.warn('[UNDERSTANDING] Could not load schema file, using embedded schema');
+    }
+
+    return {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        $id: 'https://skyline.ai/schemas/understanding.v1.json',
+        title: 'Understanding Schema v1',
+        description: 'Structured understanding of a natural language query',
+        version: '1.0.0',
+        type: 'object',
+        required: ['intent', 'confidence', 'entities', 'ambiguities', 'normalized_query'],
+        additionalProperties: false,
+        properties: {
+            intent: {
+                type: 'string',
+                enum: [
+                    'ICP_SEARCH',
+                    'PERSON_SEARCH',
+                    'COMPANY_SEARCH',
+                    'EMAIL_FILTER',
+                    'THREAD_SUMMARY',
+                    'ATTACHMENT_SEARCH',
+                    'ACTION_REQUIRED',
+                    'UNKNOWN'
+                ]
+            },
+            confidence: {
+                type: 'number',
+                minimum: 0,
+                maximum: 1
+            },
+            entities: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    job_title: { type: ['string', 'null'] },
+                    industry: { type: ['string', 'null'] },
+                    location: { type: ['string', 'null'] },
+                    employee_count_min: { type: ['integer', 'null'], minimum: 0 },
+                    employee_count_max: { type: ['integer', 'null'], minimum: 0 },
+                    person_name: { type: ['string', 'null'] },
+                    company_name: { type: ['string', 'null'] },
+                    email_type: { type: ['string', 'null'] },
+                    date_range: {
+                        type: ['object', 'null'],
+                        additionalProperties: false,
+                        properties: {
+                            from: { type: 'string', format: 'date' },
+                            to: { type: 'string', format: 'date' }
+                        }
+                    }
+                }
+            },
+            ambiguities: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    required: ['field', 'issue', 'candidates'],
+                    additionalProperties: false,
+                    properties: {
+                        field: { type: 'string' },
+                        issue: { type: 'string' },
+                        candidates: {
+                            type: 'array',
+                            items: { type: 'string' }
+                        }
+                    }
+                }
+            },
+            normalized_query: {
+                type: 'string'
+            }
+        }
+    };
+}
+
+const UNDERSTANDING_SCHEMA = loadSchema();
+
+// ──────────────────────────────────────────────────────────────
+// 4. STRICT DATE VALIDATOR
+// ──────────────────────────────────────────────────────────────
+
+function isValidDateString(dateStr) {
+    if (!dateStr || typeof dateStr !== 'string') return false;
+    // Must be YYYY-MM-DD format
+    const dateRegex = /^(\d{4})-(\d{2})-(\d{2})$/;
+    const match = dateStr.match(dateRegex);
+    if (!match) return false;
+
+    const year = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
+    const day = parseInt(match[3], 10);
+
+    // Validate month and day ranges
+    if (month < 1 || month > 12) return false;
+    if (day < 1 || day > 31) return false;
+
+    // Validate actual date exists
+    const date = new Date(year, month - 1, day);
+    return date.getFullYear() === year &&
+        date.getMonth() === month - 1 &&
+        date.getDate() === day;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 5. LOGGER (Sanitized)
+// ──────────────────────────────────────────────────────────────
+
+class Logger {
+    constructor(correlationId) {
+        this.correlationId = correlationId || `und-${uuidv4().substring(0, 8)}`;
+        this.logs = [];
+    }
+
+    log(level, message, data = {}) {
+        // ── Sanitize data ──
+        const sanitized = this.sanitize(data);
+
+        const entry = {
+            timestamp: new Date().toISOString(),
+            level: level,
+            correlationId: this.correlationId,
+            message: message,
+            ...sanitized
+        };
+
+        this.logs.push(entry);
+
+        // Always log to console in production
+        console.log(JSON.stringify(entry));
+
+        return entry;
+    }
+
+    sanitize(data) {
+        const result = {};
+
+        for (const [key, value] of Object.entries(data)) {
+            // ── Skip sensitive fields ──
+            if (['password', 'token', 'secret', 'apiKey', 'authorization'].includes(key.toLowerCase())) {
+                result[key] = '[REDACTED]';
+                continue;
+            }
+
+            // ── Hash user identifiers if PII logging is disabled ──
+            if (!CONFIG.LOG_PII && (key === 'userId' || key === 'user_id' || key === 'tenantId' || key === 'tenant_id')) {
+                result[key] = this.hashId(value);
+                continue;
+            }
+
+            // ── Truncate raw output ──
+            if (!CONFIG.LOG_RAW_OUTPUT && (key === 'rawOutput' || key === 'rawContent')) {
+                result[key] = value ? `${value.substring(0, 100)}...[TRUNCATED]` : null;
+                continue;
+            }
+
+            // ── Truncate long strings ──
+            if (typeof value === 'string' && value.length > 500) {
+                result[key] = value.substring(0, 500) + '...[TRUNCATED]';
+                continue;
+            }
+
+            // ── Recursively sanitize objects ──
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+                result[key] = this.sanitize(value);
+                continue;
+            }
+
+            result[key] = value;
         }
 
         return result;
     }
 
-    /**
-     * Build error specification
-     */
-    buildErrorSpec(input, errorMessage, requestId) {
-        return {
-            companyName: null,
-            domain: null,
-            role: null,
-            seniority: null,
-            industry: null,
-            location: null,
-            quantity: null,
-            resolvedVia: null,
-            needsClarification: true,
-            parserFailed: true,
-            parserErrorDetail: errorMessage,
-            originalRequest: input.text || JSON.stringify(input),
-            requestId: requestId || `req-${uuidv4().substring(0, 8)}`,
-            processedAt: new Date().toISOString(),
-            version: '1.1.0',
-            _error: errorMessage,
-        };
+    hashId(id) {
+        if (!id || typeof id !== 'string') return 'unknown';
+        return crypto.createHash('sha256').update(id).digest('hex').substring(0, 16);
+    }
+
+    getLogs() {
+        return this.logs;
+    }
+
+    clear() {
+        this.logs = [];
     }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 7. CONVENIENCE FUNCTION
+// 6. STRICT VALIDATOR (No crashes)
+// ──────────────────────────────────────────────────────────────
+
+function validateUnderstanding(data) {
+    const errors = [];
+
+    // ── Guard: data must be a non-null object ──
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        return {
+            valid: false,
+            errors: ['Data must be a non-null object']
+        };
+    }
+
+    // ── Required fields ──
+    const required = ['intent', 'confidence', 'entities', 'ambiguities', 'normalized_query'];
+    for (const field of required) {
+        if (!(field in data) || data[field] === undefined || data[field] === null) {
+            errors.push(`Missing required field: ${field}`);
+        }
+    }
+
+    // ── Intent enum ──
+    const validIntents = [
+        'ICP_SEARCH', 'PERSON_SEARCH', 'COMPANY_SEARCH',
+        'EMAIL_FILTER', 'THREAD_SUMMARY', 'ATTACHMENT_SEARCH',
+        'ACTION_REQUIRED', 'UNKNOWN'
+    ];
+    if (data.intent && !validIntents.includes(data.intent)) {
+        errors.push(`Invalid intent: ${data.intent}. Must be one of: ${validIntents.join(', ')}`);
+    }
+
+    // ── Confidence range ──
+    if (data.confidence !== undefined && data.confidence !== null) {
+        if (typeof data.confidence !== 'number' || data.confidence < 0 || data.confidence > 1) {
+            errors.push('Confidence must be a number between 0 and 1');
+        }
+    }
+
+    // ── Entities ──
+    if (data.entities) {
+        if (typeof data.entities !== 'object' || Array.isArray(data.entities)) {
+            errors.push('entities must be an object');
+        } else {
+            const entityFields = [
+                'job_title', 'industry', 'location', 'person_name', 'company_name', 'email_type'
+            ];
+            for (const field of entityFields) {
+                if (field in data.entities && data.entities[field] !== null && typeof data.entities[field] !== 'string') {
+                    errors.push(`entities.${field} must be a string or null`);
+                }
+            }
+
+            // Employee counts
+            if ('employee_count_min' in data.entities && data.entities.employee_count_min !== null) {
+                if (typeof data.entities.employee_count_min !== 'number' ||
+                    !Number.isInteger(data.entities.employee_count_min) ||
+                    data.entities.employee_count_min < 0) {
+                    errors.push('entities.employee_count_min must be a non-negative integer or null');
+                }
+            }
+            if ('employee_count_max' in data.entities && data.entities.employee_count_max !== null) {
+                if (typeof data.entities.employee_count_max !== 'number' ||
+                    !Number.isInteger(data.entities.employee_count_max) ||
+                    data.entities.employee_count_max < 0) {
+                    errors.push('entities.employee_count_max must be a non-negative integer or null');
+                }
+            }
+            if (data.entities.employee_count_min !== null && data.entities.employee_count_max !== null) {
+                if (data.entities.employee_count_min > data.entities.employee_count_max) {
+                    errors.push('entities.employee_count_min must be <= employee_count_max');
+                }
+            }
+
+            // Date range with strict validation
+            if ('date_range' in data.entities && data.entities.date_range !== null) {
+                if (typeof data.entities.date_range !== 'object' || Array.isArray(data.entities.date_range)) {
+                    errors.push('entities.date_range must be an object or null');
+                } else {
+                    if (data.entities.date_range.from !== undefined && data.entities.date_range.from !== null) {
+                        if (!isValidDateString(data.entities.date_range.from)) {
+                            errors.push(`entities.date_range.from must be a valid date in YYYY-MM-DD format, got: ${data.entities.date_range.from}`);
+                        }
+                    }
+                    if (data.entities.date_range.to !== undefined && data.entities.date_range.to !== null) {
+                        if (!isValidDateString(data.entities.date_range.to)) {
+                            errors.push(`entities.date_range.to must be a valid date in YYYY-MM-DD format, got: ${data.entities.date_range.to}`);
+                        }
+                    }
+                    if (data.entities.date_range.from && data.entities.date_range.to) {
+                        const from = new Date(data.entities.date_range.from + 'T00:00:00Z');
+                        const to = new Date(data.entities.date_range.to + 'T00:00:00Z');
+                        if (!isNaN(from) && !isNaN(to) && from > to) {
+                            errors.push('entities.date_range.from must be <= to');
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Ambiguities (Safe iteration) ──
+    if (!Array.isArray(data.ambiguities)) {
+        errors.push('ambiguities must be an array');
+    } else {
+        for (let i = 0; i < data.ambiguities.length; i++) {
+            const amb = data.ambiguities[i];
+            // Guard: amb must be an object
+            if (!amb || typeof amb !== 'object' || Array.isArray(amb)) {
+                errors.push(`ambiguities[${i}] must be an object`);
+                continue;
+            }
+            if (!amb.field || typeof amb.field !== 'string') {
+                errors.push(`ambiguities[${i}].field is required and must be a string`);
+            }
+            if (!amb.issue || typeof amb.issue !== 'string') {
+                errors.push(`ambiguities[${i}].issue is required and must be a string`);
+            }
+            // Safe candidates check
+            if (!Array.isArray(amb.candidates)) {
+                errors.push(`ambiguities[${i}].candidates must be an array`);
+            } else {
+                for (const candidate of amb.candidates) {
+                    if (typeof candidate !== 'string') {
+                        errors.push(`ambiguities[${i}].candidates items must be strings`);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── normalized_query ──
+    if (data.normalized_query !== undefined && data.normalized_query !== null && typeof data.normalized_query !== 'string') {
+        errors.push('normalized_query must be a string');
+    }
+
+    // ── Additional properties ──
+    const allowed = ['intent', 'confidence', 'entities', 'ambiguities', 'normalized_query'];
+    for (const key of Object.keys(data)) {
+        if (!allowed.includes(key)) {
+            errors.push(`Additional property not allowed: ${key}`);
+        }
+    }
+
+    return {
+        valid: errors.length === 0,
+        errors: errors
+    };
+}
+
+// ──────────────────────────────────────────────────────────────
+// 7. FALLBACK RESPONSE (No _meta)
+// ──────────────────────────────────────────────────────────────
+
+function getFallbackResponse() {
+    return {
+        intent: 'UNKNOWN',
+        confidence: 0.0,
+        entities: {},
+        ambiguities: [],
+        normalized_query: ''
+    };
+}
+
+// ──────────────────────────────────────────────────────────────
+// 8. SYSTEM PROMPT
+// ──────────────────────────────────────────────────────────────
+
+function buildSystemPrompt(schemaVersion) {
+    return `You are a query-understanding model. Your ONLY job is to convert the user's natural-language request into a strict JSON object that matches the provided JSON Schema.
+
+Rules:
+- Output ONLY valid JSON. No markdown, no explanations, no code fences.
+- Use the exact field names and types from the schema.
+- For unknown values, use null instead of guessing.
+- If the request is ambiguous, populate the "ambiguities" array.
+- Do not invent entities or fields that are not in the schema.
+- Do not perform any external actions. You only analyze text.
+
+INTENT DEFINITIONS:
+- ICP_SEARCH: Ideal Customer Profile search (company criteria, industry, location, size)
+- PERSON_SEARCH: Find specific people by role, company, or location
+- COMPANY_SEARCH: Find companies by criteria
+- EMAIL_FILTER: Filter existing emails by criteria
+- THREAD_SUMMARY: Summarize a conversation thread
+- ATTACHMENT_SEARCH: Find specific attachments
+- ACTION_REQUIRED: Find emails needing action
+- UNKNOWN: Fallback for unclear or out-of-scope requests
+
+AMBIGUITY GUIDANCE:
+- Lexical ambiguity: Same word, multiple meanings (e.g., "SF" = San Francisco vs South Florida)
+- Underspecification: Missing critical constraints
+- Context dependence: References to prior turns not provided
+- Populate the "ambiguities" array when any of these occur
+
+SCHEMA VERSION: ${schemaVersion}
+
+JSON Schema:
+${JSON.stringify(UNDERSTANDING_SCHEMA, null, 2)}`;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 9. USER PROMPT BUILDER
+// ──────────────────────────────────────────────────────────────
+
+function buildUserPrompt(query, tenantId, userId, conversationId, locale, timezone) {
+    const prompt = {
+        query: query,
+        tenant_id: tenantId,
+        user_id: userId
+    };
+
+    if (conversationId) {
+        prompt.conversation_id = conversationId;
+    }
+    if (locale) {
+        prompt.locale = locale;
+    }
+    if (timezone) {
+        prompt.timezone = timezone;
+    }
+
+    return JSON.stringify(prompt, null, 2);
+}
+
+// ──────────────────────────────────────────────────────────────
+// 10. TRANSPORT RETRY (Separate from schema retry)
+// ──────────────────────────────────────────────────────────────
+
+async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
+    const maxRetries = CONFIG.MAX_TRANSPORT_RETRIES;
+    let lastError = null;
+    let delay = CONFIG.TRANSPORT_RETRY_BACKOFF_MS;
+
+    for (let retry = 0; retry <= maxRetries; retry++) {
+        try {
+            const startTime = Date.now();
+            const response = await openaiClient.chat.completions.create({
+                model: CONFIG.MODEL,
+                messages: messages,
+                temperature: CONFIG.TEMPERATURE,
+                max_tokens: CONFIG.MAX_TOKENS,
+                response_format: { type: 'json_object' },
+                timeout: CONFIG.TIMEOUT_MS
+            });
+            const llmTimeMs = Date.now() - startTime;
+
+            logger.log('INFO', 'LLM response received', {
+                attempt: attempt,
+                transportRetry: retry,
+                llmTimeMs: llmTimeMs,
+                responseLength: response.choices[0].message.content.length
+            });
+
+            return {
+                success: true,
+                response: response,
+                transportRetries: retry,
+                llmTimeMs: llmTimeMs
+            };
+
+        } catch (error) {
+            lastError = error;
+
+            // ── Don't retry on certain errors ──
+            if (error.status === 401 || error.status === 403) {
+                logger.log('ERROR', 'LLM auth error (non-retryable)', {
+                    status: error.status,
+                    message: error.message
+                });
+                return {
+                    success: false,
+                    error: error,
+                    transportRetries: retry,
+                    isRetryable: false
+                };
+            }
+
+            // ── Retry on timeouts, 5xx, rate limits ──
+            const isRetryable = error.status >= 500 ||
+                error.status === 429 ||
+                error.code === 'ETIMEDOUT' ||
+                error.code === 'ECONNRESET';
+
+            if (!isRetryable || retry >= maxRetries) {
+                logger.log('ERROR', 'LLM call failed (final)', {
+                    attempt: attempt,
+                    transportRetry: retry,
+                    error: error.message,
+                    status: error.status,
+                    isRetryable: isRetryable
+                });
+                return {
+                    success: false,
+                    error: error,
+                    transportRetries: retry,
+                    isRetryable: isRetryable
+                };
+            }
+
+            logger.log('WARN', 'LLM transport retry', {
+                attempt: attempt,
+                transportRetry: retry,
+                delayMs: delay,
+                error: error.message
+            });
+
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= CONFIG.TRANSPORT_RETRY_MULTIPLIER;
+        }
+    }
+
+    return {
+        success: false,
+        error: lastError,
+        transportRetries: maxRetries,
+        isRetryable: false
+    };
+}
+
+// ──────────────────────────────────────────────────────────────
+// 11. SCHEMA RETRY (Separate from transport retry)
+// ──────────────────────────────────────────────────────────────
+
+async function processWithSchemaRetry(userQuery, tenantId, userId, conversationId, locale, timezone, openaiClient, logger, onProgress) {
+    let lastError = null;
+    let lastOutput = null;
+    const schemaErrors = [];
+
+    for (let attempt = 1; attempt <= CONFIG.MAX_SCHEMA_RETRIES; attempt++) {
+        logger.log('INFO', 'Schema attempt started', {
+            attempt: attempt,
+            maxAttempts: CONFIG.MAX_SCHEMA_RETRIES,
+            queryLength: userQuery.length
+        });
+
+        // ── Build prompt ──
+        const systemPrompt = buildSystemPrompt(CONFIG.SCHEMA_VERSION);
+        const userPrompt = buildUserPrompt(userQuery, tenantId, userId, conversationId, locale, timezone);
+
+        let finalSystemPrompt = systemPrompt;
+        if (attempt > 1 && schemaErrors.length > 0) {
+            const feedback = `\n\nPREVIOUS ATTEMPTS FAILED SCHEMA VALIDATION. ERRORS:\n${schemaErrors.join('; ')}\n\nPlease fix these issues and output valid JSON matching the schema.`;
+            finalSystemPrompt += feedback;
+        }
+
+        const messages = [
+            { role: 'system', content: finalSystemPrompt },
+            { role: 'user', content: userPrompt }
+        ];
+
+        // ── Call with transport retry ──
+        const transportResult = await callWithTransportRetry(openaiClient, messages, logger, attempt);
+
+        if (!transportResult.success) {
+            logger.log('WARN', 'Transport retry exhausted', {
+                attempt: attempt,
+                error: transportResult.error?.message
+            });
+            // Don't count transport failure as schema failure; continue to next attempt
+            continue;
+        }
+
+        const rawContent = transportResult.response.choices[0].message.content;
+        if (CONFIG.LOG_RAW_OUTPUT) {
+            logger.log('DEBUG', 'Raw LLM output', {
+                attempt: attempt,
+                rawContent: rawContent
+            });
+        }
+
+        // ── Parse JSON ──
+        let parsed;
+        try {
+            parsed = JSON.parse(rawContent);
+        } catch (parseError) {
+            const errorMsg = `JSON parse error: ${parseError.message}`;
+            schemaErrors.push(errorMsg);
+            lastError = errorMsg;
+            lastOutput = rawContent;
+            logger.log('WARN', 'JSON parse failed', {
+                attempt: attempt,
+                error: errorMsg
+            });
+            continue;
+        }
+
+        // ── Validate against schema ──
+        const validation = validateUnderstanding(parsed);
+        if (validation.valid) {
+            logger.log('INFO', 'Schema validation passed', {
+                attempt: attempt,
+                intent: parsed.intent,
+                confidence: parsed.confidence
+            });
+            return {
+                success: true,
+                data: parsed,
+                schemaAttempts: attempt,
+                transportRetries: transportResult.transportRetries,
+                rawOutput: rawContent,
+                llmTimeMs: transportResult.llmTimeMs
+            };
+        } else {
+            schemaErrors.push(...validation.errors);
+            lastError = validation.errors.join('; ');
+            lastOutput = rawContent;
+            logger.log('WARN', 'Schema validation failed', {
+                attempt: attempt,
+                errors: validation.errors
+            });
+        }
+
+        // ── Wait before retry ──
+        if (attempt < CONFIG.MAX_SCHEMA_RETRIES) {
+            const delay = CONFIG.SCHEMA_RETRY_BACKOFF_MS * (attempt * attempt);
+            logger.log('INFO', 'Schema retry waiting', {
+                attempt: attempt,
+                delayMs: delay
+            });
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+
+    // ── All schema attempts failed ──
+    logger.log('ERROR', 'All schema attempts failed', {
+        maxAttempts: CONFIG.MAX_SCHEMA_RETRIES,
+        schemaErrors: schemaErrors,
+        lastError: lastError
+    });
+
+    return {
+        success: false,
+        data: getFallbackResponse(),
+        schemaAttempts: CONFIG.MAX_SCHEMA_RETRIES,
+        lastError: lastError,
+        lastOutput: lastOutput,
+        schemaErrors: schemaErrors
+    };
+}
+
+// ──────────────────────────────────────────────────────────────
+// 12. MAIN UNDERSTANDING FUNCTION
 // ──────────────────────────────────────────────────────────────
 
 /**
- * Main entry point — process a request
- *
- * @param {string|object} input - Either a text string or structured object
- * @param {string} userPlan - 'free', 'go', or 'pro'
- * @returns {Promise<object>} Normalized Stage 1 contract
+ * Process a natural language query into structured understanding
+ * 
+ * @param {string} query - The user's natural language request
+ * @param {string} tenantId - Tenant identifier (REQUIRED)
+ * @param {string} userId - User identifier (REQUIRED)
+ * @param {object} options - Optional settings
+ * @param {string} options.conversationId - Conversation identifier
+ * @param {string} options.locale - Locale (e.g., 'en-US')
+ * @param {string} options.timezone - Timezone (e.g., 'Africa/Lagos')
+ * @param {string} options.correlationId - Correlation ID for tracing
+ * @param {object} options.rateLimiter - Rate limiter instance
+ * @param {function} options.onProgress - Progress callback
+ * @returns {Promise<object>} Validated understanding JSON (NO _meta)
  */
-async function understand(input, userPlan = 'free') {
-    const engine = new UnderstandingEngine();
+async function understand(query, tenantId, userId, options = {}) {
+    const correlationId = options.correlationId || `und-${uuidv4().substring(0, 8)}`;
+    const startTime = Date.now();
 
-    // Normalize input
-    let request = {};
-    if (typeof input === 'string') {
-        request = { text: input };
-    } else if (typeof input === 'object') {
-        request = { ...input };
-        if (!request.text && request.originalRequest) {
-            request.text = request.originalRequest;
+    // ── Create logger for this request ──
+    const logger = new Logger(correlationId);
+
+    logger.log('INFO', 'Request started', {
+        queryLength: query ? query.length : 0,
+        hasTenantId: !!tenantId,
+        hasUserId: !!userId,
+        hasConversationId: !!options.conversationId,
+        hasLocale: !!options.locale,
+        hasTimezone: !!options.timezone
+    });
+
+    try {
+        // ── Input validation ──
+        if (!query || typeof query !== 'string') {
+            logger.log('WARN', 'Invalid query: not a string');
+            return getFallbackResponse();
         }
-    } else {
-        return engine.buildErrorSpec({}, 'Invalid input type');
-    }
 
-    return engine.processRequest(request, userPlan);
+        const trimmedQuery = query.trim();
+        if (trimmedQuery.length === 0) {
+            logger.log('WARN', 'Empty query');
+            return getFallbackResponse();
+        }
+
+        if (trimmedQuery.length > CONFIG.MAX_QUERY_LENGTH) {
+            logger.log('WARN', 'Query too long', {
+                length: trimmedQuery.length,
+                maxLength: CONFIG.MAX_QUERY_LENGTH
+            });
+            return getFallbackResponse();
+        }
+
+        // ── Validate required fields ──
+        if (!tenantId || typeof tenantId !== 'string' || tenantId.trim().length === 0) {
+            logger.log('WARN', 'Missing required tenantId');
+            return getFallbackResponse();
+        }
+
+        if (!userId || typeof userId !== 'string' || userId.trim().length === 0) {
+            logger.log('WARN', 'Missing required userId');
+            return getFallbackResponse();
+        }
+
+        const normalizedTenantId = tenantId.trim();
+        const normalizedUserId = userId.trim();
+
+        // ── Rate limiting ──
+        const rateLimiter = options.rateLimiter || understand.rateLimiter || new RateLimiter();
+        understand.rateLimiter = rateLimiter;
+
+        const rateCheck = await rateLimiter.check(normalizedTenantId, normalizedUserId);
+        if (!rateCheck.allowed) {
+            logger.log('WARN', 'Rate limit exceeded', {
+                reason: rateCheck.reason,
+                limit: rateCheck.limit,
+                windowMs: rateCheck.windowMs,
+                resetAt: rateCheck.resetAt
+            });
+            const error = new Error(rateCheck.reason);
+            error.statusCode = 429;
+            error.rateLimitInfo = rateCheck;
+            throw error;
+        }
+
+        // ── Initialize OpenAI client ──
+        if (!process.env.OPENAI_API_KEY) {
+            logger.log('ERROR', 'OPENAI_API_KEY not set');
+            return getFallbackResponse();
+        }
+
+        const openai = new OpenAI({
+            apiKey: process.env.OPENAI_API_KEY
+        });
+
+        // ── Process with schema retry ──
+        const result = await processWithSchemaRetry(
+            trimmedQuery,
+            normalizedTenantId,
+            normalizedUserId,
+            options.conversationId || null,
+            options.locale || null,
+            options.timezone || null,
+            openai,
+            logger,
+            options.onProgress
+        );
+
+        // ── Build final response (NO _meta in body) ──
+        const response = {
+            ...result.data
+        };
+
+        // ── Log summary ──
+        logger.log('INFO', 'Request completed', {
+            intent: response.intent,
+            confidence: response.confidence,
+            schemaAttempts: result.schemaAttempts || 1,
+            transportRetries: result.transportRetries || 0,
+            success: result.success,
+            processingTimeMs: Date.now() - startTime,
+            hasAmbiguities: response.ambiguities.length > 0
+        });
+
+        // ── Clean up rate limiter periodically ──
+        if (Math.random() < 0.01) {
+            rateLimiter.cleanup();
+        }
+
+        // ── Return ONLY the schema-valid response (no _meta) ──
+        return response;
+
+    } catch (error) {
+        // ── Handle rate limit errors ──
+        if (error.statusCode === 429) {
+            // Rethrow for HTTP handler to handle with proper status code
+            throw error;
+        }
+
+        logger.log('ERROR', 'Fatal error', {
+            error: error.message,
+            stack: error.stack
+        });
+        return getFallbackResponse();
+    }
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. EXPORTS
+// 13. HTTP HANDLER (Express-compatible)
+// ──────────────────────────────────────────────────────────────
+
+async function handleRequest(req, res) {
+    const startTime = Date.now();
+    const correlationId = req.headers['x-correlation-id'] || `und-${uuidv4().substring(0, 8)}`;
+    const logger = new Logger(correlationId);
+
+    try {
+        // ── Validate input ──
+        const { query, tenant_id, user_id, conversation_id, locale, timezone } = req.body;
+
+        logger.log('INFO', 'HTTP request received', {
+            method: req.method,
+            path: req.path,
+            ip: req.ip ? logger.hashId(req.ip) : 'unknown',
+            hasQuery: !!query,
+            hasTenantId: !!tenant_id,
+            hasUserId: !!user_id
+        });
+
+        if (!query || typeof query !== 'string') {
+            return res.status(400).json({
+                error: {
+                    code: 'INVALID_INPUT',
+                    message: 'query is required and must be a non-empty string.',
+                    details: {}
+                }
+            });
+        }
+
+        const trimmedQuery = query.trim();
+        if (trimmedQuery.length === 0) {
+            return res.status(400).json({
+                error: {
+                    code: 'INVALID_INPUT',
+                    message: 'query must not be empty.',
+                    details: {}
+                }
+            });
+        }
+
+        if (trimmedQuery.length > CONFIG.MAX_QUERY_LENGTH) {
+            return res.status(400).json({
+                error: {
+                    code: 'INVALID_INPUT',
+                    message: `query exceeds maximum length of ${CONFIG.MAX_QUERY_LENGTH} characters.`,
+                    details: { length: trimmedQuery.length }
+                }
+            });
+        }
+
+        if (!tenant_id || typeof tenant_id !== 'string' || tenant_id.trim().length === 0) {
+            return res.status(400).json({
+                error: {
+                    code: 'INVALID_INPUT',
+                    message: 'tenant_id is required and must be a non-empty string.',
+                    details: {}
+                }
+            });
+        }
+
+        if (!user_id || typeof user_id !== 'string' || user_id.trim().length === 0) {
+            return res.status(400).json({
+                error: {
+                    code: 'INVALID_INPUT',
+                    message: 'user_id is required and must be a non-empty string.',
+                    details: {}
+                }
+            });
+        }
+
+        // ── Call understanding ──
+        const result = await understand(trimmedQuery, tenant_id.trim(), user_id.trim(), {
+            correlationId,
+            conversationId: conversation_id,
+            locale: locale,
+            timezone: timezone,
+            onProgress: (msg) => {
+                logger.log('INFO', 'Progress update', { message: msg });
+            }
+        });
+
+        // ── Return clean response (NO _meta) ──
+        res.status(200).json(result);
+
+    } catch (error) {
+        // ── Handle rate limit errors ──
+        if (error.statusCode === 429) {
+            logger.log('WARN', 'Rate limit hit', {
+                reason: error.message,
+                rateLimitInfo: error.rateLimitInfo
+            });
+            return res.status(429).json({
+                error: {
+                    code: 'RATE_LIMIT_EXCEEDED',
+                    message: error.message,
+                    details: error.rateLimitInfo || {}
+                }
+            });
+        }
+
+        logger.log('ERROR', 'Handler error', {
+            error: error.message,
+            stack: error.stack
+        });
+        res.status(500).json({
+            error: {
+                code: 'INTERNAL_ERROR',
+                message: 'An unexpected error occurred.',
+                details: {}
+            }
+        });
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 14. ROUTE REGISTRATION
+// ──────────────────────────────────────────────────────────────
+
+function registerRoutes(app) {
+    // ── POST /v1/understand/query ──
+    app.post('/v1/understand/query', handleRequest);
+
+    // ── GET /v1/understand/schema ──
+    app.get('/v1/understand/schema', (req, res) => {
+        res.status(200).json({
+            schema: UNDERSTANDING_SCHEMA,
+            version: CONFIG.SCHEMA_VERSION,
+            description: 'Understanding Schema v1'
+        });
+    });
+
+    // ── GET /v1/understand/health ──
+    app.get('/v1/understand/health', (req, res) => {
+        res.status(200).json({
+            status: 'healthy',
+            version: CONFIG.SCHEMA_VERSION,
+            timestamp: new Date().toISOString()
+        });
+    });
+
+    console.log('[UNDERSTANDING] Routes registered:');
+    console.log('  POST /v1/understand/query');
+    console.log('  GET  /v1/understand/schema');
+    console.log('  GET  /v1/understand/health');
+}
+
+// ──────────────────────────────────────────────────────────────
+// 15. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
+    // Main function
     understand,
-    UnderstandingEngine,
-    resolveDomain,
-    parseFreeText,
+
+    // HTTP handler
+    handleRequest,
+
+    // Route registration
+    registerRoutes,
+
+    // Config (for testing)
     CONFIG,
-    CONTRACT_SCHEMA,
-    COUNTRY_TO_CODE,
-    CODE_TO_COUNTRY,
-    INDUSTRY_MAPPINGS,
-    ROLE_MAPPINGS,
-    SENIORITY_MAPPINGS,
-    domainCache, // For testing/debugging
+
+    // Schema
+    UNDERSTANDING_SCHEMA,
+    loadSchema,
+
+    // Rate limiter
+    RateLimiter,
+
+    // Logger
+    Logger,
+
+    // Validator (for testing)
+    validateUnderstanding,
+    isValidDateString,
+
+    // Fallback (for testing)
+    getFallbackResponse,
+
+    // Prompt builders (for testing)
+    buildSystemPrompt,
+    buildUserPrompt
 };
