@@ -48,9 +48,6 @@ const CONFIG = {
     // ── Input limits ──
     MAX_QUERY_LENGTH: 2000,
 
-    // ── Performance ──
-    TIMEOUT_MS: 10000,
-
     // ── Rate limiting ──
     RATE_LIMIT_WINDOW_MS: 60000,
     MAX_REQUESTS_PER_TENANT: 100,
@@ -71,7 +68,6 @@ const CONFIG = {
 
 class RateLimiter {
     constructor(store = null) {
-        // Store can be a Redis client or in-memory Map for development
         this.store = store || new Map();
         this.windowMs = CONFIG.RATE_LIMIT_WINDOW_MS;
         this.tenantLimit = CONFIG.MAX_REQUESTS_PER_TENANT;
@@ -83,7 +79,6 @@ class RateLimiter {
         const now = Date.now();
         const windowMs = this.windowMs;
 
-        // ── Tenant rate limit ──
         const tenantKey = `rate:tenant:${this.hashId(tenantId)}`;
         const tenantCount = await this.getCount(tenantKey, now, windowMs);
         if (tenantCount >= this.tenantLimit) {
@@ -97,7 +92,6 @@ class RateLimiter {
         }
         await this.increment(tenantKey, now, windowMs);
 
-        // ── User rate limit ──
         const userKey = `rate:user:${this.hashId(userId)}`;
         const userCount = await this.getCount(userKey, now, windowMs);
         if (userCount >= this.userLimit) {
@@ -116,7 +110,6 @@ class RateLimiter {
 
     async getCount(key, now, windowMs) {
         if (this.isDistributed && this.store.get) {
-            // Redis: use sorted set or simple counter with TTL
             const data = await this.store.get(key);
             if (!data) return 0;
             const parsed = JSON.parse(data);
@@ -124,7 +117,6 @@ class RateLimiter {
             const valid = parsed.filter(t => t > cutoff);
             return valid.length;
         } else {
-            // In-memory fallback
             if (!this.store.has(key)) return 0;
             const data = this.store.get(key);
             const cutoff = now - windowMs;
@@ -139,7 +131,6 @@ class RateLimiter {
             const data = await this.store.get(key);
             let parsed = data ? JSON.parse(data) : [];
             parsed.push(now);
-            // Keep only recent entries
             const cutoff = now - windowMs;
             parsed = parsed.filter(t => t > cutoff);
             await this.store.set(key, JSON.stringify(parsed), windowMs / 1000);
@@ -158,7 +149,6 @@ class RateLimiter {
         return crypto.createHash('sha256').update(id).digest('hex').substring(0, 16);
     }
 
-    // Clean up old entries (for in-memory mode)
     cleanup() {
         if (this.isDistributed) return;
         const now = Date.now();
@@ -269,7 +259,6 @@ const UNDERSTANDING_SCHEMA = loadSchema();
 
 function isValidDateString(dateStr) {
     if (!dateStr || typeof dateStr !== 'string') return false;
-    // Must be YYYY-MM-DD format
     const dateRegex = /^(\d{4})-(\d{2})-(\d{2})$/;
     const match = dateStr.match(dateRegex);
     if (!match) return false;
@@ -278,11 +267,9 @@ function isValidDateString(dateStr) {
     const month = parseInt(match[2], 10);
     const day = parseInt(match[3], 10);
 
-    // Validate month and day ranges
     if (month < 1 || month > 12) return false;
     if (day < 1 || day > 31) return false;
 
-    // Validate actual date exists
     const date = new Date(year, month - 1, day);
     return date.getFullYear() === year &&
         date.getMonth() === month - 1 &&
@@ -300,7 +287,6 @@ class Logger {
     }
 
     log(level, message, data = {}) {
-        // ── Sanitize data ──
         const sanitized = this.sanitize(data);
 
         const entry = {
@@ -312,10 +298,7 @@ class Logger {
         };
 
         this.logs.push(entry);
-
-        // Always log to console in production
         console.log(JSON.stringify(entry));
-
         return entry;
     }
 
@@ -323,31 +306,26 @@ class Logger {
         const result = {};
 
         for (const [key, value] of Object.entries(data)) {
-            // ── Skip sensitive fields ──
             if (['password', 'token', 'secret', 'apiKey', 'authorization'].includes(key.toLowerCase())) {
                 result[key] = '[REDACTED]';
                 continue;
             }
 
-            // ── Hash user identifiers if PII logging is disabled ──
             if (!CONFIG.LOG_PII && (key === 'userId' || key === 'user_id' || key === 'tenantId' || key === 'tenant_id')) {
                 result[key] = this.hashId(value);
                 continue;
             }
 
-            // ── Truncate raw output ──
             if (!CONFIG.LOG_RAW_OUTPUT && (key === 'rawOutput' || key === 'rawContent')) {
                 result[key] = value ? `${value.substring(0, 100)}...[TRUNCATED]` : null;
                 continue;
             }
 
-            // ── Truncate long strings ──
             if (typeof value === 'string' && value.length > 500) {
                 result[key] = value.substring(0, 500) + '...[TRUNCATED]';
                 continue;
             }
 
-            // ── Recursively sanitize objects ──
             if (value && typeof value === 'object' && !Array.isArray(value)) {
                 result[key] = this.sanitize(value);
                 continue;
@@ -380,7 +358,6 @@ class Logger {
 function validateUnderstanding(data) {
     const errors = [];
 
-    // ── Guard: data must be a non-null object ──
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
         return {
             valid: false,
@@ -388,7 +365,6 @@ function validateUnderstanding(data) {
         };
     }
 
-    // ── Required fields ──
     const required = ['intent', 'confidence', 'entities', 'ambiguities', 'normalized_query'];
     for (const field of required) {
         if (!(field in data) || data[field] === undefined || data[field] === null) {
@@ -396,7 +372,6 @@ function validateUnderstanding(data) {
         }
     }
 
-    // ── Intent enum ──
     const validIntents = [
         'ICP_SEARCH', 'PERSON_SEARCH', 'COMPANY_SEARCH',
         'EMAIL_FILTER', 'THREAD_SUMMARY', 'ATTACHMENT_SEARCH',
@@ -406,14 +381,12 @@ function validateUnderstanding(data) {
         errors.push(`Invalid intent: ${data.intent}. Must be one of: ${validIntents.join(', ')}`);
     }
 
-    // ── Confidence range ──
     if (data.confidence !== undefined && data.confidence !== null) {
         if (typeof data.confidence !== 'number' || data.confidence < 0 || data.confidence > 1) {
             errors.push('Confidence must be a number between 0 and 1');
         }
     }
 
-    // ── Entities ──
     if (data.entities) {
         if (typeof data.entities !== 'object' || Array.isArray(data.entities)) {
             errors.push('entities must be an object');
@@ -427,7 +400,6 @@ function validateUnderstanding(data) {
                 }
             }
 
-            // Employee counts
             if ('employee_count_min' in data.entities && data.entities.employee_count_min !== null) {
                 if (typeof data.entities.employee_count_min !== 'number' ||
                     !Number.isInteger(data.entities.employee_count_min) ||
@@ -448,7 +420,6 @@ function validateUnderstanding(data) {
                 }
             }
 
-            // Date range with strict validation
             if ('date_range' in data.entities && data.entities.date_range !== null) {
                 if (typeof data.entities.date_range !== 'object' || Array.isArray(data.entities.date_range)) {
                     errors.push('entities.date_range must be an object or null');
@@ -475,13 +446,11 @@ function validateUnderstanding(data) {
         }
     }
 
-    // ── Ambiguities (Safe iteration) ──
     if (!Array.isArray(data.ambiguities)) {
         errors.push('ambiguities must be an array');
     } else {
         for (let i = 0; i < data.ambiguities.length; i++) {
             const amb = data.ambiguities[i];
-            // Guard: amb must be an object
             if (!amb || typeof amb !== 'object' || Array.isArray(amb)) {
                 errors.push(`ambiguities[${i}] must be an object`);
                 continue;
@@ -492,7 +461,6 @@ function validateUnderstanding(data) {
             if (!amb.issue || typeof amb.issue !== 'string') {
                 errors.push(`ambiguities[${i}].issue is required and must be a string`);
             }
-            // Safe candidates check
             if (!Array.isArray(amb.candidates)) {
                 errors.push(`ambiguities[${i}].candidates must be an array`);
             } else {
@@ -505,12 +473,10 @@ function validateUnderstanding(data) {
         }
     }
 
-    // ── normalized_query ──
     if (data.normalized_query !== undefined && data.normalized_query !== null && typeof data.normalized_query !== 'string') {
         errors.push('normalized_query must be a string');
     }
 
-    // ── Additional properties ──
     const allowed = ['intent', 'confidence', 'entities', 'ambiguities', 'normalized_query'];
     for (const key of Object.keys(data)) {
         if (!allowed.includes(key)) {
@@ -600,7 +566,7 @@ function buildUserPrompt(query, tenantId, userId, conversationId, locale, timezo
 }
 
 // ──────────────────────────────────────────────────────────────
-// 10. TRANSPORT RETRY (Separate from schema retry)
+// 10. TRANSPORT RETRY (Separate from schema retry) — FIXED
 // ──────────────────────────────────────────────────────────────
 
 async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
@@ -611,13 +577,13 @@ async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
     for (let retry = 0; retry <= maxRetries; retry++) {
         try {
             const startTime = Date.now();
+            // ✅ FIX: Removed 'timeout' parameter — not supported by OpenAI SDK
             const response = await openaiClient.chat.completions.create({
                 model: CONFIG.MODEL,
                 messages: messages,
                 temperature: CONFIG.TEMPERATURE,
                 max_tokens: CONFIG.MAX_TOKENS,
-                response_format: { type: 'json_object' },
-                timeout: CONFIG.TIMEOUT_MS
+                response_format: { type: 'json_object' }
             });
             const llmTimeMs = Date.now() - startTime;
 
@@ -638,7 +604,6 @@ async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
         } catch (error) {
             lastError = error;
 
-            // ── Don't retry on certain errors ──
             if (error.status === 401 || error.status === 403) {
                 logger.log('ERROR', 'LLM auth error (non-retryable)', {
                     status: error.status,
@@ -652,7 +617,6 @@ async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
                 };
             }
 
-            // ── Retry on timeouts, 5xx, rate limits ──
             const isRetryable = error.status >= 500 ||
                 error.status === 429 ||
                 error.code === 'ETIMEDOUT' ||
@@ -710,7 +674,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
             queryLength: userQuery.length
         });
 
-        // ── Build prompt ──
         const systemPrompt = buildSystemPrompt(CONFIG.SCHEMA_VERSION);
         const userPrompt = buildUserPrompt(userQuery, tenantId, userId, conversationId, locale, timezone);
 
@@ -725,7 +688,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
             { role: 'user', content: userPrompt }
         ];
 
-        // ── Call with transport retry ──
         const transportResult = await callWithTransportRetry(openaiClient, messages, logger, attempt);
 
         if (!transportResult.success) {
@@ -733,7 +695,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
                 attempt: attempt,
                 error: transportResult.error?.message
             });
-            // Don't count transport failure as schema failure; continue to next attempt
             continue;
         }
 
@@ -745,7 +706,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
             });
         }
 
-        // ── Parse JSON ──
         let parsed;
         try {
             parsed = JSON.parse(rawContent);
@@ -761,7 +721,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
             continue;
         }
 
-        // ── Validate against schema ──
         const validation = validateUnderstanding(parsed);
         if (validation.valid) {
             logger.log('INFO', 'Schema validation passed', {
@@ -787,7 +746,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
             });
         }
 
-        // ── Wait before retry ──
         if (attempt < CONFIG.MAX_SCHEMA_RETRIES) {
             const delay = CONFIG.SCHEMA_RETRY_BACKOFF_MS * (attempt * attempt);
             logger.log('INFO', 'Schema retry waiting', {
@@ -798,7 +756,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
         }
     }
 
-    // ── All schema attempts failed ──
     logger.log('ERROR', 'All schema attempts failed', {
         maxAttempts: CONFIG.MAX_SCHEMA_RETRIES,
         schemaErrors: schemaErrors,
@@ -819,26 +776,10 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
 // 12. MAIN UNDERSTANDING FUNCTION
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Process a natural language query into structured understanding
- * 
- * @param {string} query - The user's natural language request
- * @param {string} tenantId - Tenant identifier (REQUIRED)
- * @param {string} userId - User identifier (REQUIRED)
- * @param {object} options - Optional settings
- * @param {string} options.conversationId - Conversation identifier
- * @param {string} options.locale - Locale (e.g., 'en-US')
- * @param {string} options.timezone - Timezone (e.g., 'Africa/Lagos')
- * @param {string} options.correlationId - Correlation ID for tracing
- * @param {object} options.rateLimiter - Rate limiter instance
- * @param {function} options.onProgress - Progress callback
- * @returns {Promise<object>} Validated understanding JSON (NO _meta)
- */
 async function understand(query, tenantId, userId, options = {}) {
     const correlationId = options.correlationId || `und-${uuidv4().substring(0, 8)}`;
     const startTime = Date.now();
 
-    // ── Create logger for this request ──
     const logger = new Logger(correlationId);
 
     logger.log('INFO', 'Request started', {
@@ -851,7 +792,6 @@ async function understand(query, tenantId, userId, options = {}) {
     });
 
     try {
-        // ── Input validation ──
         if (!query || typeof query !== 'string') {
             logger.log('WARN', 'Invalid query: not a string');
             return getFallbackResponse();
@@ -871,7 +811,6 @@ async function understand(query, tenantId, userId, options = {}) {
             return getFallbackResponse();
         }
 
-        // ── Validate required fields ──
         if (!tenantId || typeof tenantId !== 'string' || tenantId.trim().length === 0) {
             logger.log('WARN', 'Missing required tenantId');
             return getFallbackResponse();
@@ -885,7 +824,6 @@ async function understand(query, tenantId, userId, options = {}) {
         const normalizedTenantId = tenantId.trim();
         const normalizedUserId = userId.trim();
 
-        // ── Rate limiting ──
         const rateLimiter = options.rateLimiter || understand.rateLimiter || new RateLimiter();
         understand.rateLimiter = rateLimiter;
 
@@ -903,7 +841,6 @@ async function understand(query, tenantId, userId, options = {}) {
             throw error;
         }
 
-        // ── Initialize OpenAI client ──
         if (!process.env.OPENAI_API_KEY) {
             logger.log('ERROR', 'OPENAI_API_KEY not set');
             return getFallbackResponse();
@@ -913,7 +850,6 @@ async function understand(query, tenantId, userId, options = {}) {
             apiKey: process.env.OPENAI_API_KEY
         });
 
-        // ── Process with schema retry ──
         const result = await processWithSchemaRetry(
             trimmedQuery,
             normalizedTenantId,
@@ -926,12 +862,10 @@ async function understand(query, tenantId, userId, options = {}) {
             options.onProgress
         );
 
-        // ── Build final response (NO _meta in body) ──
         const response = {
             ...result.data
         };
 
-        // ── Log summary ──
         logger.log('INFO', 'Request completed', {
             intent: response.intent,
             confidence: response.confidence,
@@ -942,18 +876,14 @@ async function understand(query, tenantId, userId, options = {}) {
             hasAmbiguities: response.ambiguities.length > 0
         });
 
-        // ── Clean up rate limiter periodically ──
         if (Math.random() < 0.01) {
             rateLimiter.cleanup();
         }
 
-        // ── Return ONLY the schema-valid response (no _meta) ──
         return response;
 
     } catch (error) {
-        // ── Handle rate limit errors ──
         if (error.statusCode === 429) {
-            // Rethrow for HTTP handler to handle with proper status code
             throw error;
         }
 
@@ -966,7 +896,7 @@ async function understand(query, tenantId, userId, options = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 13. HTTP HANDLER (Express-compatible)
+// 13. HTTP HANDLER
 // ──────────────────────────────────────────────────────────────
 
 async function handleRequest(req, res) {
@@ -975,7 +905,6 @@ async function handleRequest(req, res) {
     const logger = new Logger(correlationId);
 
     try {
-        // ── Validate input ──
         const { query, tenant_id, user_id, conversation_id, locale, timezone } = req.body;
 
         logger.log('INFO', 'HTTP request received', {
@@ -1038,7 +967,6 @@ async function handleRequest(req, res) {
             });
         }
 
-        // ── Call understanding ──
         const result = await understand(trimmedQuery, tenant_id.trim(), user_id.trim(), {
             correlationId,
             conversationId: conversation_id,
@@ -1049,11 +977,9 @@ async function handleRequest(req, res) {
             }
         });
 
-        // ── Return clean response (NO _meta) ──
         res.status(200).json(result);
 
     } catch (error) {
-        // ── Handle rate limit errors ──
         if (error.statusCode === 429) {
             logger.log('WARN', 'Rate limit hit', {
                 reason: error.message,
@@ -1087,10 +1013,8 @@ async function handleRequest(req, res) {
 // ──────────────────────────────────────────────────────────────
 
 function registerRoutes(app) {
-    // ── POST /v1/understand/query ──
     app.post('/v1/understand/query', handleRequest);
 
-    // ── GET /v1/understand/schema ──
     app.get('/v1/understand/schema', (req, res) => {
         res.status(200).json({
             schema: UNDERSTANDING_SCHEMA,
@@ -1099,7 +1023,6 @@ function registerRoutes(app) {
         });
     });
 
-    // ── GET /v1/understand/health ──
     app.get('/v1/understand/health', (req, res) => {
         res.status(200).json({
             status: 'healthy',
@@ -1119,36 +1042,17 @@ function registerRoutes(app) {
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
-    // Main function
     understand,
-
-    // HTTP handler
     handleRequest,
-
-    // Route registration
     registerRoutes,
-
-    // Config (for testing)
     CONFIG,
-
-    // Schema
     UNDERSTANDING_SCHEMA,
     loadSchema,
-
-    // Rate limiter
     RateLimiter,
-
-    // Logger
     Logger,
-
-    // Validator (for testing)
     validateUnderstanding,
     isValidDateString,
-
-    // Fallback (for testing)
     getFallbackResponse,
-
-    // Prompt builders (for testing)
     buildSystemPrompt,
     buildUserPrompt
 };
