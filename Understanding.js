@@ -7,7 +7,7 @@
 // RESPONSIBILITIES:
 // - Intent classification (enum)
 // - Entity extraction (typed, nullable)
-// - Ambiguity detection
+// - Ambiguity detection (including location ambiguity)
 // - Query normalization
 // - Schema enforcement (strict)
 // - Retry on validation failure (max 3 attempts)
@@ -505,7 +505,7 @@ function getFallbackResponse() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. SYSTEM PROMPT
+// 8. SYSTEM PROMPT — WITH LOCATION AMBIGUITY DETECTION
 // ──────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(schemaVersion) {
@@ -529,11 +529,119 @@ INTENT DEFINITIONS:
 - ACTION_REQUIRED: Find emails needing action
 - UNKNOWN: Fallback for unclear or out-of-scope requests
 
-AMBIGUITY GUIDANCE:
-- Lexical ambiguity: Same word, multiple meanings (e.g., "SF" = San Francisco vs South Florida)
-- Underspecification: Missing critical constraints
-- Context dependence: References to prior turns not provided
-- Populate the "ambiguities" array when any of these occur
+╔══════════════════════════════════════════════════════════════════╗
+║     LOCATION AMBIGUITY DETECTION — CRITICAL RULES              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+You MUST detect location ambiguity and ask clarifying questions.
+
+1. CITY NAME WITH MULTIPLE WELL-KNOWN MATCHES:
+   - "London" → Could be London, UK OR London, Ontario, Canada
+   - "Paris" → Could be Paris, France OR Paris, Texas, USA
+   - "Moscow" → Could be Moscow, Russia OR Moscow, Idaho, USA
+   - "Birmingham" → Could be Birmingham, UK OR Birmingham, Alabama, USA
+   - "Manchester" → Could be Manchester, UK OR Manchester, New Hampshire, USA
+   → ASK: "Which London do you mean? London, UK or London, Canada?"
+
+2. CITY ABBREVIATIONS / SHORT FORMS:
+   - "SF" → San Francisco OR South Florida
+   - "LA" → Los Angeles OR Latin America (in some contexts)
+   - "DC" → Washington, DC OR District of Columbia
+   - "NYC" → Usually clear (New York City) — no need to ask
+   - "Vegas" → Las Vegas, NV
+   → ASK: "Do you mean San Francisco or South Florida?"
+
+3. VAGUE OR OVERLAPPING REGION NAMES:
+   - "Bay Area" → San Francisco Bay Area OR other bay areas (e.g., Tampa Bay)
+   - "Tri-State Area" → NY/NJ/CT OR other tri-state regions
+   - "Midwest" → US Midwest (very broad — need country context)
+   - "South", "North" → Extremely broad without country context
+   → ASK: "Which bay area do you mean? San Francisco Bay Area or another?"
+
+4. COUNTRY NAMES THAT ARE AMBIGUOUS OR CONFUSED:
+   - "Georgia" → Country (Georgia) OR US State (Georgia)
+   - "Turkey" vs "Türkiye" → Same country, different naming
+   - "Congo" → Democratic Republic of the Congo OR Republic of the Congo
+   - "Guinea" → Guinea, Equatorial Guinea, Guinea-Bissau
+   → ASK: "Do you mean the country Georgia or the US state of Georgia?"
+
+5. "REMOTE" / "WORLDWIDE" VS SPECIFIC LOCATION:
+   - "Remote" → Anywhere in the world OR Remote but US-only OR Remote but Europe-only
+   - "Worldwide" → Truly global OR Global but mainly US/EU
+   → ASK: "Do you mean remote anywhere in the world, or remote within a specific region?"
+
+6. LOCATION IMPLIED BY OFFICE NAMES OR HQ:
+   - "Headquarters" → Which HQ if the company has multiple?
+   - "Main office" → Same issue
+   → ASK: "Which headquarters location do you mean?"
+
+7. LOCATION TIED TO TIME ZONE INSTEAD OF PLACE:
+   - "EST" → Eastern US, Eastern Canada, Eastern Australia, etc.
+   - "PST" → Pacific US, Pacific Canada
+   - "GMT+1" → Multiple regions share this timezone (UK, Portugal, West Africa, etc.)
+   → ASK: "Which region do you mean by EST? Eastern US, Eastern Canada, or Eastern Australia?"
+
+┌─────────────────────────────────────────────────────────────────┐
+│  HOW TO RESPOND WHEN LOCATION IS AMBIGUOUS                    │
+├─────────────────────────────────────────────────────────────────┤
+│ 1. Set "confidence" to a lower value (0.4 - 0.6)              │
+│ 2. Add an entry to "ambiguities" with:                         │
+│    - field: "location"                                        │
+│    - issue: "Description of the ambiguity"                    │
+│    - candidates: ["Option 1", "Option 2", "Option 3"]         │
+│ 3. Set "intent" to "UNKNOWN" until clarified                 │
+│ 4. Keep the "location" field as null                         │
+└─────────────────────────────────────────────────────────────────┘
+
+EXAMPLES:
+
+Example 1 — City ambiguity:
+User: "Find CEOs in London"
+→ "ambiguities": [{
+    "field": "location",
+    "issue": "London could refer to London, UK or London, Ontario, Canada.",
+    "candidates": ["London, UK", "London, Canada"]
+}]
+
+Example 2 — City abbreviation:
+User: "Find SaaS companies in SF"
+→ "ambiguities": [{
+    "field": "location",
+    "issue": "SF could mean San Francisco or South Florida.",
+    "candidates": ["San Francisco, CA", "South Florida"]
+}]
+
+Example 3 — Vague region:
+User: "Find CTOs in the Bay Area"
+→ "ambiguities": [{
+    "field": "location",
+    "issue": "Bay Area could mean San Francisco Bay Area or other bay areas.",
+    "candidates": ["San Francisco Bay Area", "Tampa Bay Area", "Other"]
+}]
+
+Example 4 — Country vs State:
+User: "Find founders in Georgia"
+→ "ambiguities": [{
+    "field": "location",
+    "issue": "Georgia could mean the country or the US state.",
+    "candidates": ["Georgia (country)", "Georgia, USA"]
+}]
+
+Example 5 — Remote ambiguity:
+User: "Find remote developers"
+→ "ambiguities": [{
+    "field": "location",
+    "issue": "Remote could mean anywhere globally, US-only, or Europe-only.",
+    "candidates": ["Global (anywhere)", "US only", "Europe only"]
+}]
+
+Example 6 — Timezone ambiguity:
+User: "Find companies in EST"
+→ "ambiguities": [{
+    "field": "location",
+    "issue": "EST could refer to Eastern US, Eastern Canada, or Eastern Australia.",
+    "candidates": ["Eastern US", "Eastern Canada", "Eastern Australia"]
+}]
 
 SCHEMA VERSION: ${schemaVersion}
 
@@ -566,7 +674,7 @@ function buildUserPrompt(query, tenantId, userId, conversationId, locale, timezo
 }
 
 // ──────────────────────────────────────────────────────────────
-// 10. TRANSPORT RETRY (Separate from schema retry) — FIXED
+// 10. TRANSPORT RETRY (Separate from schema retry)
 // ──────────────────────────────────────────────────────────────
 
 async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
@@ -577,7 +685,6 @@ async function callWithTransportRetry(openaiClient, messages, logger, attempt) {
     for (let retry = 0; retry <= maxRetries; retry++) {
         try {
             const startTime = Date.now();
-            // ✅ FIX: Removed 'timeout' parameter — not supported by OpenAI SDK
             const response = await openaiClient.chat.completions.create({
                 model: CONFIG.MODEL,
                 messages: messages,
