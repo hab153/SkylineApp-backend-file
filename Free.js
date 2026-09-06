@@ -49,11 +49,33 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        // ── Step 4: Distinguish a SYSTEM failure (AI parser broke) from a ──
-        // ── genuinely vague user request. These used to look identical    ──
-        // ── (needsClarification: true, everything else null) and got the  ──
-        // ── same generic message — that's misleading when the real cause  ──
-        // ── was an API/model failure, not the user's phrasing.            ──
+        // ── Step 4: Check if clarification is needed ──
+        // If ambiguities exist, we need to ask the user for clarification
+        const hasAmbiguities = understanding.ambiguities && understanding.ambiguities.length > 0;
+
+        if (hasAmbiguities) {
+            console.log('ℹ️ [FREE] Request needs clarification due to ambiguities');
+            
+            // ── Build a user-friendly clarification message ──
+            const clarificationMessage = buildClarificationMessage(understanding);
+            
+            return {
+                reply: clarificationMessage,
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: message },
+                    { role: 'assistant', content: clarificationMessage }
+                ],
+                _meta: {
+                    tier: 'free',
+                    understanding: understanding,
+                    status: 'needs_clarification',
+                    ambiguities: understanding.ambiguities
+                }
+            };
+        }
+
+        // ── Step 5: Check if understanding has parser failure ──
         if (understanding.parserFailed) {
             console.error('❌ [FREE] Stage 1 parser failed:', understanding.parserErrorDetail);
             return {
@@ -70,26 +92,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
                     error: 'parser_failed',
                     parserErrorDetail: understanding.parserErrorDetail,
                     requestId: understanding.requestId,
-                }
-            };
-        }
-
-        // ── Step 5: Genuine "needs more detail from the user" case ──
-        if (understanding.needsClarification) {
-            console.log('ℹ️ [FREE] Request needs clarification (not a system error)');
-            const resultsString = JSON.stringify(understanding, null, 2);
-
-            return {
-                reply: resultsString,
-                updatedHistory: [
-                    ...(history || []),
-                    { role: 'user', content: message },
-                    { role: 'assistant', content: resultsString }
-                ],
-                _meta: {
-                    tier: 'free',
-                    understanding: understanding,
-                    status: 'needs_clarification'
                 }
             };
         }
@@ -127,7 +129,31 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. EXPORTS
+// 3. HELPER: Build Clarification Message
+// ──────────────────────────────────────────────────────────────
+
+function buildClarificationMessage(understanding) {
+    if (!understanding.ambiguities || understanding.ambiguities.length === 0) {
+        return 'I understood your request. What would you like me to do?';
+    }
+
+    let message = '⚠️ **I need a bit more clarity:**\n\n';
+
+    understanding.ambiguities.forEach(function(amb) {
+        message += `• **${amb.field}**: ${amb.issue}\n`;
+        if (amb.candidates && amb.candidates.length > 0) {
+            message += `  → Options: ${amb.candidates.join(' | ')}\n`;
+        }
+        message += '\n';
+    });
+
+    message += 'Please provide more details so I can help you better.';
+
+    return message;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 4. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
