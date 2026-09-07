@@ -20,12 +20,58 @@ const handleQueueError = (error, res) => {
     return res.status(500).json({ message: 'AI service error. Please try again later.' });
 };
 
-// POST /api/chat - COMPLETE FIXED VERSION
+// ──────────────────────────────────────────────────────────────
+// HELPER: Check if a message is a clarification response
+// ──────────────────────────────────────────────────────────────
+
+function isClarificationResponse(history) {
+    if (!history || history.length === 0) return false;
+    
+    // Check the last assistant message for clarification context
+    for (let i = history.length - 1; i >= 0; i--) {
+        const entry = history[i];
+        if (entry.role === 'assistant' && entry._meta?.needsClarification) {
+            return {
+                isClarification: true,
+                originalMessage: entry._meta.originalMessage,
+                clarificationContext: entry._meta.clarificationContext
+            };
+        }
+    }
+    return false;
+}
+
+// ──────────────────────────────────────────────────────────────
+// HELPER: Build userProfile from user object
+// ──────────────────────────────────────────────────────────────
+
+function buildUserProfile(user) {
+    return {
+        fullName: user.fullName,
+        country: user.country,
+        skillLevel: user.skillLevel,
+        primaryGoal: user.primaryGoal,
+        interests: user.interests,
+        bio: user.bio,
+        userId: user._id.toString(),
+        tenantId: user.tenantId || 'skyline-default',
+        id: user._id.toString(),
+        _id: user._id.toString(),
+        conversationId: null,
+        locale: user.locale || 'en-US',
+        timezone: user.timezone || 'Africa/Lagos'
+    };
+}
+
+// ──────────────────────────────────────────────────────────────
+// POST /api/chat - COMPLETE FIXED VERSION WITH CONTEXT
+// ──────────────────────────────────────────────────────────────
+
 const sendMessage = async (req, res) => {
     let { message, history, sessionId } = req.body;
     const userId = req.userId;
     
-    // ✅ FIX #16: Validate input types before any processing
+    // ✅ Validate input types before any processing
     if (!message || typeof message !== 'string') {
         return res.status(400).json({ message: 'Message is required and must be a string' });
     }
@@ -39,19 +85,15 @@ const sendMessage = async (req, res) => {
         return res.status(400).json({ message: 'Invalid user ID' });
     }
     
-    // ✅ FIX #16: Cast userId to string for query safety
     const safeUserId = String(userId);
     
     console.log('🔍 [CHAT] Received message length:', message.length);
     console.log('🔍 [CHAT] User ID:', safeUserId);
     
-    // ✅ FIX: Store original message, sanitize ONLY for display
+    // ✅ Store original message
     const originalMessage = message;
     
-    // Sanitize for display purposes only
-    const displayMessage = sanitizeString(message);
-    
-    // ✅ FIX #17: Validate and sanitize sessionId
+    // ✅ Validate and sanitize sessionId
     let currentSessionId;
     if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
         currentSessionId = sessionId;
@@ -72,15 +114,13 @@ const sendMessage = async (req, res) => {
             userId: safeUserId,
             sessionId: String(currentSessionId),
             role: 'user',
-            content: originalMessage,  // ✅ Store original, NOT sanitized
+            content: originalMessage,
             title: originalMessage.substring(0, 30) + '...'
         });
         
         console.log('✅ [CHAT] User message saved:', savedUserMessage._id);
-        console.log('✅ [CHAT] Content length saved:', originalMessage.length);
 
         // --- Create/Update Session metadata ---
-        // ✅ FIX #17: Use safe typed values in query
         const existingSession = await Session.findOne({ 
             userId: safeUserId, 
             sessionId: String(currentSessionId) 
@@ -96,7 +136,6 @@ const sendMessage = async (req, res) => {
             });
             console.log('✅ [CHAT] Session created:', currentSessionId);
         } else {
-            // ✅ Verify session belongs to this user
             if (String(existingSession.userId) !== safeUserId) {
                 return res.status(403).json({ message: 'Access denied to this session' });
             }
@@ -108,33 +147,62 @@ const sendMessage = async (req, res) => {
             console.log('✅ [CHAT] Session updated:', currentSessionId);
         }
 
+        // ── Build history for context ──
+        // Ensure history is an array and include metadata for clarification detection
+        const historyWithMeta = history || [];
+        
+        // ── Check if this is a clarification response ──
+        const clarificationInfo = isClarificationResponse(historyWithMeta);
+        if (clarificationInfo) {
+            console.log('🔄 [CHAT] Clarification response detected');
+            console.log('   Original message:', clarificationInfo.originalMessage);
+            console.log('   Clarification context:', clarificationInfo.clarificationContext);
+        }
+
+        // ── Build userProfile ──
+        const userProfile = buildUserProfile(user);
+        
+        // ── If this is a clarification, pass the context to the AI ──
+        const aiOptions = {
+            clarificationInfo: clarificationInfo,
+            originalMessage: clarificationInfo ? clarificationInfo.originalMessage : null
+        };
+
         // --- Get AI Response ---
         let aiReply, updatedHistory;
         if (plan === 'free') {
-            const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(originalMessage, history || [], user));
+            const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(
+                originalMessage, 
+                historyWithMeta, 
+                userProfile,
+                null, // onProgress
+                aiOptions // Pass clarification context
+            ));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
-            const result = await goQueue.enqueue(() => goAI.generateGoResponse(originalMessage, history || [], user));
+            // For Go tier, we need to update Go.js to accept aiOptions
+            // For now, pass the original message
+            const result = await goQueue.enqueue(() => goAI.generateGoResponse(
+                originalMessage, 
+                historyWithMeta, 
+                userProfile,
+                aiOptions
+            ));
             aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
             updatedHistory = result ? (result.updatedHistory || []) : [];
         } else { // pro
-            const userProfile = {
-                fullName: user.fullName,
-                country: user.country,
-                skillLevel: user.skillLevel,
-                primaryGoal: user.primaryGoal,
-                interests: user.interests,
-                bio: user.bio,
-                userId: user._id.toString()
-            };
-            const result = await proQueue.enqueue(() => generateBusinessResponse(originalMessage, history || [], userProfile));
+            const result = await proQueue.enqueue(() => generateBusinessResponse(
+                originalMessage, 
+                historyWithMeta, 
+                userProfile,
+                aiOptions
+            ));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         }
 
         // ✅ SAVE AI RESPONSE
-        // ✅ FIX #19: Use safe typed values
         const savedAiMessage = await ChatMessage.create({ 
             userId: safeUserId, 
             sessionId: String(currentSessionId), 
@@ -146,7 +214,6 @@ const sendMessage = async (req, res) => {
         console.log('✅ [CHAT] AI response length:', aiReply ? aiReply.length : 0);
 
         // ✅ VERIFY messages were saved
-        // ✅ FIX #20: Use safe typed values in count query
         const verifyCount = await ChatMessage.countDocuments({ 
             userId: safeUserId, 
             sessionId: String(currentSessionId) 
@@ -169,12 +236,14 @@ const sendMessage = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────
 // POST /api/feedback
+// ──────────────────────────────────────────────────────────────
+
 const submitFeedback = async (req, res) => {
     try {
         const { messageId, type } = req.body;
         
-        // ✅ Validate inputs
         if (!messageId || typeof messageId !== 'string' || !['like', 'dislike'].includes(type)) {
             return res.status(400).json({ message: 'Invalid feedback data' });
         }
@@ -191,7 +260,6 @@ const submitFeedback = async (req, res) => {
         const message = await ChatMessage.findById(safeMessageId);
         if (!message) return res.status(404).json({ message: 'Message not found' });
         
-        // ✅ Verify ownership
         if (String(message.userId) !== safeUserId) {
             return res.status(403).json({ message: 'Unauthorized' });
         }
@@ -205,7 +273,10 @@ const submitFeedback = async (req, res) => {
     }
 };
 
-// GET /api/sessions - UPDATED to use Session model
+// ──────────────────────────────────────────────────────────────
+// GET /api/sessions
+// ──────────────────────────────────────────────────────────────
+
 const getSessions = async (req, res) => {
     try {
         const userId = req.userId;
@@ -213,7 +284,6 @@ const getSessions = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        // ✅ FIX: Cast userId to string for query safety
         const safeUserId = String(userId);
         const query = sanitizeQuery({ userId: safeUserId });
         
@@ -243,12 +313,14 @@ const getSessions = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────
 // GET /api/history/:sessionId
+// ──────────────────────────────────────────────────────────────
+
 const getHistory = async (req, res) => {
     try {
         const { sessionId } = req.params;
         
-        // ✅ Validate inputs
         if (!sessionId || typeof sessionId !== 'string') {
             return res.status(400).json({ message: 'Invalid session ID' });
         }
@@ -258,11 +330,9 @@ const getHistory = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
         
-        // ✅ FIX: Cast to strings and sanitize
         const safeUserId = String(userId);
         const sanitizedSessionId = String(sanitizeString(sessionId));
         
-        // ✅ Verify session belongs to user before returning messages
         const session = await Session.findOne({ 
             userId: safeUserId, 
             sessionId: sanitizedSessionId 
@@ -284,12 +354,14 @@ const getHistory = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────
 // POST /api/dreams/analyze (pro feature)
+// ──────────────────────────────────────────────────────────────
+
 const analyzeDream = async (req, res) => {
     let { dream, sessionId } = req.body;
     const userId = req.userId;
     
-    // ✅ Validate inputs
     if (!dream || typeof dream !== 'string') {
         return res.status(400).json({ message: 'Dream description is required and must be a string' });
     }
@@ -298,12 +370,9 @@ const analyzeDream = async (req, res) => {
     }
     
     const safeUserId = String(userId);
-    
-    // ✅ FIX: Store original, sanitize for display
     const originalDream = dream;
     dream = sanitizeString(dream);
     
-    // ✅ Validate sessionId
     let currentSessionId;
     if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
         currentSessionId = sessionId;
@@ -325,15 +394,7 @@ const analyzeDream = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
         
-        const userProfile = {
-            fullName: user.fullName,
-            country: user.country,
-            skillLevel: user.skillLevel,
-            primaryGoal: user.primaryGoal,
-            interests: user.interests,
-            bio: user.bio,
-            userId: user._id.toString()
-        };
+        const userProfile = buildUserProfile(user);
         const result = await proQueue.enqueue(() => generateBusinessResponse(originalDream, [], userProfile));
         
         await ChatMessage.create({ 
@@ -353,12 +414,14 @@ const analyzeDream = async (req, res) => {
     }
 };
 
+// ──────────────────────────────────────────────────────────────
 // POST /api/dreams/refine (pro feature)
+// ──────────────────────────────────────────────────────────────
+
 const refineDream = async (req, res) => {
     let { followUpAnswer, dreamDescription, sessionId } = req.body;
     const userId = req.userId;
     
-    // ✅ Validate inputs
     if (!followUpAnswer || typeof followUpAnswer !== 'string' || !dreamDescription || typeof dreamDescription !== 'string') {
         return res.status(400).json({ message: 'followUpAnswer and dreamDescription are required and must be strings' });
     }
@@ -367,13 +430,10 @@ const refineDream = async (req, res) => {
     }
     
     const safeUserId = String(userId);
-    
-    // ✅ FIX: Store original
     const originalFollowUp = followUpAnswer;
     followUpAnswer = sanitizeString(followUpAnswer);
     dreamDescription = sanitizeString(dreamDescription);
     
-    // ✅ Validate sessionId
     let currentSessionId;
     if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
         currentSessionId = sessionId;
@@ -394,15 +454,7 @@ const refineDream = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
         
-        const userProfile = {
-            fullName: user.fullName,
-            country: user.country,
-            skillLevel: user.skillLevel,
-            primaryGoal: user.primaryGoal,
-            interests: user.interests,
-            bio: user.bio,
-            userId: user._id.toString()
-        };
+        const userProfile = buildUserProfile(user);
         const result = await proQueue.enqueue(() => generateBusinessResponse(originalFollowUp, [], userProfile));
         
         await ChatMessage.create({ 
@@ -421,6 +473,10 @@ const refineDream = async (req, res) => {
         res.status(500).json({ message: 'Server Error refining dream' });
     }
 };
+
+// ──────────────────────────────────────────────────────────────
+// EXPORTS
+// ──────────────────────────────────────────────────────────────
 
 module.exports = {
     sendMessage,
