@@ -21,9 +21,62 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
         console.log('📋 [FREE] Tenant ID:', tenantId);
         console.log('📋 [FREE] User ID:', userId);
 
-        // ── Step 2: Understand the request with required fields ──
+        // ── Step 2: Check if this is a clarification response ──
+        // Look for the last assistant message that requested clarification
+        let clarificationContext = null;
+        let originalMessage = null;
+
+        if (history && history.length > 0) {
+            // Find the last assistant message that had clarification context
+            for (let i = history.length - 1; i >= 0; i--) {
+                const entry = history[i];
+                if (entry.role === 'assistant' && entry._meta?.needsClarification) {
+                    clarificationContext = entry._meta.clarificationContext;
+                    originalMessage = entry._meta.originalMessage;
+                    console.log('📋 [FREE] Found clarification context:', clarificationContext);
+                    console.log('📋 [FREE] Original message:', originalMessage);
+                    break;
+                }
+            }
+        }
+
+        let finalMessage = message;
+
+        // ── Step 3: If this is a clarification, merge with original context ──
+        if (clarificationContext && originalMessage) {
+            console.log('🔄 [FREE] Merging clarification with original context');
+
+            // ── Build merged query: original message + clarification ──
+            // Replace the ambiguous part with the clarification
+            // For location ambiguity, we replace the location with the clarified one
+            const ambiguousField = clarificationContext.ambiguousField || 'location';
+            const ambiguousValue = clarificationContext.ambiguousValue || '';
+
+            // Build the merged message
+            // Example: "Find me CEOs in SaaS, located in Londom" + "London, UK"
+            // → "Find me CEOs in SaaS, located in London, UK"
+            let mergedMessage = originalMessage;
+
+            // Replace the ambiguous value with the clarification
+            if (ambiguousValue && message) {
+                // Case-insensitive replacement
+                const regex = new RegExp(ambiguousValue, 'gi');
+                mergedMessage = mergedMessage.replace(regex, message.trim());
+                console.log('📋 [FREE] Merged message:', mergedMessage);
+            }
+
+            // If the ambiguous value wasn't found, append the clarification
+            if (mergedMessage === originalMessage) {
+                mergedMessage = originalMessage + ' ' + message.trim();
+                console.log('📋 [FREE] Appended clarification:', mergedMessage);
+            }
+
+            finalMessage = mergedMessage;
+        }
+
+        // ── Step 4: Understand the request (with merged context if applicable) ──
         const understanding = await Understanding.understand(
-            message,
+            finalMessage,
             tenantId,
             userId,
             {
@@ -36,7 +89,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
 
         console.log('📋 [FREE] Understanding result:', JSON.stringify(understanding, null, 2));
 
-        // ── Step 3: Check if understanding is valid ──
+        // ── Step 5: Check if understanding is valid ──
         if (!understanding) {
             console.error('❌ [FREE] Understanding returned null/undefined');
             return {
@@ -49,33 +102,50 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        // ── Step 4: Check if clarification is needed ──
-        // If ambiguities exist, we need to ask the user for clarification
+        // ── Step 6: Check if clarification is needed ──
         const hasAmbiguities = understanding.ambiguities && understanding.ambiguities.length > 0;
 
         if (hasAmbiguities) {
             console.log('ℹ️ [FREE] Request needs clarification due to ambiguities');
-            
+
+            // ── Store the original context for later ──
+            const clarificationContextData = {
+                originalMessage: finalMessage,
+                ambiguousField: 'location',
+                ambiguousValue: extractAmbiguousValue(understanding)
+            };
+
             // ── Build a user-friendly clarification message ──
             const clarificationMessage = buildClarificationMessage(understanding);
-            
+
             return {
                 reply: clarificationMessage,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: message },
-                    { role: 'assistant', content: clarificationMessage }
+                    { 
+                        role: 'assistant', 
+                        content: clarificationMessage,
+                        _meta: {
+                            needsClarification: true,
+                            clarificationContext: clarificationContextData,
+                            originalMessage: finalMessage,
+                            ambiguities: understanding.ambiguities
+                        }
+                    }
                 ],
                 _meta: {
                     tier: 'free',
                     understanding: understanding,
                     status: 'needs_clarification',
-                    ambiguities: understanding.ambiguities
+                    ambiguities: understanding.ambiguities,
+                    clarificationContext: clarificationContextData,
+                    originalMessage: finalMessage
                 }
             };
         }
 
-        // ── Step 5: Check if understanding has parser failure ──
+        // ── Step 7: Check if understanding has parser failure ──
         if (understanding.parserFailed) {
             console.error('❌ [FREE] Stage 1 parser failed:', understanding.parserErrorDetail);
             return {
@@ -96,7 +166,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress) {
             };
         }
 
-        // ── Step 6: Return the understanding result (normal, valid path) ──
+        // ── Step 8: Return the understanding result (normal, valid path) ──
         const resultsString = JSON.stringify(understanding, null, 2);
 
         return {
@@ -153,7 +223,29 @@ function buildClarificationMessage(understanding) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. EXPORTS
+// 4. HELPER: Extract Ambiguous Value
+// ──────────────────────────────────────────────────────────────
+
+function extractAmbiguousValue(understanding) {
+    // Try to extract what the ambiguous value was
+    // For location, look for the original location string
+    if (understanding.originalRequest) {
+        // Look for location patterns in the original request
+        const locationMatch = understanding.originalRequest.match(/located in\s+([^,.]+)/i);
+        if (locationMatch) {
+            return locationMatch[1].trim();
+        }
+        // Look for "in [location]" pattern
+        const inMatch = understanding.originalRequest.match(/in\s+([^,.]+)(?:\s|$)/i);
+        if (inMatch && !inMatch[1].match(/saas|company|ceo|founder|cto|any/i)) {
+            return inMatch[1].trim();
+        }
+    }
+    return null;
+}
+
+// ──────────────────────────────────────────────────────────────
+// 5. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
