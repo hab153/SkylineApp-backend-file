@@ -880,7 +880,7 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
 }
 
 // ──────────────────────────────────────────────────────────────
-// 12. MAIN UNDERSTANDING FUNCTION
+// 12. MAIN UNDERSTANDING FUNCTION — UPDATED TO RETURN ORIGINAL QUERY
 // ──────────────────────────────────────────────────────────────
 
 async function understand(query, tenantId, userId, options = {}) {
@@ -970,7 +970,9 @@ async function understand(query, tenantId, userId, options = {}) {
         );
 
         const response = {
-            ...result.data
+            ...result.data,
+            // ✅ ADD: Original query for context preservation
+            originalQuery: trimmedQuery
         };
 
         logger.log('INFO', 'Request completed', {
