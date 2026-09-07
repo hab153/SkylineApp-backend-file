@@ -165,7 +165,8 @@ const sendMessage = async (req, res) => {
         // ── If this is a clarification, pass the context to the AI ──
         const aiOptions = {
             clarificationInfo: clarificationInfo,
-            originalMessage: clarificationInfo ? clarificationInfo.originalMessage : null
+            originalMessage: clarificationInfo ? clarificationInfo.originalMessage : null,
+            sessionId: currentSessionId // ✅ PASS SESSION ID TO AI
         };
 
         // --- Get AI Response ---
@@ -176,13 +177,11 @@ const sendMessage = async (req, res) => {
                 historyWithMeta, 
                 userProfile,
                 null, // onProgress
-                aiOptions // Pass clarification context
+                aiOptions // Pass clarification context + sessionId
             ));
             aiReply = result.reply;
             updatedHistory = result.updatedHistory;
         } else if (plan === 'go') {
-            // For Go tier, we need to update Go.js to accept aiOptions
-            // For now, pass the original message
             const result = await goQueue.enqueue(() => goAI.generateGoResponse(
                 originalMessage, 
                 historyWithMeta, 
