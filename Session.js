@@ -36,6 +36,22 @@ const SessionSchema = new mongoose.Schema({
     updatedAt: {
         type: Date,
         default: Date.now
+    },
+
+    // ──────────────────────────────────────────────────────────
+    // ✅ NEW: Clarification State — Stores pending clarification
+    // ──────────────────────────────────────────────────────────
+    clarificationState: {
+        type: {
+            originalMessage: { type: String, default: null },
+            parsedRequest: { type: Object, default: null },
+            ambiguousValue: { type: String, default: null },
+            pendingField: { type: String, default: null },
+            ambiguities: { type: Array, default: [] },
+            status: { type: String, enum: ['awaiting_clarification', 'resolved', 'expired'], default: null },
+            createdAt: { type: Date, default: null }
+        },
+        default: null
     }
 });
 
