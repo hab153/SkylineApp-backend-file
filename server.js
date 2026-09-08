@@ -521,10 +521,10 @@ app.use('/api/notifications', notificationRoutes);
 console.log('✅ [SERVER] Notification routes registered');
 
 // ════════════════════════════════════════════
-//  ✅ CHAT & DREAMS ROUTES — WITH REQUEST LOGGING
+//  ✅ CHAT & DREAMS ROUTES — WITH REQUEST LOGGING (FIXED ORDER)
 // ════════════════════════════════════════════
 
-// ✅ NEW: Request logging middleware for /api/chat
+// ✅ Request logging middleware for /api/chat
 const logChatRequest = function(req, res, next) {
     console.log('📥 [SERVER] /api/chat request received');
     console.log('📥 [SERVER] Request body:', JSON.stringify(req.body, null, 2));
@@ -536,9 +536,10 @@ const logChatRequest = function(req, res, next) {
     next();
 };
 
+// ✅ FIXED: verifyToken runs BEFORE logging so userId is available
 app.post('/api/chat', 
-    logChatRequest,
-    verifyToken, 
+    verifyToken,           // ✅ FIRST: Validate token and set req.userId
+    logChatRequest,        // ✅ SECOND: Log (now userId is set)
     checkSubscriptionExpiry, 
     checkDailyLimit, 
     validate(chatSchema), 
