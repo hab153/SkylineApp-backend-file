@@ -520,8 +520,31 @@ if (typeof revenueController !== 'undefined' && revenueController.getRevenueTrac
 app.use('/api/notifications', notificationRoutes);
 console.log('✅ [SERVER] Notification routes registered');
 
-// ─── CHAT & DREAMS ROUTES ───
-app.post('/api/chat', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(chatSchema), chatController.sendMessage);
+// ════════════════════════════════════════════
+//  ✅ CHAT & DREAMS ROUTES — WITH REQUEST LOGGING
+// ════════════════════════════════════════════
+
+// ✅ NEW: Request logging middleware for /api/chat
+const logChatRequest = function(req, res, next) {
+    console.log('📥 [SERVER] /api/chat request received');
+    console.log('📥 [SERVER] Request body:', JSON.stringify(req.body, null, 2));
+    console.log('📥 [SERVER] User ID:', req.userId);
+    console.log('📥 [SERVER] Headers:', {
+        authorization: req.headers.authorization ? 'Bearer [REDACTED]' : 'none',
+        'content-type': req.headers['content-type']
+    });
+    next();
+};
+
+app.post('/api/chat', 
+    logChatRequest,
+    verifyToken, 
+    checkSubscriptionExpiry, 
+    checkDailyLimit, 
+    validate(chatSchema), 
+    chatController.sendMessage
+);
+
 app.post('/api/feedback', verifyToken, validate(feedbackSchema), chatController.submitFeedback);
 app.get('/api/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.post('/api/sessions', verifyToken, sessionController.createSession);
