@@ -785,6 +785,10 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
                 intent: parsed.intent,
                 confidence: parsed.confidence
             });
+            
+            // ✅ DEBUG: Log the parsed result
+            console.log('🔍 [UNDERSTANDING] Parsed result:', JSON.stringify(parsed, null, 2));
+            
             return {
                 success: true,
                 data: parsed,
@@ -801,6 +805,9 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
                 attempt: attempt,
                 errors: validation.errors
             });
+            
+            // ✅ DEBUG: Log the validation errors
+            console.log('❌ [UNDERSTANDING] Validation errors:', validation.errors);
         }
 
         if (attempt < CONFIG.MAX_SCHEMA_RETRIES) {
@@ -939,6 +946,11 @@ async function understand(query, tenantId, userId, options = {}) {
                 };
             });
         }
+
+        // ✅ DEBUG: Log the final response
+        console.log('📤 [UNDERSTANDING] Final response:', JSON.stringify(response, null, 2));
+        console.log('📤 [UNDERSTANDING] Response intent:', response.intent);
+        console.log('📤 [UNDERSTANDING] Response entities:', JSON.stringify(response.entities, null, 2));
 
         logger.log('INFO', 'Request completed', {
             intent: response.intent,
