@@ -16,7 +16,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
         console.log('🚀 [FREE] Generating response for:', message);
         console.log('📋 [FREE] Options:', JSON.stringify(options, null, 2));
 
-        // ── Step 1: Get tenantId and userId from userProfile ──
         const tenantId = userProfile?.tenantId || userProfile?.tenant_id || 'skyline-default';
         const userId = userProfile?.userId || userProfile?.id || userProfile?._id || 'anonymous';
         const sessionId = options?.sessionId || null;
@@ -25,7 +24,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
         console.log('📋 [FREE] User ID:', userId);
         console.log('📋 [FREE] Session ID:', sessionId);
 
-        // ── Step 2: Check if there's a pending clarification state in the database ──
         let pendingClarification = null;
         let originalMessage = null;
         let parsedRequest = null;
@@ -48,7 +46,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             }
         }
 
-        // ── Step 3: If there's a pending clarification, patch the original request ──
         let finalMessage = message;
 
         if (pendingClarification && originalMessage) {
@@ -109,7 +106,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             }
         }
 
-        // ── Step 4: Understand the request ──
         console.log('📋 [FREE] Sending to Understanding.understand() with:', finalMessage);
         
         const understanding = await Understanding.understand(
@@ -128,17 +124,18 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
 
         if (!understanding) {
             console.error('❌ [FREE] Understanding returned null/undefined');
+            const fallbackReply = JSON.stringify({
+                intent: 'UNKNOWN',
+                message: 'Could not understand your request. Please try again.',
+                status: 'error'
+            }, null, 2);
             return {
-                reply: JSON.stringify({
-                    status: 'error',
-                    message: 'Could not understand your request. Please try again.',
-                }, null, 2),
+                reply: fallbackReply,
                 updatedHistory: history || [],
                 _meta: { error: 'Understanding returned null' }
             };
         }
 
-        // ── Step 5: Check if clarification is needed ──
         const hasAmbiguities = understanding.ambiguities && understanding.ambiguities.length > 0;
 
         if (hasAmbiguities) {
@@ -212,14 +209,15 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── Step 6: Check if understanding has parser failure ──
         if (understanding.parserFailed) {
             console.error('❌ [FREE] Stage 1 parser failed:', understanding.parserErrorDetail);
+            const fallbackReply = JSON.stringify({
+                status: 'error',
+                message: "Sorry, we had trouble processing your request just now. Please try again in a moment.",
+                error: understanding.parserErrorDetail
+            }, null, 2);
             return {
-                reply: JSON.stringify({
-                    status: 'error',
-                    message: "Sorry, we had trouble processing your request just now. Please try again in a moment.",
-                }, null, 2),
+                reply: fallbackReply,
                 updatedHistory: [
                     ...(history || []),
                     { role: 'user', content: message },
@@ -236,11 +234,33 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
         // ── Step 7: Return the understanding result ──
         const resultsString = JSON.stringify(understanding, null, 2);
         
-        // ✅ DEBUG: Log the reply being sent
         console.log('📋 [FREE] Returning reply length:', resultsString ? resultsString.length : 0);
         console.log('📋 [FREE] Reply preview:', resultsString ? resultsString.substring(0, 200) : 'null');
         console.log('📋 [FREE] Understanding intent:', understanding.intent);
         console.log('📋 [FREE] Understanding status:', understanding.status);
+
+        // ✅ FIX: Ensure we always return a valid reply
+        if (!resultsString || resultsString === 'null' || resultsString === 'undefined' || resultsString === '{}') {
+            console.error('❌ [FREE] resultsString is empty, returning fallback');
+            const fallbackReply = JSON.stringify({
+                intent: 'UNKNOWN',
+                message: 'Could not process your request. Please try again.',
+                status: 'error'
+            }, null, 2);
+            return {
+                reply: fallbackReply,
+                updatedHistory: [
+                    ...(history || []),
+                    { role: 'user', content: message },
+                    { role: 'assistant', content: 'Could not process your request. Please try again.' }
+                ],
+                _meta: {
+                    tier: 'free',
+                    error: 'Empty resultsString',
+                    understanding: understanding
+                }
+            };
+        }
 
         return {
             reply: resultsString,
@@ -259,12 +279,13 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
     } catch (error) {
         console.error('❌ [FREE] Error:', error.message);
         console.error('❌ [FREE] Stack:', error.stack);
+        const fallbackReply = JSON.stringify({
+            status: 'error',
+            message: 'Sorry, something went wrong. Please try again.',
+            error: error.message
+        }, null, 2);
         return {
-            reply: JSON.stringify({
-                status: 'error',
-                message: 'Sorry, something went wrong. Please try again.',
-                error: error.message
-            }, null, 2),
+            reply: fallbackReply,
             updatedHistory: history || [],
             _meta: { error: error.message }
         };
