@@ -31,33 +31,26 @@ const crypto = require('crypto');
 // ──────────────────────────────────────────────────────────────
 
 const CONFIG = {
-    // ── LLM ──
     MODEL: 'gpt-4o-mini',
     TEMPERATURE: 0.1,
     MAX_TOKENS: 800,
 
-    // ── Schema retries (for invalid JSON/schema violations) ──
     MAX_SCHEMA_RETRIES: 3,
     SCHEMA_RETRY_BACKOFF_MS: 500,
 
-    // ── Transport retries (for network/timeout/provider errors) ──
     MAX_TRANSPORT_RETRIES: 2,
     TRANSPORT_RETRY_BACKOFF_MS: 1000,
     TRANSPORT_RETRY_MULTIPLIER: 2,
 
-    // ── Input limits ──
     MAX_QUERY_LENGTH: 2000,
 
-    // ── Rate limiting ──
     RATE_LIMIT_WINDOW_MS: 60000,
     MAX_REQUESTS_PER_TENANT: 100,
     MAX_REQUESTS_PER_USER: 50,
 
-    // ── Schema ──
     SCHEMA_VERSION: 'v1',
     SCHEMA_FILE: 'understanding.v1.json',
 
-    // ── Logging ──
     LOG_RAW_OUTPUT: false,
     LOG_PII: false,
 };
@@ -505,7 +498,7 @@ function getFallbackResponse() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. SYSTEM PROMPT — WITH LOCATION AMBIGUITY DETECTION
+// 8. SYSTEM PROMPT — NATURAL LOCATION UNDERSTANDING
 // ──────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(schemaVersion) {
@@ -530,117 +523,74 @@ INTENT DEFINITIONS:
 - UNKNOWN: Fallback for unclear or out-of-scope requests
 
 ╔══════════════════════════════════════════════════════════════════╗
-║     LOCATION AMBIGUITY DETECTION — CRITICAL RULES              ║
+║     LOCATION EXTRACTION — NATURAL UNDERSTANDING                ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-You MUST detect location ambiguity and ask clarifying questions.
+Extract location naturally from ANY city, state, country, or region the user mentions.
 
-1. CITY NAME WITH MULTIPLE WELL-KNOWN MATCHES:
-   - "London" → Could be London, UK OR London, Ontario, Canada
-   - "Paris" → Could be Paris, France OR Paris, Texas, USA
-   - "Moscow" → Could be Moscow, Russia OR Moscow, Idaho, USA
-   - "Birmingham" → Could be Birmingham, UK OR Birmingham, Alabama, USA
-   - "Manchester" → Could be Manchester, UK OR Manchester, New Hampshire, USA
-   → ASK: "Which London do you mean? London, UK or London, Canada?"
+RULES:
+1. Extract any location the user mentions — do NOT restrict to a hardcoded list
+2. Normalize: "SF" → "San Francisco", "NYC" → "New York City", "UK" → "United Kingdom"
+3. Only flag ambiguity when a location has multiple well-known meanings
+4. Do NOT hardcode or restrict locations
 
-2. CITY ABBREVIATIONS / SHORT FORMS:
-   - "SF" → San Francisco OR South Florida
-   - "LA" → Los Angeles OR Latin America (in some contexts)
-   - "DC" → Washington, DC OR District of Columbia
-   - "NYC" → Usually clear (New York City) — no need to ask
-   - "Vegas" → Las Vegas, NV
-   → ASK: "Do you mean San Francisco or South Florida?"
+CLEAR LOCATIONS (NO clarification needed):
+- "San Francisco", "New York", "Berlin", "Lagos", "Tokyo"
+- "United States", "Germany", "Nigeria", "France"
+- "California", "Texas", "Lagos State"
+- ANY specific city, state, or country name
 
-3. VAGUE OR OVERLAPPING REGION NAMES:
-   - "Bay Area" → San Francisco Bay Area OR other bay areas (e.g., Tampa Bay)
-   - "Tri-State Area" → NY/NJ/CT OR other tri-state regions
-   - "Midwest" → US Midwest (very broad — need country context)
-   - "South", "North" → Extremely broad without country context
-   → ASK: "Which bay area do you mean? San Francisco Bay Area or another?"
+AMBIGUOUS LOCATIONS (only these need clarification):
+- "London" → London, UK OR London, Canada
+- "Paris" → Paris, France OR Paris, Texas
+- "Georgia" → Country OR US State
+- "SF" → San Francisco OR South Florida
+- "LA" → Los Angeles OR Latin America
+- "Congo" → Democratic Republic of the Congo OR Republic of the Congo
 
-4. COUNTRY NAMES THAT ARE AMBIGUOUS OR CONFUSED:
-   - "Georgia" → Country (Georgia) OR US State (Georgia)
-   - "Turkey" vs "Türkiye" → Same country, different naming
-   - "Congo" → Democratic Republic of the Congo OR Republic of the Congo
-   - "Guinea" → Guinea, Equatorial Guinea, Guinea-Bissau
-   → ASK: "Do you mean the country Georgia or the US state of Georgia?"
+If the location is CLEAR, set:
+- entities.location = the location
+- ambiguities = []
 
-5. "REMOTE" / "WORLDWIDE" VS SPECIFIC LOCATION:
-   - "Remote" → Anywhere in the world OR Remote but US-only OR Remote but Europe-only
-   - "Worldwide" → Truly global OR Global but mainly US/EU
-   → ASK: "Do you mean remote anywhere in the world, or remote within a specific region?"
-
-6. LOCATION IMPLIED BY OFFICE NAMES OR HQ:
-   - "Headquarters" → Which HQ if the company has multiple?
-   - "Main office" → Same issue
-   → ASK: "Which headquarters location do you mean?"
-
-7. LOCATION TIED TO TIME ZONE INSTEAD OF PLACE:
-   - "EST" → Eastern US, Eastern Canada, Eastern Australia, etc.
-   - "PST" → Pacific US, Pacific Canada
-   - "GMT+1" → Multiple regions share this timezone (UK, Portugal, West Africa, etc.)
-   → ASK: "Which region do you mean by EST? Eastern US, Eastern Canada, or Eastern Australia?"
-
-┌─────────────────────────────────────────────────────────────────┐
-│  HOW TO RESPOND WHEN LOCATION IS AMBIGUOUS                    │
-├─────────────────────────────────────────────────────────────────┤
-│ 1. Set "confidence" to a lower value (0.4 - 0.6)              │
-│ 2. Add an entry to "ambiguities" with:                         │
-│    - field: "location"                                        │
-│    - issue: "Description of the ambiguity"                    │
-│    - candidates: ["Option 1", "Option 2", "Option 3"]         │
-│ 3. Set "intent" to "UNKNOWN" until clarified                 │
-│ 4. Keep the "location" field as null                         │
-└─────────────────────────────────────────────────────────────────┘
+If the location is AMBIGUOUS, set:
+- entities.location = null
+- ambiguities = [{ 
+    field: "entities.location",
+    patchPath: "location",
+    issue: "Description of the ambiguity",
+    candidates: ["Option 1", "Option 2"]
+}]
 
 EXAMPLES:
 
-Example 1 — City ambiguity:
+Example 1 — Clear location:
+User: "Find CEOs in San Francisco"
+→ entities.location = "San Francisco"
+→ ambiguities = []
+
+Example 2 — Clear location:
+User: "Find CEOs in Germany"
+→ entities.location = "Germany"
+→ ambiguities = []
+
+Example 3 — Ambiguous location:
 User: "Find CEOs in London"
-→ "ambiguities": [{
-    "field": "location",
-    "issue": "London could refer to London, UK or London, Ontario, Canada.",
-    "candidates": ["London, UK", "London, Canada"]
+→ entities.location = null
+→ ambiguities = [{
+    field: "entities.location",
+    patchPath: "location",
+    issue: "London could refer to London, UK or London, Ontario, Canada.",
+    candidates: ["London, UK", "London, Canada"]
 }]
 
-Example 2 — City abbreviation:
-User: "Find SaaS companies in SF"
-→ "ambiguities": [{
-    "field": "location",
-    "issue": "SF could mean San Francisco or South Florida.",
-    "candidates": ["San Francisco, CA", "South Florida"]
-}]
-
-Example 3 — Vague region:
-User: "Find CTOs in the Bay Area"
-→ "ambiguities": [{
-    "field": "location",
-    "issue": "Bay Area could mean San Francisco Bay Area or other bay areas.",
-    "candidates": ["San Francisco Bay Area", "Tampa Bay Area", "Other"]
-}]
-
-Example 4 — Country vs State:
-User: "Find founders in Georgia"
-→ "ambiguities": [{
-    "field": "location",
-    "issue": "Georgia could mean the country or the US state.",
-    "candidates": ["Georgia (country)", "Georgia, USA"]
-}]
-
-Example 5 — Remote ambiguity:
-User: "Find remote developers"
-→ "ambiguities": [{
-    "field": "location",
-    "issue": "Remote could mean anywhere globally, US-only, or Europe-only.",
-    "candidates": ["Global (anywhere)", "US only", "Europe only"]
-}]
-
-Example 6 — Timezone ambiguity:
-User: "Find companies in EST"
-→ "ambiguities": [{
-    "field": "location",
-    "issue": "EST could refer to Eastern US, Eastern Canada, or Eastern Australia.",
-    "candidates": ["Eastern US", "Eastern Canada", "Eastern Australia"]
+Example 4 — Ambiguous abbreviation:
+User: "Find companies in SF"
+→ entities.location = null
+→ ambiguities = [{
+    field: "entities.location",
+    patchPath: "location",
+    issue: "SF could mean San Francisco or South Florida.",
+    candidates: ["San Francisco, CA", "South Florida"]
 }]
 
 SCHEMA VERSION: ${schemaVersion}
@@ -974,10 +924,8 @@ async function understand(query, tenantId, userId, options = {}) {
             originalQuery: trimmedQuery
         };
 
-        // ── ENHANCEMENT: Ensure ambiguities have clear field paths ──
         if (response.ambiguities && response.ambiguities.length > 0) {
             response.ambiguities = response.ambiguities.map(amb => {
-                // If field is "location" or missing, set to a structured path
                 if (amb.field === 'location' || !amb.field) {
                     return {
                         ...amb,
