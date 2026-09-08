@@ -163,18 +163,31 @@ const sendMessage = async (req, res) => {
         console.log('📋 [CHAT] Calling Free.js with plan:', plan);
         console.log('📋 [CHAT] aiOptions:', JSON.stringify(aiOptions, null, 2));
         
+        // ── DEBUG: BYPASS QUEUE TO TEST ──
+        console.log('📋 [CHAT] ⚠️ BYPASSING QUEUE FOR DEBUGGING');
+        
         if (plan === 'free') {
-            const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(
-                originalMessage, 
-                historyWithMeta, 
-                userProfile,
-                null,
-                aiOptions
-            ));
-            aiReply = result ? result.reply : null;
-            updatedHistory = result ? result.updatedHistory : [];
-            console.log('📋 [CHAT] Free.js result received:', result ? '✅' : '❌');
-            console.log('📋 [CHAT] aiReply after Free.js call:', aiReply ? aiReply.substring(0, 100) : 'null');
+            // 🔥 BYPASS QUEUE: Direct call to Free.js
+            console.log('📋 [CHAT] Calling freeAI.generateFreeResponse directly (QUEUE BYPASSED)');
+            try {
+                const result = await freeAI.generateFreeResponse(
+                    originalMessage, 
+                    historyWithMeta, 
+                    userProfile,
+                    null,
+                    aiOptions
+                );
+                console.log('📋 [CHAT] Direct call result:', result ? '✅' : '❌');
+                aiReply = result ? result.reply : null;
+                updatedHistory = result ? result.updatedHistory : [];
+            } catch (freeError) {
+                console.error('❌ [CHAT] Free.js threw error:', freeError.message);
+                console.error('❌ [CHAT] Stack:', freeError.stack);
+                aiReply = null;
+                updatedHistory = [];
+            }
+            
+            console.log('📋 [CHAT] aiReply after direct call:', aiReply ? aiReply.substring(0, 100) : 'null');
             console.log('📋 [CHAT] aiReply length:', aiReply ? aiReply.length : 0);
         } else if (plan === 'go') {
             const result = await goQueue.enqueue(() => goAI.generateGoResponse(
@@ -232,6 +245,7 @@ const sendMessage = async (req, res) => {
         
     } catch (error) {
         console.error('❌ [CHAT] Error:', error.message);
+        console.error('❌ [CHAT] Stack:', error.stack);
         if (error.message && (error.message.includes('busy') || error.message.includes('taking longer'))) {
             return handleQueueError(error, res);
         }
