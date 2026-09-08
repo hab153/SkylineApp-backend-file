@@ -27,7 +27,6 @@ const handleQueueError = (error, res) => {
 function isClarificationResponse(history) {
     if (!history || history.length === 0) return false;
     
-    // Check the last assistant message for clarification context
     for (let i = history.length - 1; i >= 0; i--) {
         const entry = history[i];
         if (entry.role === 'assistant' && entry._meta?.needsClarification) {
@@ -71,7 +70,6 @@ const sendMessage = async (req, res) => {
     let { message, history, sessionId } = req.body;
     const userId = req.userId;
     
-    // ✅ Validate input types before any processing
     if (!message || typeof message !== 'string') {
         return res.status(400).json({ message: 'Message is required and must be a string' });
     }
@@ -80,7 +78,6 @@ const sendMessage = async (req, res) => {
         return res.status(400).json({ message: 'Message too long. Maximum 10000 characters.' });
     }
     
-    // ✅ Validate userId
     if (!isValidObjectId(userId)) {
         return res.status(400).json({ message: 'Invalid user ID' });
     }
@@ -90,10 +87,8 @@ const sendMessage = async (req, res) => {
     console.log('🔍 [CHAT] Received message length:', message.length);
     console.log('🔍 [CHAT] User ID:', safeUserId);
     
-    // ✅ Store original message
     const originalMessage = message;
     
-    // ✅ Validate and sanitize sessionId
     let currentSessionId;
     if (sessionId && typeof sessionId === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(sessionId)) {
         currentSessionId = sessionId;
@@ -109,7 +104,6 @@ const sendMessage = async (req, res) => {
     const plan = user.subscriptionTier || 'free';
 
     try {
-        // ✅ SAVE USER MESSAGE - Store the ORIGINAL message
         const savedUserMessage = await ChatMessage.create({
             userId: safeUserId,
             sessionId: String(currentSessionId),
@@ -120,7 +114,6 @@ const sendMessage = async (req, res) => {
         
         console.log('✅ [CHAT] User message saved:', savedUserMessage._id);
 
-        // --- Create/Update Session metadata ---
         const existingSession = await Session.findOne({ 
             userId: safeUserId, 
             sessionId: String(currentSessionId) 
@@ -147,11 +140,8 @@ const sendMessage = async (req, res) => {
             console.log('✅ [CHAT] Session updated:', currentSessionId);
         }
 
-        // ── Build history for context ──
-        // Ensure history is an array and include metadata for clarification detection
         const historyWithMeta = history || [];
         
-        // ── Check if this is a clarification response ──
         const clarificationInfo = isClarificationResponse(historyWithMeta);
         if (clarificationInfo) {
             console.log('🔄 [CHAT] Clarification response detected');
@@ -159,28 +149,33 @@ const sendMessage = async (req, res) => {
             console.log('   Clarification context:', clarificationInfo.clarificationContext);
         }
 
-        // ── Build userProfile ──
         const userProfile = buildUserProfile(user);
         
-        // ── If this is a clarification, pass the context to the AI ──
         const aiOptions = {
             clarificationInfo: clarificationInfo,
             originalMessage: clarificationInfo ? clarificationInfo.originalMessage : null,
-            sessionId: currentSessionId // ✅ PASS SESSION ID TO AI
+            sessionId: currentSessionId
         };
 
-        // --- Get AI Response ---
+        // ── Get AI Response ──
         let aiReply, updatedHistory;
+        
+        console.log('📋 [CHAT] Calling Free.js with plan:', plan);
+        console.log('📋 [CHAT] aiOptions:', JSON.stringify(aiOptions, null, 2));
+        
         if (plan === 'free') {
             const result = await freeQueue.enqueue(() => freeAI.generateFreeResponse(
                 originalMessage, 
                 historyWithMeta, 
                 userProfile,
-                null, // onProgress
-                aiOptions // Pass clarification context + sessionId
+                null,
+                aiOptions
             ));
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
+            aiReply = result ? result.reply : null;
+            updatedHistory = result ? result.updatedHistory : [];
+            console.log('📋 [CHAT] Free.js result received:', result ? '✅' : '❌');
+            console.log('📋 [CHAT] aiReply after Free.js call:', aiReply ? aiReply.substring(0, 100) : 'null');
+            console.log('📋 [CHAT] aiReply length:', aiReply ? aiReply.length : 0);
         } else if (plan === 'go') {
             const result = await goQueue.enqueue(() => goAI.generateGoResponse(
                 originalMessage, 
@@ -190,29 +185,38 @@ const sendMessage = async (req, res) => {
             ));
             aiReply = result ? result.reply : "⚠️ Go AI Service unavailable.";
             updatedHistory = result ? (result.updatedHistory || []) : [];
-        } else { // pro
+        } else {
             const result = await proQueue.enqueue(() => generateBusinessResponse(
                 originalMessage, 
                 historyWithMeta, 
                 userProfile,
                 aiOptions
             ));
-            aiReply = result.reply;
-            updatedHistory = result.updatedHistory;
+            aiReply = result ? result.reply : "⚠️ Pro AI Service unavailable.";
+            updatedHistory = result ? result.updatedHistory : [];
         }
 
-        // ✅ SAVE AI RESPONSE
+        // ── Ensure aiReply is always a string ──
+        if (!aiReply || typeof aiReply !== 'string' || aiReply.trim().length === 0) {
+            console.error('❌ [CHAT] aiReply is null/empty, using fallback');
+            aiReply = JSON.stringify({
+                intent: 'UNKNOWN',
+                message: 'Could not process your request. Please try again.',
+                status: 'error'
+            }, null, 2);
+        }
+
+        console.log('✅ [CHAT] Final aiReply length:', aiReply.length);
+
         const savedAiMessage = await ChatMessage.create({ 
             userId: safeUserId, 
             sessionId: String(currentSessionId), 
             role: 'ai', 
-            content: typeof aiReply === 'string' ? aiReply : 'Unable to generate response.'
+            content: aiReply
         });
         
         console.log('✅ [CHAT] AI response saved:', savedAiMessage._id);
-        console.log('✅ [CHAT] AI response length:', aiReply ? aiReply.length : 0);
 
-        // ✅ VERIFY messages were saved
         const verifyCount = await ChatMessage.countDocuments({ 
             userId: safeUserId, 
             sessionId: String(currentSessionId) 
