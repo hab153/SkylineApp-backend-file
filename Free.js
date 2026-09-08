@@ -14,6 +14,7 @@ const Session = require('./Session');
 async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
     try {
         console.log('🚀 [FREE] Generating response for:', message);
+        console.log('📋 [FREE] Options:', JSON.stringify(options, null, 2));
 
         // ── Step 1: Get tenantId and userId from userProfile ──
         const tenantId = userProfile?.tenantId || userProfile?.tenant_id || 'skyline-default';
@@ -53,21 +54,17 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
         if (pendingClarification && originalMessage) {
             console.log('🔄 [FREE] Applying clarification patch');
 
-            // ── Get the ambiguous value from the original message ──
             const ambiguousValue = pendingClarification.ambiguousValue || '';
             const pendingField = pendingClarification.pendingField || 'location';
 
-            // ── Build the patched message ──
             let patchedMessage = originalMessage;
 
             if (ambiguousValue && message) {
-                // Replace the ambiguous value with the clarification
                 const regex = new RegExp(ambiguousValue, 'gi');
                 patchedMessage = patchedMessage.replace(regex, message.trim());
                 console.log(`📋 [FREE] Replaced "${ambiguousValue}" → "${message.trim()}"`);
             }
 
-            // If no replacement happened, append the clarification
             if (patchedMessage === originalMessage) {
                 patchedMessage = originalMessage + ' ' + message.trim();
                 console.log('📋 [FREE] Appended clarification');
@@ -76,7 +73,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             finalMessage = patchedMessage;
             console.log('📋 [FREE] Patched message:', finalMessage);
 
-            // ── Clear the clarification state so it's not used again ──
             if (sessionId) {
                 await Session.findOneAndUpdate(
                     { userId: userId, sessionId: sessionId },
@@ -85,8 +81,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 console.log('✅ [FREE] Clarification state cleared');
             }
         } else {
-            // ── Step 4: Check if this is a clarification from history ──
-            // (Fallback if state wasn't in database)
             if (history && history.length > 0) {
                 for (let i = history.length - 1; i >= 0; i--) {
                     const entry = history[i];
@@ -115,7 +109,9 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             }
         }
 
-        // ── Step 5: Understand the request (with patched context if applicable) ──
+        // ── Step 4: Understand the request ──
+        console.log('📋 [FREE] Sending to Understanding.understand() with:', finalMessage);
+        
         const understanding = await Understanding.understand(
             finalMessage,
             tenantId,
@@ -130,7 +126,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
 
         console.log('📋 [FREE] Understanding result:', JSON.stringify(understanding, null, 2));
 
-        // ── Step 6: Check if understanding is valid ──
         if (!understanding) {
             console.error('❌ [FREE] Understanding returned null/undefined');
             return {
@@ -143,16 +138,14 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── Step 7: Check if clarification is needed ──
+        // ── Step 5: Check if clarification is needed ──
         const hasAmbiguities = understanding.ambiguities && understanding.ambiguities.length > 0;
 
         if (hasAmbiguities) {
             console.log('ℹ️ [FREE] Request needs clarification due to ambiguities');
 
-            // ── Extract the ambiguous value from the original message ──
             const ambiguousValue = extractAmbiguousValue(understanding, finalMessage);
 
-            // ── Build clarification state ──
             const clarificationState = {
                 originalMessage: finalMessage,
                 parsedRequest: {
@@ -167,7 +160,6 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 createdAt: new Date().toISOString()
             };
 
-            // ── Save clarification state to database ──
             if (sessionId) {
                 try {
                     await Session.findOneAndUpdate(
@@ -180,10 +172,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 }
             }
 
-            // ── Build clarification message ──
             const clarificationMessage = buildClarificationMessage(understanding);
 
-            // ── Create history entry with clarification context ──
             const assistantEntry = {
                 role: 'assistant',
                 content: clarificationMessage,
@@ -222,7 +212,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── Step 8: Check if understanding has parser failure ──
+        // ── Step 6: Check if understanding has parser failure ──
         if (understanding.parserFailed) {
             console.error('❌ [FREE] Stage 1 parser failed:', understanding.parserErrorDetail);
             return {
@@ -243,8 +233,14 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── Step 9: Return the understanding result (normal, valid path) ──
+        // ── Step 7: Return the understanding result ──
         const resultsString = JSON.stringify(understanding, null, 2);
+        
+        // ✅ DEBUG: Log the reply being sent
+        console.log('📋 [FREE] Returning reply length:', resultsString ? resultsString.length : 0);
+        console.log('📋 [FREE] Reply preview:', resultsString ? resultsString.substring(0, 200) : 'null');
+        console.log('📋 [FREE] Understanding intent:', understanding.intent);
+        console.log('📋 [FREE] Understanding status:', understanding.status);
 
         return {
             reply: resultsString,
@@ -306,7 +302,6 @@ function buildClarificationMessage(understanding) {
 function extractAmbiguousValue(understanding, originalMessage) {
     if (!originalMessage) return null;
     
-    // Look for location patterns in the original request
     const locationPatterns = [
         /located in\s+([^,.]+)/i,
         /in\s+([^,.]+)(?:\s|$)/i,
@@ -317,14 +312,12 @@ function extractAmbiguousValue(understanding, originalMessage) {
         const match = originalMessage.match(pattern);
         if (match) {
             const value = match[1].trim();
-            // Make sure it's not a common word like "SaaS", "CEO", etc.
             if (!value.match(/^(saas|ceo|founder|cto|cfo|any|company|industry)$/i)) {
                 return value;
             }
         }
     }
     
-    // If no pattern matches, return the first word that might be a location
     const words = originalMessage.split(' ');
     for (const word of words) {
         if (word.length > 2 && word[0] === word[0].toUpperCase()) {
