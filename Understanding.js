@@ -880,7 +880,7 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
 }
 
 // ──────────────────────────────────────────────────────────────
-// 12. MAIN UNDERSTANDING FUNCTION — UPDATED TO RETURN ORIGINAL QUERY
+// 12. MAIN UNDERSTANDING FUNCTION
 // ──────────────────────────────────────────────────────────────
 
 async function understand(query, tenantId, userId, options = {}) {
@@ -971,9 +971,26 @@ async function understand(query, tenantId, userId, options = {}) {
 
         const response = {
             ...result.data,
-            // ✅ ADD: Original query for context preservation
             originalQuery: trimmedQuery
         };
+
+        // ── ENHANCEMENT: Ensure ambiguities have clear field paths ──
+        if (response.ambiguities && response.ambiguities.length > 0) {
+            response.ambiguities = response.ambiguities.map(amb => {
+                // If field is "location" or missing, set to a structured path
+                if (amb.field === 'location' || !amb.field) {
+                    return {
+                        ...amb,
+                        field: 'entities.location',
+                        patchPath: 'location'
+                    };
+                }
+                return {
+                    ...amb,
+                    patchPath: amb.field
+                };
+            });
+        }
 
         logger.log('INFO', 'Request completed', {
             intent: response.intent,
