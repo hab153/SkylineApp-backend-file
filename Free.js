@@ -54,16 +54,38 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             const ambiguousValue = pendingClarification.ambiguousValue || '';
             const pendingField = pendingClarification.pendingField || 'location';
 
+            // ── EXTRACT ONLY THE LOCATION FROM THE CLARIFICATION ──
+            let locationClarification = message.trim();
+            
+            // Pattern to match location names (city, country, or city + country)
+            const locationPattern = /(London|Paris|SF|LA|New York|Berlin|Lagos|Tokyo|Moscow|Georgia|UK|USA|US|Canada|Germany|Nigeria|France|United Kingdom|United States|San Francisco|South Florida|California|Texas|Ontario)(?:\s*,\s*[A-Z]{2})?/i;
+            const locationMatch = message.match(locationPattern);
+            
+            if (locationMatch) {
+                locationClarification = locationMatch[0];
+                console.log(`📋 [FREE] Extracted location from clarification: "${locationClarification}"`);
+            } else {
+                // If no location found, try to extract anything that looks like a location
+                const fallbackPattern = /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)(?:\s*,\s*[A-Z]{2})?/;
+                const fallbackMatch = message.match(fallbackPattern);
+                if (fallbackMatch && fallbackMatch[0].length > 2) {
+                    locationClarification = fallbackMatch[0];
+                    console.log(`📋 [FREE] Fallback extracted: "${locationClarification}"`);
+                } else {
+                    console.log(`📋 [FREE] No location pattern found, using full message: "${locationClarification}"`);
+                }
+            }
+
             let patchedMessage = originalMessage;
 
-            if (ambiguousValue && message) {
+            if (ambiguousValue && locationClarification) {
                 const regex = new RegExp(ambiguousValue, 'gi');
-                patchedMessage = patchedMessage.replace(regex, message.trim());
-                console.log(`📋 [FREE] Replaced "${ambiguousValue}" → "${message.trim()}"`);
+                patchedMessage = patchedMessage.replace(regex, locationClarification);
+                console.log(`📋 [FREE] Replaced "${ambiguousValue}" → "${locationClarification}"`);
             }
 
             if (patchedMessage === originalMessage) {
-                patchedMessage = originalMessage + ' ' + message.trim();
+                patchedMessage = originalMessage + ' ' + locationClarification;
                 console.log('📋 [FREE] Appended clarification');
             }
 
@@ -90,12 +112,20 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                             const ambiguousValue = ctx.ambiguousValue || '';
                             let mergedMessage = origMsg;
                             
-                            if (ambiguousValue && message) {
+                            // ── Extract location from clarification ──
+                            let locationClarification = message.trim();
+                            const locationPattern = /(London|Paris|SF|LA|New York|Berlin|Lagos|Tokyo|Moscow|Georgia|UK|USA|US|Canada|Germany|Nigeria|France|United Kingdom|United States|San Francisco|South Florida|California|Texas|Ontario)(?:\s*,\s*[A-Z]{2})?/i;
+                            const locationMatch = message.match(locationPattern);
+                            if (locationMatch) {
+                                locationClarification = locationMatch[0];
+                            }
+                            
+                            if (ambiguousValue && locationClarification) {
                                 const regex = new RegExp(ambiguousValue, 'gi');
-                                mergedMessage = mergedMessage.replace(regex, message.trim());
+                                mergedMessage = mergedMessage.replace(regex, locationClarification);
                             }
                             if (mergedMessage === origMsg) {
-                                mergedMessage = origMsg + ' ' + message.trim();
+                                mergedMessage = origMsg + ' ' + locationClarification;
                             }
                             finalMessage = mergedMessage;
                             console.log('📋 [FREE] Patched message from history:', finalMessage);
