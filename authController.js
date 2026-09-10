@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Report = require('./Report');
-const speakeasy = require('speakeasy'); // ✅ For TOTP 2FA
+const speakeasy = require('speakeasy');
 const { sanitizeQuery, isValidObjectId, sanitizeEmail, sanitizeUsername, sanitizeString } = require('./sanitize');
 const { generateCsrfToken, deleteCsrfToken } = require('./csrf');
 
@@ -28,14 +28,13 @@ function validateSecurityAnswer(answer, fieldName) {
     if (trimmed.length < 3) {
         return `${fieldName} must be at least 3 characters long`;
     }
-    return null; // Valid
+    return null;
 }
 
-// ✅ FIXED: Register function - 3 DAY EXPIRY
+// ✅ FIXED: Register function - WITH DEBUG LOGGING
 const register = async (req, res) => {
     let { username, email, password } = req.body;
     
-    // ✅ FIX #11/#12: Validate input types before processing
     if (typeof username !== 'string' || typeof email !== 'string' || typeof password !== 'string') {
         return res.status(400).json({ message: 'Invalid input types. All fields must be strings.' });
     }
@@ -44,13 +43,11 @@ const register = async (req, res) => {
     username = sanitizeUsername(username);
     email = sanitizeEmail(email);
     
-    // ✅ Ensure sanitized values are still valid strings
     if (!username || !email || !password) {
         return res.status(400).json({ message: 'Invalid input after sanitization.' });
     }
     
     try {
-        // ✅ FIX #11: Explicitly cast to string for query safety
         const safeEmail = String(email);
         const safeUsername = String(username);
         
@@ -76,16 +73,26 @@ const register = async (req, res) => {
         });
         await user.save();
         
+        // ✅ DEBUG: Log the user ID
+        console.log('🔑 [REGISTER] User created with ID:', user.id);
+        console.log('🔑 [REGISTER] User._id:', user._id);
+        console.log('🔑 [REGISTER] User._id.toString():', user._id.toString());
+        console.log('🔑 [REGISTER] User email:', user.email);
+        
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
-        // ✅ SECURE: Strict secret check
+        console.log('🔑 [REGISTER] Token payload:', JSON.stringify(payload));
+        
         const secret = getJwtSecret();
         
-        // ✅ CHANGED: 7d → 3d (3-day session expiry)
         jwt.sign(payload, secret, { expiresIn: '3d' }, async (err, token) => {
             if (err) {
                 console.error("JWT Error:", err);
                 return res.status(500).json({ message: 'Token generation failed' });
             }
+            
+            // ✅ DEBUG: Log the token
+            console.log('🔑 [REGISTER] Token created (first 20 chars):', token.substring(0, 20) + '...');
+            
             const csrfToken = await generateCsrfToken(user.id);
             res.json({ 
                 token, 
@@ -114,11 +121,13 @@ const register = async (req, res) => {
     }
 };
 
-// ✅ SECURE: Login function - 3 DAY EXPIRY
+// ✅ SECURE: Login function - WITH DEBUG LOGGING
 const login = async (req, res) => {
     let { identifier, password } = req.body;
     
-    // ✅ FIX: Validate input types
+    console.log('🔑 [LOGIN] ===== LOGIN ATTEMPT =====');
+    console.log('🔑 [LOGIN] Identifier:', identifier);
+    
     if (typeof identifier !== 'string' || typeof password !== 'string') {
         return res.status(400).json({ message: 'Invalid input types.' });
     }
@@ -130,7 +139,6 @@ const login = async (req, res) => {
     }
     
     try {
-        // ✅ FIX #11/#12: Sanitize and explicitly type-cast identifier
         const safeIdentifier = String(sanitizeString(identifier));
         
         const query = sanitizeQuery({
@@ -142,11 +150,22 @@ const login = async (req, res) => {
         
         let user = await User.findOne(query);
         
-        // Use dummy hash to prevent timing attacks if user doesn't exist
+        // ✅ DEBUG: Log the user found
+        if (user) {
+            console.log('🔑 [LOGIN] User found:');
+            console.log('   - User ID:', user._id.toString());
+            console.log('   - User Email:', user.email);
+            console.log('   - User Username:', user.username);
+            console.log('   - Token Version:', user.tokenVersion);
+        } else {
+            console.log('🔑 [LOGIN] User NOT found for identifier:', safeIdentifier);
+        }
+        
         const dummyHash = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
         const isMatch = user ? await bcrypt.compare(password, user.password) : await bcrypt.compare(password, dummyHash);
 
         if (!user || !isMatch) { 
+            console.log('❌ [LOGIN] Invalid credentials');
             return res.status(400).json({ message: 'Invalid Credentials' }); 
         }
         
@@ -166,23 +185,19 @@ const login = async (req, res) => {
             }
         }
         
-        // ✅ SECURE: Strict secret check
         const secret = getJwtSecret();
         
-        // ✅ If user is admin, they go through TOTP 2FA verification
+        // ✅ Admin: TOTP 2FA
         if (user.isAdmin) {
-            console.log(`🔐 [ADMIN] Admin user logging in`);
+            console.log(`🔐 [ADMIN] Admin user logging in: ${user.email}`);
             
-            // Check if TOTP is enabled
             if (!user.adminTotpEnabled) {
-                console.warn(`⚠️ [ADMIN] Admin has not enabled 2FA`);
                 return res.status(403).json({
                     message: 'Admin 2FA not configured. Please contact support.',
                     requires2FASetup: true
                 });
             }
             
-            // Generate short-lived temp token for Step 2 (TOTP verification)
             const tempToken = jwt.sign(
                 { 
                     id: user.id, 
@@ -204,12 +219,22 @@ const login = async (req, res) => {
         // ─── REGULAR USER LOGIN ───
         const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
         
-        // ✅ CHANGED: 7d → 3d (3-day session expiry)
+        // ✅ DEBUG: Log the token payload
+        console.log('🔑 [LOGIN] Token payload:', JSON.stringify(payload));
+        console.log('🔑 [LOGIN] User.id:', user.id);
+        console.log('🔑 [LOGIN] User._id:', user._id);
+        console.log('🔑 [LOGIN] User._id.toString():', user._id.toString());
+        
         jwt.sign(payload, secret, { expiresIn: '3d' }, async (err, token) => {
             if (err) { 
                 console.error("JWT Error:", err); 
                 return res.status(500).json({ message: 'Token generation failed' }); 
             }
+            
+            // ✅ DEBUG: Log the token
+            console.log('🔑 [LOGIN] Token created (first 20 chars):', token.substring(0, 20) + '...');
+            console.log('🔑 [LOGIN] User ID in token:', user.id);
+            
             const csrfToken = await generateCsrfToken(user.id);
             res.json({ 
                 token, 
@@ -297,8 +322,6 @@ const verifyUsername = async (req, res) => {
     }
 };
 
-// ✅ REMOVED: resetPasswordEmailUsername - VULNERABLE ENDPOINT DELETED
-
 // ✅ FIXED: Forgot password
 const forgotPassword = async (req, res) => {
     try {
@@ -322,7 +345,6 @@ const forgotPassword = async (req, res) => {
                     userId: user._id 
                 });
             } else { 
-                // ✅ SECURITY FIX: Never log reset URLs or tokens
                 console.log(`[PASSWORD RESET] Reset link generated for user ID: ${user._id}`);
             }
         } catch (emailErr) { 
@@ -363,16 +385,14 @@ const resetPassword = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Verify Layer 2 - WITH SECURITY ANSWERS VALIDATION
+// ✅ FIXED: Verify Layer 2
 const verifyLayer2 = async (req, res) => {
     const { dish, pn, mum, dm } = req.body;
     
-    // ✅ FIX #13: Validate ALL inputs are strings before any processing
     if (typeof dish !== 'string' || typeof pn !== 'string' || typeof mum !== 'string' || typeof dm !== 'string') {
         return res.status(400).json({ message: 'All answers must be strings.' });
     }
     
-    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
     const validations = [
         validateSecurityAnswer(dish, 'Favorite dish'),
         validateSecurityAnswer(pn, 'Phone number'),
@@ -390,20 +410,17 @@ const verifyLayer2 = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' }); 
         }
         
-        // ✅ FIX #13: Cast userId to string for query safety
         const safeUserId = String(req.userId);
         const user = await User.findById(safeUserId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
         
-        // ✅ CRITICAL: Verify user is actually an admin
         if (!user.isAdmin) {
             console.warn(`⚠️ [Layer2] Non-admin user attempted Layer 2 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
-        // ✅ CRITICAL: Check that security setup is complete
         if (!user.securitySetupComplete) {
             console.warn(`⚠️ [Layer2] Admin has not completed security setup`);
             return res.status(403).json({
@@ -413,7 +430,6 @@ const verifyLayer2 = async (req, res) => {
             });
         }
         
-        // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
         const requiredAnswers = [
             { field: user.adminAns_dish, name: 'Favorite dish' },
             { field: user.adminAns_pn, name: 'Phone number' },
@@ -430,7 +446,6 @@ const verifyLayer2 = async (req, res) => {
             });
         }
         
-        // ✅ Compare answers (all already validated as non-empty above)
         const d1 = await bcrypt.compare(String(dish).trim().toLowerCase(), user.adminAns_dish);
         const d2 = await bcrypt.compare(String(pn).trim().toLowerCase(), user.adminAns_pn);
         const d3 = await bcrypt.compare(String(mum).trim().toLowerCase(), user.adminAns_mum);
@@ -454,7 +469,6 @@ const verifyLayer2 = async (req, res) => {
             });
         }
         
-        // ✅ Log failed attempts for security monitoring
         console.warn(`⚠️ [Layer2] Failed verification attempt for admin`);
         res.status(400).json({ message: 'Incorrect answers' });
         
@@ -464,16 +478,14 @@ const verifyLayer2 = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Verify Layer 3 - WITH SECURITY ANSWERS VALIDATION
+// ✅ FIXED: Verify Layer 3
 const verifyLayer3 = async (req, res) => {
     const { dad, friend, enemy, app } = req.body;
     
-    // ✅ FIX #14: Validate ALL inputs are strings before any processing
     if (typeof dad !== 'string' || typeof friend !== 'string' || typeof enemy !== 'string' || typeof app !== 'string') {
         return res.status(400).json({ message: 'All answers must be strings.' });
     }
     
-    // ✅ Validate ALL answers BEFORE any database access or bcrypt calls
     const validations = [
         validateSecurityAnswer(dad, "Father's name"),
         validateSecurityAnswer(friend, "Best friend's name"),
@@ -491,20 +503,17 @@ const verifyLayer3 = async (req, res) => {
             return res.status(400).json({ message: 'Invalid user ID' }); 
         }
         
-        // ✅ FIX #14: Cast userId to string for query safety
         const safeUserId = String(req.userId);
         const user = await User.findById(safeUserId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
         
-        // ✅ CRITICAL: Verify user is actually an admin
         if (!user.isAdmin) {
             console.warn(`⚠️ [Layer3] Non-admin user attempted Layer 3 verification`);
             return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
         }
         
-        // ✅ CRITICAL: Check that security setup is complete
         if (!user.securitySetupComplete) {
             console.warn(`⚠️ [Layer3] Admin has not completed security setup`);
             return res.status(403).json({
@@ -514,7 +523,6 @@ const verifyLayer3 = async (req, res) => {
             });
         }
         
-        // ✅ CRITICAL: Check that ALL security answers exist and are non-empty
         const requiredAnswers = [
             { field: user.adminAns_dad, name: "Father's name" },
             { field: user.adminAns_friend, name: "Best friend's name" },
@@ -531,7 +539,6 @@ const verifyLayer3 = async (req, res) => {
             });
         }
         
-        // ✅ Compare answers (all already validated as non-empty above)
         const d1 = await bcrypt.compare(String(dad).trim().toLowerCase(), user.adminAns_dad);
         const d2 = await bcrypt.compare(String(friend).trim().toLowerCase(), user.adminAns_friend);
         const d3 = await bcrypt.compare(String(enemy).trim().toLowerCase(), user.adminAns_enemy);
@@ -544,7 +551,6 @@ const verifyLayer3 = async (req, res) => {
                 isAdmin: true,
                 nonce: crypto.randomBytes(16).toString('hex')
             };
-            // ✅ CHANGED: 7d → 3d (3-day session expiry for admin too)
             const token = jwt.sign(payload, secret, { expiresIn: '3d' });
             return res.json({ 
                 token, 
@@ -553,7 +559,6 @@ const verifyLayer3 = async (req, res) => {
             });
         }
         
-        // ✅ Log failed attempts for security monitoring
         console.warn(`⚠️ [Layer3] Failed verification attempt for admin`);
         res.status(400).json({ message: 'Incorrect answers' });
         
@@ -567,7 +572,6 @@ const verifyLayer3 = async (req, res) => {
 const verifyAge = async (req, res) => {
     const { day, month, year } = req.body;
     
-    // ✅ FIX #15: Validate inputs are numbers
     const numDay = Number(day);
     const numMonth = Number(month);
     const numYear = Number(year);
@@ -616,7 +620,6 @@ const verifyAge = async (req, res) => {
 const changeEmail = async (req, res) => {
     const { currentPassword, newEmail } = req.body;
     
-    // ✅ Validate input types
     if (typeof currentPassword !== 'string' || typeof newEmail !== 'string') {
         return res.status(400).json({ message: 'Invalid input types.' });
     }
@@ -645,17 +648,15 @@ const changeEmail = async (req, res) => {
     }
 };
 
-// ✅ FIXED: Delete account - COMPLETE DATA PURGE (GDPR Compliance)
+// ✅ FIXED: Delete account
 const deleteAccount = async (req, res) => {
     const { password } = req.body;
     
-    // ✅ Validate input type
     if (typeof password !== 'string') {
         return res.status(400).json({ message: 'Password must be a string.' });
     }
     
     try {
-        // ─── VALIDATE USER ───
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
@@ -666,7 +667,6 @@ const deleteAccount = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
         
-        // ─── VERIFY PASSWORD ───
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: 'Incorrect password. Account not deleted.' });
@@ -676,46 +676,35 @@ const deleteAccount = async (req, res) => {
 
         console.log(`🗑️ [DELETE ACCOUNT] Starting deletion process for user ID: ${userId}`);
 
-        // ─── ✅ DELETE ALL USER DATA ───
-
-        // 1. Delete all ChatMessages
         const chatResult = await ChatMessage.deleteMany({ userId });
         console.log(`   📝 Deleted ${chatResult.deletedCount} chat messages`);
 
-        // 2. ✅ DELETE ALL LEADS (CRITICAL for GDPR)
         const Lead = require('./Lead');
         const leadResult = await Lead.deleteMany({ userId });
         console.log(`   📋 Deleted ${leadResult.deletedCount} leads`);
 
-        // 3. Delete all EmailAccounts
         const EmailAccount = require('./EmailAccount');
         const emailAccountResult = await EmailAccount.deleteMany({ userId });
         console.log(`   📧 Deleted ${emailAccountResult.deletedCount} email accounts`);
 
-        // 4. Delete all Sessions
         const Session = require('./Session');
         const sessionResult = await Session.deleteMany({ userId });
         console.log(`   📂 Deleted ${sessionResult.deletedCount} sessions`);
 
-        // 5. Delete all Notifications
         const notificationResult = await Notification.deleteMany({ userId });
         console.log(`   🔔 Deleted ${notificationResult.deletedCount} notifications`);
 
-        // 6. Delete all Reports
         const reportResult = await Report.deleteMany({ userId });
         console.log(`   📊 Deleted ${reportResult.deletedCount} reports`);
 
-        // 7. Delete all Data Exports
         const DataExport = require('./DataExport');
         const dataExportResult = await DataExport.deleteMany({ userId });
         console.log(`   📦 Deleted ${dataExportResult.deletedCount} data exports`);
 
-        // 8. Delete all Search Caches
         const SearchCache = require('./SearchCache');
         const searchCacheResult = await SearchCache.deleteMany({ userId });
         console.log(`   🔍 Deleted ${searchCacheResult.deletedCount} search caches`);
 
-        // 9. Delete all Follow-up schedules (if any)
         try {
             const FollowUpSchedule = require('./FollowUpSchedule');
             const followUpResult = await FollowUpSchedule.deleteMany({ userId });
@@ -724,11 +713,9 @@ const deleteAccount = async (req, res) => {
             console.log(`   ⏰ No follow-up schedule model found, skipping`);
         }
 
-        // 10. ✅ FINALLY: Delete the User account
         await User.findByIdAndDelete(userId);
         console.log(`   👤 Deleted user account ID: ${userId}`);
 
-        // ─── TOTAL SUMMARY ───
         const totalDeleted = 
             chatResult.deletedCount +
             leadResult.deletedCount +
@@ -738,7 +725,7 @@ const deleteAccount = async (req, res) => {
             reportResult.deletedCount +
             dataExportResult.deletedCount +
             searchCacheResult.deletedCount +
-            1; // User account
+            1;
 
         console.log(`✅ [DELETE ACCOUNT] Account deletion complete. Total records deleted: ${totalDeleted}`);
 
@@ -769,7 +756,7 @@ const deleteAccount = async (req, res) => {
     }
 };
 
-// ─── ✅ NEW: Setup Admin Security Questions ───
+// ✅ Setup Admin Security Questions
 const setupAdminSecurity = async (req, res) => {
     try {
         const userId = req.userId;
@@ -777,7 +764,6 @@ const setupAdminSecurity = async (req, res) => {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
-        // ✅ Verify user is admin
         const safeUserId = String(userId);
         const user = await User.findById(safeUserId);
         if (!user) {
@@ -789,13 +775,11 @@ const setupAdminSecurity = async (req, res) => {
             return res.status(403).json({ success: false, message: 'Admin privileges required' });
         }
 
-        // ─── ✅ VALIDATE ALL 8 SECURITY ANSWERS ───
         const { 
-            dish, pn, mum, dm,  // Layer 2 questions
-            dad, friend, enemy, app  // Layer 3 questions
+            dish, pn, mum, dm,
+            dad, friend, enemy, app
         } = req.body;
 
-        // ✅ Validate all inputs are strings
         const allInputs = { dish, pn, mum, dm, dad, friend, enemy, app };
         for (const [key, value] of Object.entries(allInputs)) {
             if (typeof value !== 'string') {
@@ -803,7 +787,6 @@ const setupAdminSecurity = async (req, res) => {
             }
         }
 
-        // Validate all answers are present and meet minimum requirements
         const requiredFields = [
             { value: dish, name: 'Favorite dish' },
             { value: pn, name: 'Phone number' },
@@ -830,7 +813,6 @@ const setupAdminSecurity = async (req, res) => {
             });
         }
 
-        // ─── ✅ HASH ALL ANSWERS ───
         const saltRounds = 10;
         
         const hashedDish = await bcrypt.hash(String(dish).trim().toLowerCase(), saltRounds);
@@ -842,7 +824,6 @@ const setupAdminSecurity = async (req, res) => {
         const hashedEnemy = await bcrypt.hash(String(enemy).trim().toLowerCase(), saltRounds);
         const hashedApp = await bcrypt.hash(String(app).trim().toLowerCase(), saltRounds);
 
-        // ─── ✅ SAVE TO USER ───
         user.adminAns_dish = hashedDish;
         user.adminAns_pn = hashedPn;
         user.adminAns_mum = hashedMum;
@@ -874,7 +855,7 @@ const setupAdminSecurity = async (req, res) => {
     }
 };
 
-// ─── ✅ NEW: Check Admin Security Setup Status ───
+// ✅ Check Admin Security Setup Status
 const checkAdminSecurityStatus = async (req, res) => {
     try {
         const userId = req.userId;
@@ -909,7 +890,7 @@ const checkAdminSecurityStatus = async (req, res) => {
     }
 };
 
-// ✅ NEW: Generate TOTP Secret for Admin Setup
+// ✅ Generate TOTP Secret for Admin Setup
 const generateAdminTotp = async (req, res) => {
     try {
         const userId = req.userId;
@@ -927,7 +908,7 @@ const generateAdminTotp = async (req, res) => {
     }
 };
 
-// ✅ NEW: Verify and Enable TOTP
+// ✅ Verify and Enable TOTP
 const enableAdminTotp = async (req, res) => {
     try {
         const { token } = req.body;
@@ -951,7 +932,7 @@ const enableAdminTotp = async (req, res) => {
     }
 };
 
-// ✅ NEW: Admin Login Step 2 (Verify TOTP)
+// ✅ Admin Login Step 2 (Verify TOTP)
 const verifyAdminTotpLogin = async (req, res) => {
     try {
         const { token, tempToken } = req.body;
@@ -961,7 +942,6 @@ const verifyAdminTotpLogin = async (req, res) => {
         let decoded;
         try { decoded = jwt.verify(tempToken, process.env.JWT_SECRET); } catch (err) { return res.status(401).json({ success: false, message: 'Session expired' }); }
         
-        // ✅ Validate decoded ID
         if (!decoded.id || !isValidObjectId(decoded.id)) {
             return res.status(401).json({ success: false, message: 'Invalid session' });
         }
@@ -971,7 +951,6 @@ const verifyAdminTotpLogin = async (req, res) => {
         if (!user || !user.isAdmin || !user.adminTotpEnabled) return res.status(403).json({ success: false, message: '2FA not configured or invalid user' });
         const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
         if (verified) {
-            // ✅ CHANGED: 30m → 3d (3-day session expiry for admin after 2FA)
             const finalToken = jwt.sign(
                 { id: user._id, role: 'admin', permissions: user.permissions || ['all'] },
                 process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET, 
