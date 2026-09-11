@@ -1,23 +1,13 @@
 // ──────────────────────────────────────────────────────────────
 // UNDERSTANDING.JS — Layer 1: Query Understanding Service
-// Version: v1.0.0
+// Version: v1.0.1
 // 
 // PURPOSE: Transform natural language query → validated JSON
 // 
-// RESPONSIBILITIES:
-// - Intent classification (enum)
-// - Entity extraction (typed, nullable)
-// - Ambiguity detection (including location ambiguity)
-// - Query normalization
-// - Schema enforcement (strict)
-// - Retry on validation failure (max 3 attempts)
-// - Fallback behavior (no crashes)
-// - No side effects (no external calls)
-// - Structured logging (sanitized)
-// - Rate limiting (distributed-ready)
-// - Schema versioning
-// - HTTP 429 for rate limits (not fallback)
-// - Transport retries separated from schema retries
+// FIXED IN v1.0.1:
+// - Strict intent classification rules
+// - ICP_SEARCH only when user asks for companies (no person role)
+// - PERSON_SEARCH when user asks for people (CEO, founder, etc.)
 // ──────────────────────────────────────────────────────────────
 
 const { v4: uuidv4 } = require('uuid');
@@ -176,7 +166,7 @@ function loadSchema() {
         $id: 'https://skyline.ai/schemas/understanding.v1.json',
         title: 'Understanding Schema v1',
         description: 'Structured understanding of a natural language query',
-        version: '1.0.0',
+        version: '1.0.1',
         type: 'object',
         required: ['intent', 'confidence', 'entities', 'ambiguities', 'normalized_query'],
         additionalProperties: false,
@@ -498,7 +488,7 @@ function getFallbackResponse() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. SYSTEM PROMPT — NATURAL LOCATION UNDERSTANDING
+// 8. SYSTEM PROMPT — WITH STRICT INTENT CLASSIFICATION
 // ──────────────────────────────────────────────────────────────
 
 function buildSystemPrompt(schemaVersion) {
@@ -512,15 +502,96 @@ Rules:
 - Do not invent entities or fields that are not in the schema.
 - Do not perform any external actions. You only analyze text.
 
-INTENT DEFINITIONS:
-- ICP_SEARCH: Ideal Customer Profile search (company criteria, industry, location, size)
-- PERSON_SEARCH: Find specific people by role, company, or location
-- COMPANY_SEARCH: Find companies by criteria
-- EMAIL_FILTER: Filter existing emails by criteria
-- THREAD_SUMMARY: Summarize a conversation thread
-- ATTACHMENT_SEARCH: Find specific attachments
-- ACTION_REQUIRED: Find emails needing action
-- UNKNOWN: Fallback for unclear or out-of-scope requests
+╔══════════════════════════════════════════════════════════════════╗
+║          INTENT CLASSIFICATION — CRITICAL RULES                ║
+║                                                                ║
+║  ⚠️  FOLLOW THESE RULES EXACTLY — NO EXCEPTIONS ⚠️              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+The intent MUST be chosen based on WHAT THE USER WANTS RETURNED:
+
+┌──────────────────────────────────────────────────────────────────┐
+│ PERSON_SEARCH — Use when the user asks for PEOPLE (humans)      │
+├──────────────────────────────────────────────────────────────────┤
+│ Trigger keywords:                                               │
+│   - Job titles: CEO, CFO, CTO, COO, CMO, CISO, founder,        │
+│     co-founder, owner, president, director, VP,                 │
+│     vice president, head of, manager, decision maker,           │
+│     executive, partner, principal                               │
+│   - Explicit person words: people, contacts, decision makers   │
+│                                                                 │
+│ Examples:                                                       │
+│   ✅ "Find CEOs in SaaS in San Francisco" → PERSON_SEARCH      │
+│   ✅ "Find founders in Berlin" → PERSON_SEARCH                 │
+│   ✅ "Find decision makers in Fintech in London" → PERSON_SEARCH│
+│   ✅ "I need CTO contacts in Nigeria" → PERSON_SEARCH          │
+│                                                                 │
+│ RULE: If ANY job title or person role is mentioned, ALWAYS     │
+│       use PERSON_SEARCH — even if companies are also mentioned.│
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ ICP_SEARCH — Use ONLY when the user asks for COMPANIES          │
+│              (no person, no job title mentioned)                │
+├──────────────────────────────────────────────────────────────────┤
+│ Trigger keywords:                                               │
+│   - Companies, businesses, startups, firms, enterprises,        │
+│     organizations, agencies                                    │
+│   - Industry + location + size filters ONLY                     │
+│   - NO job title, NO person role                               │
+│                                                                 │
+│ Examples:                                                       │
+│   ✅ "Find SaaS companies in San Francisco" → ICP_SEARCH       │
+│   ✅ "Find 50 startups in Germany with 100+ employees" → ICP   │
+│   ✅ "Show me fintech companies in London" → ICP_SEARCH        │
+│                                                                 │
+│ ❌ WRONG: "Find CEOs in SaaS companies in SF" → ICP_SEARCH    │
+│ ✅ RIGHT: "Find CEOs in SaaS companies in SF" → PERSON_SEARCH │
+│           (CEO is a person — use PERSON_SEARCH!)                │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ COMPANY_SEARCH — Use when the user asks for SPECIFIC COMPANIES  │
+│                  BY NAME (rare)                                 │
+├──────────────────────────────────────────────────────────────────┤
+│ Examples:                                                       │
+│   ✅ "Find Acme Corp" → COMPANY_SEARCH                         │
+│   ✅ "Look up Microsoft" → COMPANY_SEARCH                      │
+│   ✅ "Find companies called Acme" → COMPANY_SEARCH             │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ OTHER INTENTS                                                   │
+├──────────────────────────────────────────────────────────────────┤
+│ EMAIL_FILTER: Filter existing emails by criteria               │
+│ THREAD_SUMMARY: Summarize a conversation thread                │
+│ ATTACHMENT_SEARCH: Find specific attachments                   │
+│ ACTION_REQUIRED: Find emails needing action                    │
+│ UNKNOWN: Fallback for unclear or out-of-scope requests         │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ THE DECISION TREE — FOLLOW THIS EXACTLY                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│ 1. Does the user mention a JOB TITLE or PERSON ROLE?           │
+│    (CEO, founder, CTO, manager, decision maker, etc.)          │
+│                                                                 │
+│    → YES → PERSON_SEARCH                                        │
+│                                                                 │
+│ 2. Does the user ask for COMPANIES by name?                    │
+│    (Acme Corp, Microsoft, etc.)                                │
+│                                                                 │
+│    → YES → COMPANY_SEARCH                                       │
+│                                                                 │
+│ 3. Does the user ask for COMPANIES by criteria?                │
+│    (industry, location, size — no job title)                   │
+│                                                                 │
+│    → YES → ICP_SEARCH                                           │
+│                                                                 │
+│ 4. Otherwise → match to EMAIL_FILTER, THREAD_SUMMARY, etc.     │
+│                                                                 │
+└──────────────────────────────────────────────────────────────────┘
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║     LOCATION EXTRACTION — NATURAL UNDERSTANDING                ║
@@ -561,20 +632,23 @@ If the location is AMBIGUOUS, set:
     candidates: ["Option 1", "Option 2"]
 }]
 
-EXAMPLES:
+╔══════════════════════════════════════════════════════════════════╗
+║     COMPLETE EXAMPLES — INTENT + LOCATION TOGETHER             ║
+╚══════════════════════════════════════════════════════════════════╝
 
-Example 1 — Clear location:
-User: "Find CEOs in San Francisco"
+Example 1 — Person + Clear Location:
+User: "Find CEOs in SaaS in San Francisco"
+→ intent = "PERSON_SEARCH"  (CEO is a person)
+→ entities.job_title = "CEO"
+→ entities.industry = "SaaS"
 → entities.location = "San Francisco"
 → ambiguities = []
 
-Example 2 — Clear location:
-User: "Find CEOs in Germany"
-→ entities.location = "Germany"
-→ ambiguities = []
-
-Example 3 — Ambiguous location:
-User: "Find CEOs in London"
+Example 2 — Person + Ambiguous Location:
+User: "Find CEOs in SaaS in London"
+→ intent = "PERSON_SEARCH"  (CEO is a person)
+→ entities.job_title = "CEO"
+→ entities.industry = "SaaS"
 → entities.location = null
 → ambiguities = [{
     field: "entities.location",
@@ -583,15 +657,42 @@ User: "Find CEOs in London"
     candidates: ["London, UK", "London, Canada"]
 }]
 
-Example 4 — Ambiguous abbreviation:
-User: "Find companies in SF"
+Example 3 — Company only + Clear Location:
+User: "Find SaaS companies in San Francisco"
+→ intent = "ICP_SEARCH"  (no person mentioned)
+→ entities.job_title = null
+→ entities.industry = "SaaS"
+→ entities.location = "San Francisco"
+→ ambiguities = []
+
+Example 4 — Company only + Ambiguous Location:
+User: "Find SaaS companies in London"
+→ intent = "ICP_SEARCH"  (no person mentioned)
+→ entities.job_title = null
+→ entities.industry = "SaaS"
 → entities.location = null
 → ambiguities = [{
     field: "entities.location",
     patchPath: "location",
-    issue: "SF could mean San Francisco or South Florida.",
-    candidates: ["San Francisco, CA", "South Florida"]
+    issue: "London could refer to London, UK or London, Ontario, Canada.",
+    candidates: ["London, UK", "London, Canada"]
 }]
+
+Example 5 — Person + Complex criteria:
+User: "Find me CEOs in SaaS companies in Germany with 100+ employees"
+→ intent = "PERSON_SEARCH"  (CEO is a person)
+→ entities.job_title = "CEO"
+→ entities.industry = "SaaS"
+→ entities.location = "Germany"
+→ entities.employee_count_min = 100
+
+Example 6 — Company only + Complex criteria:
+User: "Find me SaaS companies in Germany with 100+ employees"
+→ intent = "ICP_SEARCH"  (no person mentioned)
+→ entities.job_title = null
+→ entities.industry = "SaaS"
+→ entities.location = "Germany"
+→ entities.employee_count_min = 100
 
 SCHEMA VERSION: ${schemaVersion}
 
@@ -786,7 +887,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
                 confidence: parsed.confidence
             });
             
-            // ✅ DEBUG: Log the parsed result
             console.log('🔍 [UNDERSTANDING] Parsed result:', JSON.stringify(parsed, null, 2));
             
             return {
@@ -806,7 +906,6 @@ async function processWithSchemaRetry(userQuery, tenantId, userId, conversationI
                 errors: validation.errors
             });
             
-            // ✅ DEBUG: Log the validation errors
             console.log('❌ [UNDERSTANDING] Validation errors:', validation.errors);
         }
 
@@ -947,7 +1046,6 @@ async function understand(query, tenantId, userId, options = {}) {
             });
         }
 
-        // ✅ DEBUG: Log the final response
         console.log('📤 [UNDERSTANDING] Final response:', JSON.stringify(response, null, 2));
         console.log('📤 [UNDERSTANDING] Response intent:', response.intent);
         console.log('📤 [UNDERSTANDING] Response entities:', JSON.stringify(response.entities, null, 2));
