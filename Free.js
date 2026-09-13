@@ -6,6 +6,7 @@
 
 const Understanding = require('./Understanding');
 const Session = require('./Session');
+const retrievalService = require('./retrievalService');
 
 // ────────────────────────────────────────────────────────────────
 // 2. MAIN FUNCTION
@@ -261,13 +262,54 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── Step 7: Return the understanding result ──
-        const resultsString = JSON.stringify(understanding, null, 2);
+        // ── Layer 5: Retrieval and Search Execution ──
+        let retrieval = null;
+        try {
+            retrieval = await retrievalService.retrieve(understanding, {
+                tenantId,
+                userId,
+                sessionId,
+                requestId: understanding.requestId || undefined
+            });
+            console.log('📋 [FREE] Layer 5 retrieval status:', retrieval.status);
+            console.log('📋 [FREE] Layer 5 candidates:', retrieval.candidates ? retrieval.candidates.length : 0);
+        } catch (err) {
+            console.error('❌ [FREE] Layer 5 retrieval failed:', err.message);
+            retrieval = {
+                status: 'ERROR',
+                request_id: understanding.requestId || null,
+                candidates: [],
+                error: {
+                    code: 'RETRIEVAL_LAYER_ERROR',
+                    message: err.message
+                },
+                metadata: {
+                    sources_attempted: [],
+                    sources_succeeded: [],
+                    sources_failed: [{ source: 'retrievalService', error_code: 'INTERNAL_ERROR' }]
+                }
+            };
+        }
+
+        // ── Step 7: Build reply object (understanding + retrieval) ──
+        const replyObject = {
+            intent: understanding.intent,
+            confidence: understanding.confidence,
+            entities: understanding.entities,
+            ambiguities: understanding.ambiguities,
+            normalized_query: understanding.normalized_query,
+            candidates: retrieval && Array.isArray(retrieval.candidates) ? retrieval.candidates : [],
+            retrieval_status: retrieval ? retrieval.status : 'UNKNOWN',
+            retrieval_metadata: retrieval ? retrieval.metadata : null,
+            search_plan: retrieval && retrieval.search_plan ? retrieval.search_plan : null
+        };
+
+        const resultsString = JSON.stringify(replyObject, null, 2);
         
         console.log('📋 [FREE] Returning reply length:', resultsString ? resultsString.length : 0);
         console.log('📋 [FREE] Reply preview:', resultsString ? resultsString.substring(0, 200) : 'null');
         console.log('📋 [FREE] Understanding intent:', understanding.intent);
-        console.log('📋 [FREE] Understanding status:', understanding.status);
+        console.log('📋 [FREE] Retrieval status:', retrieval ? retrieval.status : 'none');
 
         // ✅ FIX: Ensure we always return a valid reply
         if (!resultsString || resultsString === 'null' || resultsString === 'undefined' || resultsString === '{}') {
@@ -287,7 +329,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 _meta: {
                     tier: 'free',
                     error: 'Empty resultsString',
-                    understanding: understanding
+                    understanding: understanding,
+                    retrieval: retrieval
                 }
             };
         }
@@ -302,6 +345,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             _meta: {
                 tier: 'free',
                 understanding: understanding,
+                retrieval: retrieval,
                 status: understanding.status || 'ready'
             }
         };
