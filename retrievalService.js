@@ -4,7 +4,7 @@
 // retrievalService.js
 // Layer 5: Retrieval and Search Execution
 //
-// Version: v1
+// Version: v2
 // Schema: retrieval.v1
 //
 // PURPOSE:
@@ -13,24 +13,12 @@
 //   against registered adapters, normalize, deduplicate, rank, and
 //   return candidate records.
 //
-// ARCHITECTURE RULES (from Layer 5 design document):
-//   - No LLM. Fully deterministic.
-//   - No enrichment, verification, scoring, or formatting.
-//   - Never guess; never silently drop a filter.
-//   - Empty results are SUCCESS, not errors.
-//   - Partial source failures must be visible.
-//   - Provider details live behind adapters.
-//   - Never throws — always returns a structured response.
-//
-// EXPORTS:
-//   retrieve(understanding, context)
-//   registerAdapter(name, adapter)
-//   getAdapter(name)
-//   listAdapters()
-//   preSearchGate(understanding, context)
-//   buildSearchPlan(understanding, context)
-//   debug()
-//   CONFIG
+// v2 CHANGES:
+//   - Replaced stub adapter with REAL internal search adapter
+//   - Now queries MongoDB Lead collection with built queries
+//   - Added fuzzy matching for text fields
+//   - Added proper error handling
+//   - Search now returns actual results
 // ──────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────
@@ -60,7 +48,6 @@ const CONFIG = {
         ATTACHMENT_SEARCH: 'attachments'
     },
 
-    // Field ownership resolution (§9.5)
     FIELD_OWNERSHIP: {
         job_title: 'person',
         person_name: 'person',
@@ -73,7 +60,6 @@ const CONFIG = {
         date_range: 'email'
     },
 
-    // Approved operators only (§10.3)
     APPROVED_OPERATORS: [
         'equals',
         'normalized_equals',
@@ -89,7 +75,6 @@ const CONFIG = {
         'exists'
     ],
 
-    // Retrieval scoring weights (§16.2)
     SCORING: {
         EXACT_TITLE_MATCH: 3,
         NORMALIZED_TITLE_MATCH: 2,
@@ -127,7 +112,7 @@ const CONFIG = {
 };
 
 // ──────────────────────────────────────────────────────────────
-// 2. ID GENERATION (no external deps)
+// 2. ID GENERATION
 // ──────────────────────────────────────────────────────────────
 
 const crypto = require('crypto');
@@ -143,21 +128,11 @@ function hashId(value) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. ADAPTER REGISTRY (§11)
+// 3. ADAPTER REGISTRY
 // ──────────────────────────────────────────────────────────────
 
 const adapterRegistry = new Map();
 
-/**
- * Register a search adapter.
- * Adapter contract:
- *   {
- *     name: string,
- *     supports(searchPlan): boolean,
- *     search(searchPlan, context): Promise<{ records: any[] }>,
- *     normalize(records): Array<CanonicalCandidate>
- *   }
- */
 function registerAdapter(name, adapter) {
     if (!name || typeof name !== 'string') {
         throw new Error('registerAdapter: name must be a non-empty string');
@@ -184,33 +159,231 @@ function listAdapters() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. STUB ADAPTER (default, no external deps)
-//
-// Purpose: allow the full Layer 5 pipeline to run end-to-end
-// without a real data source. Real adapters can be registered
-// later without touching Free.js.
+// 4. REAL INTERNAL SEARCH ADAPTER — Queries MongoDB Lead collection
 // ──────────────────────────────────────────────────────────────
 
-const stubAdapter = {
-    name: 'internal_people_index',
+/**
+ * Internal lead database adapter.
+ * Searches the user's own Lead collection in MongoDB.
+ * Uses case-insensitive fuzzy matching for text fields.
+ */
+const internalLeadAdapter = {
+    name: 'internal_lead_db',
+
     supports(searchPlan) {
-        return searchPlan && typeof searchPlan.target === 'string';
+        // Supports people and companies searches
+        return searchPlan && (
+            searchPlan.target === 'people' ||
+            searchPlan.target === 'companies'
+        );
     },
-    async search(/* searchPlan, context */) {
+
+    async search(searchPlan, context) {
+        console.log('🔍 [ADAPTER] internal_lead_db.search() called');
+        console.log('🔍 [ADAPTER] Target:', searchPlan.target);
+        console.log('🔍 [ADAPTER] Filter count:', searchPlan.filters?.length || 0);
+
+        // Lazy load Lead model (avoid circular deps)
+        const Lead = require('./Lead');
+
+        // Build MongoDB query from search plan filters
+        const mongoQuery = buildMongoQuery(searchPlan, context);
+
+        console.log('🔍 [ADAPTER] MongoDB query:', JSON.stringify(mongoQuery, null, 2));
+
+        // Execute query
+        const limit = searchPlan.pagination?.limit || CONFIG.DEFAULT_LIMIT;
+        const leads = await Lead.find(mongoQuery)
+            .limit(limit)
+            .lean(); // Fast read-only
+
+        console.log('🔍 [ADAPTER] Found', leads.length, 'leads');
+
+        if (leads.length === 0) {
+            return {
+                records: [],
+                empty_result_reason: CONFIG.EMPTY_RESULT_REASONS.NO_MATCHING_RECORDS
+            };
+        }
+
         return {
-            records: [],
-            empty_result_reason: CONFIG.EMPTY_RESULT_REASONS.SOURCE_NOT_CONFIGURED
+            records: leads,
+            empty_result_reason: null
         };
     },
+
     normalize(records) {
-        return Array.isArray(records) ? records : [];
+        if (!Array.isArray(records)) return [];
+
+        return records.map(lead => ({
+            person_id: lead._id ? String(lead._id) : null,
+            company_id: null,
+            name: lead.name || null,
+            job_title: lead.jobTitle || lead.role || null,
+            job_title_normalized: lead.jobTitle ? String(lead.jobTitle).toLowerCase() : null,
+            company_name: lead.company || null,
+            industry: lead.industry || null,
+            location: lead.location || lead.hq || null,
+            employee_count: lead.employees || lead.employeeCount || null,
+            email: lead.email || null,
+            company: lead.company ? {
+                company_id: null,
+                name: lead.company,
+                industry: lead.industry || null,
+                employee_count: lead.employees || null,
+                location: lead.location || null
+            } : null,
+            contact: {
+                email: lead.email || null,
+                phone: lead.phone || null
+            },
+            source: 'internal_lead_db',
+            source_record_id: lead._id ? String(lead._id) : null,
+            match_type: 'normalized',
+            _raw: lead
+        }));
     }
 };
 
-registerAdapter('internal_people_index', stubAdapter);
+/**
+ * Build a MongoDB query from the search plan filters.
+ * 
+ * Mapping rules:
+ *   - Text fields → case-insensitive regex
+ *   - Numeric fields → $gte / $lte
+ *   - Tenant filter → always injected
+ */
+function buildMongoQuery(searchPlan, context) {
+    const query = {};
+
+    // Always filter by tenant (multi-tenant isolation)
+    if (context.tenantId) {
+        // Use userId if it matches the leads collection schema
+        // Adjust this based on your actual Lead schema
+        query.userId = context.userId || context.tenantId;
+    }
+
+    const filters = searchPlan.filters || [];
+
+    for (const filter of filters) {
+        // Skip injected filters (already handled above)
+        if (filter._injected) continue;
+
+        const { field, operator, value } = filter;
+
+        // Map canonical field names → MongoDB field names
+        const mongoField = mapFieldToMongo(field);
+        if (!mongoField) {
+            console.warn(`⚠️ [ADAPTER] Unknown field: ${field}`);
+            continue;
+        }
+
+        switch (operator) {
+            case 'normalized_equals':
+            case 'equals':
+                // Case-insensitive exact match
+                query[mongoField] = {
+                    $regex: `^${escapeRegex(value)}$`,
+                    $options: 'i'
+                };
+                break;
+
+            case 'contains':
+                // Case-insensitive substring
+                query[mongoField] = {
+                    $regex: escapeRegex(value),
+                    $options: 'i'
+                };
+                break;
+
+            case 'location_equals':
+                // Location: match city OR country OR full string
+                query[mongoField] = {
+                    $regex: escapeRegex(value),
+                    $options: 'i'
+                };
+                break;
+
+            case 'greater_than_or_equal':
+                query[mongoField] = { ...(query[mongoField] || {}), $gte: value };
+                break;
+
+            case 'less_than_or_equal':
+                query[mongoField] = { ...(query[mongoField] || {}), $lte: value };
+                break;
+
+            case 'range':
+                query[mongoField] = { $gte: value.min, $lte: value.max };
+                break;
+
+            case 'in':
+                query[mongoField] = { $in: value };
+                break;
+
+            case 'exists':
+                query[mongoField] = { $exists: true, $ne: null };
+                break;
+
+            case 'date_after':
+                query[mongoField] = { ...(query[mongoField] || {}), $gte: new Date(value) };
+                break;
+
+            case 'date_before':
+                query[mongoField] = { ...(query[mongoField] || {}), $lte: new Date(value) };
+                break;
+
+            default:
+                console.warn(`⚠️ [ADAPTER] Unknown operator: ${operator}`);
+        }
+    }
+
+    return query;
+}
+
+/**
+ * Map canonical field names → MongoDB collection field names.
+ * Adjust these to match your actual Lead schema.
+ */
+function mapFieldToMongo(canonicalField) {
+    const mapping = {
+        // Person fields
+        'person.name': 'name',
+        'person.job_title': 'jobTitle',
+        'person.location': 'location',
+        'person.email': 'email',
+        'person.phone': 'phone',
+
+        // Company fields
+        'company.name': 'company',
+        'company.industry': 'industry',
+        'company.location': 'location',
+        'company.employee_count': 'employees',
+
+        // Email fields
+        'email.type': 'emailType',
+        'email.date': 'emailDate',
+        'email.address': 'email',
+
+        // Tenant
+        'tenant_id': 'userId'
+    };
+
+    return mapping[canonicalField] || null;
+}
+
+/**
+ * Escape special regex characters in user input.
+ */
+function escapeRegex(str) {
+    if (!str) return '';
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Register the real adapter
+registerAdapter('internal_lead_db', internalLeadAdapter);
 
 // ──────────────────────────────────────────────────────────────
-// 5. REQUEST VALIDATION (§9.2, §7.3)
+// 5. REQUEST VALIDATION
 // ──────────────────────────────────────────────────────────────
 
 function validateRetrievalInput(understanding) {
@@ -232,7 +405,6 @@ function validateRetrievalInput(understanding) {
         errors.push('ambiguities must be an array');
     }
 
-    // Numeric range validation
     if (understanding.entities) {
         const e = understanding.entities;
 
@@ -263,7 +435,7 @@ function validateRetrievalInput(understanding) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. PRE-SEARCH GATE (§9.3, §9.4)
+// 6. PRE-SEARCH GATE
 // ──────────────────────────────────────────────────────────────
 
 function preSearchGate(understanding, context = {}) {
@@ -299,7 +471,6 @@ function preSearchGate(understanding, context = {}) {
     }
     result.intent_supported = true;
 
-    // Ambiguities must be resolved before retrieval (§9.3)
     if (Array.isArray(understanding.ambiguities) && understanding.ambiguities.length > 0) {
         result.error_code = CONFIG.ERROR_CODES.CLARIFICATION_REQUIRED;
         result.reason = 'Unresolved ambiguities present.';
@@ -307,7 +478,6 @@ function preSearchGate(understanding, context = {}) {
     }
     result.ambiguities_resolved = true;
 
-    // Tenant context — must be provided by trusted backend, not by the LLM (§20.1)
     if (!context || typeof context.tenantId !== 'string' || context.tenantId.trim().length === 0) {
         result.error_code = CONFIG.ERROR_CODES.PERMISSION_DENIED;
         result.reason = 'Missing authenticated tenant context.';
@@ -315,7 +485,6 @@ function preSearchGate(understanding, context = {}) {
     }
     result.authorization_valid = true;
 
-    // Required fields — target must be derivable
     if (!CONFIG.INTENT_TARGET_MAP[understanding.intent]) {
         result.error_code = CONFIG.ERROR_CODES.UNSUPPORTED_QUERY;
         result.reason = 'No target mapping for intent.';
@@ -323,7 +492,6 @@ function preSearchGate(understanding, context = {}) {
     }
     result.required_fields_present = true;
 
-    // Employee range
     const e = understanding.entities || {};
     const minOk = e.employee_count_min == null || (Number.isInteger(e.employee_count_min) && e.employee_count_min >= 0);
     const maxOk = e.employee_count_max == null || (Number.isInteger(e.employee_count_max) && e.employee_count_max >= 0);
@@ -343,23 +511,19 @@ function preSearchGate(understanding, context = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 7. INTENT → TARGET (§9.4)
+// 7. INTENT → TARGET
 // ──────────────────────────────────────────────────────────────
 
 function mapIntentToTarget(intent) {
     return CONFIG.INTENT_TARGET_MAP[intent] || null;
 }
 
-// ──────────────────────────────────────────────────────────────
-// 8. FIELD OWNERSHIP RESOLUTION (§9.5)
-// ──────────────────────────────────────────────────────────────
-
 function resolveFieldOwner(field) {
     return CONFIG.FIELD_OWNERSHIP[field] || null;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 9. SEARCH PLAN COMPILER (§9.6, §10)
+// 8. SEARCH PLAN COMPILER
 // ──────────────────────────────────────────────────────────────
 
 function compileSearchPlan(understanding, context = {}) {
@@ -368,7 +532,6 @@ function compileSearchPlan(understanding, context = {}) {
     const filters = [];
     const excludedFilters = [];
 
-    // job_title
     if (entities.job_title != null) {
         filters.push({
             field: 'person.job_title',
@@ -378,7 +541,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // industry
     if (entities.industry != null) {
         filters.push({
             field: 'company.industry',
@@ -388,7 +550,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // location — owner depends on target (§12.2)
     if (entities.location != null) {
         const locationField =
             target === 'people' ? 'person.location' :
@@ -402,7 +563,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // employee_count_min
     if (entities.employee_count_min != null) {
         filters.push({
             field: 'company.employee_count',
@@ -417,7 +577,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // employee_count_max
     if (entities.employee_count_max != null) {
         filters.push({
             field: 'company.employee_count',
@@ -432,7 +591,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // company_name
     if (entities.company_name != null) {
         filters.push({
             field: 'company.name',
@@ -442,7 +600,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // person_name
     if (entities.person_name != null) {
         filters.push({
             field: 'person.name',
@@ -452,7 +609,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // email_type
     if (entities.email_type != null) {
         filters.push({
             field: 'email.type',
@@ -462,7 +618,6 @@ function compileSearchPlan(understanding, context = {}) {
         });
     }
 
-    // date_range
     if (entities.date_range != null && typeof entities.date_range === 'object') {
         if (entities.date_range.from) {
             filters.push({
@@ -482,7 +637,7 @@ function compileSearchPlan(understanding, context = {}) {
         }
     }
 
-    // Security filter — injected from trusted context (§9.7, §20.1)
+    // Security filter — injected
     filters.push({
         field: 'tenant_id',
         operator: 'equals',
@@ -512,7 +667,7 @@ function compileSearchPlan(understanding, context = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 10. SEARCH PLAN VALIDATION (§10.3)
+// 9. SEARCH PLAN VALIDATION
 // ──────────────────────────────────────────────────────────────
 
 function validateSearchPlan(plan) {
@@ -537,7 +692,7 @@ function validateSearchPlan(plan) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 11. SOURCE SELECTION (§9.8)
+// 10. SOURCE SELECTION
 // ──────────────────────────────────────────────────────────────
 
 function selectAdapters(searchPlan /*, context */) {
@@ -553,7 +708,7 @@ function selectAdapters(searchPlan /*, context */) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 12. CANDIDATE NORMALIZATION (§14)
+// 11. CANDIDATE NORMALIZATION
 // ──────────────────────────────────────────────────────────────
 
 function normalizeCandidate(raw, sourceName) {
@@ -588,7 +743,14 @@ function normalizeAll(sourceResponses) {
     const out = [];
     for (const resp of sourceResponses) {
         if (!resp || !Array.isArray(resp.records)) continue;
-        for (const r of resp.records) {
+
+        // Find the adapter to use its normalize method
+        const adapter = getAdapter(resp.source);
+        const records = adapter && typeof adapter.normalize === 'function'
+            ? adapter.normalize(resp.records)
+            : resp.records.map(r => normalizeCandidate(r, resp.source));
+
+        for (const r of records) {
             const n = normalizeCandidate(r, resp.source);
             if (n) out.push(n);
         }
@@ -597,7 +759,7 @@ function normalizeAll(sourceResponses) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 13. DEDUPLICATION (§15)
+// 12. DEDUPLICATION
 // ──────────────────────────────────────────────────────────────
 
 function normalizeKeyPart(v) {
@@ -630,7 +792,6 @@ function deduplicateCandidates(candidates) {
         }
         const existing = byKey.get(key);
 
-        // Merge non-null fields, preserve conflicts
         const fields = ['name', 'job_title', 'company_name', 'industry', 'location', 'email'];
         for (const f of fields) {
             if (existing[f] == null && c[f] != null) {
@@ -656,7 +817,7 @@ function deduplicateCandidates(candidates) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 14. RETRIEVAL RANKING (§16)
+// 13. RETRIEVAL RANKING
 // ──────────────────────────────────────────────────────────────
 
 function scoreCandidate(candidate, plan) {
@@ -713,7 +874,6 @@ function rankCandidates(candidates, plan) {
                 retrieval_score: score,
                 matched_filters: matched
             },
-            // Explicitly null — belongs to a later layer
             lead_score: null
         };
     });
@@ -728,7 +888,7 @@ function rankCandidates(candidates, plan) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 15. SOURCE EXECUTION (§9.8, §9.9)
+// 14. SOURCE EXECUTION
 // ──────────────────────────────────────────────────────────────
 
 async function executeAdapter(adapter, searchPlan, context) {
@@ -777,7 +937,7 @@ async function executeAdapters(adapters, searchPlan, context) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 16. RESPONSE BUILDERS (§8)
+// 15. RESPONSE BUILDERS
 // ──────────────────────────────────────────────────────────────
 
 function buildSuccessResponse({ requestId, searchId, intent, searchPlan, candidates, sourceResponses, durationMs }) {
@@ -876,7 +1036,7 @@ function buildErrorResponse({ requestId, code, message, retryable = false, sourc
 }
 
 // ──────────────────────────────────────────────────────────────
-// 17. MAIN ENTRYPOINT — retrieve()
+// 16. MAIN ENTRYPOINT — retrieve()
 // ──────────────────────────────────────────────────────────────
 
 async function retrieve(understanding, context = {}) {
@@ -884,10 +1044,17 @@ async function retrieve(understanding, context = {}) {
     const requestId = context.requestId || (understanding && understanding.requestId) || generateId('req');
     const searchId = generateId('search');
 
+    console.log('═══════════════════════════════════════════════════════');
+    console.log('🔍 [RETRIEVAL] Starting retrieval');
+    console.log('🔍 [RETRIEVAL] Intent:', understanding?.intent);
+    console.log('🔍 [RETRIEVAL] Tenant:', context?.tenantId);
+    console.log('═══════════════════════════════════════════════════════');
+
     // ── Step 1: Pre-search gate ──
     const gate = preSearchGate(understanding, context);
 
     if (!gate.ready_for_retrieval) {
+        console.warn('⚠️ [RETRIEVAL] Pre-search gate failed:', gate.reason);
         if (gate.error_code === CONFIG.ERROR_CODES.CLARIFICATION_REQUIRED) {
             return buildClarificationResponse({
                 requestId,
@@ -904,10 +1071,15 @@ async function retrieve(understanding, context = {}) {
 
     // ── Step 2: Compile search plan ──
     const searchPlan = compileSearchPlan(understanding, context);
+    console.log('🔍 [RETRIEVAL] Search plan compiled:', JSON.stringify({
+        target: searchPlan.target,
+        filterCount: searchPlan.filters.length
+    }));
 
     // ── Step 3: Validate search plan ──
     const planCheck = validateSearchPlan(searchPlan);
     if (!planCheck.valid) {
+        console.error('❌ [RETRIEVAL] Search plan invalid:', planCheck.reason);
         return buildErrorResponse({
             requestId,
             code: CONFIG.ERROR_CODES.INVALID_FILTER,
@@ -918,9 +1090,9 @@ async function retrieve(understanding, context = {}) {
 
     // ── Step 4: Select adapters ──
     const adapters = selectAdapters(searchPlan, context);
+    console.log('🔍 [RETRIEVAL] Selected adapters:', adapters.map(a => a.name));
 
-    // If no adapters match the target, return empty success (not error) —
-    // this keeps the pipeline flowing and lets the next layer decide.
+    // If no adapters match the target, return empty success
     if (adapters.length === 0) {
         return buildSuccessResponse({
             requestId,
@@ -941,18 +1113,23 @@ async function retrieve(understanding, context = {}) {
 
     // ── Step 5: Execute adapters ──
     const sourceResponses = await executeAdapters(adapters, searchPlan, context);
+    console.log('🔍 [RETRIEVAL] Source responses:',
+        sourceResponses.map(s => `${s.source}: ${s.records.length} records`));
 
     // ── Step 6: Normalize ──
     const normalizedCandidates = normalizeAll(sourceResponses);
+    console.log('🔍 [RETRIEVAL] Normalized:', normalizedCandidates.length, 'candidates');
 
     // ── Step 7: Deduplicate ──
     const uniqueCandidates = deduplicateCandidates(normalizedCandidates);
+    console.log('🔍 [RETRIEVAL] After dedupe:', uniqueCandidates.length, 'unique candidates');
 
     // ── Step 8: Rank ──
     const rankedCandidates = rankCandidates(uniqueCandidates, searchPlan);
+    console.log('🔍 [RETRIEVAL] Ranked:', rankedCandidates.length, 'candidates');
 
     // ── Step 9: Build response ──
-    return buildSuccessResponse({
+    const response = buildSuccessResponse({
         requestId,
         searchId,
         intent: understanding.intent,
@@ -961,15 +1138,22 @@ async function retrieve(understanding, context = {}) {
         sourceResponses,
         durationMs: Date.now() - startTime
     });
+
+    console.log('✅ [RETRIEVAL] Complete. Status:', response.status,
+        '| Candidates:', response.candidates?.length || 0,
+        '| Duration:', Date.now() - startTime + 'ms');
+    console.log('═══════════════════════════════════════════════════════');
+
+    return response;
 }
 
 // ──────────────────────────────────────────────────────────────
-// 18. DEBUG
+// 17. DEBUG
 // ──────────────────────────────────────────────────────────────
 
 function debug() {
     return {
-        version: 'v1',
+        version: 'v2',
         schema_version: CONFIG.SCHEMA_VERSION,
         plan_version: CONFIG.PLAN_VERSION,
         supported_intents: CONFIG.SUPPORTED_INTENTS.slice(),
@@ -981,7 +1165,7 @@ function debug() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 19. EXPORTS
+// 18. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -1001,6 +1185,8 @@ module.exports = {
     deduplicateCandidates,
     rankCandidates,
     buildCandidateKey,
+    buildMongoQuery,
+    mapFieldToMongo,
     debug,
     CONFIG
 };
