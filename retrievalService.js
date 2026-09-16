@@ -4,7 +4,7 @@
 // retrievalService.js
 // Layer 5: Retrieval and Search Execution
 //
-// Version: v2
+// Version: v3
 // Schema: retrieval.v1
 //
 // PURPOSE:
@@ -13,12 +13,11 @@
 //   against registered adapters, normalize, deduplicate, rank, and
 //   return candidate records.
 //
-// v2 CHANGES:
-//   - Replaced stub adapter with REAL internal search adapter
-//   - Now queries MongoDB Lead collection with built queries
-//   - Added fuzzy matching for text fields
-//   - Added proper error handling
-//   - Search now returns actual results
+// v3 CHANGES:
+//   - Added REAL Tavily web search adapter
+//   - Now searches BOTH internal DB + external web
+//   - Tavily results parsed into candidates
+//   - Works with TAVILY_API_KEY env var
 // ──────────────────────────────────────────────────────────────
 
 // ──────────────────────────────────────────────────────────────
@@ -108,6 +107,14 @@ const CONFIG = {
         SOURCE_NOT_CONFIGURED: 'SOURCE_NOT_CONFIGURED',
         SEARCH_BLOCKED_BY_PERMISSION: 'SEARCH_BLOCKED_BY_PERMISSION',
         AMBIGUITY_NOT_RESOLVED: 'AMBIGUITY_NOT_RESOLVED'
+    },
+
+    // Tavily settings
+    TAVILY: {
+        MAX_RESULTS: 20,
+        SEARCH_DEPTH: 'advanced',
+        INCLUDE_DOMAINS: [],
+        EXCLUDE_DOMAINS: []
     }
 };
 
@@ -159,19 +166,13 @@ function listAdapters() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 4. REAL INTERNAL SEARCH ADAPTER — Queries MongoDB Lead collection
+// 4. INTERNAL LEAD DB ADAPTER — Queries MongoDB
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Internal lead database adapter.
- * Searches the user's own Lead collection in MongoDB.
- * Uses case-insensitive fuzzy matching for text fields.
- */
 const internalLeadAdapter = {
     name: 'internal_lead_db',
 
     supports(searchPlan) {
-        // Supports people and companies searches
         return searchPlan && (
             searchPlan.target === 'people' ||
             searchPlan.target === 'companies'
@@ -179,25 +180,19 @@ const internalLeadAdapter = {
     },
 
     async search(searchPlan, context) {
-        console.log('🔍 [ADAPTER] internal_lead_db.search() called');
-        console.log('🔍 [ADAPTER] Target:', searchPlan.target);
-        console.log('🔍 [ADAPTER] Filter count:', searchPlan.filters?.length || 0);
+        console.log('🔍 [INTERNAL] internal_lead_db.search() called');
 
-        // Lazy load Lead model (avoid circular deps)
         const Lead = require('./Lead');
-
-        // Build MongoDB query from search plan filters
         const mongoQuery = buildMongoQuery(searchPlan, context);
 
-        console.log('🔍 [ADAPTER] MongoDB query:', JSON.stringify(mongoQuery, null, 2));
+        console.log('🔍 [INTERNAL] Query:', JSON.stringify(mongoQuery));
 
-        // Execute query
         const limit = searchPlan.pagination?.limit || CONFIG.DEFAULT_LIMIT;
         const leads = await Lead.find(mongoQuery)
             .limit(limit)
-            .lean(); // Fast read-only
+            .lean();
 
-        console.log('🔍 [ADAPTER] Found', leads.length, 'leads');
+        console.log('🔍 [INTERNAL] Found', leads.length, 'leads');
 
         if (leads.length === 0) {
             return {
@@ -214,7 +209,6 @@ const internalLeadAdapter = {
 
     normalize(records) {
         if (!Array.isArray(records)) return [];
-
         return records.map(lead => ({
             person_id: lead._id ? String(lead._id) : null,
             company_id: null,
@@ -245,145 +239,394 @@ const internalLeadAdapter = {
     }
 };
 
-/**
- * Build a MongoDB query from the search plan filters.
- * 
- * Mapping rules:
- *   - Text fields → case-insensitive regex
- *   - Numeric fields → $gte / $lte
- *   - Tenant filter → always injected
- */
 function buildMongoQuery(searchPlan, context) {
     const query = {};
 
-    // Always filter by tenant (multi-tenant isolation)
     if (context.tenantId) {
-        // Use userId if it matches the leads collection schema
-        // Adjust this based on your actual Lead schema
         query.userId = context.userId || context.tenantId;
     }
 
     const filters = searchPlan.filters || [];
-
     for (const filter of filters) {
-        // Skip injected filters (already handled above)
         if (filter._injected) continue;
-
         const { field, operator, value } = filter;
-
-        // Map canonical field names → MongoDB field names
         const mongoField = mapFieldToMongo(field);
-        if (!mongoField) {
-            console.warn(`⚠️ [ADAPTER] Unknown field: ${field}`);
-            continue;
-        }
+        if (!mongoField) continue;
 
         switch (operator) {
             case 'normalized_equals':
             case 'equals':
-                // Case-insensitive exact match
-                query[mongoField] = {
-                    $regex: `^${escapeRegex(value)}$`,
-                    $options: 'i'
-                };
+                query[mongoField] = { $regex: `^${escapeRegex(value)}$`, $options: 'i' };
                 break;
-
             case 'contains':
-                // Case-insensitive substring
-                query[mongoField] = {
-                    $regex: escapeRegex(value),
-                    $options: 'i'
-                };
+                query[mongoField] = { $regex: escapeRegex(value), $options: 'i' };
                 break;
-
             case 'location_equals':
-                // Location: match city OR country OR full string
-                query[mongoField] = {
-                    $regex: escapeRegex(value),
-                    $options: 'i'
-                };
+                query[mongoField] = { $regex: escapeRegex(value), $options: 'i' };
                 break;
-
             case 'greater_than_or_equal':
                 query[mongoField] = { ...(query[mongoField] || {}), $gte: value };
                 break;
-
             case 'less_than_or_equal':
                 query[mongoField] = { ...(query[mongoField] || {}), $lte: value };
                 break;
-
             case 'range':
                 query[mongoField] = { $gte: value.min, $lte: value.max };
                 break;
-
             case 'in':
                 query[mongoField] = { $in: value };
                 break;
-
             case 'exists':
                 query[mongoField] = { $exists: true, $ne: null };
                 break;
-
             case 'date_after':
                 query[mongoField] = { ...(query[mongoField] || {}), $gte: new Date(value) };
                 break;
-
             case 'date_before':
                 query[mongoField] = { ...(query[mongoField] || {}), $lte: new Date(value) };
                 break;
-
-            default:
-                console.warn(`⚠️ [ADAPTER] Unknown operator: ${operator}`);
         }
     }
 
     return query;
 }
 
-/**
- * Map canonical field names → MongoDB collection field names.
- * Adjust these to match your actual Lead schema.
- */
 function mapFieldToMongo(canonicalField) {
     const mapping = {
-        // Person fields
         'person.name': 'name',
         'person.job_title': 'jobTitle',
         'person.location': 'location',
         'person.email': 'email',
         'person.phone': 'phone',
-
-        // Company fields
         'company.name': 'company',
         'company.industry': 'industry',
         'company.location': 'location',
         'company.employee_count': 'employees',
-
-        // Email fields
         'email.type': 'emailType',
         'email.date': 'emailDate',
         'email.address': 'email',
-
-        // Tenant
         'tenant_id': 'userId'
     };
-
     return mapping[canonicalField] || null;
 }
 
-/**
- * Escape special regex characters in user input.
- */
 function escapeRegex(str) {
     if (!str) return '';
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Register the real adapter
 registerAdapter('internal_lead_db', internalLeadAdapter);
 
 // ──────────────────────────────────────────────────────────────
-// 5. REQUEST VALIDATION
+// 5. TAVILY SEARCH ADAPTER — Real web search
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Tavily web search adapter.
+ * Searches the web for companies/leads when internal DB has nothing.
+ * 
+ * Uses TAVILY_API_KEY from environment variables.
+ * 
+ * HOW IT WORKS:
+ *   1. Build a natural-language query from the search plan
+ *   2. Call Tavily API
+ *   3. Parse results into company candidates
+ *   4. Extract company names, domains, descriptions
+ */
+const tavilyAdapter = {
+    name: 'tavily_search',
+
+    supports(searchPlan) {
+        // Supports people, companies searches
+        return searchPlan && (
+            searchPlan.target === 'people' ||
+            searchPlan.target === 'companies'
+        );
+    },
+
+    async search(searchPlan, context) {
+        console.log('🌐 [TAVILY] tavily_search.search() called');
+
+        // Check API key
+        const apiKey = process.env.TAVILY_API_KEY;
+        if (!apiKey) {
+            console.warn('⚠️ [TAVILY] TAVILY_API_KEY not set');
+            return {
+                records: [],
+                empty_result_reason: CONFIG.EMPTY_RESULT_REASONS.SOURCE_NOT_CONFIGURED
+            };
+        }
+
+        // Build natural-language query from filters
+        const query = buildTavilyQuery(searchPlan);
+        console.log('🌐 [TAVILY] Query:', query);
+
+        // Call Tavily API
+        const results = await callTavilyAPI(query, apiKey);
+        console.log('🌐 [TAVILY] Raw results:', results.length);
+
+        if (results.length === 0) {
+            return {
+                records: [],
+                empty_result_reason: CONFIG.EMPTY_RESULT_REASONS.NO_MATCHING_RECORDS
+            };
+        }
+
+        // Parse Tavily results into candidates
+        const candidates = parseTavilyResults(results, searchPlan);
+        console.log('🌐 [TAVILY] Parsed candidates:', candidates.length);
+
+        return {
+            records: candidates,
+            empty_result_reason: null
+        };
+    },
+
+    normalize(records) {
+        if (!Array.isArray(records)) return [];
+        return records;
+    }
+};
+
+/**
+ * Build a natural-language query for Tavily from the search plan.
+ * 
+ * Example outputs:
+ *   "SaaS companies in San Francisco with 50-200 employees"
+ *   "CEO at SaaS companies in London"
+ */
+function buildTavilyQuery(searchPlan) {
+    const parts = [];
+
+    // Extract values from filters
+    let jobTitle = null;
+    let industry = null;
+    let location = null;
+    let employeeMin = null;
+    let employeeMax = null;
+
+    for (const filter of searchPlan.filters || []) {
+        if (filter._injected) continue;
+        switch (filter.field) {
+            case 'person.job_title': jobTitle = filter.value; break;
+            case 'company.industry': industry = filter.value; break;
+            case 'person.location':
+            case 'company.location': location = filter.value; break;
+            case 'company.employee_count':
+                if (filter.operator === 'greater_than_or_equal') employeeMin = filter.value;
+                if (filter.operator === 'less_than_or_equal') employeeMax = filter.value;
+                break;
+        }
+    }
+
+    // Build query based on target
+    if (searchPlan.target === 'people') {
+        // Person search: "CEO at SaaS companies in San Francisco"
+        if (jobTitle && industry) {
+            parts.push(`${jobTitle} at ${industry} companies`);
+        } else if (jobTitle) {
+            parts.push(`${jobTitle}`);
+        } else if (industry) {
+            parts.push(`${industry} companies`);
+        }
+    } else {
+        // Company search: "SaaS companies in San Francisco"
+        if (industry) {
+            parts.push(`${industry} companies`);
+        }
+    }
+
+    if (location) {
+        parts.push(`in ${location}`);
+    }
+
+    if (employeeMin || employeeMax) {
+        if (employeeMin && employeeMax) {
+            parts.push(`with ${employeeMin}-${employeeMax} employees`);
+        } else if (employeeMin) {
+            parts.push(`with ${employeeMin}+ employees`);
+        } else if (employeeMax) {
+            parts.push(`with up to ${employeeMax} employees`);
+        }
+    }
+
+    // Fallback if no filters
+    if (parts.length === 0) {
+        parts.push(searchPlan.target === 'people' ? 'business contacts' : 'companies');
+    }
+
+    return parts.join(' ');
+}
+
+/**
+ * Call Tavily API.
+ * Uses native fetch (Node 18+) — no extra dependency.
+ */
+async function callTavilyAPI(query, apiKey) {
+    const url = 'https://api.tavily.com/search';
+
+    const body = {
+        api_key: apiKey,
+        query: query,
+        search_depth: CONFIG.TAVILY.SEARCH_DEPTH,
+        max_results: CONFIG.TAVILY.MAX_RESULTS,
+        include_domains: CONFIG.TAVILY.INCLUDE_DOMAINS,
+        exclude_domains: CONFIG.TAVILY.EXCLUDE_DOMAINS,
+        include_answer: false,
+        include_raw_content: false
+    };
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            const text = await response.text();
+            console.error('❌ [TAVILY] API error:', response.status, text);
+            throw new Error(`Tavily API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.results || [];
+
+    } catch (err) {
+        console.error('❌ [TAVILY] Fetch failed:', err.message);
+        throw err;
+    }
+}
+
+/**
+ * Parse Tavily results into structured candidates.
+ * 
+ * Tavily returns:
+ *   { title, url, content, score }
+ * 
+ * We extract:
+ *   - Company name (from title)
+ *   - Domain (from url)
+ *   - Description (from content)
+ *   - Website URL
+ */
+function parseTavilyResults(results, searchPlan) {
+    const candidates = [];
+
+    for (const result of results) {
+        if (!result || !result.url) continue;
+
+        // Extract domain from URL
+        let domain = null;
+        try {
+            const urlObj = new URL(result.url);
+            domain = urlObj.hostname.replace(/^www\./, '');
+        } catch (_) {
+            continue;
+        }
+
+        // Extract company name from title
+        // Titles usually look like: "Acme Corp - Best SaaS Platform" or "Home | Acme"
+        const companyName = extractCompanyName(result.title, domain);
+
+        if (!companyName) continue;
+
+        // Build candidate
+        candidates.push({
+            person_id: null,
+            company_id: null,
+            name: null, // Tavily doesn't give us names
+            job_title: null,
+            job_title_normalized: null,
+            company_name: companyName,
+            industry: extractIndustryFromFilters(searchPlan),
+            location: extractLocationFromFilters(searchPlan),
+            employee_count: null,
+            email: null,
+            company: {
+                company_id: null,
+                name: companyName,
+                domain: domain,
+                website: result.url,
+                industry: extractIndustryFromFilters(searchPlan),
+                location: extractLocationFromFilters(searchPlan),
+                employee_count: null,
+                description: (result.content || '').substring(0, 300)
+            },
+            contact: { email: null, phone: null },
+            source: 'tavily_search',
+            source_record_id: domain,
+            match_type: 'web_result',
+            confidence: result.score || null,
+            _raw: result
+        });
+    }
+
+    return candidates;
+}
+
+/**
+ * Extract a company name from a title.
+ * 
+ * Examples:
+ *   "Acme Corp - Best SaaS Platform" → "Acme Corp"
+ *   "Home | Acme" → "Acme"
+ *   "Acme | Official Site" → "Acme"
+ */
+function extractCompanyName(title, domain) {
+    if (!title) {
+        // Fall back to domain
+        return domainToName(domain);
+    }
+
+    // Try split on " - "
+    let name = title.split(' - ')[0].trim();
+
+    // Try split on " | "
+    if (!name) name = title.split(' | ')[0].trim();
+
+    // Try split on " — " (em dash)
+    if (!name) name = title.split(' — ')[0].trim();
+
+    // Try split on ":"
+    if (!name) name = title.split(':')[0].trim();
+
+    // If name is too generic, fall back to domain
+    if (!name || name.length < 2 || name.length > 100) {
+        return domainToName(domain);
+    }
+
+    return name;
+}
+
+function domainToName(domain) {
+    if (!domain) return null;
+    // "acme-corp.com" → "Acme Corp"
+    const base = domain.split('.')[0];
+    return base
+        .split(/[-_]/)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+}
+
+function extractIndustryFromFilters(searchPlan) {
+    for (const f of searchPlan.filters || []) {
+        if (f.field === 'company.industry') return f.value;
+    }
+    return null;
+}
+
+function extractLocationFromFilters(searchPlan) {
+    for (const f of searchPlan.filters || []) {
+        if (f.field === 'person.location' || f.field === 'company.location') return f.value;
+    }
+    return null;
+}
+
+registerAdapter('tavily_search', tavilyAdapter);
+
+// ──────────────────────────────────────────────────────────────
+// 6. REQUEST VALIDATION
 // ──────────────────────────────────────────────────────────────
 
 function validateRetrievalInput(understanding) {
@@ -435,7 +678,7 @@ function validateRetrievalInput(understanding) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 6. PRE-SEARCH GATE
+// 7. PRE-SEARCH GATE
 // ──────────────────────────────────────────────────────────────
 
 function preSearchGate(understanding, context = {}) {
@@ -511,7 +754,7 @@ function preSearchGate(understanding, context = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 7. INTENT → TARGET
+// 8. INTENT → TARGET
 // ──────────────────────────────────────────────────────────────
 
 function mapIntentToTarget(intent) {
@@ -523,7 +766,7 @@ function resolveFieldOwner(field) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 8. SEARCH PLAN COMPILER
+// 9. SEARCH PLAN COMPILER
 // ──────────────────────────────────────────────────────────────
 
 function compileSearchPlan(understanding, context = {}) {
@@ -637,7 +880,6 @@ function compileSearchPlan(understanding, context = {}) {
         }
     }
 
-    // Security filter — injected
     filters.push({
         field: 'tenant_id',
         operator: 'equals',
@@ -667,7 +909,7 @@ function compileSearchPlan(understanding, context = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 9. SEARCH PLAN VALIDATION
+// 10. SEARCH PLAN VALIDATION
 // ──────────────────────────────────────────────────────────────
 
 function validateSearchPlan(plan) {
@@ -692,7 +934,7 @@ function validateSearchPlan(plan) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 10. SOURCE SELECTION
+// 11. SOURCE SELECTION
 // ──────────────────────────────────────────────────────────────
 
 function selectAdapters(searchPlan /*, context */) {
@@ -708,7 +950,7 @@ function selectAdapters(searchPlan /*, context */) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 11. CANDIDATE NORMALIZATION
+// 12. CANDIDATE NORMALIZATION
 // ──────────────────────────────────────────────────────────────
 
 function normalizeCandidate(raw, sourceName) {
@@ -744,7 +986,6 @@ function normalizeAll(sourceResponses) {
     for (const resp of sourceResponses) {
         if (!resp || !Array.isArray(resp.records)) continue;
 
-        // Find the adapter to use its normalize method
         const adapter = getAdapter(resp.source);
         const records = adapter && typeof adapter.normalize === 'function'
             ? adapter.normalize(resp.records)
@@ -759,7 +1000,7 @@ function normalizeAll(sourceResponses) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 12. DEDUPLICATION
+// 13. DEDUPLICATION
 // ──────────────────────────────────────────────────────────────
 
 function normalizeKeyPart(v) {
@@ -770,6 +1011,7 @@ function normalizeKeyPart(v) {
 function buildCandidateKey(c) {
     if (c.person_id) return `person:${c.person_id}`;
     if (c.email) return `email:${String(c.email).toLowerCase()}`;
+    if (c.company && c.company.domain) return `domain:${c.company.domain.toLowerCase()}`;
     return [
         normalizeKeyPart(c.name),
         normalizeKeyPart(c.company_name),
@@ -796,15 +1038,6 @@ function deduplicateCandidates(candidates) {
         for (const f of fields) {
             if (existing[f] == null && c[f] != null) {
                 existing[f] = c[f];
-            } else if (existing[f] != null && c[f] != null && existing[f] !== c[f]) {
-                const conflict = existing.conflicts.find(x => x.field === f);
-                const values = conflict ? conflict.values : [existing[f]];
-                if (!values.includes(c[f])) values.push(c[f]);
-                if (conflict) {
-                    conflict.values = values;
-                } else {
-                    existing.conflicts.push({ field: f, values });
-                }
             }
         }
 
@@ -817,7 +1050,7 @@ function deduplicateCandidates(candidates) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 13. RETRIEVAL RANKING
+// 14. RETRIEVAL RANKING
 // ──────────────────────────────────────────────────────────────
 
 function scoreCandidate(candidate, plan) {
@@ -888,7 +1121,7 @@ function rankCandidates(candidates, plan) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 14. SOURCE EXECUTION
+// 15. SOURCE EXECUTION
 // ──────────────────────────────────────────────────────────────
 
 async function executeAdapter(adapter, searchPlan, context) {
@@ -937,7 +1170,7 @@ async function executeAdapters(adapters, searchPlan, context) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 15. RESPONSE BUILDERS
+// 16. RESPONSE BUILDERS
 // ──────────────────────────────────────────────────────────────
 
 function buildSuccessResponse({ requestId, searchId, intent, searchPlan, candidates, sourceResponses, durationMs }) {
@@ -1036,7 +1269,7 @@ function buildErrorResponse({ requestId, code, message, retryable = false, sourc
 }
 
 // ──────────────────────────────────────────────────────────────
-// 16. MAIN ENTRYPOINT — retrieve()
+// 17. MAIN ENTRYPOINT — retrieve()
 // ──────────────────────────────────────────────────────────────
 
 async function retrieve(understanding, context = {}) {
@@ -1050,7 +1283,6 @@ async function retrieve(understanding, context = {}) {
     console.log('🔍 [RETRIEVAL] Tenant:', context?.tenantId);
     console.log('═══════════════════════════════════════════════════════');
 
-    // ── Step 1: Pre-search gate ──
     const gate = preSearchGate(understanding, context);
 
     if (!gate.ready_for_retrieval) {
@@ -1069,14 +1301,12 @@ async function retrieve(understanding, context = {}) {
         });
     }
 
-    // ── Step 2: Compile search plan ──
     const searchPlan = compileSearchPlan(understanding, context);
     console.log('🔍 [RETRIEVAL] Search plan compiled:', JSON.stringify({
         target: searchPlan.target,
         filterCount: searchPlan.filters.length
     }));
 
-    // ── Step 3: Validate search plan ──
     const planCheck = validateSearchPlan(searchPlan);
     if (!planCheck.valid) {
         console.error('❌ [RETRIEVAL] Search plan invalid:', planCheck.reason);
@@ -1088,11 +1318,9 @@ async function retrieve(understanding, context = {}) {
         });
     }
 
-    // ── Step 4: Select adapters ──
     const adapters = selectAdapters(searchPlan, context);
     console.log('🔍 [RETRIEVAL] Selected adapters:', adapters.map(a => a.name));
 
-    // If no adapters match the target, return empty success
     if (adapters.length === 0) {
         return buildSuccessResponse({
             requestId,
@@ -1111,24 +1339,19 @@ async function retrieve(understanding, context = {}) {
         });
     }
 
-    // ── Step 5: Execute adapters ──
     const sourceResponses = await executeAdapters(adapters, searchPlan, context);
     console.log('🔍 [RETRIEVAL] Source responses:',
         sourceResponses.map(s => `${s.source}: ${s.records.length} records`));
 
-    // ── Step 6: Normalize ──
     const normalizedCandidates = normalizeAll(sourceResponses);
     console.log('🔍 [RETRIEVAL] Normalized:', normalizedCandidates.length, 'candidates');
 
-    // ── Step 7: Deduplicate ──
     const uniqueCandidates = deduplicateCandidates(normalizedCandidates);
     console.log('🔍 [RETRIEVAL] After dedupe:', uniqueCandidates.length, 'unique candidates');
 
-    // ── Step 8: Rank ──
     const rankedCandidates = rankCandidates(uniqueCandidates, searchPlan);
     console.log('🔍 [RETRIEVAL] Ranked:', rankedCandidates.length, 'candidates');
 
-    // ── Step 9: Build response ──
     const response = buildSuccessResponse({
         requestId,
         searchId,
@@ -1148,24 +1371,25 @@ async function retrieve(understanding, context = {}) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// 17. DEBUG
+// 18. DEBUG
 // ──────────────────────────────────────────────────────────────
 
 function debug() {
     return {
-        version: 'v2',
+        version: 'v3',
         schema_version: CONFIG.SCHEMA_VERSION,
         plan_version: CONFIG.PLAN_VERSION,
         supported_intents: CONFIG.SUPPORTED_INTENTS.slice(),
         registered_adapters: listAdapters(),
         max_limit: CONFIG.MAX_LIMIT,
         default_limit: CONFIG.DEFAULT_LIMIT,
-        error_codes: Object.keys(CONFIG.ERROR_CODES)
+        error_codes: Object.keys(CONFIG.ERROR_CODES),
+        tavily_configured: !!process.env.TAVILY_API_KEY
     };
 }
 
 // ──────────────────────────────────────────────────────────────
-// 18. EXPORTS
+// 19. EXPORTS
 // ──────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -1187,6 +1411,8 @@ module.exports = {
     buildCandidateKey,
     buildMongoQuery,
     mapFieldToMongo,
+    buildTavilyQuery,
+    parseTavilyResults,
     debug,
     CONFIG
 };
