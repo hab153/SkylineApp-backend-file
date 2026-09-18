@@ -30,12 +30,20 @@ async function generateFreeResponse(
 
         console.log('[Orchestrator] Understanding result:', result);
 
-        // ✅ Return a string so chatController accepts it as aiReply
+        // ✅ Build the reply string
+        let reply;
         if (!result || !result.targetEntity) {
-            return '⚠️ Could not determine a target entity from your message.';
+            reply = '⚠️ Could not determine a target entity from your message.';
+        } else {
+            reply = `🎯 Target entity: ${result.targetEntity}`;
         }
 
-        return `🎯 Target entity: ${result.targetEntity}`;
+        // ✅ Return the shape chatController expects
+        return {
+            reply,
+            updatedHistory: history || [],
+            meta: result,
+        };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
         console.error('[Orchestrator] Error name:', error.name);
