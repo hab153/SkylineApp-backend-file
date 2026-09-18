@@ -30,12 +30,16 @@ async function generateFreeResponse(
 
         console.log('[Orchestrator] Understanding result:', result);
 
-        // ✅ Build the reply string
+        // ✅ Build the reply string including targetEntity AND problem
         let reply;
         if (!result || !result.targetEntity) {
             reply = '⚠️ Could not determine a target entity from your message.';
         } else {
-            reply = `🎯 Target entity: ${result.targetEntity}`;
+            const lines = [`🎯 Target entity: ${result.targetEntity}`];
+            if (result.problem) {
+                lines.push(`📌 Problem: ${result.problem}`);
+            }
+            reply = lines.join('\n');
         }
 
         // ✅ Return the shape chatController expects
