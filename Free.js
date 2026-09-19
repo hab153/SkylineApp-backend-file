@@ -1,14 +1,6 @@
 'use strict';
 
-// ────────────────────────────────────────────────────────────────
-// IMPORTS
-// ────────────────────────────────────────────────────────────────
-
 const understandRequest = require('./UnderstandRequest');
-
-// ────────────────────────────────────────────────────────────────
-// RECEIVER / ORCHESTRATOR
-// ────────────────────────────────────────────────────────────────
 
 async function generateFreeResponse(
     message,
@@ -30,7 +22,6 @@ async function generateFreeResponse(
 
         console.log('[Orchestrator] Understanding result:', result);
 
-        // ✅ Build the reply string including targetEntity AND problem
         let reply;
         if (!result || !result.targetEntity) {
             reply = '⚠️ Could not determine a target entity from your message.';
@@ -39,10 +30,12 @@ async function generateFreeResponse(
             if (result.problem) {
                 lines.push(`📌 Problem: ${result.problem}`);
             }
+            if (result.intent) {
+                lines.push(`🎯 Intent: ${result.intent}`);
+            }
             reply = lines.join('\n');
         }
 
-        // ✅ Return the shape chatController expects
         return {
             reply,
             updatedHistory: history || [],
@@ -53,14 +46,9 @@ async function generateFreeResponse(
         console.error('[Orchestrator] Error name:', error.name);
         console.error('[Orchestrator] Error message:', error.message);
         console.error('[Orchestrator] Full error:', error);
-
         throw error;
     }
 }
-
-// ────────────────────────────────────────────────────────────────
-// EXPORTS
-// ────────────────────────────────────────────────────────────────
 
 module.exports = {
     generateFreeResponse,
