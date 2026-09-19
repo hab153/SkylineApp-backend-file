@@ -14,6 +14,12 @@ const MODEL = 'gpt-4o-mini';
 const FALLBACK_TARGET = 'company';
 const FALLBACK_PROBLEM = 'customer';
 const FALLBACK_INTENT = 'potential_customers';
+
+const FALLBACK_LOCATION = {
+    city: 'New York City',
+    country: 'USA',
+};
+
 const MAX_ATTEMPTS = 2;
 
 // ────────────────────────────────────────────────────────────────
@@ -27,6 +33,7 @@ and identify:
 1. The main target entity the user is looking for.
 2. The main problem, need, or area of interest connected to that target entity.
 3. The actual search intent behind the request.
+4. The location connected to the user's request.
 
 Read and understand the complete user request before deciding the result.
 Do not rely only on exact keywords.
@@ -53,6 +60,38 @@ something, provide something, use something, are hiring for something, belong
 to a category, are expanding, show a particular event, or represent any other
 meaning that is appropriate to the request. These are only examples, not limits.
 
+Location instructions:
+
+The location must contain only two fields:
+
+{
+  "city": "the identified city",
+  "country": "the identified country"
+}
+
+Understand the location from the complete meaning of the user's request.
+The code will not identify, infer, or decide the location for you.
+
+If the user mentions a city, identify the correct country connected to that city.
+If the user mentions only a country and no city, use null for the city.
+If the user does not clearly provide a location, use:
+
+{
+  "city": "New York City",
+  "country": "USA"
+}
+
+If the location cannot be understood, use the same fallback location:
+
+{
+  "city": "New York City",
+  "country": "USA"
+}
+
+Do not add any other location fields.
+Do not add state, region, continent, location type, relationship,
+radius, distance, unit, include, exclude, or any other location property.
+
 Do not explain your answer.
 Do not perform a search.
 Do not provide recommendations.
@@ -65,7 +104,11 @@ Return only valid JSON using exactly this format:
 {
   "targetEntity": "the identified target",
   "problem": "the identified problem or need",
-  "intent": "the actual purpose of the user's search"
+  "intent": "the actual purpose of the user's search",
+  "location": {
+    "city": "the identified city",
+    "country": "the identified country"
+  }
 }
 
 If the target entity cannot be clearly identified, return:
@@ -73,7 +116,11 @@ If the target entity cannot be clearly identified, return:
 {
   "targetEntity": null,
   "problem": "customer",
-  "intent": "the best-understood search intent"
+  "intent": "the best-understood search intent",
+  "location": {
+    "city": "New York City",
+    "country": "USA"
+  }
 }
 
 If the problem, need, or area of interest cannot be clearly identified,
@@ -140,11 +187,25 @@ async function understandRequest(message) {
             const targetEntity = parsedResult?.targetEntity;
             const problem = parsedResult?.problem;
             const intent = parsedResult?.intent;
+            const location = parsedResult?.location;
 
             if (
                 typeof targetEntity === 'string' &&
                 targetEntity.trim().length > 0
             ) {
+                const validLocation =
+                    location &&
+                    typeof location === 'object' &&
+                    typeof location.city === 'string' &&
+                    location.city.trim().length > 0 &&
+                    typeof location.country === 'string' &&
+                    location.country.trim().length > 0
+                        ? {
+                              city: location.city.trim(),
+                              country: location.country.trim(),
+                          }
+                        : FALLBACK_LOCATION;
+
                 const result = {
                     targetEntity: targetEntity.trim(),
 
@@ -159,6 +220,8 @@ async function understandRequest(message) {
                         intent.trim().length > 0
                             ? intent.trim()
                             : FALLBACK_INTENT,
+
+                    location: validLocation,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -185,6 +248,7 @@ async function understandRequest(message) {
         targetEntity: FALLBACK_TARGET,
         problem: FALLBACK_PROBLEM,
         intent: FALLBACK_INTENT,
+        location: FALLBACK_LOCATION,
     };
 
     console.warn(
