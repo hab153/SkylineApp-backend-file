@@ -31,7 +31,12 @@ async function generateFreeResponse(
                 lines.push(`📌 Problem: ${result.problem}`);
             }
             if (result.intent) {
-                lines.push(`🎯 Intent: ${result.intent}`);
+                lines.push(`💡 Intent: ${result.intent}`);
+            }
+            if (result.location && (result.location.city || result.location.country)) {
+                const city = result.location.city || '—';
+                const country = result.location.country || '—';
+                lines.push(`📍 Location: ${city}, ${country}`);
             }
             reply = lines.join('\n');
         }
