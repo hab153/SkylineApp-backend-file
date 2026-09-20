@@ -58,35 +58,40 @@ Return the most accurate plain-text description of the user's actual search inte
 For example, determine whether the user is looking for entities that may need
 something, provide something, use something, are hiring for something, belong
 to a category, are expanding, show a particular event, or represent any other
-meaning that is appropriate to the request. These are only examples, not limits.
+meaning that is appropriate for the request. These are only examples, not limits.
 
 Location instructions:
 
-The location must contain only two fields:
+The location must contain exactly two fields:
 
 {
   "city": "the identified city",
   "country": "the identified country"
 }
 
-Understand the location from the complete meaning of the user's request.
-The code will not identify, infer, or decide the location for you.
+You are fully responsible for understanding and completing the location.
+The code will not identify, infer, complete, clean, normalize, or decide
+the location for you.
 
-If the user mentions a city, identify the correct country connected to that city.
-If the user mentions only a country and no city, use null for the city.
-If the user does not clearly provide a location, use:
+The location must always contain a meaningful, non-empty city and country.
+
+If the user clearly provides both a city and a country, return those values.
+
+If the user clearly provides a country but the city is missing or unclear,
+choose a suitable city in that country and return the country.
+
+If the user clearly provides a city but the country is missing or unclear,
+identify the country that contains that city and return both values.
+
+If the user does not provide a clear location, or the location cannot be
+understood, use this location:
 
 {
   "city": "New York City",
   "country": "USA"
 }
 
-If the location cannot be understood, use the same fallback location:
-
-{
-  "city": "New York City",
-  "country": "USA"
-}
+Do not return null or empty values for city or country.
 
 Do not add any other location fields.
 Do not add state, region, continent, location type, relationship,
@@ -118,8 +123,8 @@ If the target entity cannot be clearly identified, return:
   "problem": "customer",
   "intent": "the best-understood search intent",
   "location": {
-    "city": "New York City",
-    "country": "USA"
+    "city": "the identified city",
+    "country": "the identified country"
   }
 }
 
@@ -193,19 +198,6 @@ async function understandRequest(message) {
                 typeof targetEntity === 'string' &&
                 targetEntity.trim().length > 0
             ) {
-                const validLocation =
-                    location &&
-                    typeof location === 'object' &&
-                    typeof location.city === 'string' &&
-                    location.city.trim().length > 0 &&
-                    typeof location.country === 'string' &&
-                    location.country.trim().length > 0
-                        ? {
-                              city: location.city.trim(),
-                              country: location.country.trim(),
-                          }
-                        : FALLBACK_LOCATION;
-
                 const result = {
                     targetEntity: targetEntity.trim(),
 
@@ -221,7 +213,7 @@ async function understandRequest(message) {
                             ? intent.trim()
                             : FALLBACK_INTENT,
 
-                    location: validLocation,
+                    location,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
