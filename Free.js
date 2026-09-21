@@ -42,6 +42,9 @@ async function generateFreeResponse(
             if (result.industry) {
                 lines.push(`🏭 Industry: ${result.industry}`);
             }
+            if (result.qualification) {
+                lines.push(`✅ Qualification: ${result.qualification}`);
+            }
 
             reply = lines.join('\n');
         }
