@@ -15,6 +15,7 @@ const FALLBACK_TARGET = 'company';
 const FALLBACK_PROBLEM = 'customer';
 const FALLBACK_INTENT = 'potential_customers';
 const FALLBACK_INDUSTRY = 'Software';
+const FALLBACK_QUALIFICATION = '20 or more employees';
 
 const FALLBACK_LOCATION = {
     city: 'New York City',
@@ -36,6 +37,7 @@ and identify:
 3. The actual search intent behind the request.
 4. The location connected to the user's request.
 5. The industry the user is looking for.
+6. The qualification or rule the user is trying to enforce.
 
 Read and understand the complete user request before deciding the result.
 Do not rely only on exact keywords.
@@ -75,6 +77,21 @@ is looking for.
 
 If the industry cannot be clearly identified from the user's request,
 return an empty string for the industry value.
+
+Qualification instructions:
+
+The qualification is the rule, requirement, condition, or criteria the user
+is trying to enforce or prove in the request.
+
+Decide the qualification yourself from the complete meaning of the request.
+Do not use keyword matching.
+Do not follow a predefined qualification list.
+Do not allow the code or any external rule to decide the qualification.
+Return the most accurate plain-text description of the rule, requirement,
+condition, or criteria the user is trying to enforce or prove.
+
+If the qualification cannot be clearly identified from the user's request,
+return an empty string for the qualification value.
 
 Location instructions:
 
@@ -130,7 +147,8 @@ Return only valid JSON using exactly this format:
     "city": "the identified city",
     "country": "the identified country"
   },
-  "industry": "the identified industry"
+  "industry": "the identified industry",
+  "qualification": "the identified qualification"
 }
 
 If the target entity cannot be clearly identified, return:
@@ -143,7 +161,8 @@ If the target entity cannot be clearly identified, return:
     "city": "the identified city",
     "country": "the identified country"
   },
-  "industry": "the identified industry"
+  "industry": "the identified industry",
+  "qualification": "the identified qualification"
 }
 
 If the problem, need, or area of interest cannot be clearly identified,
@@ -212,6 +231,7 @@ async function understandRequest(message) {
             const intent = parsedResult?.intent;
             const location = parsedResult?.location;
             const industry = parsedResult?.industry;
+            const qualification = parsedResult?.qualification;
 
             if (
                 typeof targetEntity === 'string' &&
@@ -239,6 +259,12 @@ async function understandRequest(message) {
                         industry.trim().length > 0
                             ? industry.trim()
                             : FALLBACK_INDUSTRY,
+
+                    qualification:
+                        typeof qualification === 'string' &&
+                        qualification.trim().length > 0
+                            ? qualification.trim()
+                            : FALLBACK_QUALIFICATION,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -267,6 +293,7 @@ async function understandRequest(message) {
         intent: FALLBACK_INTENT,
         location: FALLBACK_LOCATION,
         industry: FALLBACK_INDUSTRY,
+        qualification: FALLBACK_QUALIFICATION,
     };
 
     console.warn(
