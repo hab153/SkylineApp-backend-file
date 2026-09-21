@@ -14,6 +14,7 @@ const MODEL = 'gpt-4o-mini';
 const FALLBACK_TARGET = 'company';
 const FALLBACK_PROBLEM = 'customer';
 const FALLBACK_INTENT = 'potential_customers';
+const FALLBACK_INDUSTRY = 'Software';
 
 const FALLBACK_LOCATION = {
     city: 'New York City',
@@ -34,6 +35,7 @@ and identify:
 2. The main problem, need, or area of interest connected to that target entity.
 3. The actual search intent behind the request.
 4. The location connected to the user's request.
+5. The industry the user is looking for.
 
 Read and understand the complete user request before deciding the result.
 Do not rely only on exact keywords.
@@ -59,6 +61,20 @@ For example, determine whether the user is looking for entities that may need
 something, provide something, use something, are hiring for something, belong
 to a category, are expanding, show a particular event, or represent any other
 meaning that is appropriate for the request. These are only examples, not limits.
+
+Industry instructions:
+
+The industry is the type or category of what the user is looking for.
+
+Decide the industry yourself from the complete meaning of the request.
+Do not use keyword matching.
+Do not follow a predefined industry list.
+Do not allow the code or any external rule to decide the industry.
+Return the most accurate plain-text description of the industry the user
+is looking for.
+
+If the industry cannot be clearly identified from the user's request,
+return an empty string for the industry value.
 
 Location instructions:
 
@@ -113,7 +129,8 @@ Return only valid JSON using exactly this format:
   "location": {
     "city": "the identified city",
     "country": "the identified country"
-  }
+  },
+  "industry": "the identified industry"
 }
 
 If the target entity cannot be clearly identified, return:
@@ -125,7 +142,8 @@ If the target entity cannot be clearly identified, return:
   "location": {
     "city": "the identified city",
     "country": "the identified country"
-  }
+  },
+  "industry": "the identified industry"
 }
 
 If the problem, need, or area of interest cannot be clearly identified,
@@ -193,6 +211,7 @@ async function understandRequest(message) {
             const problem = parsedResult?.problem;
             const intent = parsedResult?.intent;
             const location = parsedResult?.location;
+            const industry = parsedResult?.industry;
 
             if (
                 typeof targetEntity === 'string' &&
@@ -214,6 +233,12 @@ async function understandRequest(message) {
                             : FALLBACK_INTENT,
 
                     location,
+
+                    industry:
+                        typeof industry === 'string' &&
+                        industry.trim().length > 0
+                            ? industry.trim()
+                            : FALLBACK_INDUSTRY,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -241,6 +266,7 @@ async function understandRequest(message) {
         problem: FALLBACK_PROBLEM,
         intent: FALLBACK_INTENT,
         location: FALLBACK_LOCATION,
+        industry: FALLBACK_INDUSTRY,
     };
 
     console.warn(
