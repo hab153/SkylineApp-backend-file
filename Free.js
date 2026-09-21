@@ -27,6 +27,7 @@ async function generateFreeResponse(
             reply = '⚠️ Could not determine a target entity from your message.';
         } else {
             const lines = [`🎯 Target entity: ${result.targetEntity}`];
+
             if (result.problem) {
                 lines.push(`📌 Problem: ${result.problem}`);
             }
@@ -38,6 +39,10 @@ async function generateFreeResponse(
                 const country = result.location.country || '—';
                 lines.push(`📍 Location: ${city}, ${country}`);
             }
+            if (result.industry) {
+                lines.push(`🏭 Industry: ${result.industry}`);
+            }
+
             reply = lines.join('\n');
         }
 
