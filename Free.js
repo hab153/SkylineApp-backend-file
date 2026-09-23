@@ -2,7 +2,18 @@
 
 const understandRequest = require('./UnderstandRequest');
 
-// Pretty labels for known fields. Unknown fields fall back to their raw key.
+// Order matches the schema exactly
+const FIELD_ORDER = [
+    'targetEntity',
+    'problem',
+    'intent',
+    'location',      // ← object, handled specially
+    'industry',
+    'qualification',
+    'signal',
+    'quantity',
+];
+
 const FIELD_LABELS = {
     targetEntity:  { icon: '🎯', label: 'Target entity' },
     problem:       { icon: '📌', label: 'Problem' },
@@ -10,18 +21,28 @@ const FIELD_LABELS = {
     industry:      { icon: '🏭', label: 'Industry' },
     qualification: { icon: '✅', label: 'Qualification' },
     signal:        { icon: '📡', label: 'Signal' },
+    quantity:      { icon: '🔢', label: 'Quantity' },
 };
-
-function formatLine(key, value, labels) {
-    const meta = labels[key] || { icon: '•', label: key };
-    return `${meta.icon} ${meta.label}: ${value}`;
-}
 
 function formatLocation(loc) {
     if (!loc || (!loc.city && !loc.country)) return null;
     const city = loc.city || '—';
     const country = loc.country || '—';
     return `📍 Location: ${city}, ${country}`;
+}
+
+function formatField(key, value) {
+    // location is special — it's an object with city/country
+    if (key === 'location') {
+        return formatLocation(value);
+    }
+
+    if (typeof value !== 'string' || !value.trim()) {
+        return null;
+    }
+
+    const meta = FIELD_LABELS[key] || { icon: '•', label: key };
+    return `${meta.icon} ${meta.label}: ${value}`;
 }
 
 function buildReply(result) {
@@ -31,25 +52,18 @@ function buildReply(result) {
 
     const lines = [];
 
-    // 1. Render every string field in a stable order (known first, then unknown)
-    const knownOrder = ['targetEntity', 'problem', 'intent', 'industry', 'qualification', 'signal'];
-    const allKeys = Object.keys(result);
-
-    const orderedKeys = [
-        ...knownOrder.filter(k => allKeys.includes(k)),
-        ...allKeys.filter(k => !knownOrder.includes(k) && k !== 'location'),
-    ];
-
-    for (const key of orderedKeys) {
-        const value = result[key];
-        if (typeof value === 'string' && value.trim()) {
-            lines.push(formatLine(key, value, FIELD_LABELS));
-        }
+    // Render in the exact schema order
+    for (const key of FIELD_ORDER) {
+        const line = formatField(key, result[key]);
+        if (line) lines.push(line);
     }
 
-    // 2. Handle location separately (it's an object)
-    const locLine = formatLocation(result.location);
-    if (locLine) lines.push(locLine);
+    // Anything the model invents that isn't in FIELD_ORDER — render at the end
+    const extraKeys = Object.keys(result).filter(k => !FIELD_ORDER.includes(k));
+    for (const key of extraKeys) {
+        const line = formatField(key, result[key]);
+        if (line) lines.push(line);
+    }
 
     return lines.join('\n');
 }
@@ -91,6 +105,4 @@ async function generateFreeResponse(
     }
 }
 
-module.exports = {
-    generateFreeResponse,
-};
+module.exports = { generateFreeResponse };
