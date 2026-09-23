@@ -2,6 +2,58 @@
 
 const understandRequest = require('./UnderstandRequest');
 
+// Pretty labels for known fields. Unknown fields fall back to their raw key.
+const FIELD_LABELS = {
+    targetEntity:  { icon: '🎯', label: 'Target entity' },
+    problem:       { icon: '📌', label: 'Problem' },
+    intent:        { icon: '💡', label: 'Intent' },
+    industry:      { icon: '🏭', label: 'Industry' },
+    qualification: { icon: '✅', label: 'Qualification' },
+    signal:        { icon: '📡', label: 'Signal' },
+};
+
+function formatLine(key, value, labels) {
+    const meta = labels[key] || { icon: '•', label: key };
+    return `${meta.icon} ${meta.label}: ${value}`;
+}
+
+function formatLocation(loc) {
+    if (!loc || (!loc.city && !loc.country)) return null;
+    const city = loc.city || '—';
+    const country = loc.country || '—';
+    return `📍 Location: ${city}, ${country}`;
+}
+
+function buildReply(result) {
+    if (!result || !result.targetEntity) {
+        return '⚠️ Could not determine a target entity from your message.';
+    }
+
+    const lines = [];
+
+    // 1. Render every string field in a stable order (known first, then unknown)
+    const knownOrder = ['targetEntity', 'problem', 'intent', 'industry', 'qualification', 'signal'];
+    const allKeys = Object.keys(result);
+
+    const orderedKeys = [
+        ...knownOrder.filter(k => allKeys.includes(k)),
+        ...allKeys.filter(k => !knownOrder.includes(k) && k !== 'location'),
+    ];
+
+    for (const key of orderedKeys) {
+        const value = result[key];
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(formatLine(key, value, FIELD_LABELS));
+        }
+    }
+
+    // 2. Handle location separately (it's an object)
+    const locLine = formatLocation(result.location);
+    if (locLine) lines.push(locLine);
+
+    return lines.join('\n');
+}
+
 async function generateFreeResponse(
     message,
     history,
@@ -22,32 +74,8 @@ async function generateFreeResponse(
 
         console.log('[Orchestrator] Understanding result:', result);
 
-        let reply;
-        if (!result || !result.targetEntity) {
-            reply = '⚠️ Could not determine a target entity from your message.';
-        } else {
-            const lines = [`🎯 Target entity: ${result.targetEntity}`];
-
-            if (result.problem) {
-                lines.push(`📌 Problem: ${result.problem}`);
-            }
-            if (result.intent) {
-                lines.push(`💡 Intent: ${result.intent}`);
-            }
-            if (result.location && (result.location.city || result.location.country)) {
-                const city = result.location.city || '—';
-                const country = result.location.country || '—';
-                lines.push(`📍 Location: ${city}, ${country}`);
-            }
-            if (result.industry) {
-                lines.push(`🏭 Industry: ${result.industry}`);
-            }
-            if (result.qualification) {
-                lines.push(`✅ Qualification: ${result.qualification}`);
-            }
-
-            reply = lines.join('\n');
-        }
+        const reply = buildReply(result);
+        console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
