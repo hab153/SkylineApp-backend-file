@@ -16,6 +16,7 @@ const FALLBACK_PROBLEM = 'customer';
 const FALLBACK_INTENT = 'potential_customers';
 const FALLBACK_INDUSTRY = 'Software';
 const FALLBACK_QUALIFICATION = '20 or more employees';
+const FALLBACK_SIGNAL = 'hiring employees';
 
 const FALLBACK_LOCATION = {
     city: 'New York City',
@@ -38,6 +39,7 @@ and identify:
 4. The location connected to the user's request.
 5. The industry the user is looking for.
 6. The qualification or rule the user is trying to enforce.
+7. The signal or evidence to investigate for the request.
 
 Read and understand the complete user request before deciding the result.
 Do not rely only on exact keywords.
@@ -92,6 +94,32 @@ condition, or criteria the user is trying to enforce or prove.
 
 If the qualification cannot be clearly identified from the user's request,
 return an empty string for the qualification value.
+
+Signal instructions:
+
+The signal is the evidence that should be looked for to determine whether
+an entity really matches the problem or need the user mentioned.
+
+The signal is not the need itself. The need is what the entity may want.
+The signal is what should be investigated to support the possibility that
+the entity has that need.
+
+The understanding does not claim the entity has the signal. It only tells
+the next layers what evidence to investigate.
+
+Example: if the user is looking for companies that need cybersecurity,
+the signal could be a security incident, hiring security employees,
+security or compliance requirements, handling sensitive customer data,
+or expanding digital systems. These are only examples, not limits.
+
+Decide the signal yourself from the complete meaning of the request.
+Do not use keyword matching.
+Do not follow a predefined signal list.
+Do not allow the code or any external rule to decide the signal.
+Return the most accurate plain-text description of the evidence to investigate.
+
+If the signal cannot be clearly identified from the user's request,
+return an empty string for the signal value.
 
 Location instructions:
 
@@ -148,7 +176,8 @@ Return only valid JSON using exactly this format:
     "country": "the identified country"
   },
   "industry": "the identified industry",
-  "qualification": "the identified qualification"
+  "qualification": "the identified qualification",
+  "signal": "the identified signal"
 }
 
 If the target entity cannot be clearly identified, return:
@@ -162,7 +191,8 @@ If the target entity cannot be clearly identified, return:
     "country": "the identified country"
   },
   "industry": "the identified industry",
-  "qualification": "the identified qualification"
+  "qualification": "the identified qualification",
+  "signal": "the identified signal"
 }
 
 If the problem, need, or area of interest cannot be clearly identified,
@@ -232,6 +262,7 @@ async function understandRequest(message) {
             const location = parsedResult?.location;
             const industry = parsedResult?.industry;
             const qualification = parsedResult?.qualification;
+            const signal = parsedResult?.signal;
 
             if (
                 typeof targetEntity === 'string' &&
@@ -265,6 +296,12 @@ async function understandRequest(message) {
                         qualification.trim().length > 0
                             ? qualification.trim()
                             : FALLBACK_QUALIFICATION,
+
+                    signal:
+                        typeof signal === 'string' &&
+                        signal.trim().length > 0
+                            ? signal.trim()
+                            : FALLBACK_SIGNAL,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -294,6 +331,7 @@ async function understandRequest(message) {
         location: FALLBACK_LOCATION,
         industry: FALLBACK_INDUSTRY,
         qualification: FALLBACK_QUALIFICATION,
+        signal: FALLBACK_SIGNAL,
     };
 
     console.warn(
