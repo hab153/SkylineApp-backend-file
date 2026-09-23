@@ -17,6 +17,7 @@ const FALLBACK_INTENT = 'potential_customers';
 const FALLBACK_INDUSTRY = 'Software';
 const FALLBACK_QUALIFICATION = '20 or more employees';
 const FALLBACK_SIGNAL = 'hiring employees';
+const FALLBACK_QUANTITY = '5 companies';
 
 const FALLBACK_LOCATION = {
     city: 'New York City',
@@ -40,6 +41,7 @@ and identify:
 5. The industry the user is looking for.
 6. The qualification or rule the user is trying to enforce.
 7. The signal or evidence to investigate for the request.
+8. The quantity of leads or results the user wants.
 
 Read and understand the complete user request before deciding the result.
 Do not rely only on exact keywords.
@@ -121,6 +123,28 @@ Return the most accurate plain-text description of the evidence to investigate.
 If the signal cannot be clearly identified from the user's request,
 return an empty string for the signal value.
 
+Quantity instructions:
+
+The quantity is how many leads or results the user wants to find.
+
+The quantity answers the question: how many?
+
+The quantity is different from the qualification.
+The quantity is how many.
+The qualification is the rule, requirement, condition, or criteria.
+
+Examples: ten companies, fifty companies, three hundred companies,
+as many as possible. These are only examples, not limits.
+
+Decide the quantity yourself from the complete meaning of the request.
+Do not use keyword matching.
+Do not follow a predefined quantity list.
+Do not allow the code or any external rule to decide the quantity.
+Return the most accurate plain-text description of how many the user wants.
+
+If the quantity cannot be clearly identified from the user's request,
+return an empty string for the quantity value.
+
 Location instructions:
 
 The location must contain exactly two fields:
@@ -177,7 +201,8 @@ Return only valid JSON using exactly this format:
   },
   "industry": "the identified industry",
   "qualification": "the identified qualification",
-  "signal": "the identified signal"
+  "signal": "the identified signal",
+  "quantity": "the identified quantity"
 }
 
 If the target entity cannot be clearly identified, return:
@@ -192,7 +217,8 @@ If the target entity cannot be clearly identified, return:
   },
   "industry": "the identified industry",
   "qualification": "the identified qualification",
-  "signal": "the identified signal"
+  "signal": "the identified signal",
+  "quantity": "the identified quantity"
 }
 
 If the problem, need, or area of interest cannot be clearly identified,
@@ -263,6 +289,7 @@ async function understandRequest(message) {
             const industry = parsedResult?.industry;
             const qualification = parsedResult?.qualification;
             const signal = parsedResult?.signal;
+            const quantity = parsedResult?.quantity;
 
             if (
                 typeof targetEntity === 'string' &&
@@ -302,6 +329,12 @@ async function understandRequest(message) {
                         signal.trim().length > 0
                             ? signal.trim()
                             : FALLBACK_SIGNAL,
+
+                    quantity:
+                        typeof quantity === 'string' &&
+                        quantity.trim().length > 0
+                            ? quantity.trim()
+                            : FALLBACK_QUANTITY,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -332,6 +365,7 @@ async function understandRequest(message) {
         industry: FALLBACK_INDUSTRY,
         qualification: FALLBACK_QUALIFICATION,
         signal: FALLBACK_SIGNAL,
+        quantity: FALLBACK_QUANTITY,
     };
 
     console.warn(
