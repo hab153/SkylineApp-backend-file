@@ -24,12 +24,12 @@ const FALLBACK_LOCATION = {
     country: 'USA',
 };
 
-const REQUIRED_INFORMATION = {
-    companyName: '',
-    companyEmail: '',
-    phoneNumber: '',
-    shortCompanyInformation: '',
-};
+const REQUIRED_INFORMATION = [
+    'companyName',
+    'companyEmail',
+    'phoneNumber',
+    'shortCompanyInformation',
+];
 
 const MAX_ATTEMPTS = 2;
 
