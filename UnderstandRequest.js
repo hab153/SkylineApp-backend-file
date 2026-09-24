@@ -24,6 +24,13 @@ const FALLBACK_LOCATION = {
     country: 'USA',
 };
 
+const REQUIRED_INFORMATION = {
+    companyName: '',
+    companyEmail: '',
+    phoneNumber: '',
+    shortCompanyInformation: '',
+};
+
 const MAX_ATTEMPTS = 2;
 
 // ────────────────────────────────────────────────────────────────
@@ -335,6 +342,8 @@ async function understandRequest(message) {
                         quantity.trim().length > 0
                             ? quantity.trim()
                             : FALLBACK_QUANTITY,
+
+                    information: REQUIRED_INFORMATION,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -366,6 +375,7 @@ async function understandRequest(message) {
         qualification: FALLBACK_QUALIFICATION,
         signal: FALLBACK_SIGNAL,
         quantity: FALLBACK_QUANTITY,
+        information: REQUIRED_INFORMATION,
     };
 
     console.warn(
