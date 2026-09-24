@@ -19,6 +19,7 @@ const FALLBACK_QUALIFICATION = '20 or more employees';
 const FALLBACK_SIGNAL = 'hiring employees';
 const FALLBACK_QUANTITY = '5 companies';
 const FALLBACK_EXCLUSIONS = 'freelancers';
+const FALLBACK_CONSTRAINTS = 'companies founded after 2020';
 
 const FALLBACK_LOCATION = {
     city: 'New York City',
@@ -51,6 +52,7 @@ and identify:
 7. The signal or evidence to investigate for the request.
 8. The quantity of leads or results the user wants.
 9. The exclusions the user wants left out.
+10. The constraints or special rules Skyline must follow.
 
 Read and understand the complete user request before deciding the result.
 Do not rely only on exact keywords.
@@ -177,6 +179,33 @@ left out.
 If the exclusions cannot be clearly identified from the user's request,
 return an empty string for the exclusions value.
 
+Constraints instructions:
+
+The constraints are special rules or limits that must be followed when
+finding and returning leads.
+
+The constraints answer the question: what special rules must be followed?
+
+Examples: only companies with a website, only publicly available business
+emails, do not include duplicates, only companies founded after 2020.
+These are only examples, not limits.
+
+The constraints are different from the qualification and from the exclusions.
+The qualification is what the entity must have.
+The exclusions are what should be left out.
+The constraints are the special rules to follow when finding and returning
+leads.
+
+Decide the constraints yourself from the complete meaning of the request.
+Do not use keyword matching.
+Do not follow a predefined constraints list.
+Do not allow the code or any external rule to decide the constraints.
+Return the most accurate plain-text description of the special rules
+to follow.
+
+If the constraints cannot be clearly identified from the user's request,
+return an empty string for the constraints value.
+
 Location instructions:
 
 The location must contain exactly two fields:
@@ -235,7 +264,8 @@ Return only valid JSON using exactly this format:
   "qualification": "the identified qualification",
   "signal": "the identified signal",
   "quantity": "the identified quantity",
-  "exclusions": "the identified exclusions"
+  "exclusions": "the identified exclusions",
+  "constraints": "the identified constraints"
 }
 
 If the target entity cannot be clearly identified, return:
@@ -252,7 +282,8 @@ If the target entity cannot be clearly identified, return:
   "qualification": "the identified qualification",
   "signal": "the identified signal",
   "quantity": "the identified quantity",
-  "exclusions": "the identified exclusions"
+  "exclusions": "the identified exclusions",
+  "constraints": "the identified constraints"
 }
 
 If the problem, need, or area of interest cannot be clearly identified,
@@ -325,6 +356,7 @@ async function understandRequest(message) {
             const signal = parsedResult?.signal;
             const quantity = parsedResult?.quantity;
             const exclusions = parsedResult?.exclusions;
+            const constraints = parsedResult?.constraints;
 
             if (
                 typeof targetEntity === 'string' &&
@@ -371,13 +403,19 @@ async function understandRequest(message) {
                             ? quantity.trim()
                             : FALLBACK_QUANTITY,
 
+                    information: REQUIRED_INFORMATION,
+
                     exclusions:
                         typeof exclusions === 'string' &&
                         exclusions.trim().length > 0
                             ? exclusions.trim()
                             : FALLBACK_EXCLUSIONS,
 
-                    information: REQUIRED_INFORMATION,
+                    constraints:
+                        typeof constraints === 'string' &&
+                        constraints.trim().length > 0
+                            ? constraints.trim()
+                            : FALLBACK_CONSTRAINTS,
                 };
 
                 console.log('[UnderstandRequest] Final result:', result);
@@ -409,8 +447,9 @@ async function understandRequest(message) {
         qualification: FALLBACK_QUALIFICATION,
         signal: FALLBACK_SIGNAL,
         quantity: FALLBACK_QUANTITY,
-        exclusions: FALLBACK_EXCLUSIONS,
         information: REQUIRED_INFORMATION,
+        exclusions: FALLBACK_EXCLUSIONS,
+        constraints: FALLBACK_CONSTRAINTS,
     };
 
     console.warn(
