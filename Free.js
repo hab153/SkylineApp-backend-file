@@ -7,11 +7,12 @@ const FIELD_ORDER = [
     'targetEntity',
     'problem',
     'intent',
-    'location',      // ← object, handled specially
+    'location',
     'industry',
     'qualification',
     'signal',
     'quantity',
+    'information',
 ];
 
 const FIELD_LABELS = {
@@ -22,6 +23,7 @@ const FIELD_LABELS = {
     qualification: { icon: '✅', label: 'Qualification' },
     signal:        { icon: '📡', label: 'Signal' },
     quantity:      { icon: '🔢', label: 'Quantity' },
+    information:   { icon: '📋', label: 'Information' },
 };
 
 function formatLocation(loc) {
@@ -32,17 +34,32 @@ function formatLocation(loc) {
 }
 
 function formatField(key, value) {
-    // location is special — it's an object with city/country
+    // location is special — object with city/country
     if (key === 'location') {
         return formatLocation(value);
     }
 
-    if (typeof value !== 'string' || !value.trim()) {
-        return null;
+    // ✅ NEW: arrays — render as comma-separated list
+    if (Array.isArray(value)) {
+        const items = value.filter(v => typeof v === 'string' && v.trim());
+        if (items.length === 0) return null;
+        const meta = FIELD_LABELS[key] || { icon: '•', label: key };
+        return `${meta.icon} ${meta.label}: ${items.join(', ')}`;
     }
 
-    const meta = FIELD_LABELS[key] || { icon: '•', label: key };
-    return `${meta.icon} ${meta.label}: ${value}`;
+    // strings
+    if (typeof value === 'string' && value.trim()) {
+        const meta = FIELD_LABELS[key] || { icon: '•', label: key };
+        return `${meta.icon} ${meta.label}: ${value}`;
+    }
+
+    // numbers / booleans
+    if (typeof value === 'number' || typeof value === 'boolean') {
+        const meta = FIELD_LABELS[key] || { icon: '•', label: key };
+        return `${meta.icon} ${meta.label}: ${value}`;
+    }
+
+    return null;
 }
 
 function buildReply(result) {
