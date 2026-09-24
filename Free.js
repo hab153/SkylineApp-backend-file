@@ -2,6 +2,10 @@
 
 const understandRequest = require('./UnderstandRequest');
 
+// ────────────────────────────────────────────────────────────────
+// FIELD ORDER — matches the schema exactly
+// ────────────────────────────────────────────────────────────────
+
 const FIELD_ORDER = [
     'targetEntity',
     'problem',
@@ -11,8 +15,9 @@ const FIELD_ORDER = [
     'qualification',
     'signal',
     'quantity',
-    'exclusions',
     'information',
+    'exclusions',
+    'constraints',
 ];
 
 const FIELD_LABELS = {
@@ -23,9 +28,16 @@ const FIELD_LABELS = {
     qualification: { icon: '✅', label: 'Qualification' },
     signal:        { icon: '📡', label: 'Signal' },
     quantity:      { icon: '🔢', label: 'Quantity' },
-    exclusions:    { icon: '🚫', label: 'Exclusions' },
     information:   { icon: '📋', label: 'Information' },
+    exclusions:    { icon: '🚫', label: 'Exclusions' },
+    constraints:   { icon: '📎', label: 'Constraints' },
 };
+
+const DEFAULT_FIELD_ICON = '📝';
+
+function titleCase(key) {
+    return key.charAt(0).toUpperCase() + key.slice(1);
+}
 
 function formatLocation(loc) {
     if (!loc || (!loc.city && !loc.country)) return null;
@@ -35,24 +47,21 @@ function formatLocation(loc) {
 }
 
 function formatField(key, value) {
-    if (key === 'location') {
-        return formatLocation(value);
-    }
+    if (key === 'location') return formatLocation(value);
+
+    const meta = FIELD_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
     if (Array.isArray(value)) {
         const items = value.filter(v => typeof v === 'string' && v.trim());
         if (items.length === 0) return null;
-        const meta = FIELD_LABELS[key] || { icon: '•', label: key };
         return `${meta.icon} ${meta.label}: ${items.join(', ')}`;
     }
 
     if (typeof value === 'string' && value.trim()) {
-        const meta = FIELD_LABELS[key] || { icon: '•', label: key };
         return `${meta.icon} ${meta.label}: ${value}`;
     }
 
     if (typeof value === 'number' || typeof value === 'boolean') {
-        const meta = FIELD_LABELS[key] || { icon: '•', label: key };
         return `${meta.icon} ${meta.label}: ${value}`;
     }
 
@@ -71,6 +80,7 @@ function buildReply(result) {
         if (line) lines.push(line);
     }
 
+    // Any extra fields the model invents — render at the end with default icon
     const extraKeys = Object.keys(result).filter(k => !FIELD_ORDER.includes(k));
     for (const key of extraKeys) {
         const line = formatField(key, result[key]);
@@ -80,22 +90,13 @@ function buildReply(result) {
     return lines.join('\n');
 }
 
-async function generateFreeResponse(
-    message,
-    history,
-    userProfile,
-    onProgress,
-    options = {}
-) {
+async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
 
     try {
         const result = await understandRequest(message, {
-            history,
-            userProfile,
-            onProgress,
-            options,
+            history, userProfile, onProgress, options,
         });
 
         console.log('[Orchestrator] Understanding result:', result);
