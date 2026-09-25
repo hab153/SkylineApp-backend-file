@@ -1,6 +1,7 @@
 'use strict';
 
 const understandRequest = require('./UnderstandRequest');
+const planRequest      = require('./PlanRequest');
 
 // ────────────────────────────────────────────────────────────────
 // FIELD ORDER — matches the schema exactly
@@ -90,24 +91,47 @@ function buildReply(result) {
     return lines.join('\n');
 }
 
+// ────────────────────────────────────────────────────────────────
+// ORCHESTRATOR
+// ────────────────────────────────────────────────────────────────
+
 async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
 
     try {
-        const result = await understandRequest(message, {
+        // ── STEP 1: Understand the request ──
+        const understanding = await understandRequest(message, {
             history, userProfile, onProgress, options,
         });
 
-        console.log('[Orchestrator] Understanding result:', result);
+        console.log('[Orchestrator] Understanding result:', understanding);
 
-        const reply = buildReply(result);
+        // ── STEP 2: Plan based on the understanding ──
+        const planResult = await planRequest(understanding, {
+            message,
+            history,
+            userProfile,
+            onProgress,
+            options,
+        });
+
+        console.log('[Orchestrator] Plan result:', planResult);
+
+        const plan = planResult.plan;
+        const finalUnderstanding = planResult.understanding || understanding;
+
+        // ── STEP 3: Render the reply from the understanding ──
+        const reply = buildReply(finalUnderstanding);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: result,
+            meta: {
+                understanding: finalUnderstanding,
+                plan,
+            },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
