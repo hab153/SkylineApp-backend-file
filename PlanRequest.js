@@ -19,12 +19,12 @@ const MAX_ATTEMPTS = 2;
 
 // Builds the fallback strategy from the Understanding output using the
 // conditional fallback rules:
-//   IF target exists       → start with target + location
-//   IF qualification exists→ plan to check those qualifications
-//   IF signals exist       → plan to investigate those signals
-//   IF exclusions exist    → plan to exclude them
-//   IF quantity exists     → search toward that quantity
-//   IF need exists         → include the need when designing the search approach
+//   IF target exists        → start with target + location
+//   IF qualification exists → plan to check those qualifications
+//   IF signals exist        → plan to investigate those signals
+//   IF exclusions exist     → plan to exclude them
+//   IF quantity exists      → search toward that quantity
+//   IF need exists          → include the need when designing the search approach
 
 function buildFallbackStrategy(understanding) {
     const parts = [];
@@ -98,6 +98,15 @@ Search Strategy does not actually search. It does not report results. It does
 not say that a specific entity was found. Instead, it describes how the search
 should be carried out.
 
+The strategy must describe what needs to be investigated. It must not claim
+that the investigation has already succeeded.
+
+Use forward-looking and investigative language, such as:
+search for, look for, investigate, check for, plan to, continue looking for.
+
+Do not use language that suggests the work is already complete, such as:
+found, identified, confirmed, verified, ensured, located.
+
 Example:
 
 If the Understanding output is:
@@ -123,10 +132,11 @@ If the Understanding output is:
 
 A suitable Search Strategy would be:
 
-"Find hospitals in Chicago → exclude government-owned facilities → identify
-hospitals that meet the revenue requirement → investigate evidence related to
-MRI needs, including radiology hiring → continue finding suitable candidates
-until enough valid leads are available."
+"Search for hospitals in Chicago → plan to exclude government-owned facilities
+→ plan to check which hospitals meet the revenue requirement → plan to
+investigate evidence related to MRI needs, including radiology hiring →
+continue searching for suitable candidates until enough valid leads are
+available."
 
 Decide the Search Strategy yourself from the complete meaning of the
 Understanding output.
