@@ -4,10 +4,10 @@ const understandRequest = require('./UnderstandRequest');
 const planRequest      = require('./PlanRequest');
 
 // ────────────────────────────────────────────────────────────────
-// FIELD ORDER — matches the schema exactly
+// UNDERSTANDING FIELDS
 // ────────────────────────────────────────────────────────────────
 
-const FIELD_ORDER = [
+const UNDERSTANDING_ORDER = [
     'targetEntity',
     'problem',
     'intent',
@@ -21,7 +21,7 @@ const FIELD_ORDER = [
     'constraints',
 ];
 
-const FIELD_LABELS = {
+const UNDERSTANDING_LABELS = {
     targetEntity:  { icon: '🎯', label: 'Target entity' },
     problem:       { icon: '📌', label: 'Problem' },
     intent:        { icon: '💡', label: 'Intent' },
@@ -34,7 +34,27 @@ const FIELD_LABELS = {
     constraints:   { icon: '📎', label: 'Constraints' },
 };
 
+// ────────────────────────────────────────────────────────────────
+// PLANNING FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const PLANNING_ORDER = [
+    'strategy',
+    'steps',
+    'action',
+];
+
+const PLANNING_LABELS = {
+    strategy: { icon: '🧭', label: 'Strategy' },
+    steps:    { icon: '🪜', label: 'Steps' },
+    action:   { icon: '⚡', label: 'Action' },
+};
+
 const DEFAULT_FIELD_ICON = '📝';
+
+// ────────────────────────────────────────────────────────────────
+// HELPERS
+// ────────────────────────────────────────────────────────────────
 
 function titleCase(key) {
     return key.charAt(0).toUpperCase() + key.slice(1);
@@ -47,13 +67,15 @@ function formatLocation(loc) {
     return `📍 Location: ${city}, ${country}`;
 }
 
-function formatField(key, value) {
+function formatField(key, value, labels) {
     if (key === 'location') return formatLocation(value);
 
-    const meta = FIELD_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+    const meta = labels[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
     if (Array.isArray(value)) {
-        const items = value.filter(v => typeof v === 'string' && v.trim());
+        const items = value
+            .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+            .filter(Boolean);
         if (items.length === 0) return null;
         return `${meta.icon} ${meta.label}: ${items.join(', ')}`;
     }
@@ -69,26 +91,90 @@ function formatField(key, value) {
     return null;
 }
 
-function buildReply(result) {
-    if (!result || !result.targetEntity) {
-        return '⚠️ Could not determine a target entity from your message.';
+// ────────────────────────────────────────────────────────────────
+// RENDER: UNDERSTANDING SECTION
+// ────────────────────────────────────────────────────────────────
+
+function renderUnderstanding(understanding) {
+    if (!understanding || typeof understanding !== 'object') {
+        return 'Understanding\n⚠️ No understanding data.';
     }
 
     const lines = [];
 
-    for (const key of FIELD_ORDER) {
-        const line = formatField(key, result[key]);
+    for (const key of UNDERSTANDING_ORDER) {
+        const line = formatField(key, understanding[key], UNDERSTANDING_LABELS);
         if (line) lines.push(line);
     }
 
-    // Any extra fields the model invents — render at the end with default icon
-    const extraKeys = Object.keys(result).filter(k => !FIELD_ORDER.includes(k));
-    for (const key of extraKeys) {
-        const line = formatField(key, result[key]);
+    // Extra fields the model invented — still render them
+    const extras = Object.keys(understanding)
+        .filter(k => !UNDERSTANDING_ORDER.includes(k));
+    for (const key of extras) {
+        const line = formatField(key, understanding[key], UNDERSTANDING_LABELS);
         if (line) lines.push(line);
     }
 
-    return lines.join('\n');
+    if (lines.length === 0) {
+        return 'Understanding\n⚠️ No understanding data.';
+    }
+
+    return ['Understanding', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// RENDER: PLANNING SECTION
+// ────────────────────────────────────────────────────────────────
+
+function renderPlanning(plan) {
+    if (!plan || typeof plan !== 'object') {
+        return 'Planning\n⚠️ No planning data.';
+    }
+
+    const lines = [];
+
+    for (const key of PLANNING_ORDER) {
+        const value = plan[key];
+        if (value === undefined || value === null) continue;
+
+        if (Array.isArray(value)) {
+            const items = value
+                .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+                .filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push('🪜 Steps:');
+            items.forEach((s, i) => lines.push(`   ${i + 1}. ${s}`));
+            continue;
+        }
+
+        const line = formatField(key, value, PLANNING_LABELS);
+        if (line) lines.push(line);
+    }
+
+    // Extra fields in the plan
+    const extras = Object.keys(plan)
+        .filter(k => !PLANNING_ORDER.includes(k));
+    for (const key of extras) {
+        const line = formatField(key, plan[key], PLANNING_LABELS);
+        if (line) lines.push(line);
+    }
+
+    if (lines.length === 0) {
+        return 'Planning\n⚠️ No planning data.';
+    }
+
+    return ['Planning', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY
+// ────────────────────────────────────────────────────────────────
+
+function buildReply(understanding, plan) {
+    const understandingSection = renderUnderstanding(understanding);
+    const planningSection      = renderPlanning(plan);
+
+    return `${understandingSection}\n\n${planningSection}`;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -100,38 +186,28 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
     console.log('[Orchestrator] Message:', message);
 
     try {
-        // ── STEP 1: Understand the request ──
+        // ── STEP 1: Understand ──
         const understanding = await understandRequest(message, {
             history, userProfile, onProgress, options,
         });
 
         console.log('[Orchestrator] Understanding result:', understanding);
 
-        // ── STEP 2: Plan based on the understanding ──
-        const planResult = await planRequest(understanding, {
-            message,
-            history,
-            userProfile,
-            onProgress,
-            options,
+        // ── STEP 2: Plan ──
+        const plan = await planRequest(understanding, {
+            message, history, userProfile, onProgress, options,
         });
 
-        console.log('[Orchestrator] Plan result:', planResult);
+        console.log('[Orchestrator] Plan result:', plan);
 
-        const plan = planResult.plan;
-        const finalUnderstanding = planResult.understanding || understanding;
-
-        // ── STEP 3: Render the reply from the understanding ──
-        const reply = buildReply(finalUnderstanding);
+        // ── STEP 3: Render ──
+        const reply = buildReply(understanding, plan);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: {
-                understanding: finalUnderstanding,
-                plan,
-            },
+            meta: { understanding, plan },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
