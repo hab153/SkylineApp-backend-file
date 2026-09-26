@@ -63,6 +63,55 @@ function buildFallbackStrategy(understanding) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// FALLBACK SOURCE BUILDER
+// ────────────────────────────────────────────────────────────────
+
+// Builds the fallback source selection from the Understanding output using
+// fixed field-presence rules. The code does not read the original request,
+// does not match keywords, and does not decide the meaning of any field.
+// It only checks which Understanding fields are present and emits the
+// predefined source phrase associated with each field.
+
+function buildFallbackSource(understanding) {
+    const parts = [];
+
+    const information = Array.isArray(understanding.information)
+        ? understanding.information
+        : [];
+
+    if (understanding.targetEntity) {
+        parts.push('search engines and relevant directories');
+    }
+
+    if (information.includes('companyName')) {
+        parts.push('official company websites');
+    }
+
+    if (
+        information.includes('companyEmail') ||
+        information.includes('phoneNumber')
+    ) {
+        parts.push('contact pages and public business sources');
+    }
+
+    if (understanding.qualification) {
+        parts.push('reliable business sources');
+    }
+
+    if (understanding.signal) {
+        parts.push('relevant authoritative sources');
+    }
+
+    if (parts.length === 0) {
+        parts.push(
+            'search engine, official website, and relevant authoritative sources'
+        );
+    }
+
+    return parts.join(' → ');
+}
+
+// ────────────────────────────────────────────────────────────────
 // GPT INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
@@ -72,7 +121,7 @@ has already determined what the user wants: the target entity, problem, intent,
 location, industry, qualification, signal, quantity, information, exclusions,
 and constraints.
 
-Your only task is to create the Search Strategy.
+Your only task is to create the Search Strategy and the Source Selection.
 
 Search Strategy is the overall plan for how to find the leads the user
 requested.
@@ -148,6 +197,44 @@ Return the most accurate plain-text description of the search strategy.
 The strategy must be a clear, meaningful plain-text description of the overall
 approach. Do not return an empty or null strategy.
 
+Source Selection instructions:
+
+Source Selection is deciding where to look for the information that is needed.
+
+Source Selection answers the question: what types of sources should be used?
+
+Source Selection does not search yet. It only tells the Discovery layer which
+sources to investigate.
+
+Source Selection must describe what sources should be investigated. It must
+not claim that any source has already been searched, and it must not claim
+that any result has already been found.
+
+Use forward-looking and investigative language, such as:
+look in, investigate, use, check, search.
+
+Do not use language that suggests the work is already complete, such as:
+found, identified, confirmed, verified, ensured, located.
+
+The source selection must be a clear, meaningful plain-text description of the
+types of sources to investigate. Do not return an empty or null source
+selection.
+
+Decide the Source Selection yourself from the complete meaning of the
+Understanding output.
+Do not use keyword matching.
+Do not follow a predefined source list.
+Do not allow the code or any external rule to decide the source selection.
+
+Examples of suitable Source Selections (these are only examples, not limits):
+
+"search engines and healthcare directories → official clinic websites →
+careers pages and job postings → reliable business sources → official
+contact pages"
+
+"search engines and business directories → official company websites →
+company announcements and relevant news → official contact pages"
+
 Do not explain your answer.
 Do not perform a search.
 Do not provide recommendations.
@@ -158,7 +245,8 @@ Do not invent unnecessary details.
 Return only valid JSON using exactly this format:
 
 {
-  "strategy": "the search strategy"
+  "strategy": "the search strategy",
+  "source": "the selected sources"
 }
 `;
 
@@ -219,6 +307,7 @@ async function planRequest(understanding) {
             );
 
             const strategy = parsedResult?.strategy;
+            const source = parsedResult?.source;
 
             if (
                 typeof strategy === 'string' &&
@@ -226,6 +315,12 @@ async function planRequest(understanding) {
             ) {
                 const result = {
                     strategy: strategy.trim(),
+
+                    source:
+                        typeof source === 'string' &&
+                        source.trim().length > 0
+                            ? source.trim()
+                            : buildFallbackSource(understanding),
                 };
 
                 console.log('[PlanRequest] Final result:', result);
@@ -250,6 +345,7 @@ async function planRequest(understanding) {
 
     const fallbackResult = {
         strategy: buildFallbackStrategy(understanding),
+        source: buildFallbackSource(understanding),
     };
 
     console.warn(
