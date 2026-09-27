@@ -35,23 +35,25 @@ const UNDERSTANDING_LABELS = {
 };
 
 // ────────────────────────────────────────────────────────────────
-// PLANNING FIELDS
+// PLANNING FIELDS — matches the PlanRequest schema exactly
 // ────────────────────────────────────────────────────────────────
 
 const PLANNING_ORDER = [
     'strategy',
     'source',
     'query',
+    'evidenceSearch',
     'steps',
     'action',
 ];
 
 const PLANNING_LABELS = {
-    strategy: { icon: '🧭', label: 'Strategy' },
-    source:   { icon: '🔗', label: 'Source' },
-    query:    { icon: '🔍', label: 'Query' },
-    steps:    { icon: '🪜', label: 'Steps' },
-    action:   { icon: '⚡', label: 'Action' },
+    strategy:       { icon: '🧭', label: 'Strategy' },
+    source:         { icon: '🔗', label: 'Source' },
+    query:          { icon: '🔍', label: 'Query' },
+    evidenceSearch: { icon: '🔬', label: 'Evidence Search' },
+    steps:          { icon: '🪜', label: 'Steps' },
+    action:         { icon: '⚡', label: 'Action' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -140,36 +142,33 @@ function renderPlanning(plan) {
         const value = plan[key];
         if (value === undefined || value === null) continue;
 
+        // ── Array fields ──
         if (Array.isArray(value)) {
             const items = value
                 .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
                 .filter(Boolean);
             if (items.length === 0) continue;
 
-            // Query array → one line per query for readability
-            if (key === 'query') {
-                lines.push('🔍 Query:');
-                items.forEach((q, i) => lines.push(`   ${i + 1}. ${q}`));
-                continue;
-            }
-
-            // Steps array → numbered
-            if (key === 'steps') {
-                lines.push('🪜 Steps:');
-                items.forEach((s, i) => lines.push(`   ${i + 1}. ${s}`));
-                continue;
-            }
-
-            // Generic array → comma separated
             const meta = PLANNING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+
+            // query and evidenceSearch → numbered, one per line
+            if (key === 'query' || key === 'evidenceSearch' || key === 'steps') {
+                lines.push(`${meta.icon} ${meta.label}:`);
+                items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
+                continue;
+            }
+
+            // Generic arrays → comma-separated
             lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
             continue;
         }
 
+        // ── Scalar fields ──
         const line = formatField(key, value, PLANNING_LABELS);
         if (line) lines.push(line);
     }
 
+    // Any extra plan fields — appended at the end
     const extras = Object.keys(plan)
         .filter(k => !PLANNING_ORDER.includes(k));
     for (const key of extras) {
