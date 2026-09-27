@@ -112,6 +112,55 @@ function buildFallbackSource(understanding) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// FALLBACK QUERY BUILDER
+// ────────────────────────────────────────────────────────────────
+
+// Builds the fallback query list from the Understanding output using fixed
+// field-combination rules. The code does not read the original request,
+// does not match keywords, and does not decide the meaning of any field.
+// It only combines the structured fields already produced by Understanding.
+//
+// The combinations are applied in this order:
+//   Target + Location
+//   Target + Problem
+//   Target + Location + Problem
+//   Target + Location + Signal
+//   Target + Signal
+
+function buildFallbackQuery(understanding) {
+    const queries = [];
+
+    const target = understanding.targetEntity;
+    const city = understanding.location?.city ?? '';
+    const country = understanding.location?.country ?? '';
+    const location = `${city} ${country}`.trim();
+    const problem = understanding.problem;
+    const signal = understanding.signal;
+
+    if (target && location) {
+        queries.push(`${target} ${location}`);
+    }
+
+    if (target && problem) {
+        queries.push(`${target} ${problem}`);
+    }
+
+    if (target && location && problem) {
+        queries.push(`${target} ${location} ${problem}`);
+    }
+
+    if (target && location && signal) {
+        queries.push(`${target} ${location} ${signal}`);
+    }
+
+    if (target && signal) {
+        queries.push(`${target} ${signal}`);
+    }
+
+    return queries;
+}
+
+// ────────────────────────────────────────────────────────────────
 // GPT INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
@@ -121,7 +170,8 @@ has already determined what the user wants: the target entity, problem, intent,
 location, industry, qualification, signal, quantity, information, exclusions,
 and constraints.
 
-Your only task is to create the Search Strategy and the Source Selection.
+Your only task is to create the Search Strategy, the Source Selection, and the
+Query Generation.
 
 Search Strategy is the overall plan for how to find the leads the user
 requested.
@@ -235,6 +285,65 @@ contact pages"
 "search engines and business directories → official company websites →
 company announcements and relevant news → official contact pages"
 
+Query Generation instructions:
+
+Query Generation is creating the actual search phrases that will be sent to
+the search system.
+
+Query Generation answers the question: what exact searches should be sent?
+
+The user gives a request. That request is not always a good search query.
+Natural language is often too broad or too complicated for effective
+searching. The user might ask for companies that need cybersecurity, but a
+search engine may not have a page literally saying that a company needs
+cybersecurity.
+
+Query Generation turns the Understanding output and the Planning decisions
+into multiple targeted search queries that the Discovery layer can execute.
+
+Query Generation creates queries around observable evidence. Examples of
+observable evidence include: hiring activity, job postings, compliance
+requirements, incidents, technology expansion, announcements, and any other
+evidence that supports the possibility that the need exists. These are only
+examples, not limits.
+
+Query Generation does not decide whether a company is actually a good lead.
+It only creates the searches. The decision about whether a company is a good
+lead belongs to later stages.
+
+Query Generation must describe what searches to send. It must not claim that
+any search has already been performed, and it must not claim that any result
+has already been found.
+
+Use forward-looking language, such as:
+search for, look for, investigate, check for.
+
+Do not use language that suggests the work is already complete, such as:
+found, identified, confirmed, verified, ensured, located.
+
+Example:
+
+If the Understanding output is for fintech companies in London that need
+cybersecurity solutions, are hiring security engineers, and have 100 or more
+employees, a suitable Query Generation would be:
+
+[
+  "fintech companies London UK",
+  "London fintech companies hiring security engineers",
+  "London fintech companies cybersecurity jobs",
+  "London fintech companies 100+ employees",
+  "London fintech companies security compliance"
+]
+
+Decide the Query Generation yourself from the complete meaning of the
+Understanding output.
+Do not use keyword matching.
+Do not follow a predefined query list.
+Do not allow the code or any external rule to decide the queries.
+Return the most accurate list of search queries.
+
+The queries must be a non-empty list of non-empty search phrases.
+
 Do not explain your answer.
 Do not perform a search.
 Do not provide recommendations.
@@ -246,7 +355,8 @@ Return only valid JSON using exactly this format:
 
 {
   "strategy": "the search strategy",
-  "source": "the selected sources"
+  "source": "the selected sources",
+  "query": ["the first search query", "the second search query"]
 }
 `;
 
@@ -308,11 +418,26 @@ async function planRequest(understanding) {
 
             const strategy = parsedResult?.strategy;
             const source = parsedResult?.source;
+            const query = parsedResult?.query;
 
             if (
                 typeof strategy === 'string' &&
                 strategy.trim().length > 0
             ) {
+                const normalizedQuery =
+                    Array.isArray(query) &&
+                    query.filter(
+                        (q) => typeof q === 'string' && q.trim().length > 0
+                    ).length > 0
+                        ? query
+                              .filter(
+                                  (q) =>
+                                      typeof q === 'string' &&
+                                      q.trim().length > 0
+                              )
+                              .map((q) => q.trim())
+                        : buildFallbackQuery(understanding);
+
                 const result = {
                     strategy: strategy.trim(),
 
@@ -321,6 +446,8 @@ async function planRequest(understanding) {
                         source.trim().length > 0
                             ? source.trim()
                             : buildFallbackSource(understanding),
+
+                    query: normalizedQuery,
                 };
 
                 console.log('[PlanRequest] Final result:', result);
@@ -346,6 +473,7 @@ async function planRequest(understanding) {
     const fallbackResult = {
         strategy: buildFallbackStrategy(understanding),
         source: buildFallbackSource(understanding),
+        query: buildFallbackQuery(understanding),
     };
 
     console.warn(
