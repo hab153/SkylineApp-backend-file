@@ -161,6 +161,49 @@ function buildFallbackQuery(understanding) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// FALLBACK EVIDENCE SEARCH BUILDER
+// ────────────────────────────────────────────────────────────────
+
+// Builds the fallback evidence search list from the Understanding output
+// using three fixed field-combination patterns. The code does not read the
+// original request, does not match keywords, and does not decide the meaning
+// of any field. It only combines the structured fields already produced by
+// Understanding.
+//
+// Because targetEntity, location, and signal are guaranteed to exist (the
+// Understanding layer provides its own fallbacks for all three), these are
+// three fixed patterns rather than conditional branches.
+//
+// The patterns are applied in this order:
+//   Target + Location + Signal
+//   Target + Signal
+//   Location + Signal
+
+function buildFallbackEvidenceSearch(understanding) {
+    const evidenceSearch = [];
+
+    const target = understanding.targetEntity;
+    const city = understanding.location?.city ?? '';
+    const country = understanding.location?.country ?? '';
+    const location = `${city} ${country}`.trim();
+    const signal = understanding.signal;
+
+    if (target && location && signal) {
+        evidenceSearch.push(`${target} ${location} ${signal}`);
+    }
+
+    if (target && signal) {
+        evidenceSearch.push(`${target} ${signal}`);
+    }
+
+    if (location && signal) {
+        evidenceSearch.push(`${location} ${signal}`);
+    }
+
+    return evidenceSearch;
+}
+
+// ────────────────────────────────────────────────────────────────
 // GPT INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
@@ -170,8 +213,8 @@ has already determined what the user wants: the target entity, problem, intent,
 location, industry, qualification, signal, quantity, information, exclusions,
 and constraints.
 
-Your only task is to create the Search Strategy, the Source Selection, and the
-Query Generation.
+Your only task is to create the Search Strategy, the Source Selection, the
+Query Generation, and the Signal Search Planning.
 
 Search Strategy is the overall plan for how to find the leads the user
 requested.
@@ -344,6 +387,51 @@ Return the most accurate list of search queries.
 
 The queries must be a non-empty list of non-empty search phrases.
 
+Signal Search Planning instructions:
+
+Signal Search Planning is deciding how to search for evidence that a company
+may match the user's need.
+
+Signal Search Planning answers the question: how should the signal be
+investigated?
+
+The signal cannot be searched directly. A search engine does not have pages
+that say a company needs a specific thing. Instead, the search must look for
+evidence that supports the possibility that the need exists.
+
+Signal Search Planning does not perform the search. It does not report
+results. It does not say that any piece of evidence was found. It only
+describes how to investigate the signal.
+
+The evidence that is searched for is different from the signal itself.
+For example:
+
+If the signal is hiring security engineers, suitable evidence searches could
+include: company security engineer jobs, company cybersecurity hiring.
+
+If the signal is a security incident, suitable evidence searches could
+include: company security incident, company data breach.
+
+These are only examples, not limits.
+
+The Signal Search Planning must describe how to investigate the signal. It
+must not claim that any investigation has already been performed, and it must
+not claim that any evidence has already been found.
+
+Use forward-looking and investigative language, such as:
+search for, look for, investigate, check for.
+
+Do not use language that suggests the work is already complete, such as:
+found, identified, confirmed, verified, ensured, located.
+
+Decide the Signal Search Planning yourself from the complete meaning of the
+Understanding output.
+Do not use keyword matching.
+Do not follow a predefined signal search list.
+Do not allow the code or any external rule to decide the signal search.
+
+The evidence searches must be a non-empty list of non-empty search phrases.
+
 Do not explain your answer.
 Do not perform a search.
 Do not provide recommendations.
@@ -356,7 +444,8 @@ Return only valid JSON using exactly this format:
 {
   "strategy": "the search strategy",
   "source": "the selected sources",
-  "query": ["the first search query", "the second search query"]
+  "query": ["the first search query", "the second search query"],
+  "evidenceSearch": ["the first evidence search", "the second evidence search"]
 }
 `;
 
@@ -419,6 +508,7 @@ async function planRequest(understanding) {
             const strategy = parsedResult?.strategy;
             const source = parsedResult?.source;
             const query = parsedResult?.query;
+            const evidenceSearch = parsedResult?.evidenceSearch;
 
             if (
                 typeof strategy === 'string' &&
@@ -438,6 +528,20 @@ async function planRequest(understanding) {
                               .map((q) => q.trim())
                         : buildFallbackQuery(understanding);
 
+                const normalizedEvidenceSearch =
+                    Array.isArray(evidenceSearch) &&
+                    evidenceSearch.filter(
+                        (e) => typeof e === 'string' && e.trim().length > 0
+                    ).length > 0
+                        ? evidenceSearch
+                              .filter(
+                                  (e) =>
+                                      typeof e === 'string' &&
+                                      e.trim().length > 0
+                              )
+                              .map((e) => e.trim())
+                        : buildFallbackEvidenceSearch(understanding);
+
                 const result = {
                     strategy: strategy.trim(),
 
@@ -448,6 +552,8 @@ async function planRequest(understanding) {
                             : buildFallbackSource(understanding),
 
                     query: normalizedQuery,
+
+                    evidenceSearch: normalizedEvidenceSearch,
                 };
 
                 console.log('[PlanRequest] Final result:', result);
@@ -474,6 +580,7 @@ async function planRequest(understanding) {
         strategy: buildFallbackStrategy(understanding),
         source: buildFallbackSource(understanding),
         query: buildFallbackQuery(understanding),
+        evidenceSearch: buildFallbackEvidenceSearch(understanding),
     };
 
     console.warn(
