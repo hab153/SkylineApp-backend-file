@@ -40,12 +40,16 @@ const UNDERSTANDING_LABELS = {
 
 const PLANNING_ORDER = [
     'strategy',
+    'source',
+    'query',
     'steps',
     'action',
 ];
 
 const PLANNING_LABELS = {
     strategy: { icon: '🧭', label: 'Strategy' },
+    source:   { icon: '🔗', label: 'Source' },
+    query:    { icon: '🔍', label: 'Query' },
     steps:    { icon: '🪜', label: 'Steps' },
     action:   { icon: '⚡', label: 'Action' },
 };
@@ -107,7 +111,6 @@ function renderUnderstanding(understanding) {
         if (line) lines.push(line);
     }
 
-    // Extra fields the model invented — still render them
     const extras = Object.keys(understanding)
         .filter(k => !UNDERSTANDING_ORDER.includes(k));
     for (const key of extras) {
@@ -142,8 +145,24 @@ function renderPlanning(plan) {
                 .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
                 .filter(Boolean);
             if (items.length === 0) continue;
-            lines.push('🪜 Steps:');
-            items.forEach((s, i) => lines.push(`   ${i + 1}. ${s}`));
+
+            // Query array → one line per query for readability
+            if (key === 'query') {
+                lines.push('🔍 Query:');
+                items.forEach((q, i) => lines.push(`   ${i + 1}. ${q}`));
+                continue;
+            }
+
+            // Steps array → numbered
+            if (key === 'steps') {
+                lines.push('🪜 Steps:');
+                items.forEach((s, i) => lines.push(`   ${i + 1}. ${s}`));
+                continue;
+            }
+
+            // Generic array → comma separated
+            const meta = PLANNING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
             continue;
         }
 
@@ -151,7 +170,6 @@ function renderPlanning(plan) {
         if (line) lines.push(line);
     }
 
-    // Extra fields in the plan
     const extras = Object.keys(plan)
         .filter(k => !PLANNING_ORDER.includes(k));
     for (const key of extras) {
@@ -186,21 +204,18 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
     console.log('[Orchestrator] Message:', message);
 
     try {
-        // ── STEP 1: Understand ──
         const understanding = await understandRequest(message, {
             history, userProfile, onProgress, options,
         });
 
         console.log('[Orchestrator] Understanding result:', understanding);
 
-        // ── STEP 2: Plan ──
         const plan = await planRequest(understanding, {
             message, history, userProfile, onProgress, options,
         });
 
         console.log('[Orchestrator] Plan result:', plan);
 
-        // ── STEP 3: Render ──
         const reply = buildReply(understanding, plan);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
