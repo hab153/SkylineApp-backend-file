@@ -35,7 +35,7 @@ const UNDERSTANDING_LABELS = {
 };
 
 // ────────────────────────────────────────────────────────────────
-// PLANNING FIELDS — matches the PlanRequest schema exactly
+// PLANNING FIELDS
 // ────────────────────────────────────────────────────────────────
 
 const PLANNING_ORDER = [
@@ -43,6 +43,7 @@ const PLANNING_ORDER = [
     'source',
     'query',
     'evidenceSearch',
+    'allocation',
     'steps',
     'action',
 ];
@@ -52,6 +53,7 @@ const PLANNING_LABELS = {
     source:         { icon: '🔗', label: 'Source' },
     query:          { icon: '🔍', label: 'Query' },
     evidenceSearch: { icon: '🔬', label: 'Evidence Search' },
+    allocation:     { icon: '📊', label: 'Allocation' },
     steps:          { icon: '🪜', label: 'Steps' },
     action:         { icon: '⚡', label: 'Action' },
 };
@@ -64,6 +66,13 @@ const DEFAULT_FIELD_ICON = '📝';
 
 function titleCase(key) {
     return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function humanizeKey(key) {
+    return key
+        .replace(/([A-Z])/g, ' $1')
+        .replace(/^./, c => c.toUpperCase())
+        .trim();
 }
 
 function formatLocation(loc) {
@@ -98,6 +107,37 @@ function formatField(key, value, labels) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// RENDER: ALLOCATION OBJECT
+// ────────────────────────────────────────────────────────────────
+
+function renderAllocation(allocation) {
+    if (!allocation || typeof allocation !== 'object') return null;
+
+    const lines = [];
+
+    if (allocation.totalSearches !== undefined && allocation.totalSearches !== null) {
+        lines.push(`   • Total searches: ${allocation.totalSearches}`);
+    }
+
+    if (allocation.distribution && typeof allocation.distribution === 'object') {
+        lines.push('   • Distribution:');
+        for (const [key, value] of Object.entries(allocation.distribution)) {
+            lines.push(`      – ${humanizeKey(key)}: ${value}`);
+        }
+    }
+
+    const knownKeys = ['totalSearches', 'distribution'];
+    for (const key of Object.keys(allocation)) {
+        if (knownKeys.includes(key)) continue;
+        const v = allocation[key];
+        lines.push(`   • ${humanizeKey(key)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+    }
+
+    if (lines.length === 0) return null;
+    return ['📊 Allocation:', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
 // RENDER: UNDERSTANDING SECTION
 // ────────────────────────────────────────────────────────────────
 
@@ -113,17 +153,13 @@ function renderUnderstanding(understanding) {
         if (line) lines.push(line);
     }
 
-    const extras = Object.keys(understanding)
-        .filter(k => !UNDERSTANDING_ORDER.includes(k));
+    const extras = Object.keys(understanding).filter(k => !UNDERSTANDING_ORDER.includes(k));
     for (const key of extras) {
         const line = formatField(key, understanding[key], UNDERSTANDING_LABELS);
         if (line) lines.push(line);
     }
 
-    if (lines.length === 0) {
-        return 'Understanding\n⚠️ No understanding data.';
-    }
-
+    if (lines.length === 0) return 'Understanding\n⚠️ No understanding data.';
     return ['Understanding', ...lines].join('\n');
 }
 
@@ -142,7 +178,7 @@ function renderPlanning(plan) {
         const value = plan[key];
         if (value === undefined || value === null) continue;
 
-        // ── Array fields ──
+        // ── Arrays ──
         if (Array.isArray(value)) {
             const items = value
                 .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
@@ -151,35 +187,46 @@ function renderPlanning(plan) {
 
             const meta = PLANNING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
-            // query and evidenceSearch → numbered, one per line
             if (key === 'query' || key === 'evidenceSearch' || key === 'steps') {
                 lines.push(`${meta.icon} ${meta.label}:`);
                 items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
                 continue;
             }
 
-            // Generic arrays → comma-separated
             lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
             continue;
         }
 
-        // ── Scalar fields ──
+        // ── Objects (like allocation) ──
+        if (typeof value === 'object') {
+            if (key === 'allocation') {
+                const block = renderAllocation(value);
+                if (block) lines.push(block);
+                continue;
+            }
+
+            // Generic object fallback — flatten as key: value
+            const meta = PLANNING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+            continue;
+        }
+
+        // ── Scalars ──
         const line = formatField(key, value, PLANNING_LABELS);
         if (line) lines.push(line);
     }
 
-    // Any extra plan fields — appended at the end
-    const extras = Object.keys(plan)
-        .filter(k => !PLANNING_ORDER.includes(k));
+    // Extra fields
+    const extras = Object.keys(plan).filter(k => !PLANNING_ORDER.includes(k));
     for (const key of extras) {
         const line = formatField(key, plan[key], PLANNING_LABELS);
         if (line) lines.push(line);
     }
 
-    if (lines.length === 0) {
-        return 'Planning\n⚠️ No planning data.';
-    }
-
+    if (lines.length === 0) return 'Planning\n⚠️ No planning data.';
     return ['Planning', ...lines].join('\n');
 }
 
@@ -190,7 +237,6 @@ function renderPlanning(plan) {
 function buildReply(understanding, plan) {
     const understandingSection = renderUnderstanding(understanding);
     const planningSection      = renderPlanning(plan);
-
     return `${understandingSection}\n\n${planningSection}`;
 }
 
