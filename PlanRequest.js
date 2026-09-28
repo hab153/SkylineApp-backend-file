@@ -14,6 +14,36 @@ const MODEL = 'gpt-4o-mini';
 const MAX_ATTEMPTS = 2;
 
 // ────────────────────────────────────────────────────────────────
+// SEARCH CAPACITY BUCKETS
+// ────────────────────────────────────────────────────────────────
+
+// Fixed search-capacity buckets used by the fallback allocation.
+// These are search-capacity limits, not searches per lead.
+
+const SEARCH_CAPACITY_BUCKETS = [
+    { min: 1, max: 25, searches: 10 },
+    { min: 26, max: 50, searches: 20 },
+    { min: 51, max: 100, searches: 35 },
+    { min: 101, max: 200, searches: 60 },
+    { min: 201, max: 300, searches: 90 },
+    { min: 301, max: 500, searches: 140 },
+    { min: 501, max: 750, searches: 200 },
+    { min: 751, max: 1000, searches: 260 },
+];
+
+const FALLBACK_ALLOCATION_MAX_SEARCHES = 260;
+
+// Fixed percentage distribution used by the fallback allocation.
+// Category order matters — it determines the output key order.
+
+const FALLBACK_ALLOCATION_DISTRIBUTION = {
+    companyDiscovery: 0.42,
+    qualificationInvestigation: 0.17,
+    signalEvidenceInvestigation: 0.25,
+    otherSupportingSearches: 0.16,
+};
+
+// ────────────────────────────────────────────────────────────────
 // FALLBACK STRATEGY BUILDER
 // ────────────────────────────────────────────────────────────────
 
@@ -204,6 +234,135 @@ function buildFallbackEvidenceSearch(understanding) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// FALLBACK ALLOCATION BUILDER
+// ────────────────────────────────────────────────────────────────
+
+// Builds the fallback allocation from the Understanding output using a
+// fixed bucket table and a fixed percentage distribution.
+//
+// Step 1: extract the requested leads from the already-structured quantity
+//         string. This is parsing an already-structured field, not
+//         re-understanding the user's request.
+// Step 2: select the matching bucket → fixed total search capacity.
+//         If no number is present (for example "as many as possible"),
+//         use the largest bucket.
+// Step 3: apply the fixed percentage distribution.
+// Step 4: round to integers and correct any rounding drift on the largest
+//         category, so the distribution always sums to the total.
+
+function buildFallbackAllocation(understanding) {
+    // Step 1: extract requested leads from the quantity string
+    const quantityString =
+        typeof understanding.quantity === 'string'
+            ? understanding.quantity
+            : '';
+    const match = quantityString.match(/\d+/);
+    const requestedLeads = match ? parseInt(match[0], 10) : null;
+
+    // Step 2: select bucket → total search capacity
+    let totalSearches = FALLBACK_ALLOCATION_MAX_SEARCHES;
+
+    if (requestedLeads !== null) {
+        for (const bucket of SEARCH_CAPACITY_BUCKETS) {
+            if (
+                requestedLeads >= bucket.min &&
+                requestedLeads <= bucket.max
+            ) {
+                totalSearches = bucket.searches;
+                break;
+            }
+        }
+    }
+
+    // Step 3: apply the fixed percentage distribution
+    const categories = Object.keys(FALLBACK_ALLOCATION_DISTRIBUTION);
+    const distribution = {};
+    let sum = 0;
+
+    for (const category of categories) {
+        const value = Math.round(
+            totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION[category]
+        );
+        distribution[category] = value;
+        sum += value;
+    }
+
+    // Step 4: correct rounding drift on the largest category
+    if (sum !== totalSearches) {
+        const delta = totalSearches - sum;
+
+        let largestCategory = categories[0];
+        for (const category of categories) {
+            if (distribution[category] > distribution[largestCategory]) {
+                largestCategory = category;
+            }
+        }
+
+        distribution[largestCategory] += delta;
+    }
+
+    return {
+        totalSearches,
+        distribution,
+    };
+}
+
+// ────────────────────────────────────────────────────────────────
+// ALLOCATION VALIDATION
+// ────────────────────────────────────────────────────────────────
+
+// Returns true when the AI-provided allocation is structurally valid:
+// an object with a positive integer totalSearches and a non-empty
+// distribution of non-negative integer values that sums to totalSearches.
+
+function isValidAllocation(allocation) {
+    if (!allocation || typeof allocation !== 'object') {
+        return false;
+    }
+
+    if (
+        !Number.isInteger(allocation.totalSearches) ||
+        allocation.totalSearches <= 0
+    ) {
+        return false;
+    }
+
+    const distribution = allocation.distribution;
+
+    if (
+        !distribution ||
+        typeof distribution !== 'object' ||
+        Array.isArray(distribution)
+    ) {
+        return false;
+    }
+
+    const keys = Object.keys(distribution);
+
+    if (keys.length === 0) {
+        return false;
+    }
+
+    let sum = 0;
+
+    for (const key of keys) {
+        const value = distribution[key];
+
+        if (!Number.isInteger(value) || value < 0) {
+            return false;
+        }
+
+        sum += value;
+    }
+
+    if (sum !== allocation.totalSearches) {
+        return false;
+    }
+
+    return true;
+}
+
+// ────────────────────────────────────────────────────────────────
 // GPT INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
@@ -214,7 +373,7 @@ location, industry, qualification, signal, quantity, information, exclusions,
 and constraints.
 
 Your only task is to create the Search Strategy, the Source Selection, the
-Query Generation, and the Signal Search Planning.
+Query Generation, the Signal Search Planning, and the Search Allocation.
 
 Search Strategy is the overall plan for how to find the leads the user
 requested.
@@ -432,6 +591,56 @@ Do not allow the code or any external rule to decide the signal search.
 
 The evidence searches must be a non-empty list of non-empty search phrases.
 
+Search Allocation instructions:
+
+Search Allocation is deciding how to distribute the available searches among
+the different search tasks.
+
+Search Allocation answers the question: how much should be searched for each
+task?
+
+The searches are paid search resources. They must not be spent endlessly on
+one task. The goal is to use the available search capacity efficiently.
+
+Query Generation decides what to search. Signal Search Planning decides how to
+investigate the signal. Search Allocation decides how much to search each task.
+
+The totalSearches value is a search-capacity limit, not a number of searches
+per lead. One search can return many candidate companies. The results are then
+extracted, deduplicated, and verified by later stages.
+
+The Search Allocation must contain:
+
+1. totalSearches — a positive integer that represents the total search
+   capacity for this request.
+2. distribution — an object that maps a task name to a positive integer
+   number of searches.
+
+The distribution must sum exactly to totalSearches.
+
+You may choose task names that fit the request. Examples of suitable task
+names include: companyDiscovery, qualificationInvestigation,
+signalEvidenceInvestigation, otherSupportingSearches. These are only
+examples, not limits. You may also create request-specific task names when
+they fit the request better.
+
+The Search Allocation must be a clear, meaningful plan for how to distribute
+the searches. Do not return an empty or null allocation.
+
+Example:
+
+If the request is for 200 leads, a suitable Search Allocation would be:
+
+{
+  "totalSearches": 60,
+  "distribution": {
+    "companyDiscovery": 25,
+    "qualificationInvestigation": 10,
+    "signalEvidenceInvestigation": 15,
+    "otherSupportingSearches": 10
+  }
+}
+
 Do not explain your answer.
 Do not perform a search.
 Do not provide recommendations.
@@ -445,7 +654,16 @@ Return only valid JSON using exactly this format:
   "strategy": "the search strategy",
   "source": "the selected sources",
   "query": ["the first search query", "the second search query"],
-  "evidenceSearch": ["the first evidence search", "the second evidence search"]
+  "evidenceSearch": ["the first evidence search", "the second evidence search"],
+  "allocation": {
+    "totalSearches": 60,
+    "distribution": {
+      "companyDiscovery": 25,
+      "qualificationInvestigation": 10,
+      "signalEvidenceInvestigation": 15,
+      "otherSupportingSearches": 10
+    }
+  }
 }
 `;
 
@@ -509,6 +727,7 @@ async function planRequest(understanding) {
             const source = parsedResult?.source;
             const query = parsedResult?.query;
             const evidenceSearch = parsedResult?.evidenceSearch;
+            const allocation = parsedResult?.allocation;
 
             if (
                 typeof strategy === 'string' &&
@@ -542,6 +761,10 @@ async function planRequest(understanding) {
                               .map((e) => e.trim())
                         : buildFallbackEvidenceSearch(understanding);
 
+                const normalizedAllocation = isValidAllocation(allocation)
+                    ? allocation
+                    : buildFallbackAllocation(understanding);
+
                 const result = {
                     strategy: strategy.trim(),
 
@@ -554,6 +777,8 @@ async function planRequest(understanding) {
                     query: normalizedQuery,
 
                     evidenceSearch: normalizedEvidenceSearch,
+
+                    allocation: normalizedAllocation,
                 };
 
                 console.log('[PlanRequest] Final result:', result);
@@ -581,6 +806,7 @@ async function planRequest(understanding) {
         source: buildFallbackSource(understanding),
         query: buildFallbackQuery(understanding),
         evidenceSearch: buildFallbackEvidenceSearch(understanding),
+        allocation: buildFallbackAllocation(understanding),
     };
 
     console.warn(
