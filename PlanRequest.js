@@ -363,6 +363,89 @@ function isValidAllocation(allocation) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// FALLBACK SEARCH EXPANSION BUILDER
+// ────────────────────────────────────────────────────────────────
+
+// Builds the fallback search expansion from the Understanding output and the
+// already-generated queries. The code does not read the original request,
+// does not match keywords, and does not decide the meaning of any field.
+// It only combines the structured fields already produced by Understanding.
+//
+// The five fixed combination rules are applied in this order:
+//   Target + Location + Signal
+//   Target + Location + Qualification
+//   Target + Location + Problem
+//   Location + Target + Signal
+//   Location + Target + Qualification
+//
+// Any query already present in the existing plan queries is removed.
+// Any duplicate within the expansion list is removed.
+// The surviving queries are joined into a single descriptive string,
+// followed by the stop rule.
+
+function buildFallbackSearchExpansion(understanding, plan) {
+    const expansions = [];
+
+    const target = understanding.targetEntity;
+    const city = understanding.location?.city ?? '';
+    const country = understanding.location?.country ?? '';
+    const location = `${city} ${country}`.trim();
+    const signal = understanding.signal;
+    const qualification = understanding.qualification;
+    const problem = understanding.problem;
+
+    if (target && location && signal) {
+        expansions.push(`${target} ${location} ${signal}`);
+    }
+
+    if (target && location && qualification) {
+        expansions.push(`${target} ${location} ${qualification}`);
+    }
+
+    if (target && location && problem) {
+        expansions.push(`${target} ${location} ${problem}`);
+    }
+
+    if (location && target && signal) {
+        expansions.push(`${location} ${target} ${signal}`);
+    }
+
+    if (location && target && qualification) {
+        expansions.push(`${location} ${target} ${qualification}`);
+    }
+
+    // Dedupe against existing plan queries and within the expansion list.
+    const existingQueries = Array.isArray(plan?.query) ? plan.query : [];
+
+    const seen = new Set(
+        existingQueries
+            .filter((q) => typeof q === 'string')
+            .map((q) => q.trim().toLowerCase())
+    );
+
+    const unique = [];
+
+    for (const expansion of expansions) {
+        const key = expansion.trim().toLowerCase();
+        if (!seen.has(key)) {
+            seen.add(key);
+            unique.push(expansion.trim());
+        }
+    }
+
+    const expansionPart = unique.join(' → ');
+
+    const stopRule =
+        'continue searching only while new useful leads are being found, searches remain, and new approaches exist; otherwise stop and return the leads already found without inventing new ones';
+
+    if (expansionPart.length === 0) {
+        return stopRule;
+    }
+
+    return `${expansionPart} → ${stopRule}`;
+}
+
+// ────────────────────────────────────────────────────────────────
 // GPT INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
@@ -373,7 +456,8 @@ location, industry, qualification, signal, quantity, information, exclusions,
 and constraints.
 
 Your only task is to create the Search Strategy, the Source Selection, the
-Query Generation, the Signal Search Planning, and the Search Allocation.
+Query Generation, the Signal Search Planning, the Search Allocation, and the
+Search Expansion and Refinement plan.
 
 Search Strategy is the overall plan for how to find the leads the user
 requested.
@@ -641,6 +725,61 @@ If the request is for 200 leads, a suitable Search Allocation would be:
   }
 }
 
+Search Expansion and Refinement instructions:
+
+Search Expansion and Refinement is the plan for what to do when the first
+round of searching is not enough.
+
+Search Expansion and Refinement answers the question: those searches were not
+enough, what should be changed or tried next?
+
+The four expansion types are:
+
+1. Expand the search wording. The original wording may not find everything.
+   Related wording can be tried instead.
+2. Expand the location. If only a country was searched, important locations
+   within that country can be tried.
+3. Expand the sources. Additional source types can be investigated.
+4. Refine unsuccessful searches. A search that produced many irrelevant
+   results can be made more specific.
+
+Search Expansion and Refinement does not perform the search. It does not
+report results. It only describes what to try next.
+
+Search Expansion and Refinement must never change, remove, or weaken the
+qualification, exclusion, or constraint.
+
+Search Expansion and Refinement must continue only while new useful leads are
+being found, searches remain, and reasonable new approaches exist.
+
+If the planned expansions have been tried and the requested quantity is still
+not reached, the search must stop and return the leads already found. It must
+not invent the missing leads.
+
+Example:
+
+If the Understanding output is for 300 healthcare companies in Germany, and
+the first searches only found 85 useful companies, a suitable Search Expansion
+and Refinement plan would describe how to broaden the search wording, expand
+the location to important cities, add additional source types, and continue
+only while new useful leads are being found.
+
+Use forward-looking language, such as:
+search for, look for, investigate, check for, plan to.
+
+Do not use language that suggests the work is already complete, such as:
+found, identified, confirmed, verified, ensured, located.
+
+Decide the Search Expansion and Refinement yourself from the complete meaning
+of the Understanding output.
+Do not use keyword matching.
+Do not follow a predefined expansion list.
+Do not allow the code or any external rule to decide the expansion plan.
+
+The Search Expansion and Refinement must be a clear, meaningful plain-text
+description of what to change or try next. Do not return an empty or null
+expansion plan.
+
 Do not explain your answer.
 Do not perform a search.
 Do not provide recommendations.
@@ -663,7 +802,8 @@ Return only valid JSON using exactly this format:
       "signalEvidenceInvestigation": 15,
       "otherSupportingSearches": 10
     }
-  }
+  },
+  "searchExpansion": "the search expansion and refinement plan"
 }
 `;
 
@@ -728,6 +868,7 @@ async function planRequest(understanding) {
             const query = parsedResult?.query;
             const evidenceSearch = parsedResult?.evidenceSearch;
             const allocation = parsedResult?.allocation;
+            const searchExpansion = parsedResult?.searchExpansion;
 
             if (
                 typeof strategy === 'string' &&
@@ -765,6 +906,14 @@ async function planRequest(understanding) {
                     ? allocation
                     : buildFallbackAllocation(understanding);
 
+                const normalizedSearchExpansion =
+                    typeof searchExpansion === 'string' &&
+                    searchExpansion.trim().length > 0
+                        ? searchExpansion.trim()
+                        : buildFallbackSearchExpansion(understanding, {
+                              query: normalizedQuery,
+                          });
+
                 const result = {
                     strategy: strategy.trim(),
 
@@ -779,6 +928,8 @@ async function planRequest(understanding) {
                     evidenceSearch: normalizedEvidenceSearch,
 
                     allocation: normalizedAllocation,
+
+                    searchExpansion: normalizedSearchExpansion,
                 };
 
                 console.log('[PlanRequest] Final result:', result);
@@ -801,12 +952,17 @@ async function planRequest(understanding) {
         }
     }
 
+    const fallbackQuery = buildFallbackQuery(understanding);
+
     const fallbackResult = {
         strategy: buildFallbackStrategy(understanding),
         source: buildFallbackSource(understanding),
-        query: buildFallbackQuery(understanding),
+        query: fallbackQuery,
         evidenceSearch: buildFallbackEvidenceSearch(understanding),
         allocation: buildFallbackAllocation(understanding),
+        searchExpansion: buildFallbackSearchExpansion(understanding, {
+            query: fallbackQuery,
+        }),
     };
 
     console.warn(
