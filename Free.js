@@ -35,7 +35,7 @@ const UNDERSTANDING_LABELS = {
 };
 
 // ────────────────────────────────────────────────────────────────
-// PLANNING FIELDS
+// PLANNING FIELDS — matches your schema exactly
 // ────────────────────────────────────────────────────────────────
 
 const PLANNING_ORDER = [
@@ -44,18 +44,20 @@ const PLANNING_ORDER = [
     'query',
     'evidenceSearch',
     'allocation',
+    'searchExpansion',
     'steps',
     'action',
 ];
 
 const PLANNING_LABELS = {
-    strategy:       { icon: '🧭', label: 'Strategy' },
-    source:         { icon: '🔗', label: 'Source' },
-    query:          { icon: '🔍', label: 'Query' },
-    evidenceSearch: { icon: '🔬', label: 'Evidence Search' },
-    allocation:     { icon: '📊', label: 'Allocation' },
-    steps:          { icon: '🪜', label: 'Steps' },
-    action:         { icon: '⚡', label: 'Action' },
+    strategy:        { icon: '🧭', label: 'Strategy' },
+    source:          { icon: '🔗', label: 'Source' },
+    query:           { icon: '🔍', label: 'Query' },
+    evidenceSearch:  { icon: '🔬', label: 'Evidence Search' },
+    allocation:      { icon: '📊', label: 'Allocation' },
+    searchExpansion: { icon: '🌐', label: 'Search Expansion' },
+    steps:           { icon: '🪜', label: 'Steps' },
+    action:          { icon: '⚡', label: 'Action' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -187,7 +189,7 @@ function renderPlanning(plan) {
 
             const meta = PLANNING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
-            if (key === 'query' || key === 'evidenceSearch' || key === 'steps') {
+            if (key === 'query' || key === 'evidenceSearch' || key === 'searchExpansion' || key === 'steps') {
                 lines.push(`${meta.icon} ${meta.label}:`);
                 items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
                 continue;
@@ -205,7 +207,6 @@ function renderPlanning(plan) {
                 continue;
             }
 
-            // Generic object fallback — flatten as key: value
             const meta = PLANNING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
             lines.push(`${meta.icon} ${meta.label}:`);
             for (const [k, v] of Object.entries(value)) {
