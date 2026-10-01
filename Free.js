@@ -2,6 +2,7 @@
 
 const understandRequest = require('./UnderstandRequest');
 const planRequest      = require('./PlanRequest');
+const discoverySearch  = require('./DiscoverySearch');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -232,13 +233,94 @@ function renderPlanning(plan) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// RENDER: DISCOVERY SECTION
+// ────────────────────────────────────────────────────────────────
+
+const DISCOVERY_ORDER = [
+    'status',
+    'results',
+    'companies',
+    'leads',
+    'totalFound',
+    'summary',
+    'message',
+];
+
+const DISCOVERY_LABELS = {
+    status:     { icon: '📶', label: 'Status' },
+    results:    { icon: '📦', label: 'Results' },
+    companies:  { icon: '🏢', label: 'Companies' },
+    leads:      { icon: '🎁', label: 'Leads' },
+    totalFound: { icon: '🔢', label: 'Total Found' },
+    summary:    { icon: '📝', label: 'Summary' },
+    message:    { icon: '💬', label: 'Message' },
+};
+
+function renderDiscovery(discovery) {
+    if (!discovery || typeof discovery !== 'object') {
+        return 'Discovery\n⚠️ No discovery data.';
+    }
+
+    const lines = [];
+
+    for (const key of DISCOVERY_ORDER) {
+        const value = discovery[key];
+        if (value === undefined || value === null) continue;
+
+        // Arrays of objects (companies/leads/results) → render as blocks
+        if (Array.isArray(value)) {
+            if (value.length === 0) continue;
+
+            const meta = DISCOVERY_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+            lines.push(`${meta.icon} ${meta.label}:`);
+
+            value.forEach((item, i) => {
+                if (typeof item === 'string') {
+                    lines.push(`   ${i + 1}. ${item}`);
+                } else if (item && typeof item === 'object') {
+                    const name = item.companyName || item.name || item.title || `Item ${i + 1}`;
+                    lines.push(`   ${i + 1}. ${name}`);
+                    for (const [k, v] of Object.entries(item)) {
+                        if (k === 'companyName' || k === 'name' || k === 'title') continue;
+                        if (v === undefined || v === null || v === '') continue;
+                        lines.push(`      • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+                    }
+                }
+            });
+            continue;
+        }
+
+        // Plain scalar
+        const line = formatField(key, value, DISCOVERY_LABELS);
+        if (line) lines.push(line);
+    }
+
+    // Extra fields
+    const extras = Object.keys(discovery).filter(k => !DISCOVERY_ORDER.includes(k));
+    for (const key of extras) {
+        const line = formatField(key, discovery[key], DISCOVERY_LABELS);
+        if (line) lines.push(line);
+    }
+
+    if (lines.length === 0) return 'Discovery\n⚠️ No discovery data.';
+    return ['Discovery', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
 // COMPOSE FINAL REPLY
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan) {
-    const understandingSection = renderUnderstanding(understanding);
-    const planningSection      = renderPlanning(plan);
-    return `${understandingSection}\n\n${planningSection}`;
+function buildReply(understanding, plan, discovery) {
+    const sections = [];
+
+    sections.push(renderUnderstanding(understanding));
+    sections.push(renderPlanning(plan));
+
+    if (discovery) {
+        sections.push(renderDiscovery(discovery));
+    }
+
+    return sections.join('\n\n');
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -250,25 +332,48 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
     console.log('[Orchestrator] Message:', message);
 
     try {
+        // ── STEP 1: Understand ──
         const understanding = await understandRequest(message, {
             history, userProfile, onProgress, options,
         });
 
         console.log('[Orchestrator] Understanding result:', understanding);
 
+        // ── STEP 2: Plan ──
         const plan = await planRequest(understanding, {
             message, history, userProfile, onProgress, options,
         });
 
         console.log('[Orchestrator] Plan result:', plan);
 
-        const reply = buildReply(understanding, plan);
+        // ── STEP 3: Discovery Search ──
+        let discovery = null;
+        try {
+            discovery = await discoverySearch(understanding, plan, {
+                message,
+                history,
+                userProfile,
+                onProgress,
+                options,
+            });
+
+            console.log('[Orchestrator] Discovery result:', discovery);
+        } catch (discoveryErr) {
+            console.error('[Orchestrator] DiscoverySearch failed:', discoveryErr.message);
+            discovery = {
+                status: 'error',
+                message: discoveryErr.message,
+            };
+        }
+
+        // ── STEP 4: Render ──
+        const reply = buildReply(understanding, plan, discovery);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan },
+            meta: { understanding, plan, discovery },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
