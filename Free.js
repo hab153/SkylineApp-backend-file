@@ -36,7 +36,7 @@ const UNDERSTANDING_LABELS = {
 };
 
 // ────────────────────────────────────────────────────────────────
-// PLANNING FIELDS — matches your schema exactly
+// PLANNING FIELDS
 // ────────────────────────────────────────────────────────────────
 
 const PLANNING_ORDER = [
@@ -59,6 +59,34 @@ const PLANNING_LABELS = {
     searchExpansion: { icon: '🌐', label: 'Search Expansion' },
     steps:           { icon: '🪜', label: 'Steps' },
     action:          { icon: '⚡', label: 'Action' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// DISCOVERY FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const DISCOVERY_ORDER = [
+    'status',
+    'context',
+    'discoveryContext',
+    'totalFound',
+    'summary',
+    'companies',
+    'results',
+    'leads',
+    'message',
+];
+
+const DISCOVERY_LABELS = {
+    status:           { icon: '📶', label: 'Status' },
+    context:          { icon: '🧩', label: 'Context' },
+    discoveryContext: { icon: '🧩', label: 'Discovery Context' },
+    totalFound:       { icon: '🔢', label: 'Total Found' },
+    summary:          { icon: '📝', label: 'Summary' },
+    companies:        { icon: '🏢', label: 'Companies' },
+    results:          { icon: '📦', label: 'Results' },
+    leads:            { icon: '🎁', label: 'Leads' },
+    message:          { icon: '💬', label: 'Message' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -141,7 +169,7 @@ function renderAllocation(allocation) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// RENDER: UNDERSTANDING SECTION
+// RENDER: UNDERSTANDING
 // ────────────────────────────────────────────────────────────────
 
 function renderUnderstanding(understanding) {
@@ -167,7 +195,7 @@ function renderUnderstanding(understanding) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// RENDER: PLANNING SECTION
+// RENDER: PLANNING
 // ────────────────────────────────────────────────────────────────
 
 function renderPlanning(plan) {
@@ -181,7 +209,6 @@ function renderPlanning(plan) {
         const value = plan[key];
         if (value === undefined || value === null) continue;
 
-        // ── Arrays ──
         if (Array.isArray(value)) {
             const items = value
                 .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
@@ -200,7 +227,6 @@ function renderPlanning(plan) {
             continue;
         }
 
-        // ── Objects (like allocation) ──
         if (typeof value === 'object') {
             if (key === 'allocation') {
                 const block = renderAllocation(value);
@@ -216,12 +242,10 @@ function renderPlanning(plan) {
             continue;
         }
 
-        // ── Scalars ──
         const line = formatField(key, value, PLANNING_LABELS);
         if (line) lines.push(line);
     }
 
-    // Extra fields
     const extras = Object.keys(plan).filter(k => !PLANNING_ORDER.includes(k));
     for (const key of extras) {
         const line = formatField(key, plan[key], PLANNING_LABELS);
@@ -233,28 +257,8 @@ function renderPlanning(plan) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// RENDER: DISCOVERY SECTION
+// RENDER: DISCOVERY
 // ────────────────────────────────────────────────────────────────
-
-const DISCOVERY_ORDER = [
-    'status',
-    'results',
-    'companies',
-    'leads',
-    'totalFound',
-    'summary',
-    'message',
-];
-
-const DISCOVERY_LABELS = {
-    status:     { icon: '📶', label: 'Status' },
-    results:    { icon: '📦', label: 'Results' },
-    companies:  { icon: '🏢', label: 'Companies' },
-    leads:      { icon: '🎁', label: 'Leads' },
-    totalFound: { icon: '🔢', label: 'Total Found' },
-    summary:    { icon: '📝', label: 'Summary' },
-    message:    { icon: '💬', label: 'Message' },
-};
 
 function renderDiscovery(discovery) {
     if (!discovery || typeof discovery !== 'object') {
@@ -267,7 +271,7 @@ function renderDiscovery(discovery) {
         const value = discovery[key];
         if (value === undefined || value === null) continue;
 
-        // Arrays of objects (companies/leads/results) → render as blocks
+        // ── Arrays of objects / strings ──
         if (Array.isArray(value)) {
             if (value.length === 0) continue;
 
@@ -290,7 +294,18 @@ function renderDiscovery(discovery) {
             continue;
         }
 
-        // Plain scalar
+        // ── Objects (context blocks, stats, etc.) ──
+        if (typeof value === 'object') {
+            const meta = DISCOVERY_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+            continue;
+        }
+
+        // ── Scalars ──
         const line = formatField(key, value, DISCOVERY_LABELS);
         if (line) lines.push(line);
     }
@@ -307,18 +322,15 @@ function renderDiscovery(discovery) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY
+// COMPOSE FINAL REPLY — 3 SECTIONS
 // ────────────────────────────────────────────────────────────────
 
 function buildReply(understanding, plan, discovery) {
-    const sections = [];
-
-    sections.push(renderUnderstanding(understanding));
-    sections.push(renderPlanning(plan));
-
-    if (discovery) {
-        sections.push(renderDiscovery(discovery));
-    }
+    const sections = [
+        renderUnderstanding(understanding),
+        renderPlanning(plan),
+        renderDiscovery(discovery),
+    ];
 
     return sections.join('\n\n');
 }
@@ -346,15 +358,11 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
 
         console.log('[Orchestrator] Plan result:', plan);
 
-        // ── STEP 3: Discovery Search ──
+        // ── STEP 3: Discovery ──
         let discovery = null;
         try {
             discovery = await discoverySearch(understanding, plan, {
-                message,
-                history,
-                userProfile,
-                onProgress,
-                options,
+                message, history, userProfile, onProgress, options,
             });
 
             console.log('[Orchestrator] Discovery result:', discovery);
@@ -366,7 +374,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── STEP 4: Render ──
+        // ── STEP 4: Render all 3 sections ──
         const reply = buildReply(understanding, plan, discovery);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
