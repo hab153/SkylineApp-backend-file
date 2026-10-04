@@ -18,20 +18,12 @@ const MAX_ATTEMPTS = 2;
 // ────────────────────────────────────────────────────────────────
 
 // Fixed search-capacity buckets used by the fallback allocation.
+// Each 10-lead range from 1 to 1,000 maps to a search capacity equal
+// to the upper bound of that range.
 // These are search-capacity limits, not searches per lead.
 
-const SEARCH_CAPACITY_BUCKETS = [
-    { min: 1, max: 25, searches: 10 },
-    { min: 26, max: 50, searches: 20 },
-    { min: 51, max: 100, searches: 35 },
-    { min: 101, max: 200, searches: 60 },
-    { min: 201, max: 300, searches: 90 },
-    { min: 301, max: 500, searches: 140 },
-    { min: 501, max: 750, searches: 200 },
-    { min: 751, max: 1000, searches: 260 },
-];
-
-const FALLBACK_ALLOCATION_MAX_SEARCHES = 260;
+const SEARCH_CAPACITY_BUCKET_SIZE = 10;
+const SEARCH_CAPACITY_MAX_BUCKET = 1000;
 
 // Fixed percentage distribution used by the fallback allocation.
 // Category order matters — it determines the output key order.
@@ -237,15 +229,17 @@ function buildFallbackEvidenceSearch(understanding) {
 // FALLBACK ALLOCATION BUILDER
 // ────────────────────────────────────────────────────────────────
 
-// Builds the fallback allocation from the Understanding output using a
-// fixed bucket table and a fixed percentage distribution.
+// Builds the fallback allocation from the Understanding output using the
+// fixed search-capacity table and a fixed percentage distribution.
 //
 // Step 1: extract the requested leads from the already-structured quantity
 //         string. This is parsing an already-structured field, not
 //         re-understanding the user's request.
 // Step 2: select the matching bucket → fixed total search capacity.
+//         Each 10-lead range from 1 to 1,000 maps to a search capacity
+//         equal to the upper bound of that range.
 //         If no number is present (for example "as many as possible"),
-//         use the largest bucket.
+//         use the maximum bucket (1,000 searches).
 // Step 3: apply the fixed percentage distribution.
 // Step 4: round to integers and correct any rounding drift on the largest
 //         category, so the distribution always sums to the total.
@@ -260,18 +254,20 @@ function buildFallbackAllocation(understanding) {
     const requestedLeads = match ? parseInt(match[0], 10) : null;
 
     // Step 2: select bucket → total search capacity
-    let totalSearches = FALLBACK_ALLOCATION_MAX_SEARCHES;
+    // Each 10-lead range from 1 to 1,000 maps to a search capacity equal to
+    // the upper bound of that range. Anything above 1,000 or without a
+    // number uses the maximum bucket.
+    let totalSearches = SEARCH_CAPACITY_MAX_BUCKET;
 
     if (requestedLeads !== null) {
-        for (const bucket of SEARCH_CAPACITY_BUCKETS) {
-            if (
-                requestedLeads >= bucket.min &&
-                requestedLeads <= bucket.max
-            ) {
-                totalSearches = bucket.searches;
-                break;
-            }
-        }
+        const roundedUp =
+            Math.ceil(requestedLeads / SEARCH_CAPACITY_BUCKET_SIZE) *
+            SEARCH_CAPACITY_BUCKET_SIZE;
+
+        totalSearches = Math.min(
+            roundedUp,
+            SEARCH_CAPACITY_MAX_BUCKET
+        );
     }
 
     // Step 3: apply the fixed percentage distribution
@@ -702,6 +698,22 @@ The Search Allocation must contain:
 
 The distribution must sum exactly to totalSearches.
 
+The totalSearches value is based on the number of leads the user requested.
+The total search capacity is equal to the upper bound of the ten-lead range
+that the requested quantity falls into. For example:
+
+- 1 to 10 leads → 10 searches
+- 11 to 20 leads → 20 searches
+- 21 to 30 leads → 30 searches
+- 41 to 50 leads → 50 searches
+- 91 to 100 leads → 100 searches
+- 191 to 200 leads → 200 searches
+- 291 to 300 leads → 300 searches
+- 991 to 1,000 leads → 1,000 searches
+
+Any request above 1,000 leads uses 1,000 searches. Any request without a
+clear number uses 1,000 searches.
+
 You may choose task names that fit the request. Examples of suitable task
 names include: companyDiscovery, qualificationInvestigation,
 signalEvidenceInvestigation, otherSupportingSearches. These are only
@@ -716,12 +728,12 @@ Example:
 If the request is for 200 leads, a suitable Search Allocation would be:
 
 {
-  "totalSearches": 60,
+  "totalSearches": 200,
   "distribution": {
-    "companyDiscovery": 25,
-    "qualificationInvestigation": 10,
-    "signalEvidenceInvestigation": 15,
-    "otherSupportingSearches": 10
+    "companyDiscovery": 84,
+    "qualificationInvestigation": 34,
+    "signalEvidenceInvestigation": 50,
+    "otherSupportingSearches": 32
   }
 }
 
@@ -795,12 +807,12 @@ Return only valid JSON using exactly this format:
   "query": ["the first search query", "the second search query"],
   "evidenceSearch": ["the first evidence search", "the second evidence search"],
   "allocation": {
-    "totalSearches": 60,
+    "totalSearches": 200,
     "distribution": {
-      "companyDiscovery": 25,
-      "qualificationInvestigation": 10,
-      "signalEvidenceInvestigation": 15,
-      "otherSupportingSearches": 10
+      "companyDiscovery": 84,
+      "qualificationInvestigation": 34,
+      "signalEvidenceInvestigation": 50,
+      "otherSupportingSearches": 32
     }
   },
   "searchExpansion": "the search expansion and refinement plan"
