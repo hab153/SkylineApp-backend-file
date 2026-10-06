@@ -18,21 +18,22 @@ const MAX_ATTEMPTS = 2;
 // ────────────────────────────────────────────────────────────────
 
 // Fixed search-capacity buckets used by the fallback allocation.
-// Each 10-lead range from 1 to 1,000 maps to a search capacity equal
-// to the upper bound of that range.
+// maxSearches = ceil(quantity / 10) * 10, capped at 1,000.
 // These are search-capacity limits, not searches per lead.
 
 const SEARCH_CAPACITY_BUCKET_SIZE = 10;
 const SEARCH_CAPACITY_MAX_BUCKET = 1000;
 
-// Fixed percentage distribution used by the fallback allocation.
+// Fixed proportional distribution used by the fallback allocation.
+// The first three categories use Math.floor. The last category receives
+// the remainder so the total always equals totalSearches exactly.
 // Category order matters — it determines the output key order.
 
 const FALLBACK_ALLOCATION_DISTRIBUTION = {
-    companyDiscovery: 0.42,
-    qualificationInvestigation: 0.17,
-    signalEvidenceInvestigation: 0.25,
-    otherSupportingSearches: 0.16,
+    companyDiscovery: 0.40,
+    qualification: 0.20,
+    signalEvidence: 0.30,
+    supportingEvidence: 0.10,
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -230,19 +231,20 @@ function buildFallbackEvidenceSearch(understanding) {
 // ────────────────────────────────────────────────────────────────
 
 // Builds the fallback allocation from the Understanding output using the
-// fixed search-capacity table and a fixed percentage distribution.
+// fixed search-capacity rule and a fixed proportional distribution.
 //
 // Step 1: extract the requested leads from the already-structured quantity
 //         string. This is parsing an already-structured field, not
 //         re-understanding the user's request.
-// Step 2: select the matching bucket → fixed total search capacity.
-//         Each 10-lead range from 1 to 1,000 maps to a search capacity
-//         equal to the upper bound of that range.
-//         If no number is present (for example "as many as possible"),
-//         use the maximum bucket (1,000 searches).
-// Step 3: apply the fixed percentage distribution.
-// Step 4: round to integers and correct any rounding drift on the largest
-//         category, so the distribution always sums to the total.
+// Step 2: calculate totalSearches = ceil(quantity / 10) * 10, capped at
+//         1,000. Anything above 1,000 or without a number uses 1,000.
+// Step 3: distribute the total using fixed proportions:
+//           companyDiscovery:   40%
+//           qualification:      20%
+//           signalEvidence:     30%
+//           supportingEvidence: remainder
+//         The first three use Math.floor. The fourth receives the remainder
+//         so the total always equals totalSearches exactly.
 
 function buildFallbackAllocation(understanding) {
     // Step 1: extract requested leads from the quantity string
@@ -253,53 +255,41 @@ function buildFallbackAllocation(understanding) {
     const match = quantityString.match(/\d+/);
     const requestedLeads = match ? parseInt(match[0], 10) : null;
 
-    // Step 2: select bucket → total search capacity
-    // Each 10-lead range from 1 to 1,000 maps to a search capacity equal to
-    // the upper bound of that range. Anything above 1,000 or without a
-    // number uses the maximum bucket.
+    // Step 2: calculate totalSearches
     let totalSearches = SEARCH_CAPACITY_MAX_BUCKET;
 
     if (requestedLeads !== null) {
-        const roundedUp =
-            Math.ceil(requestedLeads / SEARCH_CAPACITY_BUCKET_SIZE) *
-            SEARCH_CAPACITY_BUCKET_SIZE;
-
         totalSearches = Math.min(
-            roundedUp,
+            Math.ceil(requestedLeads / SEARCH_CAPACITY_BUCKET_SIZE) *
+                SEARCH_CAPACITY_BUCKET_SIZE,
             SEARCH_CAPACITY_MAX_BUCKET
         );
     }
 
-    // Step 3: apply the fixed percentage distribution
-    const categories = Object.keys(FALLBACK_ALLOCATION_DISTRIBUTION);
-    const distribution = {};
-    let sum = 0;
-
-    for (const category of categories) {
-        const value = Math.round(
-            totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION[category]
-        );
-        distribution[category] = value;
-        sum += value;
-    }
-
-    // Step 4: correct rounding drift on the largest category
-    if (sum !== totalSearches) {
-        const delta = totalSearches - sum;
-
-        let largestCategory = categories[0];
-        for (const category of categories) {
-            if (distribution[category] > distribution[largestCategory]) {
-                largestCategory = category;
-            }
-        }
-
-        distribution[largestCategory] += delta;
-    }
+    // Step 3: proportional distribution — first three floor, last gets remainder
+    const companyDiscovery = Math.floor(
+        totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION.companyDiscovery
+    );
+    const qualification = Math.floor(
+        totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION.qualification
+    );
+    const signalEvidence = Math.floor(
+        totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION.signalEvidence
+    );
+    const supportingEvidence =
+        totalSearches -
+        companyDiscovery -
+        qualification -
+        signalEvidence;
 
     return {
         totalSearches,
-        distribution,
+        distribution: {
+            companyDiscovery,
+            qualification,
+            signalEvidence,
+            supportingEvidence,
+        },
     };
 }
 
@@ -693,18 +683,22 @@ The Search Allocation must contain:
 
 1. totalSearches — a positive integer that represents the total search
    capacity for this request.
-2. distribution — an object that maps a task name to a positive integer
+2. distribution — an object that maps a fixed task name to a positive integer
    number of searches.
 
 The distribution must sum exactly to totalSearches.
 
-The totalSearches value is based on the number of leads the user requested.
-The total search capacity is equal to the upper bound of the ten-lead range
-that the requested quantity falls into. For example:
+The totalSearches value is calculated from the number of leads the user
+requested using this rule:
+
+totalSearches = ceil(quantity / 10) * 10
+
+capped at 1,000. For example:
 
 - 1 to 10 leads → 10 searches
 - 11 to 20 leads → 20 searches
 - 21 to 30 leads → 30 searches
+- 31 to 40 leads → 40 searches
 - 41 to 50 leads → 50 searches
 - 91 to 100 leads → 100 searches
 - 191 to 200 leads → 200 searches
@@ -714,28 +708,53 @@ that the requested quantity falls into. For example:
 Any request above 1,000 leads uses 1,000 searches. Any request without a
 clear number uses 1,000 searches.
 
-You may choose task names that fit the request. Examples of suitable task
-names include: companyDiscovery, qualificationInvestigation,
-signalEvidenceInvestigation, otherSupportingSearches. These are only
-examples, not limits. You may also create request-specific task names when
-they fit the request better.
+The distribution must always use exactly these four fixed category names:
+
+- companyDiscovery
+- qualification
+- signalEvidence
+- supportingEvidence
+
+The distribution must follow this fixed proportional split:
+
+- companyDiscovery:    40% of totalSearches
+- qualification:       20% of totalSearches
+- signalEvidence:      30% of totalSearches
+- supportingEvidence:  the remainder
+
+Use Math.floor for the first three categories. The fourth category receives
+the remainder so the sum is exactly totalSearches.
+
+Example for 40 leads:
+
+{
+  "totalSearches": 40,
+  "distribution": {
+    "companyDiscovery": 16,
+    "qualification": 8,
+    "signalEvidence": 12,
+    "supportingEvidence": 4
+  }
+}
+
+Example for 100 leads:
+
+{
+  "totalSearches": 100,
+  "distribution": {
+    "companyDiscovery": 40,
+    "qualification": 20,
+    "signalEvidence": 30,
+    "supportingEvidence": 10
+  }
+}
+
+The distribution must sum exactly to totalSearches. Do not use any category
+names other than companyDiscovery, qualification, signalEvidence, and
+supportingEvidence.
 
 The Search Allocation must be a clear, meaningful plan for how to distribute
 the searches. Do not return an empty or null allocation.
-
-Example:
-
-If the request is for 200 leads, a suitable Search Allocation would be:
-
-{
-  "totalSearches": 200,
-  "distribution": {
-    "companyDiscovery": 84,
-    "qualificationInvestigation": 34,
-    "signalEvidenceInvestigation": 50,
-    "otherSupportingSearches": 32
-  }
-}
 
 Search Expansion and Refinement instructions:
 
@@ -807,12 +826,12 @@ Return only valid JSON using exactly this format:
   "query": ["the first search query", "the second search query"],
   "evidenceSearch": ["the first evidence search", "the second evidence search"],
   "allocation": {
-    "totalSearches": 200,
+    "totalSearches": 40,
     "distribution": {
-      "companyDiscovery": 84,
-      "qualificationInvestigation": 34,
-      "signalEvidenceInvestigation": 50,
-      "otherSupportingSearches": 32
+      "companyDiscovery": 16,
+      "qualification": 8,
+      "signalEvidence": 12,
+      "supportingEvidence": 4
     }
   },
   "searchExpansion": "the search expansion and refinement plan"
