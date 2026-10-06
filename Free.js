@@ -2,7 +2,7 @@
 
 const understandRequest = require('./UnderstandRequest');
 const planRequest      = require('./PlanRequest');
-const discoverySearch  = require('./DiscoverySearch');
+const { discoverySearch } = require('./DiscoverySearch');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
