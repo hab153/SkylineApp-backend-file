@@ -89,6 +89,54 @@ const DISCOVERY_LABELS = {
     message:          { icon: '💬', label: 'Message' },
 };
 
+// ────────────────────────────────────────────────────────────────
+// DISCOVERY CONTEXT INNER FIELD LABELS
+// ────────────────────────────────────────────────────────────────
+
+// Labels for the 17 fields inside the Discovery Context object.
+// These reuse the Understanding and Planning icons so the Discovery section
+// displays with the same visual style as the earlier sections.
+
+const DISCOVERY_CONTEXT_LABELS = {
+    target:              { icon: '🎯', label: 'Target' },
+    need:                { icon: '📌', label: 'Need' },
+    intent:              { icon: '💡', label: 'Intent' },
+    location:            { icon: '📍', label: 'Location' },
+    industry:            { icon: '🏭', label: 'Industry' },
+    qualification:       { icon: '✅', label: 'Qualification' },
+    signal:              { icon: '📡', label: 'Signal' },
+    quantity:            { icon: '🔢', label: 'Quantity' },
+    requiredInformation: { icon: '📋', label: 'Required Information' },
+    exclusions:          { icon: '🚫', label: 'Exclusions' },
+    constraints:         { icon: '📎', label: 'Constraints' },
+    strategy:            { icon: '🧭', label: 'Strategy' },
+    source:              { icon: '🔗', label: 'Source' },
+    query:               { icon: '🔍', label: 'Query' },
+    evidenceSearch:      { icon: '🔬', label: 'Evidence Search' },
+    allocation:          { icon: '📊', label: 'Allocation' },
+    searchExpansion:     { icon: '🌐', label: 'Search Expansion' },
+};
+
+const DISCOVERY_CONTEXT_ORDER = [
+    'target',
+    'need',
+    'intent',
+    'location',
+    'industry',
+    'qualification',
+    'signal',
+    'quantity',
+    'requiredInformation',
+    'exclusions',
+    'constraints',
+    'strategy',
+    'source',
+    'query',
+    'evidenceSearch',
+    'allocation',
+    'searchExpansion',
+];
+
 const DEFAULT_FIELD_ICON = '📝';
 
 // ────────────────────────────────────────────────────────────────
@@ -166,6 +214,107 @@ function renderAllocation(allocation) {
 
     if (lines.length === 0) return null;
     return ['📊 Allocation:', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// RENDER: DISCOVERY CONTEXT BLOCK
+// ────────────────────────────────────────────────────────────────
+
+// Renders the discoveryContext object as a fully labeled block, using the
+// DISCOVERY_CONTEXT_LABELS map so the icons and labels match the earlier
+// Understanding and Planning sections.
+
+function renderDiscoveryContext(context) {
+    if (!context || typeof context !== 'object') return null;
+
+    const lines = [];
+
+    for (const key of DISCOVERY_CONTEXT_ORDER) {
+        const value = context[key];
+        if (value === undefined || value === null) continue;
+
+        // Location — special rendering
+        if (key === 'location') {
+            const locLine = formatLocation(value);
+            if (locLine) lines.push(locLine);
+            continue;
+        }
+
+        const meta = DISCOVERY_CONTEXT_LABELS[key] || {
+            icon: DEFAULT_FIELD_ICON,
+            label: titleCase(key),
+        };
+
+        // Arrays — numbered list for query and evidenceSearch
+        if (Array.isArray(value)) {
+            if (value.length === 0) continue;
+            const items = value
+                .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+                .filter(Boolean);
+            if (items.length === 0) continue;
+
+            if (key === 'query' || key === 'evidenceSearch' || key === 'requiredInformation') {
+                lines.push(`${meta.icon} ${meta.label}:`);
+                items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
+                continue;
+            }
+
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+            continue;
+        }
+
+        // Allocation — use the allocation renderer
+        if (key === 'allocation') {
+            const block = renderAllocation(value);
+            if (block) lines.push(block);
+            continue;
+        }
+
+        // Other objects — generic rendering
+        if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+            continue;
+        }
+
+        // Scalars
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    // Extra fields not in the known order
+    const extras = Object.keys(context).filter(k => !DISCOVERY_CONTEXT_ORDER.includes(k));
+    for (const key of extras) {
+        const value = context[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return null;
+    return lines.join('\n');
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -265,6 +414,18 @@ function renderDiscovery(discovery) {
         return 'Discovery\n⚠️ No discovery data.';
     }
 
+    // If the discovery object itself is the discovery context — meaning it
+    // has the context shape (target, need, intent, ...) — render it directly
+    // with the context renderer.
+    if (
+        discovery.target !== undefined &&
+        discovery.need !== undefined &&
+        discovery.intent !== undefined
+    ) {
+        const block = renderDiscoveryContext(discovery);
+        if (block) return ['Discovery', block].join('\n');
+    }
+
     const lines = [];
 
     for (const key of DISCOVERY_ORDER) {
@@ -298,6 +459,19 @@ function renderDiscovery(discovery) {
         if (typeof value === 'object') {
             const meta = DISCOVERY_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
             lines.push(`${meta.icon} ${meta.label}:`);
+
+            // If this is the discovery context, use its dedicated renderer.
+            if (key === 'discoveryContext' || key === 'context') {
+                const block = renderDiscoveryContext(value);
+                if (block) {
+                    // Indent each line of the context block
+                    for (const line of block.split('\n')) {
+                        lines.push(`   ${line}`);
+                    }
+                }
+                continue;
+            }
+
             for (const [k, v] of Object.entries(value)) {
                 if (v === undefined || v === null || v === '') continue;
                 lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
