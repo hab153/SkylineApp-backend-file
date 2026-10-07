@@ -2,7 +2,7 @@
 
 const understandRequest = require('./UnderstandRequest');
 const planRequest      = require('./PlanRequest');
-const { discoverySearch } = require('./DiscoverySearch');
+const { discoverySearch, searchTask } = require('./DiscoverySearch');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -136,6 +136,36 @@ const DISCOVERY_CONTEXT_ORDER = [
     'allocation',
     'searchExpansion',
 ];
+
+// ────────────────────────────────────────────────────────────────
+// TASK COORDINATION FIELD LABELS
+// ────────────────────────────────────────────────────────────────
+
+const TASK_ORDER = [
+    'type',
+    'objective',
+    'queries',
+    'sources',
+    'requirements',
+    'evidenceQueries',
+    'evidenceRequirement',
+    'exclusions',
+    'constraints',
+    'requestedQuantity',
+];
+
+const TASK_LABELS = {
+    type:                { icon: '🎯', label: 'Type' },
+    objective:           { icon: '🧭', label: 'Objective' },
+    queries:             { icon: '🔍', label: 'Queries' },
+    sources:             { icon: '🔗', label: 'Sources' },
+    requirements:        { icon: '✅', label: 'Requirements' },
+    evidenceQueries:     { icon: '🔬', label: 'Evidence Queries' },
+    evidenceRequirement: { icon: '📡', label: 'Evidence Requirement' },
+    exclusions:          { icon: '🚫', label: 'Exclusions' },
+    constraints:         { icon: '📎', label: 'Constraints' },
+    requestedQuantity:   { icon: '🔢', label: 'Requested Quantity' },
+};
 
 const DEFAULT_FIELD_ICON = '📝';
 
@@ -318,6 +348,90 @@ function renderDiscoveryContext(context) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// RENDER: TASK COORDINATION
+// ────────────────────────────────────────────────────────────────
+
+// Renders a Search Task object as a fully labeled block using the
+// TASK_LABELS map. Arrays (queries, evidenceQueries) are numbered.
+// Empty strings and empty arrays are skipped.
+
+function renderTaskCoordination(task) {
+    if (!task || typeof task !== 'object') {
+        return 'Task Coordination\n⚠️ No task data.';
+    }
+
+    const lines = [];
+
+    for (const key of TASK_ORDER) {
+        const value = task[key];
+        if (value === undefined || value === null) continue;
+
+        const meta = TASK_LABELS[key] || {
+            icon: DEFAULT_FIELD_ICON,
+            label: humanizeKey(key),
+        };
+
+        // Arrays
+        if (Array.isArray(value)) {
+            if (value.length === 0) continue;
+            const items = value
+                .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+                .filter(Boolean);
+            if (items.length === 0) continue;
+
+            lines.push(`${meta.icon} ${meta.label}:`);
+            items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
+            continue;
+        }
+
+        // Objects — generic rendering
+        if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+            continue;
+        }
+
+        // Scalars — skip empty strings
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    // Extra fields
+    const extras = Object.keys(task).filter(k => !TASK_ORDER.includes(k));
+    for (const key of extras) {
+        const value = task[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return 'Task Coordination\n⚠️ No task data.';
+    return ['Task Coordination', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
 // RENDER: UNDERSTANDING
 // ────────────────────────────────────────────────────────────────
 
@@ -496,15 +610,19 @@ function renderDiscovery(discovery) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 3 SECTIONS
+// COMPOSE FINAL REPLY — 4 SECTIONS
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan, discovery) {
+function buildReply(understanding, plan, discovery, task) {
     const sections = [
         renderUnderstanding(understanding),
         renderPlanning(plan),
         renderDiscovery(discovery),
     ];
+
+    if (task) {
+        sections.push(renderTaskCoordination(task));
+    }
 
     return sections.join('\n\n');
 }
@@ -516,6 +634,11 @@ function buildReply(understanding, plan, discovery) {
 async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
+
+    // The stage to build the search task for.
+    // Until Discovery Control exists, this defaults to 'companyDiscovery'.
+    // Callers can override via options.currentStage.
+    const currentStage = options.currentStage || 'companyDiscovery';
 
     try {
         // ── STEP 1: Understand ──
@@ -532,7 +655,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
 
         console.log('[Orchestrator] Plan result:', plan);
 
-        // ── STEP 3: Discovery ──
+        // ── STEP 3: Discovery Context ──
         let discovery = null;
         try {
             discovery = await discoverySearch(understanding, plan, {
@@ -548,14 +671,38 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── STEP 4: Render all 3 sections ──
-        const reply = buildReply(understanding, plan, discovery);
+        // ── STEP 4: Task Coordination ──
+        let task = null;
+        if (discovery && !discovery.status) {
+            try {
+                task = await searchTask(discovery, currentStage);
+
+                console.log('[Orchestrator] Task result:', task);
+            } catch (taskErr) {
+                console.error('[Orchestrator] SearchTask failed:', taskErr.message);
+                task = {
+                    type: currentStage,
+                    objective: 'Task Coordination failed',
+                    queries: [],
+                    sources: '',
+                    requirements: '',
+                    evidenceQueries: [],
+                    evidenceRequirement: '',
+                    exclusions: '',
+                    constraints: '',
+                    requestedQuantity: '',
+                };
+            }
+        }
+
+        // ── STEP 5: Render all sections ──
+        const reply = buildReply(understanding, plan, discovery, task);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan, discovery },
+            meta: { understanding, plan, discovery, task },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
