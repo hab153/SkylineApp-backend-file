@@ -2,6 +2,7 @@
 
 const understandRequest = require('./UnderstandRequest');
 const planRequest      = require('./PlanRequest');
+const summaryRequest   = require('./Summary');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -58,6 +59,20 @@ const PLANNING_LABELS = {
     searchExpansion: { icon: '🌐', label: 'Search Expansion' },
     steps:           { icon: '🪜', label: 'Steps' },
     action:          { icon: '⚡', label: 'Action' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// SUMMARY FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const SUMMARY_ORDER = [
+    'summary',
+    'allocation',
+];
+
+const SUMMARY_LABELS = {
+    summary:    { icon: '📝', label: 'Summary' },
+    allocation: { icon: '📊', label: 'Allocation' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -238,14 +253,100 @@ function renderPlanning(plan) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 2 SECTIONS
+// RENDER: SUMMARY
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan) {
+function renderSummary(summary) {
+    if (!summary || typeof summary !== 'object') {
+        return 'Summary\n⚠️ No summary data.';
+    }
+
+    const lines = [];
+
+    for (const key of SUMMARY_ORDER) {
+        const value = summary[key];
+        if (value === undefined || value === null) continue;
+
+        const meta = SUMMARY_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+
+        // Allocation — use the dedicated renderer
+        if (key === 'allocation') {
+            const block = renderAllocation(value);
+            if (block) lines.push(block);
+            continue;
+        }
+
+        // Arrays
+        if (Array.isArray(value)) {
+            const items = value
+                .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+                .filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}:`);
+            items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
+            continue;
+        }
+
+        // Objects
+        if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+            continue;
+        }
+
+        // Scalars — strings, numbers, booleans
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    // Extra fields
+    const extras = Object.keys(summary).filter(k => !SUMMARY_ORDER.includes(k));
+    for (const key of extras) {
+        const value = summary[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return 'Summary\n⚠️ No summary data.';
+    return ['Summary', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 3 SECTIONS
+// ────────────────────────────────────────────────────────────────
+
+function buildReply(understanding, plan, summary) {
     const sections = [
         renderUnderstanding(understanding),
         renderPlanning(plan),
     ];
+
+    if (summary) {
+        sections.push(renderSummary(summary));
+    }
 
     return sections.join('\n\n');
 }
@@ -273,14 +374,30 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
 
         console.log('[Orchestrator] Plan result:', plan);
 
-        // ── STEP 3: Render both sections ──
-        const reply = buildReply(understanding, plan);
+        // ── STEP 3: Summary ──
+        let summary = null;
+        try {
+            summary = await summaryRequest(understanding, plan, {
+                message, history, userProfile, onProgress, options,
+            });
+
+            console.log('[Orchestrator] Summary result:', summary);
+        } catch (summaryErr) {
+            console.error('[Orchestrator] SummaryRequest failed:', summaryErr.message);
+            summary = {
+                summary: '',
+                allocation: plan?.allocation ?? null,
+            };
+        }
+
+        // ── STEP 4: Render all sections ──
+        const reply = buildReply(understanding, plan, summary);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan },
+            meta: { understanding, plan, summary },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
