@@ -14,27 +14,20 @@ const MODEL = 'gpt-4o-mini';
 const MAX_ATTEMPTS = 2;
 
 // ────────────────────────────────────────────────────────────────
-// SEARCH CAPACITY BUCKETS
+// SEARCH ALLOCATION CONSTANTS
 // ────────────────────────────────────────────────────────────────
 
-// Fixed search-capacity buckets used by the fallback allocation.
-// maxSearches = ceil(quantity / 10) * 10, capped at 1,000.
-// These are search-capacity limits, not searches per lead.
+// Every 20 requested leads adds 12 to the maximum search-call limit.
+// maxSearchCalls = ceil(quantity / 20) * 12
+// Supported requested quantity range: 1–700.
+// Quantities above 700 or without a number cap at 420 (700 leads).
 
-const SEARCH_CAPACITY_BUCKET_SIZE = 10;
-const SEARCH_CAPACITY_MAX_BUCKET = 1000;
-
-// Fixed proportional distribution used by the fallback allocation.
-// The first three categories use Math.floor. The last category receives
-// the remainder so the total always equals totalSearches exactly.
-// Category order matters — it determines the output key order.
-
-const FALLBACK_ALLOCATION_DISTRIBUTION = {
-    companyDiscovery: 0.40,
-    qualification: 0.20,
-    signalEvidence: 0.30,
-    supportingEvidence: 0.10,
-};
+const SEARCH_ALLOCATION_BLOCK_SIZE = 20;
+const SEARCH_ALLOCATION_BLOCK_VALUE = 12;
+const SEARCH_ALLOCATION_MAX_QUANTITY = 700;
+const SEARCH_ALLOCATION_MAX_CALLS =
+    (SEARCH_ALLOCATION_MAX_QUANTITY / SEARCH_ALLOCATION_BLOCK_SIZE) *
+    SEARCH_ALLOCATION_BLOCK_VALUE;
 
 // ────────────────────────────────────────────────────────────────
 // FALLBACK STRATEGY BUILDER
@@ -230,21 +223,17 @@ function buildFallbackEvidenceSearch(understanding) {
 // FALLBACK ALLOCATION BUILDER
 // ────────────────────────────────────────────────────────────────
 
-// Builds the fallback allocation from the Understanding output using the
-// fixed search-capacity rule and a fixed proportional distribution.
+// Builds the fallback allocation from the Understanding output.
 //
 // Step 1: extract the requested leads from the already-structured quantity
 //         string. This is parsing an already-structured field, not
 //         re-understanding the user's request.
-// Step 2: calculate totalSearches = ceil(quantity / 10) * 10, capped at
-//         1,000. Anything above 1,000 or without a number uses 1,000.
-// Step 3: distribute the total using fixed proportions:
-//           companyDiscovery:   40%
-//           qualification:      20%
-//           signalEvidence:     30%
-//           supportingEvidence: remainder
-//         The first three use Math.floor. The fourth receives the remainder
-//         so the total always equals totalSearches exactly.
+// Step 2: calculate maxSearchCalls = ceil(quantity / 20) * 12.
+//         Supported range is 1–700. Quantities above 700 or without a
+//         number cap at 420 (which is the value for 700 leads).
+// Step 3: return the allocation as { requestedQuantity, maxSearchCalls }.
+//         No distribution is produced — the allocation rule defines a
+//         ceiling only, not a breakdown among tasks.
 
 function buildFallbackAllocation(understanding) {
     // Step 1: extract requested leads from the quantity string
@@ -253,43 +242,31 @@ function buildFallbackAllocation(understanding) {
             ? understanding.quantity
             : '';
     const match = quantityString.match(/\d+/);
-    const requestedLeads = match ? parseInt(match[0], 10) : null;
+    const parsedQuantity = match ? parseInt(match[0], 10) : null;
 
-    // Step 2: calculate totalSearches
-    let totalSearches = SEARCH_CAPACITY_MAX_BUCKET;
+    // Step 2: calculate maxSearchCalls
+    let requestedQuantity;
+    let maxSearchCalls;
 
-    if (requestedLeads !== null) {
-        totalSearches = Math.min(
-            Math.ceil(requestedLeads / SEARCH_CAPACITY_BUCKET_SIZE) *
-                SEARCH_CAPACITY_BUCKET_SIZE,
-            SEARCH_CAPACITY_MAX_BUCKET
-        );
+    if (parsedQuantity === null) {
+        // No number — use the maximum supported quantity
+        requestedQuantity = SEARCH_ALLOCATION_MAX_QUANTITY;
+        maxSearchCalls = SEARCH_ALLOCATION_MAX_CALLS;
+    } else if (parsedQuantity > SEARCH_ALLOCATION_MAX_QUANTITY) {
+        // Above 700 — cap at the maximum
+        requestedQuantity = SEARCH_ALLOCATION_MAX_QUANTITY;
+        maxSearchCalls = SEARCH_ALLOCATION_MAX_CALLS;
+    } else {
+        requestedQuantity = parsedQuantity;
+        maxSearchCalls =
+            Math.ceil(parsedQuantity / SEARCH_ALLOCATION_BLOCK_SIZE) *
+            SEARCH_ALLOCATION_BLOCK_VALUE;
     }
 
-    // Step 3: proportional distribution — first three floor, last gets remainder
-    const companyDiscovery = Math.floor(
-        totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION.companyDiscovery
-    );
-    const qualification = Math.floor(
-        totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION.qualification
-    );
-    const signalEvidence = Math.floor(
-        totalSearches * FALLBACK_ALLOCATION_DISTRIBUTION.signalEvidence
-    );
-    const supportingEvidence =
-        totalSearches -
-        companyDiscovery -
-        qualification -
-        signalEvidence;
-
+    // Step 3: return the allocation
     return {
-        totalSearches,
-        distribution: {
-            companyDiscovery,
-            qualification,
-            signalEvidence,
-            supportingEvidence,
-        },
+        requestedQuantity,
+        maxSearchCalls,
     };
 }
 
@@ -298,8 +275,8 @@ function buildFallbackAllocation(understanding) {
 // ────────────────────────────────────────────────────────────────
 
 // Returns true when the AI-provided allocation is structurally valid:
-// an object with a positive integer totalSearches and a non-empty
-// distribution of non-negative integer values that sums to totalSearches.
+// an object with a positive integer requestedQuantity and a positive
+// integer maxSearchCalls.
 
 function isValidAllocation(allocation) {
     if (!allocation || typeof allocation !== 'object') {
@@ -307,41 +284,16 @@ function isValidAllocation(allocation) {
     }
 
     if (
-        !Number.isInteger(allocation.totalSearches) ||
-        allocation.totalSearches <= 0
+        !Number.isInteger(allocation.requestedQuantity) ||
+        allocation.requestedQuantity <= 0
     ) {
         return false;
     }
-
-    const distribution = allocation.distribution;
 
     if (
-        !distribution ||
-        typeof distribution !== 'object' ||
-        Array.isArray(distribution)
+        !Number.isInteger(allocation.maxSearchCalls) ||
+        allocation.maxSearchCalls <= 0
     ) {
-        return false;
-    }
-
-    const keys = Object.keys(distribution);
-
-    if (keys.length === 0) {
-        return false;
-    }
-
-    let sum = 0;
-
-    for (const key of keys) {
-        const value = distribution[key];
-
-        if (!Number.isInteger(value) || value < 0) {
-            return false;
-        }
-
-        sum += value;
-    }
-
-    if (sum !== allocation.totalSearches) {
         return false;
     }
 
@@ -663,98 +615,62 @@ The evidence searches must be a non-empty list of non-empty search phrases.
 
 Search Allocation instructions:
 
-Search Allocation is deciding how to distribute the available searches among
-the different search tasks.
+Search Allocation is deciding the maximum number of search API calls allowed
+for this request.
 
-Search Allocation answers the question: how much should be searched for each
-task?
+Search Allocation answers the question: what is the maximum number of search
+calls we may make?
 
-The searches are paid search resources. They must not be spent endlessly on
-one task. The goal is to use the available search capacity efficiently.
-
-Query Generation decides what to search. Signal Search Planning decides how to
-investigate the signal. Search Allocation decides how much to search each task.
-
-The totalSearches value is a search-capacity limit, not a number of searches
-per lead. One search can return many candidate companies. The results are then
-extracted, deduplicated, and verified by later stages.
+Search Allocation does not distribute the calls among tasks. The allocation
+rule defines a search-call ceiling only. The system decides which search task
+to perform next at runtime.
 
 The Search Allocation must contain:
 
-1. totalSearches — a positive integer that represents the total search
-   capacity for this request.
-2. distribution — an object that maps a fixed task name to a positive integer
-   number of searches.
+1. requestedQuantity — the validated requested quantity as a positive integer.
+2. maxSearchCalls — the maximum number of search API calls allowed for this
+   request, as a positive integer.
 
-The distribution must sum exactly to totalSearches.
+The maxSearchCalls value is calculated from the requested quantity using this
+rule:
 
-The totalSearches value is calculated from the number of leads the user
-requested using this rule:
+maxSearchCalls = ceil(requestedQuantity / 20) * 12
 
-totalSearches = ceil(quantity / 10) * 10
+Every 20 requested leads adds 12 to the maximum search-call limit.
 
-capped at 1,000. For example:
+Examples:
 
-- 1 to 10 leads → 10 searches
-- 11 to 20 leads → 20 searches
-- 21 to 30 leads → 30 searches
-- 31 to 40 leads → 40 searches
-- 41 to 50 leads → 50 searches
-- 91 to 100 leads → 100 searches
-- 191 to 200 leads → 200 searches
-- 291 to 300 leads → 300 searches
-- 991 to 1,000 leads → 1,000 searches
+- 15 requested leads  → 12 max search calls
+- 35 requested leads  → 24 max search calls
+- 100 requested leads → 60 max search calls
+- 300 requested leads → 180 max search calls
+- 700 requested leads → 420 max search calls
 
-Any request above 1,000 leads uses 1,000 searches. Any request without a
-clear number uses 1,000 searches.
+The supported requested quantity range is 1–700. The requested quantity must
+be a valid positive integer. Quantities above 700 must be capped at 700 (420
+maximum search calls). A quantity without a clear number must also use 700
+as the requested quantity, giving 420 maximum search calls.
 
-The distribution must always use exactly these four fixed category names:
-
-- companyDiscovery
-- qualification
-- signalEvidence
-- supportingEvidence
-
-The distribution must follow this fixed proportional split:
-
-- companyDiscovery:    40% of totalSearches
-- qualification:       20% of totalSearches
-- signalEvidence:      30% of totalSearches
-- supportingEvidence:  the remainder
-
-Use Math.floor for the first three categories. The fourth category receives
-the remainder so the sum is exactly totalSearches.
-
-Example for 40 leads:
-
-{
-  "totalSearches": 40,
-  "distribution": {
-    "companyDiscovery": 16,
-    "qualification": 8,
-    "signalEvidence": 12,
-    "supportingEvidence": 4
-  }
-}
+The maxSearchCalls value is a maximum permitted usage, not a required number
+of calls. The system may stop earlier when the requested leads are found or
+when other completion conditions are met.
 
 Example for 100 leads:
 
 {
-  "totalSearches": 100,
-  "distribution": {
-    "companyDiscovery": 40,
-    "qualification": 20,
-    "signalEvidence": 30,
-    "supportingEvidence": 10
-  }
+  "requestedQuantity": 100,
+  "maxSearchCalls": 60
 }
 
-The distribution must sum exactly to totalSearches. Do not use any category
-names other than companyDiscovery, qualification, signalEvidence, and
-supportingEvidence.
+Example for 300 leads:
 
-The Search Allocation must be a clear, meaningful plan for how to distribute
-the searches. Do not return an empty or null allocation.
+{
+  "requestedQuantity": 300,
+  "maxSearchCalls": 180
+}
+
+The Search Allocation must be a clear, meaningful plan for how many search
+calls are allowed. Do not return an empty or null allocation.
 
 Search Expansion and Refinement instructions:
 
@@ -826,13 +742,8 @@ Return only valid JSON using exactly this format:
   "query": ["the first search query", "the second search query"],
   "evidenceSearch": ["the first evidence search", "the second evidence search"],
   "allocation": {
-    "totalSearches": 40,
-    "distribution": {
-      "companyDiscovery": 16,
-      "qualification": 8,
-      "signalEvidence": 12,
-      "supportingEvidence": 4
-    }
+    "requestedQuantity": 300,
+    "maxSearchCalls": 180
   },
   "searchExpansion": "the search expansion and refinement plan"
 }
