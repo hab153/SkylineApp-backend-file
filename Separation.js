@@ -4,7 +4,102 @@
 // IMPORTS
 // ────────────────────────────────────────────────────────────────
 
+const OpenAI = require('openai');
+
 const { getAll } = require('./Saving');
+
+// ────────────────────────────────────────────────────────────────
+// CONFIGURATION
+// ────────────────────────────────────────────────────────────────
+
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+});
+
+const MODEL = 'gpt-4o-mini';
+
+// V1 exception: this layer retries up to 4 times, not 2.
+const MAX_ATTEMPTS = 4;
+
+// ────────────────────────────────────────────────────────────────
+// GPT INSTRUCTIONS
+// ────────────────────────────────────────────────────────────────
+
+const SYSTEM_INSTRUCTIONS = `
+You are given the raw search results collected from several web searches.
+
+Your only task is to separate these results into company blocks.
+
+Rule:
+
+- Everything that belongs to a company goes under that company.
+- A company gets its own block.
+- Everything about that company is written inside that company's block.
+- Nothing crosses between companies.
+
+Example:
+
+If a search result mentions three companies (Company A, Company B, Company C),
+that same mention appears in Company A's block, in Company B's block, and in
+Company C's block.
+
+If a search result mentions one company, that mention appears only in that
+company's block.
+
+If a search result mentions no company, that mention is not included at all.
+
+Do not:
+
+- invent companies that are not present in the search results
+- invent mentions
+- merge two companies into one block
+- mix details between different companies
+- change URLs, titles, or descriptions
+- add recommendations or evidence
+- add confidence scores
+
+You may only:
+
+- identify the companies mentioned in the search results
+- place every mention under the correct company
+- group mentions of the same company together in that company's block
+
+Return only valid JSON using exactly this format:
+
+{
+  "companies": [
+    {
+      "name": "the company name",
+      "mentions": [
+        {
+          "search": "the search phrase that produced this mention",
+          "url": "the page URL",
+          "title": "the page title",
+          "description": "the page snippet",
+          "score": 0.0
+        }
+      ]
+    }
+  ]
+}
+
+Every mention must include the search phrase, URL, title, description, and
+score exactly as they appear in the search results.
+
+If the same company appears in multiple search results, all of its mentions
+go into one company block — the same company is never split into two blocks.
+
+If no companies can be identified, return:
+
+{
+  "companies": []
+}
+
+Do not explain your answer.
+Do not add extra fields.
+Do not remove any fields.
+Do not invent unnecessary details.
+`;
 
 // ────────────────────────────────────────────────────────────────
 // SEPARATION REQUEST
@@ -18,10 +113,15 @@ const { getAll } = require('./Saving');
 //   - collected    — number of result sets taken
 //   - totalResults — total individual results across all sets
 //
-// Returns the summary and the full accumulated array.
+// Then sends the raw results to the AI, which separates them into
+// company blocks. The AI is retried up to 4 times. If all attempts fail,
+// the companies array is empty — no fallback is invented.
 //
-// It does not search. It does not verify. It does not transform entries.
-// It does not decide meaning. It only collects.
+// Returns:
+//   { collected, totalResults, results, companies }
+//
+// It does not search. It does not verify. It does not decide meaning.
+// It collects and separates.
 
 async function separationRequest(notification) {
     console.log('[Separation] Started');
@@ -57,20 +157,151 @@ async function separationRequest(notification) {
         return sum + (Array.isArray(r) ? r.length : 0);
     }, 0);
 
+    // ── Separate via AI ──
+    let companies = [];
+
+    if (totalResults > 0) {
+        companies = await separateCompanies(allResults);
+    } else {
+        console.warn(
+            '[Separation] No results to separate. companies will be empty.'
+        );
+    }
+
     // ── Build the result ──
     const result = {
         collected,
         totalResults,
         results: allResults,
+        companies,
     };
 
     console.log(
         '[Separation] Final result:',
         `collected=${collected}`,
-        `totalResults=${totalResults}`
+        `totalResults=${totalResults}`,
+        `companies=${companies.length}`
     );
 
     return result;
+}
+
+// ────────────────────────────────────────────────────────────────
+// SEPARATE COMPANIES — AI CALL WITH RETRIES
+// ────────────────────────────────────────────────────────────────
+
+// Sends the raw search results to the AI and asks it to separate them
+// into company blocks. Retries up to MAX_ATTEMPTS times.
+// On total failure, returns an empty array — no fallback is invented.
+
+async function separateCompanies(allResults) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        console.log(
+            `[Separation] AI attempt ${attempt}/${MAX_ATTEMPTS}`
+        );
+
+        try {
+            const completion = await openai.chat.completions.create({
+                model: MODEL,
+                temperature: 0,
+                response_format: {
+                    type: 'json_object',
+                },
+                messages: [
+                    {
+                        role: 'system',
+                        content: SYSTEM_INSTRUCTIONS,
+                    },
+                    {
+                        role: 'user',
+                        content: `Search results:\n${JSON.stringify(
+                            allResults,
+                            null,
+                            2
+                        )}`,
+                    },
+                ],
+            });
+
+            console.log(
+                '[Separation] OpenAI response received'
+            );
+
+            const content = completion.choices?.[0]?.message?.content;
+
+            console.log(
+                '[Separation] Raw model response:',
+                content
+            );
+
+            if (!content) {
+                console.error(
+                    '[Separation] Model returned an empty response'
+                );
+                continue;
+            }
+
+            const parsedResult = JSON.parse(content);
+
+            console.log(
+                '[Separation] Parsed model response:',
+                parsedResult
+            );
+
+            const rawCompanies = parsedResult?.companies;
+
+            const companies = Array.isArray(rawCompanies)
+                ? rawCompanies.filter(
+                      (c) =>
+                          c &&
+                          typeof c === 'object' &&
+                          typeof c.name === 'string' &&
+                          c.name.trim().length > 0 &&
+                          Array.isArray(c.mentions)
+                  )
+                : [];
+
+            if (companies.length > 0) {
+                console.log(
+                    '[Separation] Valid companies from AI:',
+                    companies.length
+                );
+
+                return companies;
+            }
+
+            console.warn(
+                '[Separation] No valid companies returned'
+            );
+        } catch (error) {
+            console.error(
+                `[Separation] AI attempt ${attempt} failed`
+            );
+
+            console.error(
+                '[Separation] Error name:',
+                error.name
+            );
+            console.error(
+                '[Separation] Error message:',
+                error.message
+            );
+            console.error(
+                '[Separation] Error status:',
+                error.status
+            );
+            console.error(
+                '[Separation] Full error:',
+                error
+            );
+        }
+    }
+
+    console.warn(
+        '[Separation] All AI attempts failed. companies will be empty.'
+    );
+
+    return [];
 }
 
 // ────────────────────────────────────────────────────────────────
