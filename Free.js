@@ -4,6 +4,7 @@ const understandRequest  = require('./UnderstandRequest');
 const planRequest       = require('./PlanRequest');
 const summaryRequest    = require('./Summary');
 const generationRequest = require('./Generation');
+const controllingRequest = require('./Controlling');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -90,6 +91,22 @@ const GENERATION_LABELS = {
     searches:   { icon: '🔎', label: 'Searches' },
     allocation: { icon: '📊', label: 'Allocation' },
     message:    { icon: '💬', label: 'Message' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// CONTROLLING FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const CONTROLLING_ORDER = [
+    'completed',
+    'searchesProcessed',
+    'reason',
+];
+
+const CONTROLLING_LABELS = {
+    completed:         { icon: '✅', label: 'Completed' },
+    searchesProcessed: { icon: '🔢', label: 'Searches Processed' },
+    reason:            { icon: '💬', label: 'Reason' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -438,10 +455,68 @@ function renderGeneration(generation) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 4 SECTIONS
+// RENDER: CONTROLLING
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan, summary, generation) {
+// Renders the Controlling result. The shape is:
+//   Success:  { completed: true, searchesProcessed: <number> }
+//   Fallback: { completed: false, searchesProcessed: 0, reason: "..." }
+
+function renderControlling(controlling) {
+    if (!controlling || typeof controlling !== 'object') {
+        return 'Controlling\n⚠️ No controlling data.';
+    }
+
+    const lines = [];
+
+    for (const key of CONTROLLING_ORDER) {
+        const value = controlling[key];
+        if (value === undefined || value === null) continue;
+
+        const meta = CONTROLLING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+
+        // Scalars
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'boolean' || typeof value === 'number') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    // Extra fields
+    const extras = Object.keys(controlling).filter(k => !CONTROLLING_ORDER.includes(k));
+    for (const key of extras) {
+        const value = controlling[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return 'Controlling\n⚠️ No controlling data.';
+    return ['Controlling', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 5 SECTIONS
+// ────────────────────────────────────────────────────────────────
+
+function buildReply(understanding, plan, summary, generation, controlling) {
     const sections = [
         renderUnderstanding(understanding),
         renderPlanning(plan),
@@ -453,6 +528,10 @@ function buildReply(understanding, plan, summary, generation) {
 
     if (generation) {
         sections.push(renderGeneration(generation));
+    }
+
+    if (controlling) {
+        sections.push(renderControlling(controlling));
     }
 
     return sections.join('\n\n');
@@ -512,14 +591,31 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── STEP 5: Render all sections ──
-        const reply = buildReply(understanding, plan, summary, generation);
+        // ── STEP 5: Controlling ──
+        let controlling = null;
+        try {
+            controlling = await controllingRequest(generation, {
+                message, history, userProfile, onProgress, options,
+            });
+
+            console.log('[Orchestrator] Controlling result:', controlling);
+        } catch (controllingErr) {
+            console.error('[Orchestrator] ControllingRequest failed:', controllingErr.message);
+            controlling = {
+                completed: false,
+                searchesProcessed: 0,
+                reason: controllingErr.message,
+            };
+        }
+
+        // ── STEP 6: Render all sections ──
+        const reply = buildReply(understanding, plan, summary, generation, controlling);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan, summary, generation },
+            meta: { understanding, plan, summary, generation, controlling },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
