@@ -1,10 +1,11 @@
 'use strict';
 
-const understandRequest  = require('./UnderstandRequest');
-const planRequest       = require('./PlanRequest');
-const summaryRequest    = require('./Summary');
-const generationRequest = require('./Generation');
+const understandRequest   = require('./UnderstandRequest');
+const planRequest        = require('./PlanRequest');
+const summaryRequest     = require('./Summary');
+const generationRequest  = require('./Generation');
 const controllingRequest = require('./Controlling');
+const separationRequest  = require('./Separation');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -161,13 +162,6 @@ function formatField(key, value, labels) {
 // RENDER: ALLOCATION OBJECT
 // ────────────────────────────────────────────────────────────────
 
-// Renders the allocation object. The current shape is:
-//   {
-//     requestedQuantity: <number>,
-//     maxSearchCalls: <number>
-//   }
-// Any additional keys are rendered generically as a fallback.
-
 function renderAllocation(allocation) {
     if (!allocation || typeof allocation !== 'object') return null;
 
@@ -303,14 +297,12 @@ function renderSummary(summary) {
 
         const meta = SUMMARY_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
-        // Allocation — use the dedicated renderer
         if (key === 'allocation') {
             const block = renderAllocation(value);
             if (block) lines.push(block);
             continue;
         }
 
-        // Arrays
         if (Array.isArray(value)) {
             const items = value
                 .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
@@ -321,7 +313,6 @@ function renderSummary(summary) {
             continue;
         }
 
-        // Objects
         if (typeof value === 'object') {
             lines.push(`${meta.icon} ${meta.label}:`);
             for (const [k, v] of Object.entries(value)) {
@@ -331,7 +322,6 @@ function renderSummary(summary) {
             continue;
         }
 
-        // Scalars — strings, numbers, booleans
         if (typeof value === 'string' && value.trim()) {
             lines.push(`${meta.icon} ${meta.label}: ${value}`);
             continue;
@@ -343,7 +333,6 @@ function renderSummary(summary) {
         }
     }
 
-    // Extra fields
     const extras = Object.keys(summary).filter(k => !SUMMARY_ORDER.includes(k));
     for (const key of extras) {
         const value = summary[key];
@@ -372,10 +361,6 @@ function renderSummary(summary) {
 // RENDER: GENERATION
 // ────────────────────────────────────────────────────────────────
 
-// Renders the Generation output. Handles both shapes:
-//   Success:  { searches: [...], allocation: {...} }
-//   Fallback: { message: "..." }
-
 function renderGeneration(generation) {
     if (!generation || typeof generation !== 'object') {
         return 'Generation\n⚠️ No generation data.';
@@ -389,14 +374,12 @@ function renderGeneration(generation) {
 
         const meta = GENERATION_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
-        // Allocation — use the dedicated renderer
         if (key === 'allocation') {
             const block = renderAllocation(value);
             if (block) lines.push(block);
             continue;
         }
 
-        // Arrays — searches get a numbered list
         if (Array.isArray(value)) {
             const items = value
                 .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
@@ -407,7 +390,6 @@ function renderGeneration(generation) {
             continue;
         }
 
-        // Objects
         if (typeof value === 'object') {
             lines.push(`${meta.icon} ${meta.label}:`);
             for (const [k, v] of Object.entries(value)) {
@@ -417,7 +399,6 @@ function renderGeneration(generation) {
             continue;
         }
 
-        // Scalars — strings (including the friendly message), numbers, booleans
         if (typeof value === 'string' && value.trim()) {
             lines.push(`${meta.icon} ${meta.label}: ${value}`);
             continue;
@@ -429,7 +410,6 @@ function renderGeneration(generation) {
         }
     }
 
-    // Extra fields
     const extras = Object.keys(generation).filter(k => !GENERATION_ORDER.includes(k));
     for (const key of extras) {
         const value = generation[key];
@@ -458,10 +438,6 @@ function renderGeneration(generation) {
 // RENDER: CONTROLLING
 // ────────────────────────────────────────────────────────────────
 
-// Renders the Controlling result. The shape is:
-//   Success:  { completed: true, searchesProcessed: <number> }
-//   Fallback: { completed: false, searchesProcessed: 0, reason: "..." }
-
 function renderControlling(controlling) {
     if (!controlling || typeof controlling !== 'object') {
         return 'Controlling\n⚠️ No controlling data.';
@@ -475,7 +451,6 @@ function renderControlling(controlling) {
 
         const meta = CONTROLLING_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
 
-        // Scalars
         if (typeof value === 'string' && value.trim()) {
             lines.push(`${meta.icon} ${meta.label}: ${value}`);
             continue;
@@ -487,7 +462,6 @@ function renderControlling(controlling) {
         }
     }
 
-    // Extra fields
     const extras = Object.keys(controlling).filter(k => !CONTROLLING_ORDER.includes(k));
     for (const key of extras) {
         const value = controlling[key];
@@ -513,10 +487,58 @@ function renderControlling(controlling) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 5 SECTIONS
+// RENDER: SEPARATION
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan, summary, generation, controlling) {
+// Renders a summary of the Separation stage.
+// The collected array itself is not rendered — only the summary counts.
+//
+//   📦 Collected: <number of result sets>
+//   🔢 Total results: <total individual results across all sets>
+
+function renderSeparation(separation) {
+    if (!separation || typeof separation !== 'object') {
+        return 'Separation\n⚠️ No separation data.';
+    }
+
+    const lines = [];
+
+    const collected = separation.collected;
+    const totalResults = separation.totalResults;
+
+    if (
+        collected !== undefined &&
+        collected !== null &&
+        !Number.isNaN(collected)
+    ) {
+        lines.push(`📦 Collected: ${collected} result sets`);
+    }
+
+    if (
+        totalResults !== undefined &&
+        totalResults !== null &&
+        !Number.isNaN(totalResults)
+    ) {
+        lines.push(`🔢 Total results: ${totalResults}`);
+    }
+
+    const knownKeys = ['collected', 'totalResults'];
+    for (const key of Object.keys(separation)) {
+        if (knownKeys.includes(key)) continue;
+        const v = separation[key];
+        if (v === undefined || v === null || v === '') continue;
+        lines.push(`📝 ${humanizeKey(key)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+    }
+
+    if (lines.length === 0) return 'Separation\n⚠️ No separation data.';
+    return ['Separation', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 6 SECTIONS
+// ────────────────────────────────────────────────────────────────
+
+function buildReply(understanding, plan, summary, generation, controlling, separation) {
     const sections = [
         renderUnderstanding(understanding),
         renderPlanning(plan),
@@ -532,6 +554,10 @@ function buildReply(understanding, plan, summary, generation, controlling) {
 
     if (controlling) {
         sections.push(renderControlling(controlling));
+    }
+
+    if (separation) {
+        sections.push(renderSeparation(separation));
     }
 
     return sections.join('\n\n');
@@ -608,14 +634,37 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── STEP 6: Render all sections ──
-        const reply = buildReply(understanding, plan, summary, generation, controlling);
+        // ── STEP 6: Separation ──
+        let separation = null;
+        try {
+            separation = await separationRequest(controlling, {
+                message, history, userProfile, onProgress, options,
+            });
+
+            console.log('[Orchestrator] Separation result:', separation);
+        } catch (separationErr) {
+            console.error('[Orchestrator] SeparationRequest failed:', separationErr.message);
+            separation = {
+                collected: 0,
+                totalResults: 0,
+            };
+        }
+
+        // ── STEP 7: Render all sections ──
+        const reply = buildReply(
+            understanding,
+            plan,
+            summary,
+            generation,
+            controlling,
+            separation
+        );
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan, summary, generation, controlling },
+            meta: { understanding, plan, summary, generation, controlling, separation },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
