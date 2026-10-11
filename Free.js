@@ -1,8 +1,9 @@
 'use strict';
 
-const understandRequest = require('./UnderstandRequest');
-const planRequest      = require('./PlanRequest');
-const summaryRequest   = require('./Summary');
+const understandRequest  = require('./UnderstandRequest');
+const planRequest       = require('./PlanRequest');
+const summaryRequest    = require('./Summary');
+const generationRequest = require('./Generation');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -73,6 +74,22 @@ const SUMMARY_ORDER = [
 const SUMMARY_LABELS = {
     summary:    { icon: '📝', label: 'Summary' },
     allocation: { icon: '📊', label: 'Allocation' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// GENERATION FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const GENERATION_ORDER = [
+    'searches',
+    'allocation',
+    'message',
+];
+
+const GENERATION_LABELS = {
+    searches:   { icon: '🔎', label: 'Searches' },
+    allocation: { icon: '📊', label: 'Allocation' },
+    message:    { icon: '💬', label: 'Message' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -335,10 +352,96 @@ function renderSummary(summary) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 3 SECTIONS
+// RENDER: GENERATION
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan, summary) {
+// Renders the Generation output. Handles both shapes:
+//   Success:  { searches: [...], allocation: {...} }
+//   Fallback: { message: "..." }
+
+function renderGeneration(generation) {
+    if (!generation || typeof generation !== 'object') {
+        return 'Generation\n⚠️ No generation data.';
+    }
+
+    const lines = [];
+
+    for (const key of GENERATION_ORDER) {
+        const value = generation[key];
+        if (value === undefined || value === null) continue;
+
+        const meta = GENERATION_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+
+        // Allocation — use the dedicated renderer
+        if (key === 'allocation') {
+            const block = renderAllocation(value);
+            if (block) lines.push(block);
+            continue;
+        }
+
+        // Arrays — searches get a numbered list
+        if (Array.isArray(value)) {
+            const items = value
+                .map(v => (typeof v === 'string' ? v : JSON.stringify(v)))
+                .filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}:`);
+            items.forEach((item, i) => lines.push(`   ${i + 1}. ${item}`));
+            continue;
+        }
+
+        // Objects
+        if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+            continue;
+        }
+
+        // Scalars — strings (including the friendly message), numbers, booleans
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'number' || typeof value === 'boolean') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    // Extra fields
+    const extras = Object.keys(generation).filter(k => !GENERATION_ORDER.includes(k));
+    for (const key of extras) {
+        const value = generation[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return 'Generation\n⚠️ No generation data.';
+    return ['Generation', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 4 SECTIONS
+// ────────────────────────────────────────────────────────────────
+
+function buildReply(understanding, plan, summary, generation) {
     const sections = [
         renderUnderstanding(understanding),
         renderPlanning(plan),
@@ -346,6 +449,10 @@ function buildReply(understanding, plan, summary) {
 
     if (summary) {
         sections.push(renderSummary(summary));
+    }
+
+    if (generation) {
+        sections.push(renderGeneration(generation));
     }
 
     return sections.join('\n\n');
@@ -390,14 +497,29 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── STEP 4: Render all sections ──
-        const reply = buildReply(understanding, plan, summary);
+        // ── STEP 4: Generation ──
+        let generation = null;
+        try {
+            generation = await generationRequest(summary, {
+                message, history, userProfile, onProgress, options,
+            });
+
+            console.log('[Orchestrator] Generation result:', generation);
+        } catch (generationErr) {
+            console.error('[Orchestrator] GenerationRequest failed:', generationErr.message);
+            generation = {
+                message: 'Our server is currently experiencing high traffic. Please try again shortly.',
+            };
+        }
+
+        // ── STEP 5: Render all sections ──
+        const reply = buildReply(understanding, plan, summary, generation);
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan, summary },
+            meta: { understanding, plan, summary, generation },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
