@@ -35,6 +35,16 @@ The Summary layer output contains:
 Your only task is to generate a set of search phrases that will be sent to
 the search system to find leads about companies.
 
+The search phrases you generate will be sent to a real search engine. The
+search engine does not have a database of companies. It returns web pages.
+The pages it returns are pages where companies are mentioned or listed:
+company websites, job postings, business directories, news articles,
+professional profiles, and industry listings.
+
+For a search phrase to find companies, it must be phrased so that a real
+web page could contain that phrase. If no real page contains the phrase,
+the search will return nothing useful.
+
 The number of search phrases you must generate is calculated as:
 
 searchCount = min(requestedQuantity, 10)
@@ -49,20 +59,80 @@ Examples:
 - If requestedQuantity is 40, generate exactly 10 search phrases.
 - If requestedQuantity is 300, generate exactly 10 search phrases.
 
-Each search phrase must be a clear, meaningful search string that a search
-engine can execute to find companies matching the requirements described in
-the summary.
+Every search phrase must pass these tests:
+
+1. Could a real web page contain this exact phrase?
+   If no page says it, the search will return nothing useful.
+
+2. Does it use natural page language?
+   Real pages say: hiring, jobs, careers, directory, news, services,
+   about, team, linkedin, crunchbase.
+   Real pages never say: requiring, seeking, employing, needing,
+   that need, that require, with websites.
+
+3. Does it target a specific source type?
+   Each search must aim at one type of page: a job board, a company
+   directory, a news article, a company website, a professional
+   profile, or an industry listing.
+
+4. Is it different from the other searches?
+   Do not generate ten variations of the same idea. Each search must
+   open a different corner of the web. Do not repeat the same wording
+   with small changes.
 
 The search phrases must be grounded in the summary. Do not invent
-information that is not present in the summary. Do not change the target,
-location, industry, qualification, signal, exclusions, constraints, or any
-other requirement. Do not weaken or remove any requirement.
+information that is not present in the summary. Do not change the
+target, location, industry, qualification, signal, exclusions,
+constraints, or any other requirement. Do not weaken or remove any
+requirement.
 
-The search phrases must be different from each other. Do not generate the
-same phrase twice.
+Forbidden phrasing — never use these. They describe ideas rather than
+pages, and no real page contains them:
 
-Use forward-looking and investigative language. The search phrases describe
-what to search for, not the results of any search.
+- requiring
+- seeking
+- employing
+- needing
+- that need
+- that require
+- with websites
+- with a website
+- that have websites
+- organizations requiring
+- firms seeking
+- companies needing
+- companies requiring
+- looking for
+
+Preferred phrasing — use these where they fit, because they appear on
+real pages:
+
+- hiring, jobs, careers, job openings, recruiting
+- directory, business directory, companies in, list of companies
+- news, announcement, funding, expansion
+- services, solutions, products, about, team
+- linkedin, crunchbase, professional profile
+
+When the location is non-English-speaking, include 1 or 2 search
+phrases in the local language. For example, if the location is Berlin,
+Germany, include a phrase such as:
+
+- "Berlin Gesundheitsunternehmen IT"
+- "Berlin Gesundheitswesen Software"
+
+This helps reach local pages that English searches miss.
+
+The signal tells us what evidence to look for. Use the signal to
+choose the right source type:
+
+- If the signal is about hiring, target job boards and careers pages.
+- If the signal is about expansion, target news and press pages.
+- If the signal is about incidents, target news and reports.
+- If the signal is about compliance, target regulatory filings.
+- If the signal is about adoption, target case studies and product pages.
+
+Use forward-looking and investigative language. The search phrases
+describe what to search for, not the results of any search.
 
 Do not use language that suggests the work is already complete, such as:
 found, identified, confirmed, verified, ensured, located.
