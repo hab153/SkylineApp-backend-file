@@ -40,45 +40,22 @@ Rule:
 Extracting companies:
 
 - Extract EVERY company that is named in the search results — not only
-  the company the page is about. A single directory page may name twenty
-  companies. Each of those companies gets its own block.
-- Extract a company if its name appears in the title, in the snippet, or
-  in the URL.
-- The same company may appear in many search results. All of its mentions
-  go into one company block — the same company is never split into two
-  blocks.
+  the company the page is about. A single page may name many companies.
+  Each of those companies gets its own block.
+- Extract a company if its name appears in the title, in the snippet,
+  or in the URL.
+- The same company may appear in many search results. All of its
+  mentions go into one company block — the same company is never split
+  into two blocks.
 
 What counts as a company to include:
 
-- Fintech companies, financial technology companies, digital banks,
-  payment companies, lending platforms, financial software companies,
-  and similar companies that are part of the financial technology
-  industry.
-- Only companies that are relevant to what the user asked for.
-
-What does NOT count as a company to include:
-
-- Recruitment agencies and staffing companies
-- Cybersecurity vendors or cybersecurity service providers
-- Consulting firms and professional services companies
-- News websites, media companies, industry publications
-- Job boards and job listing platforms
-- Directory websites and list aggregators
-- Technology vendors whose main business is not financial technology
-- Any company whose main business is not financial technology
-
-Examples of companies to exclude (do not create blocks for them):
-
-- Recruitment agencies: Morgan McKinley, Barclay Simpson, Selby Jennings,
-  Harrington Starr, Rutherford, Hunter Bond, EC1 Partners, Robert Walters
-- Cybersecurity vendors: Cyber Alchemy, PeoplActive, FoxTech, Intersys,
-  Cynance, Astra Security, Eden Data, Infosec K2K, Resilience & Cyber
-- Consulting firms: Capco, Deloitte, KPMG, Accenture
-- News sites: FinTech Weekly, FinTech Futures, FinTech Magazine
-- Job boards: Indeed, LinkedIn Jobs, Built In London, Fintech Careers
-
-If a company's main business is not financial technology, do not create
-a block for it — even if it appears on a fintech page.
+- A company that matches what the searches were looking for.
+- The searches show what is being looked for — through the search
+  phrases and through the target, location, and industry the results
+  are about.
+- If a company is not the kind of company the searches were looking
+  for, do not include it.
 
 Do not:
 
@@ -115,8 +92,8 @@ Return only valid JSON using exactly this format:
   ]
 }
 
-Every mention must include the search phrase, URL, title, description, and
-score exactly as they appear in the search results.
+Every mention must include the search phrase, URL, title, description,
+and score exactly as they appear in the search results.
 
 If no companies can be identified, return:
 
