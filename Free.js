@@ -1,11 +1,12 @@
 'use strict';
 
-const understandRequest   = require('./UnderstandRequest');
-const planRequest        = require('./PlanRequest');
-const summaryRequest     = require('./Summary');
-const generationRequest  = require('./Generation');
-const controllingRequest = require('./Controlling');
-const separationRequest  = require('./Separation');
+const understandRequest    = require('./UnderstandRequest');
+const planRequest         = require('./PlanRequest');
+const summaryRequest      = require('./Summary');
+const generationRequest   = require('./Generation');
+const controllingRequest  = require('./Controlling');
+const separationRequest   = require('./Separation');
+const verificationRequest = require('./VerificationCompany');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -490,24 +491,6 @@ function renderControlling(controlling) {
 // RENDER: SEPARATION
 // ────────────────────────────────────────────────────────────────
 
-// Renders the Separation stage readably.
-//
-//   1. A short summary:
-//      📦 Collected: <number of result sets>
-//      🔢 Total results: <total individual results across all sets>
-//      🏢 Companies: <number of companies separated>
-//
-//   2. Then each company as its own block, one after the other:
-//
-//      Company 1. Teya
-//         🔍 Found in search: fintech companies London UK hiring security engineers
-//         🔗 URL: https://...
-//         📝 Title: Senior Security Engineer Crypto - Teya | Built In London
-//         📄 Description: We're a regulated payments fintech...
-//
-//      Company 2. Wise
-//         ...
-
 function renderSeparation(separation) {
     if (!separation || typeof separation !== 'object') {
         return 'Separation\n⚠️ No separation data.';
@@ -515,7 +498,6 @@ function renderSeparation(separation) {
 
     const lines = [];
 
-    // ── Summary block ──
     const collected = separation.collected;
     const totalResults = separation.totalResults;
     const companies = Array.isArray(separation.companies) ? separation.companies : [];
@@ -538,8 +520,6 @@ function renderSeparation(separation) {
 
     lines.push(`🏢 Companies: ${companies.length}`);
 
-    // ── Render the collected raw results ONLY if there are no companies ──
-    //    (kept for backward compatibility, not rendered when companies exist)
     if (companies.length === 0) {
         if (separation.results !== undefined) {
             const v = separation.results;
@@ -553,7 +533,6 @@ function renderSeparation(separation) {
         }
     }
 
-    // ── Company blocks ──
     if (companies.length > 0) {
         lines.push('');
         lines.push('──────────────────────────────────');
@@ -620,20 +599,17 @@ function renderSeparation(separation) {
                     lines.push(`   ⭐ Score: ${score}`);
                 }
 
-                // Separator between mentions of the same company
                 if (j < mentions.length - 1) {
                     lines.push('   ───');
                 }
             });
 
-            // Blank line between companies
             if (i < companies.length - 1) {
                 lines.push('');
             }
         });
     }
 
-    // ── Any other extra fields (not collected, totalResults, companies, results) ──
     const knownKeys = ['collected', 'totalResults', 'companies', 'results'];
     for (const key of Object.keys(separation)) {
         if (knownKeys.includes(key)) continue;
@@ -647,10 +623,174 @@ function renderSeparation(separation) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 6 SECTIONS
+// RENDER: VERIFICATION
 // ────────────────────────────────────────────────────────────────
 
-function buildReply(understanding, plan, summary, generation, controlling, separation) {
+// Renders the Verification stage readably.
+//
+//   1. A summary line:
+//      📊 Summary: <valid> valid / <invalid> invalid / <total> total
+//
+//   2. Then each company as its own block, one after the other:
+//
+//      Company 1. Revolut
+//         ⭐ Rating: 9
+//         🏷️ Status: valid
+//         💬 Reason: London fintech, matches all requirements
+//         🔍 Found in search: ...
+//         🔗 URL: ...
+//         📝 Title: ...
+//         📄 Description: ...
+//
+//   3. If verification failed (all chunks), a message is rendered.
+
+function renderVerification(verification) {
+    if (!verification || typeof verification !== 'object') {
+        return 'Verification\n⚠️ No verification data.';
+    }
+
+    // ── Fallback path — friendly message ──
+    if (typeof verification.message === 'string' && verification.message.trim()) {
+        return ['Verification', `💬 Message: ${verification.message.trim()}`].join('\n');
+    }
+
+    const lines = [];
+
+    // ── Summary block ──
+    const summary = verification.summary;
+    if (summary && typeof summary === 'object') {
+        const parts = [];
+        if (typeof summary.valid === 'number') parts.push(`${summary.valid} valid`);
+        if (typeof summary.invalid === 'number') parts.push(`${summary.invalid} invalid`);
+        if (typeof summary.total === 'number') parts.push(`${summary.total} total`);
+        if (parts.length > 0) {
+            lines.push(`📊 Summary: ${parts.join(' / ')}`);
+        }
+    }
+
+    // ── Verified companies ──
+    const verified = Array.isArray(verification.verified) ? verification.verified : [];
+
+    if (verified.length > 0) {
+        lines.push('');
+        lines.push('──────────────────────────────────');
+        lines.push('');
+
+        verified.forEach((company, i) => {
+            if (!company || typeof company !== 'object') return;
+
+            const name =
+                typeof company.name === 'string' && company.name.trim()
+                    ? company.name.trim()
+                    : `Company ${i + 1}`;
+
+            lines.push(`Company ${i + 1}. ${name}`);
+
+            const rating =
+                typeof company.rating === 'number' ? company.rating : null;
+
+            const status =
+                typeof company.status === 'string' && company.status.trim()
+                    ? company.status.trim()
+                    : null;
+
+            const reason =
+                typeof company.reason === 'string' && company.reason.trim()
+                    ? company.reason.trim()
+                    : null;
+
+            if (rating !== null) {
+                lines.push(`   ⭐ Rating: ${rating}`);
+            }
+
+            if (status !== null) {
+                lines.push(`   🏷️ Status: ${status}`);
+            }
+
+            if (reason !== null) {
+                lines.push(`   💬 Reason: ${reason}`);
+            }
+
+            // Show the mentions from the underlying company record.
+            const mentions = Array.isArray(company.mentions) ? company.mentions : [];
+
+            mentions.forEach((mention, j) => {
+                if (!mention || typeof mention !== 'object') return;
+
+                const searchText =
+                    typeof mention.search === 'string' && mention.search.trim()
+                        ? mention.search.trim()
+                        : null;
+
+                const url =
+                    typeof mention.url === 'string' && mention.url.trim()
+                        ? mention.url.trim()
+                        : null;
+
+                const title =
+                    typeof mention.title === 'string' && mention.title.trim()
+                        ? mention.title.trim()
+                        : null;
+
+                const description =
+                    typeof mention.description === 'string' &&
+                    mention.description.trim()
+                        ? mention.description.trim()
+                        : null;
+
+                if (searchText) {
+                    lines.push(`   🔍 Found in search: ${searchText}`);
+                }
+
+                if (url) {
+                    lines.push(`   🔗 URL: ${url}`);
+                }
+
+                if (title) {
+                    lines.push(`   📝 Title: ${title}`);
+                }
+
+                if (description) {
+                    lines.push(`   📄 Description: ${description}`);
+                }
+
+                if (j < mentions.length - 1) {
+                    lines.push('   ───');
+                }
+            });
+
+            if (i < verified.length - 1) {
+                lines.push('');
+            }
+        });
+    }
+
+    // ── Any other extra fields ──
+    const knownKeys = ['message', 'summary', 'verified'];
+    for (const key of Object.keys(verification)) {
+        if (knownKeys.includes(key)) continue;
+        const v = verification[key];
+        if (v === undefined || v === null || v === '') continue;
+        lines.push(`📝 ${humanizeKey(key)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+    }
+
+    if (lines.length === 0) return 'Verification\n⚠️ No verification data.';
+    return ['Verification', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 7 SECTIONS
+// ────────────────────────────────────────────────────────────────
+
+function buildReply(
+    understanding,
+    plan,
+    summary,
+    generation,
+    controlling,
+    separation,
+    verification
+) {
     const sections = [
         renderUnderstanding(understanding),
         renderPlanning(plan),
@@ -670,6 +810,10 @@ function buildReply(understanding, plan, summary, generation, controlling, separ
 
     if (separation) {
         sections.push(renderSeparation(separation));
+    }
+
+    if (verification) {
+        sections.push(renderVerification(verification));
     }
 
     return sections.join('\n\n');
@@ -763,21 +907,45 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             };
         }
 
-        // ── STEP 7: Render all sections ──
+        // ── STEP 7: Verification ──
+        let verification = null;
+        try {
+            verification = await verificationRequest(separation, understanding, {
+                message, history, userProfile, onProgress, options,
+            });
+
+            console.log('[Orchestrator] Verification result:', verification);
+        } catch (verificationErr) {
+            console.error('[Orchestrator] VerificationRequest failed:', verificationErr.message);
+            verification = {
+                message: 'Our server is currently experiencing high traffic. Please try again shortly.',
+            };
+        }
+
+        // ── STEP 8: Render all sections ──
         const reply = buildReply(
             understanding,
             plan,
             summary,
             generation,
             controlling,
-            separation
+            separation,
+            verification
         );
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
         return {
             reply,
             updatedHistory: history || [],
-            meta: { understanding, plan, summary, generation, controlling, separation },
+            meta: {
+                understanding,
+                plan,
+                summary,
+                generation,
+                controlling,
+                separation,
+                verification,
+            },
         };
     } catch (error) {
         console.error('[Orchestrator] Request failed');
