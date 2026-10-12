@@ -490,11 +490,23 @@ function renderControlling(controlling) {
 // RENDER: SEPARATION
 // ────────────────────────────────────────────────────────────────
 
-// Renders a summary of the Separation stage.
-// The collected array itself is not rendered — only the summary counts.
+// Renders the Separation stage readably.
 //
-//   📦 Collected: <number of result sets>
-//   🔢 Total results: <total individual results across all sets>
+//   1. A short summary:
+//      📦 Collected: <number of result sets>
+//      🔢 Total results: <total individual results across all sets>
+//      🏢 Companies: <number of companies separated>
+//
+//   2. Then each company as its own block, one after the other:
+//
+//      Company 1. Teya
+//         🔍 Found in search: fintech companies London UK hiring security engineers
+//         🔗 URL: https://...
+//         📝 Title: Senior Security Engineer Crypto - Teya | Built In London
+//         📄 Description: We're a regulated payments fintech...
+//
+//      Company 2. Wise
+//         ...
 
 function renderSeparation(separation) {
     if (!separation || typeof separation !== 'object') {
@@ -503,8 +515,10 @@ function renderSeparation(separation) {
 
     const lines = [];
 
+    // ── Summary block ──
     const collected = separation.collected;
     const totalResults = separation.totalResults;
+    const companies = Array.isArray(separation.companies) ? separation.companies : [];
 
     if (
         collected !== undefined &&
@@ -522,7 +536,105 @@ function renderSeparation(separation) {
         lines.push(`🔢 Total results: ${totalResults}`);
     }
 
-    const knownKeys = ['collected', 'totalResults'];
+    lines.push(`🏢 Companies: ${companies.length}`);
+
+    // ── Render the collected raw results ONLY if there are no companies ──
+    //    (kept for backward compatibility, not rendered when companies exist)
+    if (companies.length === 0) {
+        if (separation.results !== undefined) {
+            const v = separation.results;
+            lines.push(
+                `📝 Results: ${
+                    typeof v === 'object'
+                        ? JSON.stringify(v)
+                        : v
+                }`
+            );
+        }
+    }
+
+    // ── Company blocks ──
+    if (companies.length > 0) {
+        lines.push('');
+        lines.push('──────────────────────────────────');
+        lines.push('');
+
+        companies.forEach((company, i) => {
+            if (!company || typeof company !== 'object') return;
+
+            const name =
+                typeof company.name === 'string' && company.name.trim()
+                    ? company.name.trim()
+                    : `Company ${i + 1}`;
+
+            lines.push(`Company ${i + 1}. ${name}`);
+
+            const mentions = Array.isArray(company.mentions)
+                ? company.mentions
+                : [];
+
+            mentions.forEach((mention, j) => {
+                if (!mention || typeof mention !== 'object') return;
+
+                const searchText =
+                    typeof mention.search === 'string' && mention.search.trim()
+                        ? mention.search.trim()
+                        : null;
+
+                const url =
+                    typeof mention.url === 'string' && mention.url.trim()
+                        ? mention.url.trim()
+                        : null;
+
+                const title =
+                    typeof mention.title === 'string' && mention.title.trim()
+                        ? mention.title.trim()
+                        : null;
+
+                const description =
+                    typeof mention.description === 'string' &&
+                    mention.description.trim()
+                        ? mention.description.trim()
+                        : null;
+
+                const score =
+                    typeof mention.score === 'number' ? mention.score : null;
+
+                if (searchText) {
+                    lines.push(`   🔍 Found in search: ${searchText}`);
+                }
+
+                if (url) {
+                    lines.push(`   🔗 URL: ${url}`);
+                }
+
+                if (title) {
+                    lines.push(`   📝 Title: ${title}`);
+                }
+
+                if (description) {
+                    lines.push(`   📄 Description: ${description}`);
+                }
+
+                if (score !== null) {
+                    lines.push(`   ⭐ Score: ${score}`);
+                }
+
+                // Separator between mentions of the same company
+                if (j < mentions.length - 1) {
+                    lines.push('   ───');
+                }
+            });
+
+            // Blank line between companies
+            if (i < companies.length - 1) {
+                lines.push('');
+            }
+        });
+    }
+
+    // ── Any other extra fields (not collected, totalResults, companies, results) ──
+    const knownKeys = ['collected', 'totalResults', 'companies', 'results'];
     for (const key of Object.keys(separation)) {
         if (knownKeys.includes(key)) continue;
         const v = separation[key];
@@ -647,6 +759,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             separation = {
                 collected: 0,
                 totalResults: 0,
+                companies: [],
             };
         }
 
