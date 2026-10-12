@@ -59,26 +59,49 @@ Examples:
 - If requestedQuantity is 40, generate exactly 10 search phrases.
 - If requestedQuantity is 300, generate exactly 10 search phrases.
 
-Every search phrase must pass these tests:
+Every search phrase must follow these principles:
 
-1. Could a real web page contain this exact phrase?
-   If no page says it, the search will return nothing useful.
+Principle 1 — One idea per search.
 
-2. Does it use natural page language?
-   Real pages say: hiring, jobs, careers, directory, news, services,
-   about, team, linkedin, crunchbase.
-   Real pages never say: requiring, seeking, employing, needing,
-   that need, that require, with websites.
+- Each search phrase must express exactly ONE idea.
+- If you want to search for two things, generate two separate searches.
+- Do not join ideas with "and", "with", "plus", or "or".
+- A search that combines a target, a qualification, and a signal will be
+  too narrow, and the search engine will return pages that match any of
+  those words — usually unrelated pages.
 
-3. Does it target a specific source type?
-   Each search must aim at one type of page: a job board, a company
-   directory, a news article, a company website, a professional
-   profile, or an industry listing.
+Principle 2 — Use words a real page would use.
 
-4. Is it different from the other searches?
-   Do not generate ten variations of the same idea. Each search must
-   open a different corner of the web. Do not repeat the same wording
-   with small changes.
+- Before writing a search phrase, ask: could a real web page contain this
+  exact phrase?
+- If no page says it, the search will return nothing useful.
+- Prefer words that appear on the target pages: language about hiring,
+  jobs, careers, directories, news, contact pages, official company
+  pages, professional profiles.
+- Avoid words that describe an idea rather than appear on a page, such
+  as: "list of", "with X or more", "top 10", "requiring", "needing",
+  "seeking", "employing".
+
+Principle 3 — Search for the target, not for the qualification.
+
+- The search phrase should find the target entities.
+- Do not put the qualification, the count, or the number of leads into
+  the search phrase.
+- The qualification will be checked later, in other stages. The search
+  phrase only needs to find candidates.
+- For example, a search phrase should look for companies matching the
+  target and location. It should not try to filter by employee count,
+  revenue, certifications, or any other qualification. Those filters
+  belong to later stages.
+
+Principle 4 — Each search opens a different corner of the web.
+
+- Do not generate multiple variations of the same idea.
+- Each search should aim at a different type of page: a job board, a
+  company directory, a news article, a company website, a professional
+  profile, or an industry listing.
+- Together, the searches should cover different angles so that companies
+  appear from multiple sources.
 
 The search phrases must be grounded in the summary. Do not invent
 information that is not present in the summary. Do not change the
@@ -103,15 +126,10 @@ pages, and no real page contains them:
 - companies needing
 - companies requiring
 - looking for
-
-Preferred phrasing — use these where they fit, because they appear on
-real pages:
-
-- hiring, jobs, careers, job openings, recruiting
-- directory, business directory, companies in, list of companies
-- news, announcement, funding, expansion
-- services, solutions, products, about, team
-- linkedin, crunchbase, professional profile
+- list of
+- top 10
+- with X or more
+- with X+ employees
 
 When the location is non-English-speaking, include 1 or 2 search
 phrases in the local language. For example, if the location is Berlin,
