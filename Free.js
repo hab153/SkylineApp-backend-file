@@ -630,19 +630,13 @@ function renderSeparation(separation) {
 //
 //   1. A summary line:
 //      📊 Summary: <valid> valid / <invalid> invalid / <total> total
+//      ✅ Qualified (rating 5+): <qualified>
 //
-//   2. Then each company as its own block, one after the other:
+//   2. The qualified list is displayed first — these are the
+//      companies that move to the next stage.
 //
-//      Company 1. Revolut
-//         ⭐ Rating: 9
-//         🏷️ Status: valid
-//         💬 Reason: London fintech, matches all requirements
-//         🔍 Found in search: ...
-//         🔗 URL: ...
-//         📝 Title: ...
-//         📄 Description: ...
-//
-//   3. If verification failed (all chunks), a message is rendered.
+//   3. The full verified list (all 79 companies, sorted by rating)
+//      is available in meta.verification.verified but not rendered.
 
 function renderVerification(verification) {
     if (!verification || typeof verification !== 'object') {
@@ -666,17 +660,25 @@ function renderVerification(verification) {
         if (parts.length > 0) {
             lines.push(`📊 Summary: ${parts.join(' / ')}`);
         }
+
+        if (typeof summary.qualified === 'number') {
+            lines.push(`✅ Qualified (rating 5+): ${summary.qualified}`);
+        }
     }
 
-    // ── Verified companies ──
-    const verified = Array.isArray(verification.verified) ? verification.verified : [];
+    // ── Qualified companies ──
+    const qualified = Array.isArray(verification.qualified)
+        ? verification.qualified
+        : [];
 
-    if (verified.length > 0) {
+    if (qualified.length > 0) {
         lines.push('');
         lines.push('──────────────────────────────────');
         lines.push('');
+        lines.push('QUALIFIED COMPANIES');
+        lines.push('');
 
-        verified.forEach((company, i) => {
+        qualified.forEach((company, i) => {
             if (!company || typeof company !== 'object') return;
 
             const name =
@@ -684,7 +686,7 @@ function renderVerification(verification) {
                     ? company.name.trim()
                     : `Company ${i + 1}`;
 
-            lines.push(`Company ${i + 1}. ${name}`);
+            lines.push(`Qualified Company ${i + 1}. ${name}`);
 
             const rating =
                 typeof company.rating === 'number' ? company.rating : null;
@@ -711,7 +713,6 @@ function renderVerification(verification) {
                 lines.push(`   💬 Reason: ${reason}`);
             }
 
-            // Show the mentions from the underlying company record.
             const mentions = Array.isArray(company.mentions) ? company.mentions : [];
 
             mentions.forEach((mention, j) => {
@@ -759,14 +760,14 @@ function renderVerification(verification) {
                 }
             });
 
-            if (i < verified.length - 1) {
+            if (i < qualified.length - 1) {
                 lines.push('');
             }
         });
     }
 
     // ── Any other extra fields ──
-    const knownKeys = ['message', 'summary', 'verified'];
+    const knownKeys = ['message', 'summary', 'verified', 'qualified'];
     for (const key of Object.keys(verification)) {
         if (knownKeys.includes(key)) continue;
         const v = verification[key];
