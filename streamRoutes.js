@@ -8,17 +8,15 @@ const express = require('express');
 const router = express.Router();
 
 const { streamPipeline } = require('./Stream');
+
+// Middleware — imported from the same files server.js uses.
 const { verifyToken } = require('./authMiddleware');
-const {
-    checkSubscriptionExpiry,
-    checkDailyLimit,
-} = require('./dailyLimitMiddleware');
+const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
+const { checkDailyLimit } = require('./dailyLimitMiddleware');
 
 // ────────────────────────────────────────────────────────────────
 // SSE HEADERS
 // ────────────────────────────────────────────────────────────────
-
-// Applies the standard SSE headers to the response.
 
 function setSSEHeaders(res) {
     res.writeHead(200, {
@@ -30,7 +28,6 @@ function setSSEHeaders(res) {
         'Access-Control-Allow-Credentials': 'true',
     });
 
-    // Flush headers immediately so the client sees the connection open.
     if (typeof res.flushHeaders === 'function') {
         res.flushHeaders();
     }
@@ -40,9 +37,6 @@ function setSSEHeaders(res) {
 // EVENT WRITER
 // ────────────────────────────────────────────────────────────────
 
-// Writes a single SSE event to the response.
-// The event name is always "stage". The payload is JSON.
-
 function writeSSEEvent(res, payload) {
     res.write('event: stage\n');
     res.write('data: ' + JSON.stringify(payload) + '\n\n');
@@ -51,11 +45,6 @@ function writeSSEEvent(res, payload) {
 // ────────────────────────────────────────────────────────────────
 // QUERY-STRING TOKEN BRIDGE
 // ────────────────────────────────────────────────────────────────
-
-// EventSource cannot send headers. So the client sends the JWT as a
-// query parameter. If a bearer token is present in the header, it is
-// used. Otherwise, the query-string token is promoted to the
-// Authorization header so the existing verifyToken middleware works.
 
 function bridgeQueryToken(req, res, next) {
     if (
@@ -73,12 +62,6 @@ function bridgeQueryToken(req, res, next) {
 // PIPELINE STREAM ROUTE
 // ────────────────────────────────────────────────────────────────
 
-// GET /api/stream/pipeline?message=...&token=...
-//
-// Streams each pipeline stage as it completes.
-// The wire only ever carries neutral stage labels — never the
-// internal stage names.
-
 router.get(
     '/pipeline',
     bridgeQueryToken,
@@ -90,7 +73,6 @@ router.get(
             ? req.query.message.trim()
             : '';
 
-        // ── Guard: message must be present ──
         if (message.length === 0) {
             res.status(400).json({
                 error: 'message query parameter is required',
@@ -102,10 +84,8 @@ router.get(
         console.log('[StreamRoutes] User:', req.userId);
         console.log('[StreamRoutes] Message length:', message.length);
 
-        // ── Set SSE headers ──
         setSSEHeaders(res);
 
-        // ── Track whether the connection is still open ──
         let closed = false;
 
         req.on('close', function () {
@@ -117,10 +97,6 @@ router.get(
             closed = true;
             console.log('[StreamRoutes] Client connection error');
         });
-
-        // ── The onStage callback ──
-        // Receives the neutral stage label and the stage data.
-        // Writes one SSE event per stage.
 
         function onStage(label, data) {
             if (closed) return;
@@ -136,11 +112,9 @@ router.get(
             }
         }
 
-        // ── Run the pipeline ──
         try {
             await streamPipeline(message, { userId: req.userId }, onStage);
         } catch (pipelineErr) {
-            // Log the real error server-side.
             console.error(
                 '[StreamRoutes] Pipeline failed:',
                 pipelineErr && pipelineErr.message
@@ -148,8 +122,6 @@ router.get(
                     : pipelineErr
             );
 
-            // Send a sanitized error event to the client.
-            // No internal details are exposed.
             if (!closed) {
                 try {
                     writeSSEEvent(res, {
@@ -158,17 +130,13 @@ router.get(
                             message: 'Something went wrong while processing your request. Please try again.',
                         },
                     });
-                } catch (_) {
-                    // If writing fails, the connection is already broken.
-                }
+                } catch (_) {}
             }
         } finally {
             if (!closed) {
                 try {
                     res.end();
-                } catch (_) {
-                    // Nothing to do if the connection is already closed.
-                }
+                } catch (_) {}
             }
 
             console.log('[StreamRoutes] Pipeline stream closed');
