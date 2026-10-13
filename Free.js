@@ -626,31 +626,17 @@ function renderSeparation(separation) {
 // RENDER: VERIFICATION
 // ────────────────────────────────────────────────────────────────
 
-// Renders the Verification stage readably.
-//
-//   1. A summary line:
-//      📊 Summary: <valid> valid / <invalid> invalid / <total> total
-//      ✅ Qualified (rating 5+): <qualified>
-//
-//   2. The qualified list is displayed first — these are the
-//      companies that move to the next stage.
-//
-//   3. The full verified list (all 79 companies, sorted by rating)
-//      is available in meta.verification.verified but not rendered.
-
 function renderVerification(verification) {
     if (!verification || typeof verification !== 'object') {
         return 'Verification\n⚠️ No verification data.';
     }
 
-    // ── Fallback path — friendly message ──
     if (typeof verification.message === 'string' && verification.message.trim()) {
         return ['Verification', `💬 Message: ${verification.message.trim()}`].join('\n');
     }
 
     const lines = [];
 
-    // ── Summary block ──
     const summary = verification.summary;
     if (summary && typeof summary === 'object') {
         const parts = [];
@@ -666,7 +652,6 @@ function renderVerification(verification) {
         }
     }
 
-    // ── Qualified companies ──
     const qualified = Array.isArray(verification.qualified)
         ? verification.qualified
         : [];
@@ -766,7 +751,6 @@ function renderVerification(verification) {
         });
     }
 
-    // ── Any other extra fields ──
     const knownKeys = ['message', 'summary', 'verified', 'qualified'];
     for (const key of Object.keys(verification)) {
         if (knownKeys.includes(key)) continue;
@@ -821,7 +805,136 @@ function buildReply(
 }
 
 // ────────────────────────────────────────────────────────────────
-// ORCHESTRATOR
+// STAGE FUNCTIONS — one per pipeline stage
+// ────────────────────────────────────────────────────────────────
+
+// Stage 1 — Understanding
+async function generateUnderstanding(message, options = {}) {
+    console.log('[Orchestrator] Stage 1: Understanding');
+
+    const understanding = await understandRequest(message, options);
+
+    console.log('[Orchestrator] Understanding result:', understanding);
+
+    return understanding;
+}
+
+// Stage 2 — Planning
+async function generatePlanning(understanding, message, options = {}) {
+    console.log('[Orchestrator] Stage 2: Planning');
+
+    const plan = await planRequest(understanding, {
+        message,
+        ...options,
+    });
+
+    console.log('[Orchestrator] Plan result:', plan);
+
+    return plan;
+}
+
+// Stage 3 — Summary
+async function generateSummary(understanding, plan, options = {}) {
+    console.log('[Orchestrator] Stage 3: Summary');
+
+    try {
+        const summary = await summaryRequest(understanding, plan, options);
+
+        console.log('[Orchestrator] Summary result:', summary);
+
+        return summary;
+    } catch (summaryErr) {
+        console.error('[Orchestrator] SummaryRequest failed:', summaryErr.message);
+
+        return {
+            summary: '',
+            allocation: plan && plan.allocation ? plan.allocation : null,
+        };
+    }
+}
+
+// Stage 4 — Generation
+async function generateGeneration(summary, options = {}) {
+    console.log('[Orchestrator] Stage 4: Generation');
+
+    try {
+        const generation = await generationRequest(summary, options);
+
+        console.log('[Orchestrator] Generation result:', generation);
+
+        return generation;
+    } catch (generationErr) {
+        console.error('[Orchestrator] GenerationRequest failed:', generationErr.message);
+
+        return {
+            message: 'Our server is currently experiencing high traffic. Please try again shortly.',
+        };
+    }
+}
+
+// Stage 5 — Controlling
+async function generateControlling(generation, options = {}) {
+    console.log('[Orchestrator] Stage 5: Controlling');
+
+    try {
+        const controlling = await controllingRequest(generation, options);
+
+        console.log('[Orchestrator] Controlling result:', controlling);
+
+        return controlling;
+    } catch (controllingErr) {
+        console.error('[Orchestrator] ControllingRequest failed:', controllingErr.message);
+
+        return {
+            completed: false,
+            searchesProcessed: 0,
+            reason: controllingErr.message,
+        };
+    }
+}
+
+// Stage 6 — Separation
+async function generateSeparation(controlling, options = {}) {
+    console.log('[Orchestrator] Stage 6: Separation');
+
+    try {
+        const separation = await separationRequest(controlling, options);
+
+        console.log('[Orchestrator] Separation result:', separation);
+
+        return separation;
+    } catch (separationErr) {
+        console.error('[Orchestrator] SeparationRequest failed:', separationErr.message);
+
+        return {
+            collected: 0,
+            totalResults: 0,
+            companies: [],
+        };
+    }
+}
+
+// Stage 7 — Verification
+async function generateVerification(separation, understanding, options = {}) {
+    console.log('[Orchestrator] Stage 7: Verification');
+
+    try {
+        const verification = await verificationRequest(separation, understanding, options);
+
+        console.log('[Orchestrator] Verification result:', verification);
+
+        return verification;
+    } catch (verificationErr) {
+        console.error('[Orchestrator] VerificationRequest failed:', verificationErr.message);
+
+        return {
+            message: 'Our server is currently experiencing high traffic. Please try again shortly.',
+        };
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// ORCHESTRATOR — full pipeline (unchanged, for backward compatibility)
 // ────────────────────────────────────────────────────────────────
 
 async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
@@ -829,101 +942,34 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
     console.log('[Orchestrator] Message:', message);
 
     try {
-        // ── STEP 1: Understand ──
-        const understanding = await understandRequest(message, {
+        const understanding = await generateUnderstanding(message, {
             history, userProfile, onProgress, options,
         });
 
-        console.log('[Orchestrator] Understanding result:', understanding);
+        const plan = await generatePlanning(understanding, message, {
+            history, userProfile, onProgress, options,
+        });
 
-        // ── STEP 2: Plan ──
-        const plan = await planRequest(understanding, {
+        const summary = await generateSummary(understanding, plan, {
             message, history, userProfile, onProgress, options,
         });
 
-        console.log('[Orchestrator] Plan result:', plan);
+        const generation = await generateGeneration(summary, {
+            message, history, userProfile, onProgress, options,
+        });
 
-        // ── STEP 3: Summary ──
-        let summary = null;
-        try {
-            summary = await summaryRequest(understanding, plan, {
-                message, history, userProfile, onProgress, options,
-            });
+        const controlling = await generateControlling(generation, {
+            message, history, userProfile, onProgress, options,
+        });
 
-            console.log('[Orchestrator] Summary result:', summary);
-        } catch (summaryErr) {
-            console.error('[Orchestrator] SummaryRequest failed:', summaryErr.message);
-            summary = {
-                summary: '',
-                allocation: plan?.allocation ?? null,
-            };
-        }
+        const separation = await generateSeparation(controlling, {
+            message, history, userProfile, onProgress, options,
+        });
 
-        // ── STEP 4: Generation ──
-        let generation = null;
-        try {
-            generation = await generationRequest(summary, {
-                message, history, userProfile, onProgress, options,
-            });
+        const verification = await generateVerification(separation, understanding, {
+            message, history, userProfile, onProgress, options,
+        });
 
-            console.log('[Orchestrator] Generation result:', generation);
-        } catch (generationErr) {
-            console.error('[Orchestrator] GenerationRequest failed:', generationErr.message);
-            generation = {
-                message: 'Our server is currently experiencing high traffic. Please try again shortly.',
-            };
-        }
-
-        // ── STEP 5: Controlling ──
-        let controlling = null;
-        try {
-            controlling = await controllingRequest(generation, {
-                message, history, userProfile, onProgress, options,
-            });
-
-            console.log('[Orchestrator] Controlling result:', controlling);
-        } catch (controllingErr) {
-            console.error('[Orchestrator] ControllingRequest failed:', controllingErr.message);
-            controlling = {
-                completed: false,
-                searchesProcessed: 0,
-                reason: controllingErr.message,
-            };
-        }
-
-        // ── STEP 6: Separation ──
-        let separation = null;
-        try {
-            separation = await separationRequest(controlling, {
-                message, history, userProfile, onProgress, options,
-            });
-
-            console.log('[Orchestrator] Separation result:', separation);
-        } catch (separationErr) {
-            console.error('[Orchestrator] SeparationRequest failed:', separationErr.message);
-            separation = {
-                collected: 0,
-                totalResults: 0,
-                companies: [],
-            };
-        }
-
-        // ── STEP 7: Verification ──
-        let verification = null;
-        try {
-            verification = await verificationRequest(separation, understanding, {
-                message, history, userProfile, onProgress, options,
-            });
-
-            console.log('[Orchestrator] Verification result:', verification);
-        } catch (verificationErr) {
-            console.error('[Orchestrator] VerificationRequest failed:', verificationErr.message);
-            verification = {
-                message: 'Our server is currently experiencing high traffic. Please try again shortly.',
-            };
-        }
-
-        // ── STEP 8: Render all sections ──
         const reply = buildReply(
             understanding,
             plan,
@@ -957,4 +1003,18 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
     }
 }
 
-module.exports = { generateFreeResponse };
+// ────────────────────────────────────────────────────────────────
+// EXPORTS
+// ────────────────────────────────────────────────────────────────
+
+module.exports = {
+    generateFreeResponse,
+    generateUnderstanding,
+    generatePlanning,
+    generateSummary,
+    generateGeneration,
+    generateControlling,
+    generateSeparation,
+    generateVerification,
+    buildReply,
+};
