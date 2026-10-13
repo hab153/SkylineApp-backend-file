@@ -23,6 +23,12 @@ const MAX_ATTEMPTS_PER_CHUNK = 4;
 // AI reads the full prompt without skimming.
 const CHUNK_SIZE = 10;
 
+// Minimum rating a company must have to be considered qualified
+// for the next stage. Companies rated below this are still verified
+// and returned in the "verified" array, but they do not appear in
+// the "qualified" array.
+const MIN_QUALIFIED_RATING = 5;
+
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
@@ -118,7 +124,7 @@ Do not invent unnecessary details.
 // If every chunk fails, the entire output becomes a friendly message.
 //
 // Returns:
-//   { verified, summary } on success
+//   { verified, qualified, summary } on success
 //   { message } on total failure
 
 async function verificationRequest(separation, understanding) {
@@ -142,18 +148,20 @@ async function verificationRequest(separation, understanding) {
         'compan(ies) to verify'
     );
 
-    // ── No companies — return empty verified list, no AI call ──
+    // ── No companies — return empty lists, no AI call ──
     if (companies.length === 0) {
         console.log(
-            '[Verification] No companies to verify. Returning empty verified list.'
+            '[Verification] No companies to verify. Returning empty lists.'
         );
 
         return {
             verified: [],
+            qualified: [],
             summary: {
                 total: 0,
                 valid: 0,
                 invalid: 0,
+                qualified: 0,
             },
         };
     }
@@ -185,9 +193,6 @@ async function verificationRequest(separation, understanding) {
         if (chunkResult) {
             successfulChunks++;
 
-            // Preserve the original mentions array alongside the
-            // verification result. The AI only returns name, rating,
-            // status, and reason.
             for (let i = 0; i < chunkResult.length; i++) {
                 const verifiedCompany = chunkResult[i];
                 const original = chunk[i];
@@ -224,7 +229,6 @@ async function verificationRequest(separation, understanding) {
                 });
             }
         } else {
-            // Chunk failed on all attempts — mark unverified.
             console.warn(
                 `[Verification] Chunk ${c + 1} failed. Marking ${chunk.length} compan(ies) as unverified.`
             );
@@ -255,7 +259,6 @@ async function verificationRequest(separation, understanding) {
     }
 
     // ── Sort verified by rating descending, then name alphabetically ──
-    //    Unverified (rating === null) go last.
     verified.sort((a, b) => {
         const aRating = typeof a.rating === 'number' ? a.rating : -Infinity;
         const bRating = typeof b.rating === 'number' ? b.rating : -Infinity;
@@ -264,6 +267,15 @@ async function verificationRequest(separation, understanding) {
 
         return a.name.localeCompare(b.name);
     });
+
+    // ── Build the qualified list ──
+    //    Only companies whose rating is a number >= MIN_QUALIFIED_RATING.
+    //    Unverified companies (rating === null) are excluded.
+    const qualified = verified.filter(
+        (c) =>
+            typeof c.rating === 'number' &&
+            c.rating >= MIN_QUALIFIED_RATING
+    );
 
     // ── Compute summary ──
     let valid = 0;
@@ -276,10 +288,12 @@ async function verificationRequest(separation, understanding) {
 
     const result = {
         verified,
+        qualified,
         summary: {
             total: verified.length,
             valid,
             invalid,
+            qualified: qualified.length,
         },
     };
 
@@ -287,7 +301,8 @@ async function verificationRequest(separation, understanding) {
         '[Verification] Final result:',
         `total=${result.summary.total}`,
         `valid=${result.summary.valid}`,
-        `invalid=${result.summary.invalid}`
+        `invalid=${result.summary.invalid}`,
+        `qualified=${result.summary.qualified}`
     );
 
     return result;
@@ -296,10 +311,6 @@ async function verificationRequest(separation, understanding) {
 // ────────────────────────────────────────────────────────────────
 // VERIFY ONE CHUNK — AI CALL WITH RETRIES
 // ────────────────────────────────────────────────────────────────
-
-// Sends one chunk of companies to the AI along with the Understanding
-// output. Retries up to MAX_ATTEMPTS_PER_CHUNK times. On total failure,
-// returns null — the caller marks those companies as unverified.
 
 async function verifyChunk(chunk, understanding) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_CHUNK; attempt++) {
@@ -378,9 +389,6 @@ async function verifyChunk(chunk, understanding) {
                 : [];
 
             if (verifiedList.length > 0) {
-                // Match the returned list back to the chunk in order.
-                // If the AI dropped or reordered companies, fall back
-                // to the chunk's original names for alignment.
                 const aligned = chunk.map((original, i) => {
                     const match = verifiedList[i];
 
