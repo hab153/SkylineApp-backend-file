@@ -108,6 +108,9 @@ const notificationRoutes = require('./notificationRoutes');
 // ✅ COMPOSE CONTROLLER (NEW)
 const composeController = require('./composeController');
 
+// ✅ STREAM ROUTES — SSE pipeline streaming
+const streamRoutes = require('./streamRoutes');
+
 dotenv.config();
 const app = express();
 
@@ -199,6 +202,7 @@ app.use(compression({
     filter: function(req, res) {
         if (req.path.includes('/webhook')) return false;
         if (req.path.includes('/events/stream')) return false;
+        if (req.path.includes('/stream/pipeline')) return false;
         return compression.filter(req, res);
     }
 }));
@@ -714,6 +718,17 @@ console.log('✅ [COMPOSE] GET /api/compose/suggestions registered');
 // Get recent leads for quick select
 app.get('/api/compose/recent-leads', verifyToken, composeController.getRecentLeads);
 console.log('✅ [COMPOSE] GET /api/compose/recent-leads registered');
+
+// ════════════════════════════════════════════
+//  ✅ STREAM ROUTES (NEW — SSE pipeline)
+// ════════════════════════════════════════════
+
+console.log('📡 [STREAM] Registering stream routes...');
+
+app.use('/api/stream', streamRoutes);
+
+console.log('✅ [STREAM] Routes registered at /api/stream');
+console.log('   📋 GET /api/stream/pipeline  - Stream pipeline stages via SSE');
 
 // ════════════════════════════════════════════
 //  START SERVER
