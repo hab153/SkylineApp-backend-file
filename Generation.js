@@ -94,20 +94,78 @@ Principle 3 — Search for the target, not for the qualification.
   revenue, certifications, or any other qualification. Those filters
   belong to later stages.
 
-Principle 4 — Each search opens a different corner of the web.
+Principle 4 — Each search must target a different page type.
 
-- Do not generate multiple variations of the same idea.
-- Each search should aim at a different type of page: a job board, a
-  company directory, a news article, a company website, a professional
-  profile, or an industry listing.
-- Together, the searches should cover different angles so that companies
-  appear from multiple sources.
+- Do not generate multiple variations of the same search.
+- Each search must aim at a different type of page.
+- The ten page types are listed below. Each one gets exactly one search.
 
-The search phrases must be grounded in the summary. Do not invent
-information that is not present in the summary. Do not change the
-target, location, industry, qualification, signal, exclusions,
-constraints, or any other requirement. Do not weaken or remove any
-requirement.
+The ten page types:
+
+Every search must correspond to exactly one of the following page types.
+Do not invent new page types. Do not repeat a page type.
+
+Page type 1 — Broad discovery.
+Purpose: find the target industry or sector generally.
+Shape: <target> <location>
+Example: fintech companies London
+
+Page type 2 — Directory.
+Purpose: find pages that list companies, often with URLs.
+Shape: <target> <location> directory
+Example: fintech companies London directory
+
+Page type 3 — Professional profile.
+Purpose: find company profile pages on professional networks.
+Shape: <target> <location> linkedin
+Example: fintech companies London linkedin
+
+Page type 4 — Job board.
+Purpose: find companies that are hiring.
+Shape: <target> <location> jobs
+Example: fintech companies London jobs
+
+Page type 5 — Careers page.
+Purpose: find the specific hiring signal.
+Shape: <target> <location> <signal keyword>
+Example: fintech companies London security engineer
+
+Page type 6 — Contact page.
+Purpose: find pages with company contact information.
+Shape: <target> <location> contact
+Example: fintech companies London contact
+
+Page type 7 — Official site hint.
+Purpose: find pages that link to official company sites.
+Shape: <target> <location> official website
+Example: fintech companies London official website
+
+Page type 8 — Company profile site.
+Purpose: find company databases and profiles.
+Shape: site:crunchbase.com <target> <location>
+Example: site:crunchbase.com fintech companies London
+
+Page type 9 — News.
+Purpose: find recent news mentioning companies.
+Shape: <target> <location> news
+Example: fintech London news
+
+Page type 10 — Local language.
+Purpose: reach local pages when the location is non-English.
+Shape: <target in local language> <location in local language>
+Example: Berlin Gesundheitsunternehmen IT
+
+Replace <target> with the target entity from the summary.
+Replace <location> with the location from the summary.
+Replace <signal keyword> with one or two relevant words from the signal
+in the summary.
+
+If the location is English-speaking, use the careers-page slot to
+target the specific signal instead of a local-language search.
+
+If the location is non-English-speaking, include the local-language
+search as one of the ten, and use the signal keyword in the careers
+search as well.
 
 Forbidden phrasing — never use these. They describe ideas rather than
 pages, and no real page contains them:
@@ -131,23 +189,66 @@ pages, and no real page contains them:
 - with X or more
 - with X+ employees
 
-When the location is non-English-speaking, include 1 or 2 search
-phrases in the local language. For example, if the location is Berlin,
-Germany, include a phrase such as:
+Forbidden search endings — these always return the wrong page type and
+must not appear at the end of any search phrase:
 
-- "Berlin Gesundheitsunternehmen IT"
-- "Berlin Gesundheitswesen Software"
+- "...solutions"           → returns software vendors
+- "...services"            → returns service providers
+- "...industry reports"    → returns research firms
+- "...reports"             → returns news sites
+- "...hiring announcements" → returns recruiters
+- "...recruiting"          → returns recruiters
+- "...technology upgrades" → returns vendor articles
+- "...with business emails" → returns email marketing pages
 
-This helps reach local pages that English searches miss.
+Favored search endings — these hit the right page types and should
+appear at the end of the corresponding page-type search:
+
+- "...directory"           → hits directory pages
+- "...linkedin"            → hits profile pages
+- "...jobs"                → hits job boards
+- "...contact"             → hits contact pages
+- "...official website"    → hits site-link pages
+- "...news"                → hits news pages
+
+Before returning, verify that your searches cover all ten page types.
+If any page type is missing, replace one of your searches so the ten
+page types are all covered.
+
+Do not return ten variations of the same search.
+Do not return ten searches that all start with the same target and
+location phrase.
+
+The search phrases must be grounded in the summary. Do not invent
+information that is not present in the summary. Do not change the
+target, location, industry, qualification, signal, exclusions,
+constraints, or any other requirement. Do not weaken or remove any
+requirement.
 
 The signal tells us what evidence to look for. Use the signal to
-choose the right source type:
+choose the keyword for the careers-page search:
 
-- If the signal is about hiring, target job boards and careers pages.
-- If the signal is about expansion, target news and press pages.
-- If the signal is about incidents, target news and reports.
-- If the signal is about compliance, target regulatory filings.
-- If the signal is about adoption, target case studies and product pages.
+- If the signal is about hiring, use a hiring-related keyword from
+  the signal (for example, a role name such as "security engineer"
+  or "chef" or "developer").
+- If the signal is about expansion, use an expansion-related keyword
+  from the signal.
+- If the signal is about incidents, use an incident-related keyword
+  from the signal.
+- If the signal is about compliance, use a compliance-related keyword
+  from the signal.
+- If the signal is about adoption, use an adoption-related keyword
+  from the signal.
+
+The signal determines the keyword, but the page type is always a
+careers page.
+
+When the location is non-English-speaking, include one search phrase
+in the local language of that location. For example, if the location
+is in a country whose primary language is not English, use that
+language for one of the ten searches. Combine the target and location
+in the local language, and may also include a local-language keyword
+from the signal or industry.
 
 Use forward-looking and investigative language. The search phrases
 describe what to search for, not the results of any search.
