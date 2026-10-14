@@ -70,6 +70,12 @@ Verification rules:
   looking for companies that need cybersecurity, a consulting firm, an
   industry body, a news website, a job board, a directory, or any
   company in the wrong location or industry.
+- A company is invalid if its name is a generic category label rather
+  than a specific, real company name. Examples of invalid names:
+  "Fintech Company", "Company", "Agency", "Firm", "Startup",
+  "Business", "Organization", "Enterprise". If the name is a generic
+  label that could refer to any company in the industry, the company
+  is invalid.
 - Consider the original user request carefully. Use the complete
   meaning of the request, not keyword matching.
 
@@ -269,12 +275,15 @@ async function verificationRequest(separation, understanding) {
     });
 
     // ── Build the qualified list ──
-    //    Only companies whose rating is a number >= MIN_QUALIFIED_RATING.
+    //    Only companies whose rating is a number >= MIN_QUALIFIED_RATING
+    //    AND whose status is "valid" appear in the qualified list.
     //    Unverified companies (rating === null) are excluded.
+    //    Invalid companies are excluded even if their rating is high.
     const qualified = verified.filter(
         (c) =>
             typeof c.rating === 'number' &&
-            c.rating >= MIN_QUALIFIED_RATING
+            c.rating >= MIN_QUALIFIED_RATING &&
+            c.status === 'valid'
     );
 
     // ── Compute summary ──
