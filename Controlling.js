@@ -12,7 +12,7 @@ const searchSystem       = require('./SearchSystem');
 // ────────────────────────────────────────────────────────────────
 
 // Controlling.js receives the Generation output, saves the allocation into
-// Rule.js, then sends each search phrase one at a time to SearchSystem.js.
+// Rule.js, then sends all search phrases to SearchSystem.js in parallel.
 //
 // It does not perform any search itself. It does not talk to Tavily. It does
 // not store results. It only coordinates the dispatch of searches.
@@ -71,8 +71,8 @@ async function controllingRequest(generation) {
         );
     }
 
-    // ── Determine the loop limit ──
-    // The loop must never exceed the allocation ceiling (maxSearchCalls).
+    // ── Determine the dispatch limit ──
+    // The dispatch must never exceed the allocation ceiling (maxSearchCalls).
     // If the allocation is missing or malformed, no ceiling is applied.
     let loopLimit = searches.length;
 
@@ -85,36 +85,42 @@ async function controllingRequest(generation) {
     }
 
     console.log(
-        `[Controlling] Processing ${loopLimit} of ${searches.length} searches`
+        `[Controlling] Processing ${loopLimit} of ${searches.length} searches in parallel`
     );
 
-    // ── Sequential dispatch ──
+    // ── Parallel dispatch ──
+    // All searches are fired at once. Each completes independently.
+    // A failed search does not block the others — each has its own catch.
+
+    const searchPhrases = searches.slice(0, loopLimit);
+
     let searchesProcessed = 0;
 
-    for (let i = 0; i < loopLimit; i++) {
-        const searchPhrase = searches[i];
-
+    const tasks = searchPhrases.map((searchPhrase, i) => {
         console.log(
-            `[Controlling] Sending search ${i + 1}/${loopLimit}:`,
+            `[Controlling] Dispatching search ${i + 1}/${loopLimit}:`,
             searchPhrase
         );
 
-        try {
-            await searchSystem(searchPhrase);
+        return searchSystem(searchPhrase)
+            .then(() => {
+                searchesProcessed += 1;
 
-            searchesProcessed += 1;
+                console.log(
+                    `[Controlling] Search ${i + 1} completed`
+                );
+            })
+            .catch((err) => {
+                console.error(
+                    `[Controlling] Search ${i + 1} failed:`,
+                    err && err.message ? err.message : err
+                );
+                // Skip the failed search and let the others continue.
+            });
+    });
 
-            console.log(
-                `[Controlling] Search ${i + 1} completed`
-            );
-        } catch (err) {
-            console.error(
-                `[Controlling] Search ${i + 1} failed:`,
-                err && err.message ? err.message : err
-            );
-            // Skip the failed search and continue with the next one.
-        }
-    }
+    // Wait for all searches to settle (succeeded or failed).
+    await Promise.all(tasks);
 
     console.log(
         `[Controlling] Completed. ${searchesProcessed}/${loopLimit} searches processed`
