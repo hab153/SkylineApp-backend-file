@@ -18,7 +18,7 @@ const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
 // Reference: https://docs.tavily.com/documentation/api-reference/endpoint/search
 const TAVILY_PARAMS = {
     search_depth: 'basic',
-    max_results: 20,
+    max_results: 10,
     topic: 'general',
     include_answer: false,
     include_raw_content: false,
