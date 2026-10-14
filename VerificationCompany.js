@@ -66,16 +66,55 @@ Verification rules:
   does not violate any exclusion or constraint.
 - A company is invalid if it is not the kind of company the user is
   looking for. For example: a recruitment agency when the user is
-  looking for companies, a cybersecurity vendor when the user is
-  looking for companies that need cybersecurity, a consulting firm, an
-  industry body, a news website, a job board, a directory, or any
-  company in the wrong location or industry.
+  looking for companies, a vendor when the user is looking for buyers,
+  a consulting firm, an industry body, a news website, a job board,
+  a directory, or any company in the wrong location or industry.
 - A company is invalid if its name is a generic category label rather
   than a specific, real company name. Examples of invalid names:
   "Fintech Company", "Company", "Agency", "Firm", "Startup",
   "Business", "Organization", "Enterprise". If the name is a generic
   label that could refer to any company in the industry, the company
   is invalid.
+- A company is invalid if its primary business is not the type of
+  entity the user is looking for, even if it has a division, team,
+  or department that operates in the requested industry. The company
+  must be the type of entity the user is looking for as its primary
+  business, not as a secondary function. Example: if the user asks
+  for restaurants, a hotel with a restaurant is invalid — the hotel
+  is not a restaurant.
+- A company must have at least one mention from a page that focuses
+  on that specific company. If the only mentions of the company come
+  from pages that list many companies at once — such as directory
+  pages, list articles, feed posts, "top N" articles, news roundups,
+  or industry overview pages — the company is invalid, unless
+  additional evidence from a single-company page also exists.
+  A single-company page is a page whose primary subject is that
+  company: the company's own website, a job posting about a role at
+  that company, a news article about that company, a company profile
+  page, or any other page dedicated to that one company.
+  A list page is a page whose subject is a category, and the company
+  is only one of many named inside it.
+- If two entries in the batch refer to the same underlying company
+  under different names — a company and its subsidiary, its legal
+  entity name, or its brand name — only the primary entry is valid.
+  The duplicate must be marked invalid.
+- If the user request includes a signal, a company is only valid if
+  at least one of its mentions contains direct evidence of that
+  signal. A page that merely lists the company, describes its
+  services, or refers to it in passing is not direct evidence. If
+  no direct evidence of the signal exists, the company is invalid.
+  Example: if the signal is hiring for a role, the company must have
+  a mention showing hiring for that role. A directory entry is not
+  proof. Example: if the signal is expanding locations, the company
+  must have a mention showing expansion. A profile page is not proof.
+  Example: if the signal is recently raised funding, the company must
+  have a mention showing funding. A list of funded companies is not
+  proof unless the company itself is the subject.
+- A company is invalid if its primary business is in a different
+  industry than the one the user asked for, even if it operates in
+  multiple industries or is mentioned in a context related to the
+  requested industry. The company must be primarily known for the
+  industry the user is looking for.
 - Consider the original user request carefully. Use the complete
   meaning of the request, not keyword matching.
 
