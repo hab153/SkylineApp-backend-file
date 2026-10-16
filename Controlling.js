@@ -16,10 +16,24 @@ const searchSystem       = require('./SearchSystem');
 //
 // It does not perform any search itself. It does not talk to Tavily. It does
 // not store results. It only coordinates the dispatch of searches.
+//
+// It accepts an optional onProgress callback. If provided, the callback is
+// called once per completed search so the caller can report progress in
+// real time.
+//
+//   onProgress(searchesProcessed, totalSearches)
+//
+// The callback is optional. If not provided, Controlling behaves exactly
+// as before — silent dispatch.
 
-async function controllingRequest(generation) {
+async function controllingRequest(generation, options = {}) {
     console.log('[Controlling] Started');
     console.log('[Controlling] Received generation output:', generation);
+
+    const onProgress =
+        options && typeof options.onProgress === 'function'
+            ? options.onProgress
+            : null;
 
     // ── Guard: no generation output ──
     if (!generation || typeof generation !== 'object') {
@@ -91,6 +105,10 @@ async function controllingRequest(generation) {
     // ── Parallel dispatch ──
     // All searches are fired at once. Each completes independently.
     // A failed search does not block the others — each has its own catch.
+    //
+    // The onProgress callback is called after every search completes,
+    // whether it succeeded or failed. This lets the caller track real
+    // progress in real time.
 
     const searchPhrases = searches.slice(0, loopLimit);
 
@@ -109,6 +127,19 @@ async function controllingRequest(generation) {
                 console.log(
                     `[Controlling] Search ${i + 1} completed`
                 );
+
+                if (onProgress) {
+                    try {
+                        onProgress(searchesProcessed, loopLimit);
+                    } catch (progressErr) {
+                        console.error(
+                            '[Controlling] onProgress callback threw:',
+                            progressErr && progressErr.message
+                                ? progressErr.message
+                                : progressErr
+                        );
+                    }
+                }
             })
             .catch((err) => {
                 console.error(
@@ -116,6 +147,19 @@ async function controllingRequest(generation) {
                     err && err.message ? err.message : err
                 );
                 // Skip the failed search and let the others continue.
+
+                if (onProgress) {
+                    try {
+                        onProgress(searchesProcessed, loopLimit);
+                    } catch (progressErr) {
+                        console.error(
+                            '[Controlling] onProgress callback threw:',
+                            progressErr && progressErr.message
+                                ? progressErr.message
+                                : progressErr
+                        );
+                    }
+                }
             });
     });
 
