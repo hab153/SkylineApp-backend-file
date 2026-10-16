@@ -15,10 +15,15 @@ const TAVILY_ENDPOINT = 'https://api.tavily.com/search';
 // Fixed Tavily search parameters used for every search.
 // These are the same for every phrase — only the query changes.
 //
+// max_results is capped at 5 per search. Ten searches return up to
+// 50 pages total instead of 100 — half the input for Separation, so
+// the pipeline runs faster and the AI reads less noise. The top 5
+// results per search are the most relevant anyway.
+//
 // Reference: https://docs.tavily.com/documentation/api-reference/endpoint/search
 const TAVILY_PARAMS = {
     search_depth: 'basic',
-    max_results: 10,
+    max_results: 5,
     topic: 'general',
     include_answer: false,
     include_raw_content: false,
