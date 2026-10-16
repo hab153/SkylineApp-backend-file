@@ -29,6 +29,14 @@ const CHUNK_SIZE = 10;
 // the "qualified" array.
 const MIN_QUALIFIED_RATING = 5;
 
+// Maximum number of companies that can pass to the next stage.
+// The qualified array is capped at this many entries — the
+// highest-rated ones. Everything downstream (domain discovery,
+// contact extraction, etc.) only ever runs on at most this many
+// companies. This protects the pipeline from runaway Tavily and AI
+// usage in later stages.
+const MAX_QUALIFIED_OUTPUT = 10;
+
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
@@ -165,6 +173,9 @@ Do not invent unnecessary details.
 // separately for each batch. Each chunk is retried up to
 // MAX_ATTEMPTS_PER_CHUNK times. If a chunk fails on all attempts, the
 // companies in that chunk are marked as unverified.
+//
+// The qualified list is capped at MAX_QUALIFIED_OUTPUT entries.
+// Only the highest-rated companies pass to the next stage.
 //
 // If every chunk fails, the entire output becomes a friendly message.
 //
@@ -318,12 +329,16 @@ async function verificationRequest(separation, understanding) {
     //    AND whose status is "valid" appear in the qualified list.
     //    Unverified companies (rating === null) are excluded.
     //    Invalid companies are excluded even if their rating is high.
-    const qualified = verified.filter(
-        (c) =>
-            typeof c.rating === 'number' &&
-            c.rating >= MIN_QUALIFIED_RATING &&
-            c.status === 'valid'
-    );
+    //    The list is capped at MAX_QUALIFIED_OUTPUT entries — the
+    //    highest-rated companies, since verified was already sorted.
+    const qualified = verified
+        .filter(
+            (c) =>
+                typeof c.rating === 'number' &&
+                c.rating >= MIN_QUALIFIED_RATING &&
+                c.status === 'valid'
+        )
+        .slice(0, MAX_QUALIFIED_OUTPUT);
 
     // ── Compute summary ──
     let valid = 0;
@@ -350,7 +365,8 @@ async function verificationRequest(separation, understanding) {
         `total=${result.summary.total}`,
         `valid=${result.summary.valid}`,
         `invalid=${result.summary.invalid}`,
-        `qualified=${result.summary.qualified}`
+        `qualified=${result.summary.qualified}`,
+        `cap=${MAX_QUALIFIED_OUTPUT}`
     );
 
     return result;
