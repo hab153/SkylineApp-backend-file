@@ -37,6 +37,13 @@ const MIN_QUALIFIED_RATING = 5;
 // usage in later stages.
 const MAX_QUALIFIED_OUTPUT = 10;
 
+// Maximum number of companies that will be verified in one run.
+// Only the first MAX_INPUT_COMPANIES from the Separation output are
+// verified. This protects the pipeline from running 10+ verification
+// chunks when the qualified output is capped at 10 companies anyway.
+// Verification runs on 2 chunks of 10 instead of 10+ chunks.
+const MAX_INPUT_COMPANIES = 20;
+
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
@@ -174,6 +181,8 @@ Do not invent unnecessary details.
 // MAX_ATTEMPTS_PER_CHUNK times. If a chunk fails on all attempts, the
 // companies in that chunk are marked as unverified.
 //
+// The input is capped at MAX_INPUT_COMPANIES — only the first N
+// companies from the Separation output are verified.
 // The qualified list is capped at MAX_QUALIFIED_OUTPUT entries.
 // Only the highest-rated companies pass to the next stage.
 //
@@ -189,19 +198,22 @@ async function verificationRequest(separation, understanding) {
 
     const companies =
         separation && Array.isArray(separation.companies)
-            ? separation.companies.filter(
-                  (c) =>
-                      c &&
-                      typeof c === 'object' &&
-                      typeof c.name === 'string' &&
-                      c.name.trim().length > 0
-              )
+            ? separation.companies
+                  .filter(
+                      (c) =>
+                          c &&
+                          typeof c === 'object' &&
+                          typeof c.name === 'string' &&
+                          c.name.trim().length > 0
+                  )
+                  .slice(0, MAX_INPUT_COMPANIES)
             : [];
 
     console.log(
         '[Verification] Received',
         companies.length,
-        'compan(ies) to verify'
+        'compan(ies) to verify',
+        `(cap=${MAX_INPUT_COMPANIES})`
     );
 
     // ── No companies — return empty lists, no AI call ──
@@ -366,7 +378,8 @@ async function verificationRequest(separation, understanding) {
         `valid=${result.summary.valid}`,
         `invalid=${result.summary.invalid}`,
         `qualified=${result.summary.qualified}`,
-        `cap=${MAX_QUALIFIED_OUTPUT}`
+        `inCap=${MAX_INPUT_COMPANIES}`,
+        `outCap=${MAX_QUALIFIED_OUTPUT}`
     );
 
     return result;
