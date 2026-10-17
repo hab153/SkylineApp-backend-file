@@ -1,6 +1,7 @@
 // authMiddleware.js
 const jwt = require('jsonwebtoken');
 const User = require('./User');
+const { isValidObjectId } = require('./sanitize');  // ✅ ADDED
 
 // ✅ SECURE: Strict JWT secret getter - NO FALLBACKS, NO DEFAULTS
 const getJwtSecret = () => {
@@ -32,14 +33,12 @@ const verifyToken = async (req, res, next) => {
 
         console.log('🔑 [AUTH] Token (first 20 chars):', token.substring(0, 20) + '...');
 
-        // ✅ SECURE: Get secret with strict check
         const secret = getJwtSecret();
         let decoded;
         
         try {
             decoded = jwt.verify(token, secret);
             
-            // ✅ DEBUG: Log the entire decoded token
             console.log('🔑 [AUTH] Decoded token:', JSON.stringify(decoded, null, 2));
             console.log('🔑 [AUTH] decoded.user:', decoded.user);
             console.log('🔑 [AUTH] decoded.user?.id:', decoded.user?.id);
@@ -64,9 +63,18 @@ const verifyToken = async (req, res, next) => {
         const userId = decoded.user?.id || decoded.id || decoded.userId || decoded._id;
         console.log('🔑 [AUTH] Extracted userId:', userId);
         
-        if (!userId) {
-            console.log('❌ [AUTH] No user ID found in token');
+        // ════════════════════════════════════════════════════════════
+        // ✅ CRITICAL FIX: Reject if userId is null/undefined/string "null"
+        // ════════════════════════════════════════════════════════════
+        if (!userId || userId === 'null' || userId === 'undefined') {
+            console.log('❌ [AUTH] No valid user ID found in token');
             return res.status(401).json({ message: 'Unauthorized: Invalid token payload' });
+        }
+
+        // ✅ CRITICAL FIX: Validate ObjectId format before querying
+        if (!isValidObjectId(userId)) {
+            console.log('❌ [AUTH] Invalid ObjectId format:', userId);
+            return res.status(401).json({ message: 'Unauthorized: Invalid user ID in token' });
         }
 
         // Check for special tokens (layer tokens)
@@ -77,10 +85,11 @@ const verifyToken = async (req, res, next) => {
         let user;
         try {
             console.log('🔑 [AUTH] Fetching user from database with ID:', userId);
-            user = await User.findById(userId).select('tokenVersion isSuspended suspensionEnds');
+            user = await User.findById(userId).select('tokenVersion isSuspended suspensionEnds email username isAdmin');
             console.log('🔑 [AUTH] User found:', user ? 'Yes' : 'No');
             if (user) {
                 console.log('🔑 [AUTH] User email:', user.email);
+                console.log('🔑 [AUTH] User username:', user.username);
                 console.log('🔑 [AUTH] User tokenVersion:', user.tokenVersion);
             }
         } catch (dbErr) {
