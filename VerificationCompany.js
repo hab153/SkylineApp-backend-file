@@ -24,24 +24,13 @@ const MAX_ATTEMPTS_PER_CHUNK = 4;
 const CHUNK_SIZE = 10;
 
 // Minimum rating a company must have to be considered qualified
-// for the next stage. Companies rated below this are still verified
-// and returned in the "verified" array, but they do not appear in
-// the "qualified" array.
+// for the next stage.
 const MIN_QUALIFIED_RATING = 5;
 
 // Maximum number of companies that can pass to the next stage.
-// The qualified array is capped at this many entries — the
-// highest-rated ones. Everything downstream (domain discovery,
-// contact extraction, etc.) only ever runs on at most this many
-// companies. This protects the pipeline from runaway Tavily and AI
-// usage in later stages.
 const MAX_QUALIFIED_OUTPUT = 10;
 
 // Maximum number of companies that will be verified in one run.
-// Only the first MAX_INPUT_COMPANIES from the Separation output are
-// verified. This protects the pipeline from running 10+ verification
-// chunks when the qualified output is capped at 10 companies anyway.
-// Verification runs on 2 chunks of 10 instead of 10+ chunks.
 const MAX_INPUT_COMPANIES = 20;
 
 const FALLBACK_MESSAGE =
@@ -176,21 +165,21 @@ Do not invent unnecessary details.
 
 // Receives the Separation output and the Understanding output.
 // Verifies each company against the original request.
-// Chunks the companies into batches of CHUNK_SIZE and calls the AI
-// separately for each batch. Each chunk is retried up to
-// MAX_ATTEMPTS_PER_CHUNK times. If a chunk fails on all attempts, the
-// companies in that chunk are marked as unverified.
 //
 // The input is capped at MAX_INPUT_COMPANIES — only the first N
-// companies from the Separation output are verified.
+// companies from the Separation output are verified. This means at
+// most 2 chunks of CHUNK_SIZE companies are processed in parallel.
+//
+// All chunks are verified IN PARALLEL using Promise.all. This replaces
+// the old sequential loop, which was waiting for each chunk to finish
+// before starting the next one.
+//
+// Each chunk is retried up to MAX_ATTEMPTS_PER_CHUNK times. If a
+// chunk fails on all attempts, the companies in that chunk are marked
+// as unverified.
+//
 // The qualified list is capped at MAX_QUALIFIED_OUTPUT entries.
 // Only the highest-rated companies pass to the next stage.
-//
-// If every chunk fails, the entire output becomes a friendly message.
-//
-// Returns:
-//   { verified, qualified, summary } on success
-//   { message } on total failure
 
 async function verificationRequest(separation, understanding) {
     console.log('[Verification] Started');
@@ -242,21 +231,32 @@ async function verificationRequest(separation, understanding) {
     }
 
     console.log(
-        `[Verification] Split into ${chunks.length} chunk(s) of up to ${CHUNK_SIZE} companies`
+        `[Verification] Split into ${chunks.length} chunk(s) of up to ${CHUNK_SIZE} companies — running in parallel`
     );
 
-    // ── Verify each chunk ──
+    // ── Verify all chunks IN PARALLEL ──
+    //
+    // Every chunk's verifyChunk() is started at the same time. The
+    // Promise.all waits for all of them to settle. Failed chunks
+    // resolve to null — they don't reject — so a single failure does
+    // not cancel the others.
+
+    const chunkResults = await Promise.all(
+        chunks.map((chunk, i) => {
+            console.log(
+                `[Verification] Dispatching chunk ${i + 1}/${chunks.length} — ${chunk.length} compan(ies)`
+            );
+            return verifyChunk(chunk, understanding);
+        })
+    );
+
+    // ── Process each chunk's result ──
     const verified = [];
     let successfulChunks = 0;
 
-    for (let c = 0; c < chunks.length; c++) {
+    for (let c = 0; c < chunkResults.length; c++) {
+        const chunkResult = chunkResults[c];
         const chunk = chunks[c];
-
-        console.log(
-            `[Verification] Chunk ${c + 1}/${chunks.length} — ${chunk.length} compan(ies)`
-        );
-
-        const chunkResult = await verifyChunk(chunk, understanding);
 
         if (chunkResult) {
             successfulChunks++;
