@@ -18,19 +18,6 @@ const {
 // STAGE IDs
 // ────────────────────────────────────────────────────────────────
 
-// Neutral stage identifiers. The wire only carries these IDs —
-// no internal names ever leave the server.
-//
-//   s1 — Understand
-//   s2 — Planning
-//   s3 — Summary
-//   s4 — Generation
-//   s5 — Controlling
-//   s6 — Search System
-//   s7 — Verification
-//
-// The frontend maps these IDs to display labels.
-
 const STAGE_IDS = {
     UNDERSTAND:    's1',
     PLANNING:      's2',
@@ -44,6 +31,38 @@ const STAGE_IDS = {
 };
 
 // ────────────────────────────────────────────────────────────────
+// CANCELLATION
+// ────────────────────────────────────────────────────────────────
+
+// Thrown when the request has been cancelled by the user.
+// The route handler recognises this and sends the 'cancelled' SSE
+// event instead of the 'error' event.
+function throwCancelled() {
+    const err = new Error('cancelled');
+    err.name = 'AbortError';
+    err.code = 'CANCELLED';
+    throw err;
+}
+
+// Checks the cancellation state. If cancelled, throws. Otherwise
+// returns.
+//
+// `options.isCancelled` is a function supplied by the route handler.
+// `options.signal` is an AbortSignal. Either can flag cancellation.
+
+function ensureNotCancelled(options) {
+    if (!options) return;
+
+    if (typeof options.isCancelled === 'function' && options.isCancelled()) {
+        throwCancelled();
+    }
+
+    if (options.signal && options.signal.aborted) {
+        throwCancelled();
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
 // STREAM PIPELINE
 // ────────────────────────────────────────────────────────────────
 
@@ -51,10 +70,14 @@ const STAGE_IDS = {
 //
 // After each stage completes, it calls onStage(stageId, data).
 //
-// The label is a neutral identifier — "s1", "s2", etc. — so the
-// wire never reveals the internal stage names.
+// The label is a neutral identifier — "s1", "s2", etc.
 //
-// The function returns the full pipeline result at the end.
+// Cancellation is checked BEFORE every stage. If the user pressed
+// the stop button at any point, the pipeline throws immediately and
+// no further work happens.
+//
+// options.signal is forwarded to every stage so in-flight fetches
+// abort as well — not just at stage boundaries.
 
 async function streamPipeline(message, options, onStage) {
     console.log('[Stream] Pipeline started');
@@ -71,94 +94,83 @@ async function streamPipeline(message, options, onStage) {
     const safeOptions = options && typeof options === 'object' ? options : {};
 
     // ── s1 — Understand ──
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.UNDERSTAND, { status: 'processing' });
 
     const understanding = await generateUnderstanding(message, safeOptions);
 
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.UNDERSTAND, {
         status: 'completed',
         data: understanding,
     });
-
     console.log('[Stream] s1 complete — Understand');
 
     // ── s2 — Planning ──
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.PLANNING, { status: 'processing' });
 
     const plan = await generatePlanning(understanding, message, safeOptions);
 
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.PLANNING, {
         status: 'completed',
         data: plan,
     });
-
     console.log('[Stream] s2 complete — Planning');
 
     // ── s3 — Summary ──
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.SUMMARY, { status: 'processing' });
 
     const summary = await generateSummary(understanding, plan, safeOptions);
 
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.SUMMARY, {
         status: 'completed',
         data: summary,
     });
-
     console.log('[Stream] s3 complete — Summary');
 
     // ── s4 — Generation ──
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.GENERATION, { status: 'processing' });
 
     const generation = await generateGeneration(summary, safeOptions);
 
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.GENERATION, {
         status: 'completed',
         data: generation,
     });
-
     console.log('[Stream] s4 complete — Generation');
 
     // ── s5 + s6 — Controlling (with Search System inside) ──
-    //
-    // Controlling contains the search loop. We signal:
-    //   s5 processing  → Controlling starts
-    //   s6 processing  → Search System starts (first search begins)
-    //   s6 completed   → Search System finishes (all searches done)
-    //   s5 completed   → Controlling finishes
-    //
-    // Stream.js does not know which search is running — Controlling
-    // runs internally. The frontend stepper shows a single rotating
-    // icon for s6 while it's active.
-
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.CONTROLLING, { status: 'processing' });
-
-    // Signal that Search System is about to begin
     onStage(STAGE_IDS.SEARCH_SYSTEM, { status: 'processing' });
 
     const controlling = await generateControlling(generation, safeOptions);
 
-    // Search System finished with Controlling
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.SEARCH_SYSTEM, {
         status: 'completed',
         data: controlling,
     });
-
-    // Controlling finished too
     onStage(STAGE_IDS.CONTROLLING, {
         status: 'completed',
         data: controlling,
     });
-
     console.log('[Stream] s5 complete — Controlling');
     console.log('[Stream] s6 complete — Search System');
 
-    // ── s7 — Verification ──
-    onStage(STAGE_IDS.VERIFICATION, { status: 'processing' });
-
+    // ── Separation (silent — not a visible stage) ──
+    ensureNotCancelled(safeOptions);
     const separation = await generateSeparation(controlling, safeOptions);
 
-    // Separation is not a visible stage — it runs silently between
-    // Controlling and Verification.
+    // ── s7 — Verification ──
+    ensureNotCancelled(safeOptions);
+    onStage(STAGE_IDS.VERIFICATION, { status: 'processing' });
 
     const verification = await generateVerification(
         separation,
@@ -166,16 +178,15 @@ async function streamPipeline(message, options, onStage) {
         safeOptions
     );
 
+    ensureNotCancelled(safeOptions);
     onStage(STAGE_IDS.VERIFICATION, {
         status: 'completed',
         data: verification,
     });
-
     console.log('[Stream] s7 complete — Verification');
 
     // ── Done ──
     onStage(STAGE_IDS.DONE, { completed: true });
-
     console.log('[Stream] Pipeline finished');
 
     return {
