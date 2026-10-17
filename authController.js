@@ -31,7 +31,9 @@ function validateSecurityAnswer(answer, fieldName) {
     return null;
 }
 
-// ✅ FIXED: Register function - WITH DEBUG LOGGING
+// ════════════════════════════════════════════════════════════════
+// ✅ FIXED: REGISTER - Uses _id.toString() for token payload
+// ════════════════════════════════════════════════════════════════
 const register = async (req, res) => {
     let { username, email, password } = req.body;
     
@@ -73,13 +75,16 @@ const register = async (req, res) => {
         });
         await user.save();
         
-        // ✅ DEBUG: Log the user ID
-        console.log('🔑 [REGISTER] User created with ID:', user.id);
+        // ✅ CRITICAL FIX: Use _id.toString() instead of user.id
+        const userId = user._id.toString();
+        
+        console.log('🔑 [REGISTER] User created with ID:', userId);
         console.log('🔑 [REGISTER] User._id:', user._id);
-        console.log('🔑 [REGISTER] User._id.toString():', user._id.toString());
+        console.log('🔑 [REGISTER] User._id.toString():', userId);
         console.log('🔑 [REGISTER] User email:', user.email);
         
-        const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
+        // ✅ CRITICAL FIX: Use _id.toString() in payload
+        const payload = { user: { id: userId, tokenVersion: user.tokenVersion } };
         console.log('🔑 [REGISTER] Token payload:', JSON.stringify(payload));
         
         const secret = getJwtSecret();
@@ -90,16 +95,16 @@ const register = async (req, res) => {
                 return res.status(500).json({ message: 'Token generation failed' });
             }
             
-            // ✅ DEBUG: Log the token
             console.log('🔑 [REGISTER] Token created (first 20 chars):', token.substring(0, 20) + '...');
             
-            const csrfToken = await generateCsrfToken(user.id);
+            // ✅ CRITICAL FIX: Use _id.toString() for CSRF token
+            const csrfToken = await generateCsrfToken(userId);
             res.json({ 
                 token, 
                 csrfToken, 
                 message: 'Registration successful',
                 user: {
-                    id: user.id,
+                    id: userId,
                     username: user.username,
                     email: user.email
                 }
@@ -121,7 +126,9 @@ const register = async (req, res) => {
     }
 };
 
-// ✅ SECURE: Login function - WITH DEBUG LOGGING
+// ════════════════════════════════════════════════════════════════
+// ✅ FIXED: LOGIN - Uses _id.toString() for token payload
+// ════════════════════════════════════════════════════════════════
 const login = async (req, res) => {
     let { identifier, password } = req.body;
     
@@ -150,7 +157,6 @@ const login = async (req, res) => {
         
         let user = await User.findOne(query);
         
-        // ✅ DEBUG: Log the user found
         if (user) {
             console.log('🔑 [LOGIN] User found:');
             console.log('   - User ID:', user._id.toString());
@@ -185,6 +191,8 @@ const login = async (req, res) => {
             }
         }
         
+        // ✅ CRITICAL FIX: Use _id.toString()
+        const userId = user._id.toString();
         const secret = getJwtSecret();
         
         // ✅ Admin: TOTP 2FA
@@ -198,9 +206,10 @@ const login = async (req, res) => {
                 });
             }
             
+            // ✅ CRITICAL FIX: Use _id.toString()
             const tempToken = jwt.sign(
                 { 
-                    id: user.id, 
+                    id: userId,
                     step: 'totp_verify',
                     nonce: crypto.randomBytes(16).toString('hex')
                 }, 
@@ -217,13 +226,11 @@ const login = async (req, res) => {
         }
         
         // ─── REGULAR USER LOGIN ───
-        const payload = { user: { id: user.id, tokenVersion: user.tokenVersion } };
+        // ✅ CRITICAL FIX: Use _id.toString()
+        const payload = { user: { id: userId, tokenVersion: user.tokenVersion } };
         
-        // ✅ DEBUG: Log the token payload
         console.log('🔑 [LOGIN] Token payload:', JSON.stringify(payload));
-        console.log('🔑 [LOGIN] User.id:', user.id);
-        console.log('🔑 [LOGIN] User._id:', user._id);
-        console.log('🔑 [LOGIN] User._id.toString():', user._id.toString());
+        console.log('🔑 [LOGIN] User ID for token:', userId);
         
         jwt.sign(payload, secret, { expiresIn: '3d' }, async (err, token) => {
             if (err) { 
@@ -231,17 +238,16 @@ const login = async (req, res) => {
                 return res.status(500).json({ message: 'Token generation failed' }); 
             }
             
-            // ✅ DEBUG: Log the token
             console.log('🔑 [LOGIN] Token created (first 20 chars):', token.substring(0, 20) + '...');
-            console.log('🔑 [LOGIN] User ID in token:', user.id);
             
-            const csrfToken = await generateCsrfToken(user.id);
+            // ✅ CRITICAL FIX: Use userId string
+            const csrfToken = await generateCsrfToken(userId);
             res.json({ 
                 token, 
                 csrfToken, 
                 message: 'Login successful',
                 user: {
-                    id: user.id,
+                    id: userId,
                     email: user.email,
                     username: user.username,
                     isAdmin: user.isAdmin || false
@@ -453,9 +459,10 @@ const verifyLayer2 = async (req, res) => {
         
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
+            // ✅ CRITICAL FIX: Use _id.toString()
             const layerToken = jwt.sign(
                 { 
-                    user: { id: user.id }, 
+                    user: { id: user._id.toString() },
                     step: 'layer3',
                     nonce: crypto.randomBytes(16).toString('hex')
                 }, 
@@ -546,8 +553,9 @@ const verifyLayer3 = async (req, res) => {
         
         if (d1 && d2 && d3 && d4) {
             const secret = getJwtSecret();
+            // ✅ CRITICAL FIX: Use _id.toString()
             const payload = { 
-                user: { id: user.id }, 
+                user: { id: user._id.toString() },
                 isAdmin: true,
                 nonce: crypto.randomBytes(16).toString('hex')
             };
@@ -951,8 +959,9 @@ const verifyAdminTotpLogin = async (req, res) => {
         if (!user || !user.isAdmin || !user.adminTotpEnabled) return res.status(403).json({ success: false, message: '2FA not configured or invalid user' });
         const verified = speakeasy.totp.verify({ secret: user.adminTotpSecret, encoding: 'base32', token: String(token), window: 1 });
         if (verified) {
+            // ✅ CRITICAL FIX: Use _id.toString()
             const finalToken = jwt.sign(
-                { id: user._id, role: 'admin', permissions: user.permissions || ['all'] },
+                { id: user._id.toString(), role: 'admin', permissions: user.permissions || ['all'] },
                 process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET, 
                 { expiresIn: '3d' }
             );
