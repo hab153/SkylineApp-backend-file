@@ -114,6 +114,50 @@ const CONTROLLING_LABELS = {
 const DEFAULT_FIELD_ICON = '📝';
 
 // ────────────────────────────────────────────────────────────────
+// CANCELLATION HELPERS
+// ────────────────────────────────────────────────────────────────
+
+// Thrown when a stage is cancelled by the user. The route handler
+// recognises this shape and sends a `cancelled` SSE event instead of
+// an `error` event.
+function throwCancelled() {
+    const err = new Error('cancelled');
+    err.name = 'AbortError';
+    err.code = 'CANCELLED';
+    throw err;
+}
+
+// Checks the cancellation state of the current request.
+// If cancelled, throws — the stage's catch block must NOT swallow it.
+//
+// Every stage function calls this BEFORE the underlying request,
+// and again AFTER — to catch cancellation that happened mid-flight
+// but didn't throw (e.g., a fetch that resolved before the abort).
+function ensureNotCancelled(options) {
+    if (!options) return;
+
+    if (typeof options.isCancelled === 'function' && options.isCancelled()) {
+        throwCancelled();
+    }
+
+    if (options.signal && options.signal.aborted) {
+        throwCancelled();
+    }
+}
+
+// Distinguishes cancellation errors from real errors.
+// Used in every stage's catch block to RE-THROW cancellation instead
+// of returning the stage's fallback shape.
+function isCancellationError(err) {
+    if (!err) return false;
+    return (
+        err.name === 'AbortError' ||
+        err.message === 'cancelled' ||
+        err.code === 'CANCELLED'
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
 // HELPERS
 // ────────────────────────────────────────────────────────────────
 
@@ -807,45 +851,78 @@ function buildReply(
 // ────────────────────────────────────────────────────────────────
 // STAGE FUNCTIONS — one per pipeline stage
 // ────────────────────────────────────────────────────────────────
+//
+// Cancellation:
+//
+//   Every stage checks ensureNotCancelled(options) BEFORE and AFTER
+//   the underlying request. If the user pressed stop:
+//
+//   - Before the request: the stage throws immediately — no work
+//     is started.
+//   - After the request: the stage throws before emitting its
+//     completed event — so the pipeline stops even if the request
+//     finished just as the user pressed stop.
+//
+//   The catch block uses isCancellationError(err) to RE-THROW
+//   cancellation errors instead of returning the stage's fallback
+//   shape. This is critical — otherwise a cancelled stage would
+//   look like a failed stage and the pipeline would continue.
+//
+//   The `signal` in options is forwarded to the underlying request
+//   so in-flight fetches abort mid-flight.
 
 // Stage 1 — Understanding
 async function generateUnderstanding(message, options = {}) {
     console.log('[Orchestrator] Stage 1: Understanding');
 
-    const understanding = await understandRequest(message, options);
+    ensureNotCancelled(options);
 
-    console.log('[Orchestrator] Understanding result:', understanding);
-
-    return understanding;
+    try {
+        const understanding = await understandRequest(message, options);
+        ensureNotCancelled(options);
+        console.log('[Orchestrator] Understanding result:', understanding);
+        return understanding;
+    } catch (err) {
+        if (isCancellationError(err)) throw err;
+        throw err;
+    }
 }
 
 // Stage 2 — Planning
 async function generatePlanning(understanding, message, options = {}) {
     console.log('[Orchestrator] Stage 2: Planning');
 
-    const plan = await planRequest(understanding, {
-        message,
-        ...options,
-    });
+    ensureNotCancelled(options);
 
-    console.log('[Orchestrator] Plan result:', plan);
-
-    return plan;
+    try {
+        const plan = await planRequest(understanding, {
+            message,
+            ...options,
+        });
+        ensureNotCancelled(options);
+        console.log('[Orchestrator] Plan result:', plan);
+        return plan;
+    } catch (err) {
+        if (isCancellationError(err)) throw err;
+        throw err;
+    }
 }
 
 // Stage 3 — Summary
 async function generateSummary(understanding, plan, options = {}) {
     console.log('[Orchestrator] Stage 3: Summary');
 
+    ensureNotCancelled(options);
+
     try {
         const summary = await summaryRequest(understanding, plan, options);
-
+        ensureNotCancelled(options);
         console.log('[Orchestrator] Summary result:', summary);
-
         return summary;
     } catch (summaryErr) {
-        console.error('[Orchestrator] SummaryRequest failed:', summaryErr.message);
+        if (isCancellationError(summaryErr)) throw summaryErr;
 
+        console.error('[Orchestrator] SummaryRequest failed:', summaryErr.message);
         return {
             summary: '',
             allocation: plan && plan.allocation ? plan.allocation : null,
@@ -857,15 +934,17 @@ async function generateSummary(understanding, plan, options = {}) {
 async function generateGeneration(summary, options = {}) {
     console.log('[Orchestrator] Stage 4: Generation');
 
+    ensureNotCancelled(options);
+
     try {
         const generation = await generationRequest(summary, options);
-
+        ensureNotCancelled(options);
         console.log('[Orchestrator] Generation result:', generation);
-
         return generation;
     } catch (generationErr) {
-        console.error('[Orchestrator] GenerationRequest failed:', generationErr.message);
+        if (isCancellationError(generationErr)) throw generationErr;
 
+        console.error('[Orchestrator] GenerationRequest failed:', generationErr.message);
         return {
             message: 'Our server is currently experiencing high traffic. Please try again shortly.',
         };
@@ -873,27 +952,20 @@ async function generateGeneration(summary, options = {}) {
 }
 
 // Stage 5 — Controlling
-//
-// The onProgress callback is forwarded to Controlling.js so the caller
-// can receive per-search progress in real time:
-//
-//   onProgress(searchesProcessed, totalSearches)
-//
-// The callback is optional. When present, it lets the caller report
-// live progress for the Search System phase.
-
 async function generateControlling(generation, options = {}) {
     console.log('[Orchestrator] Stage 5: Controlling');
 
+    ensureNotCancelled(options);
+
     try {
         const controlling = await controllingRequest(generation, options);
-
+        ensureNotCancelled(options);
         console.log('[Orchestrator] Controlling result:', controlling);
-
         return controlling;
     } catch (controllingErr) {
-        console.error('[Orchestrator] ControllingRequest failed:', controllingErr.message);
+        if (isCancellationError(controllingErr)) throw controllingErr;
 
+        console.error('[Orchestrator] ControllingRequest failed:', controllingErr.message);
         return {
             completed: false,
             searchesProcessed: 0,
@@ -906,15 +978,17 @@ async function generateControlling(generation, options = {}) {
 async function generateSeparation(controlling, options = {}) {
     console.log('[Orchestrator] Stage 6: Separation');
 
+    ensureNotCancelled(options);
+
     try {
         const separation = await separationRequest(controlling, options);
-
+        ensureNotCancelled(options);
         console.log('[Orchestrator] Separation result:', separation);
-
         return separation;
     } catch (separationErr) {
-        console.error('[Orchestrator] SeparationRequest failed:', separationErr.message);
+        if (isCancellationError(separationErr)) throw separationErr;
 
+        console.error('[Orchestrator] SeparationRequest failed:', separationErr.message);
         return {
             collected: 0,
             totalResults: 0,
@@ -927,15 +1001,17 @@ async function generateSeparation(controlling, options = {}) {
 async function generateVerification(separation, understanding, options = {}) {
     console.log('[Orchestrator] Stage 7: Verification');
 
+    ensureNotCancelled(options);
+
     try {
         const verification = await verificationRequest(separation, understanding, options);
-
+        ensureNotCancelled(options);
         console.log('[Orchestrator] Verification result:', verification);
-
         return verification;
     } catch (verificationErr) {
-        console.error('[Orchestrator] VerificationRequest failed:', verificationErr.message);
+        if (isCancellationError(verificationErr)) throw verificationErr;
 
+        console.error('[Orchestrator] VerificationRequest failed:', verificationErr.message);
         return {
             message: 'Our server is currently experiencing high traffic. Please try again shortly.',
         };
