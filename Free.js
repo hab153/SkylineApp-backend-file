@@ -873,6 +873,15 @@ async function generateGeneration(summary, options = {}) {
 }
 
 // Stage 5 — Controlling
+//
+// The onProgress callback is forwarded to Controlling.js so the caller
+// can receive per-search progress in real time:
+//
+//   onProgress(searchesProcessed, totalSearches)
+//
+// The callback is optional. When present, it lets the caller report
+// live progress for the Search System phase.
+
 async function generateControlling(generation, options = {}) {
     console.log('[Orchestrator] Stage 5: Controlling');
 
