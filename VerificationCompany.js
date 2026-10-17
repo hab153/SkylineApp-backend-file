@@ -28,10 +28,7 @@ const CHUNK_SIZE = 10;
 const MIN_QUALIFIED_RATING = 5;
 
 // Maximum number of companies that can pass to the next stage.
-const MAX_QUALIFIED_OUTPUT = 10;
-
-// Maximum number of companies that will be verified in one run.
-const MAX_INPUT_COMPANIES = 20;
+const MAX_QUALIFIED_OUTPUT = 300;
 
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
@@ -166,13 +163,10 @@ Do not invent unnecessary details.
 // Receives the Separation output and the Understanding output.
 // Verifies each company against the original request.
 //
-// The input is capped at MAX_INPUT_COMPANIES — only the first N
-// companies from the Separation output are verified. This means at
-// most 2 chunks of CHUNK_SIZE companies are processed in parallel.
-//
-// All chunks are verified IN PARALLEL using Promise.all. This replaces
-// the old sequential loop, which was waiting for each chunk to finish
-// before starting the next one.
+// There is NO input cap — every company from Separation is verified.
+// The companies are split into chunks of CHUNK_SIZE and all chunks
+// run IN PARALLEL using Promise.all. This keeps wall-clock time low
+// even with many companies, because the AI calls overlap.
 //
 // Each chunk is retried up to MAX_ATTEMPTS_PER_CHUNK times. If a
 // chunk fails on all attempts, the companies in that chunk are marked
@@ -187,22 +181,20 @@ async function verificationRequest(separation, understanding) {
 
     const companies =
         separation && Array.isArray(separation.companies)
-            ? separation.companies
-                  .filter(
-                      (c) =>
-                          c &&
-                          typeof c === 'object' &&
-                          typeof c.name === 'string' &&
-                          c.name.trim().length > 0
-                  )
-                  .slice(0, MAX_INPUT_COMPANIES)
+            ? separation.companies.filter(
+                  (c) =>
+                      c &&
+                      typeof c === 'object' &&
+                      typeof c.name === 'string' &&
+                      c.name.trim().length > 0
+              )
             : [];
 
     console.log(
         '[Verification] Received',
         companies.length,
         'compan(ies) to verify',
-        `(cap=${MAX_INPUT_COMPANIES})`
+        '(no input cap)'
     );
 
     // ── No companies — return empty lists, no AI call ──
@@ -378,7 +370,6 @@ async function verificationRequest(separation, understanding) {
         `valid=${result.summary.valid}`,
         `invalid=${result.summary.invalid}`,
         `qualified=${result.summary.qualified}`,
-        `inCap=${MAX_INPUT_COMPANIES}`,
         `outCap=${MAX_QUALIFIED_OUTPUT}`
     );
 
