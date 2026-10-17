@@ -18,16 +18,16 @@ const openai = new OpenAI({
 
 const MODEL = 'gpt-4o-mini';
 
-// Per-chunk retry: if the AI fails to extract companies from one
-// search's results, retry that chunk up to 4 times.
-const MAX_ATTEMPTS_PER_CHUNK = 4;
+// Per-attempt retry: if the AI fails to extract companies, retry up
+// to 4 times. There is only ONE AI call now — not one per search.
+const MAX_ATTEMPTS = 4;
 
 // ────────────────────────────────────────────────────────────────
 // GPT INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
 const SYSTEM_INSTRUCTIONS = `
-You are given the raw search results collected from one search.
+You are given the raw search results collected from several searches.
 
 Your only task is to separate these results into company blocks.
 
@@ -45,9 +45,9 @@ Extracting companies:
   Each of those companies gets its own block.
 - Extract a company if its name appears in the title, in the snippet,
   or in the URL.
-- The same company may appear in many search results. All of its
-  mentions go into one company block — the same company is never split
-  into two blocks.
+- The same company may appear in many search results — across many
+  different searches. All of its mentions go into one company block —
+  the same company is never split into two blocks.
 
 What counts as a company to include:
 
@@ -62,7 +62,7 @@ Do not:
 
 - invent companies that are not present in the search results
 - invent mentions
-- merge two companies into one block
+- merge two different companies into one block
 - mix details between different companies
 - change URLs, titles, or descriptions
 - add recommendations or evidence
@@ -116,11 +116,9 @@ Do not invent unnecessary details.
 // Calls Saving.getAll() to take all accumulated search results.
 // Saving.js is cleared after the take.
 //
-// For each search result set (one per search), calls the AI separately
-// to extract companies from that search's results. This chunking keeps
-// each prompt small so the AI can read it fully.
-//
-// Extracted companies from all chunks are then merged by company name.
+// Sends ALL search results to the AI in ONE call. The AI returns
+// one separated list of companies. This replaces the old per-search
+// chunking, which was making 10+ AI calls per run.
 //
 // Returns:
 //   { collected, totalResults, results, companies }
@@ -161,7 +159,7 @@ async function separationRequest(notification) {
         return sum + (Array.isArray(r) ? r.length : 0);
     }, 0);
 
-    // ── Extract companies, one chunk per search ──
+    // ── Extract companies in ONE AI call ──
     let companies = [];
 
     if (allResults.length > 0) {
@@ -191,65 +189,40 @@ async function separationRequest(notification) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// EXTRACT COMPANIES — ONE AI CALL PER SEARCH
+// EXTRACT COMPANIES — ONE AI CALL FOR ALL SEARCHES
 // ────────────────────────────────────────────────────────────────
 
-// Loops over each search entry in allResults and calls the AI on
-// just that entry. Each call is small enough that the AI reads it
-// fully. Extracted companies from all chunks are merged by name.
+// Sends all search results to the AI in a single prompt. The AI
+// returns one separated list of companies, with each company's
+// mentions grouped together — across all searches.
+//
+// Retries up to MAX_ATTEMPTS times. Returns [] if all attempts fail.
 
 async function extractCompanies(allResults) {
-    const merged = new Map();
+    // Build a compact representation. Each entry is:
+    //   { search: <phrase>, results: [ <Tavily results> ] }
+    //
+    // We send the full Tavily response per search, so the AI sees
+    // everything — titles, URLs, snippets, scores.
+    const payload = allResults.map((entry) => ({
+        search: entry && entry.search ? entry.search : '',
+        results:
+            entry &&
+            entry.response &&
+            Array.isArray(entry.response.results)
+                ? entry.response.results
+                : [],
+    }));
 
-    for (let i = 0; i < allResults.length; i++) {
-        const entry = allResults[i];
+    console.log(
+        '[Separation] Sending',
+        payload.length,
+        'search result sets to the AI in one call'
+    );
 
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         console.log(
-            `[Separation] Chunk ${i + 1}/${allResults.length} — search:`,
-            entry && entry.search
-        );
-
-        const chunkCompanies = await extractFromChunk(entry);
-
-        console.log(
-            `[Separation] Chunk ${i + 1} extracted`,
-            chunkCompanies.length,
-            'compan(ies)'
-        );
-
-        // Merge into the master map, deduped by lowercased name.
-        for (const company of chunkCompanies) {
-            const key = company.name.trim().toLowerCase();
-
-            if (!merged.has(key)) {
-                merged.set(key, {
-                    name: company.name.trim(),
-                    mentions: [...company.mentions],
-                });
-            } else {
-                const existing = merged.get(key);
-                for (const mention of company.mentions) {
-                    existing.mentions.push(mention);
-                }
-            }
-        }
-    }
-
-    return Array.from(merged.values());
-}
-
-// ────────────────────────────────────────────────────────────────
-// EXTRACT FROM ONE CHUNK — AI CALL WITH RETRIES
-// ────────────────────────────────────────────────────────────────
-
-// Sends one search entry (search phrase + its Tavily response) to
-// the AI. Retries up to MAX_ATTEMPTS_PER_CHUNK times. Returns [] if
-// all attempts fail — no fallback invented.
-
-async function extractFromChunk(entry) {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_CHUNK; attempt++) {
-        console.log(
-            `[Separation] AI attempt ${attempt}/${MAX_ATTEMPTS_PER_CHUNK}`
+            `[Separation] AI attempt ${attempt}/${MAX_ATTEMPTS}`
         );
 
         try {
@@ -267,7 +240,7 @@ async function extractFromChunk(entry) {
                     {
                         role: 'user',
                         content: `Search results:\n${JSON.stringify(
-                            entry,
+                            payload,
                             null,
                             2
                         )}`,
@@ -323,7 +296,7 @@ async function extractFromChunk(entry) {
             }
 
             console.warn(
-                '[Separation] No valid companies returned from chunk'
+                '[Separation] No valid companies returned'
             );
         } catch (error) {
             console.error(
@@ -350,7 +323,7 @@ async function extractFromChunk(entry) {
     }
 
     console.warn(
-        '[Separation] All AI attempts failed for this chunk. Returning empty.'
+        '[Separation] All AI attempts failed. Returning empty.'
     );
 
     return [];
