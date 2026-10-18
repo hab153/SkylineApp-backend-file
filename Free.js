@@ -1,12 +1,13 @@
 'use strict';
 
-const understandRequest    = require('./UnderstandRequest');
-const planRequest         = require('./PlanRequest');
-const summaryRequest      = require('./Summary');
-const generationRequest   = require('./Generation');
-const controllingRequest  = require('./Controlling');
-const separationRequest   = require('./Separation');
-const verificationRequest = require('./VerificationCompany');
+const understandRequest       = require('./UnderstandRequest');
+const planRequest             = require('./PlanRequest');
+const summaryRequest          = require('./Summary');
+const generationRequest       = require('./Generation');
+const controllingRequest      = require('./Controlling');
+const separationRequest       = require('./Separation');
+const verificationRequest     = require('./VerificationCompany');
+const searchGenerationRequest = require('./SearchGeneration');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -109,6 +110,20 @@ const CONTROLLING_LABELS = {
     completed:         { icon: '✅', label: 'Completed' },
     searchesProcessed: { icon: '🔢', label: 'Searches Processed' },
     reason:            { icon: '💬', label: 'Reason' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// SEARCH GENERATION FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const SEARCH_GENERATION_ORDER = [
+    'searches',
+    'message',
+];
+
+const SEARCH_GENERATION_LABELS = {
+    searches: { icon: '🔎', label: 'Searches' },
+    message:  { icon: '💬', label: 'Message' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -764,7 +779,59 @@ function renderVerification(verification) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 7 SECTIONS
+// RENDER: SEARCH GENERATION
+// ────────────────────────────────────────────────────────────────
+
+function renderSearchGeneration(searchGeneration) {
+    if (!searchGeneration || typeof searchGeneration !== 'object') {
+        return 'Search Generation\n⚠️ No search generation data.';
+    }
+
+    if (
+        typeof searchGeneration.message === 'string' &&
+        searchGeneration.message.trim()
+    ) {
+        return [
+            'Search Generation',
+            `💬 Message: ${searchGeneration.message.trim()}`,
+        ].join('\n');
+    }
+
+    const lines = [];
+
+    const searches = Array.isArray(searchGeneration.searches)
+        ? searchGeneration.searches
+        : [];
+
+    if (searches.length === 0) {
+        return 'Search Generation\n⚠️ No searches generated.';
+    }
+
+    lines.push(`🔎 Generated ${searches.length} search(es):`);
+    lines.push('');
+
+    searches.forEach((search, i) => {
+        if (typeof search !== 'string' || !search.trim()) return;
+        lines.push(`   ${i + 1}. ${search.trim()}`);
+    });
+
+    const knownKeys = ['searches', 'message'];
+    for (const key of Object.keys(searchGeneration)) {
+        if (knownKeys.includes(key)) continue;
+        const v = searchGeneration[key];
+        if (v === undefined || v === null || v === '') continue;
+        lines.push(
+            `📝 ${humanizeKey(key)}: ${
+                typeof v === 'object' ? JSON.stringify(v) : v
+            }`
+        );
+    }
+
+    return ['Search Generation', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 8 SECTIONS
 // ────────────────────────────────────────────────────────────────
 
 function buildReply(
@@ -774,7 +841,8 @@ function buildReply(
     generation,
     controlling,
     separation,
-    verification
+    verification,
+    searchGeneration
 ) {
     const sections = [
         renderUnderstanding(understanding),
@@ -799,6 +867,10 @@ function buildReply(
 
     if (verification) {
         sections.push(renderVerification(verification));
+    }
+
+    if (searchGeneration) {
+        sections.push(renderSearchGeneration(searchGeneration));
     }
 
     return sections.join('\n\n');
@@ -873,15 +945,6 @@ async function generateGeneration(summary, options = {}) {
 }
 
 // Stage 5 — Controlling
-//
-// The onProgress callback is forwarded to Controlling.js so the caller
-// can receive per-search progress in real time:
-//
-//   onProgress(searchesProcessed, totalSearches)
-//
-// The callback is optional. When present, it lets the caller report
-// live progress for the Search System phase.
-
 async function generateControlling(generation, options = {}) {
     console.log('[Orchestrator] Stage 5: Controlling');
 
@@ -942,8 +1005,35 @@ async function generateVerification(separation, understanding, options = {}) {
     }
 }
 
+// Stage 8 — Search Generation
+async function generateSearchGeneration(verification, understanding, options = {}) {
+    console.log('[Orchestrator] Stage 8: Search Generation');
+
+    try {
+        const searchGeneration = await searchGenerationRequest(
+            verification,
+            understanding,
+            options
+        );
+
+        console.log('[Orchestrator] SearchGeneration result:', searchGeneration);
+
+        return searchGeneration;
+    } catch (searchGenErr) {
+        console.error(
+            '[Orchestrator] SearchGenerationRequest failed:',
+            searchGenErr.message
+        );
+
+        return {
+            message:
+                'Our server is currently experiencing high traffic. Please try again shortly.',
+        };
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
-// ORCHESTRATOR — full pipeline (unchanged, for backward compatibility)
+// ORCHESTRATOR — full pipeline
 // ────────────────────────────────────────────────────────────────
 
 async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
@@ -979,6 +1069,12 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             message, history, userProfile, onProgress, options,
         });
 
+        const searchGeneration = await generateSearchGeneration(
+            verification,
+            understanding,
+            { message, history, userProfile, onProgress, options }
+        );
+
         const reply = buildReply(
             understanding,
             plan,
@@ -986,7 +1082,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             generation,
             controlling,
             separation,
-            verification
+            verification,
+            searchGeneration
         );
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
@@ -1001,6 +1098,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 controlling,
                 separation,
                 verification,
+                searchGeneration,
             },
         };
     } catch (error) {
@@ -1025,5 +1123,6 @@ module.exports = {
     generateControlling,
     generateSeparation,
     generateVerification,
+    generateSearchGeneration,
     buildReply,
 };
