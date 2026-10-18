@@ -1,14 +1,15 @@
 'use strict';
 
-const understandRequest       = require('./UnderstandRequest');
-const planRequest             = require('./PlanRequest');
-const summaryRequest          = require('./Summary');
-const generationRequest       = require('./Generation');
-const controllingRequest      = require('./Controlling');
-const separationRequest       = require('./Separation');
-const verificationRequest     = require('./VerificationCompany');
-const searchGenerationRequest = require('./SearchGeneration');
-const searchControllerRequest = require('./SearchController');
+const understandRequest        = require('./UnderstandRequest');
+const planRequest              = require('./PlanRequest');
+const summaryRequest           = require('./Summary');
+const generationRequest        = require('./Generation');
+const controllingRequest       = require('./Controlling');
+const separationRequest        = require('./Separation');
+const verificationRequest      = require('./VerificationCompany');
+const searchGenerationRequest  = require('./SearchGeneration');
+const searchControllerRequest  = require('./SearchController');
+const domainExtractionRequest  = require('./DomainExtraction');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -141,6 +142,22 @@ const SEARCH_CONTROLLER_LABELS = {
     completed:         { icon: '✅', label: 'Completed' },
     searchesProcessed: { icon: '🔢', label: 'Searches Processed' },
     reason:            { icon: '💬', label: 'Reason' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// DOMAIN EXTRACTION FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const DOMAIN_EXTRACTION_ORDER = [
+    'summary',
+    'companies',
+    'message',
+];
+
+const DOMAIN_EXTRACTION_LABELS = {
+    summary:   { icon: '📊', label: 'Summary' },
+    companies: { icon: '🏢', label: 'Companies' },
+    message:   { icon: '💬', label: 'Message' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -900,7 +917,96 @@ function renderSearchController(searchController) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 9 SECTIONS
+// RENDER: DOMAIN EXTRACTION
+// ────────────────────────────────────────────────────────────────
+
+function renderDomainExtraction(domainExtraction) {
+    if (!domainExtraction || typeof domainExtraction !== 'object') {
+        return 'Domain Extraction\n⚠️ No domain extraction data.';
+    }
+
+    if (
+        typeof domainExtraction.message === 'string' &&
+        domainExtraction.message.trim()
+    ) {
+        return [
+            'Domain Extraction',
+            `💬 Message: ${domainExtraction.message.trim()}`,
+        ].join('\n');
+    }
+
+    const lines = [];
+
+    const summary = domainExtraction.summary;
+    if (summary && typeof summary === 'object') {
+        const parts = [];
+        if (typeof summary.withDomain === 'number') parts.push(`${summary.withDomain} with domain`);
+        if (typeof summary.withoutDomain === 'number') parts.push(`${summary.withoutDomain} without domain`);
+        if (typeof summary.total === 'number') parts.push(`${summary.total} total`);
+        if (parts.length > 0) {
+            lines.push(`📊 Summary: ${parts.join(' / ')}`);
+        }
+    }
+
+    const companies = Array.isArray(domainExtraction.companies)
+        ? domainExtraction.companies
+        : [];
+
+    if (companies.length > 0) {
+        lines.push('');
+        lines.push('──────────────────────────────────');
+        lines.push('');
+
+        companies.forEach((c, i) => {
+            if (!c || typeof c !== 'object') return;
+
+            const name =
+                typeof c.name === 'string' && c.name.trim()
+                    ? c.name.trim()
+                    : `Company ${i + 1}`;
+
+            lines.push(`Company ${i + 1}. ${name}`);
+
+            if (typeof c.domain === 'string' && c.domain.trim()) {
+                lines.push(`   🌐 Domain: ${c.domain.trim()}`);
+            } else {
+                lines.push('   🌐 Domain: (not identified)');
+            }
+
+            const urls = c.urls && typeof c.urls === 'object' ? c.urls : {};
+
+            if (typeof urls.contact === 'string' && urls.contact.trim()) {
+                lines.push(`   📧 Contact URL: ${urls.contact.trim()}`);
+            }
+
+            if (typeof urls.about === 'string' && urls.about.trim()) {
+                lines.push(`   ℹ️ About URL: ${urls.about.trim()}`);
+            }
+
+            if (i < companies.length - 1) {
+                lines.push('');
+            }
+        });
+    }
+
+    const knownKeys = ['summary', 'companies', 'message'];
+    for (const key of Object.keys(domainExtraction)) {
+        if (knownKeys.includes(key)) continue;
+        const v = domainExtraction[key];
+        if (v === undefined || v === null || v === '') continue;
+        lines.push(
+            `📝 ${humanizeKey(key)}: ${
+                typeof v === 'object' ? JSON.stringify(v) : v
+            }`
+        );
+    }
+
+    if (lines.length === 0) return 'Domain Extraction\n⚠️ No domain extraction data.';
+    return ['Domain Extraction', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 10 SECTIONS
 // ────────────────────────────────────────────────────────────────
 
 function buildReply(
@@ -912,7 +1018,8 @@ function buildReply(
     separation,
     verification,
     searchGeneration,
-    searchController
+    searchController,
+    domainExtraction
 ) {
     const sections = [
         renderUnderstanding(understanding),
@@ -945,6 +1052,10 @@ function buildReply(
 
     if (searchController) {
         sections.push(renderSearchController(searchController));
+    }
+
+    if (domainExtraction) {
+        sections.push(renderDomainExtraction(domainExtraction));
     }
 
     return sections.join('\n\n');
@@ -1133,6 +1244,37 @@ async function generateSearchController(searchGeneration, options = {}) {
     }
 }
 
+// Stage 10 — Domain Extraction
+async function generateDomainExtraction(searchController, understanding, options = {}) {
+    console.log('[Orchestrator] Stage 10: Domain Extraction');
+
+    try {
+        const domainExtraction = await domainExtractionRequest(
+            searchController,
+            understanding,
+            options
+        );
+
+        console.log('[Orchestrator] DomainExtraction result:', domainExtraction);
+
+        return domainExtraction;
+    } catch (domainExtractionErr) {
+        console.error(
+            '[Orchestrator] DomainExtractionRequest failed:',
+            domainExtractionErr.message
+        );
+
+        return {
+            companies: [],
+            summary: {
+                total: 0,
+                withDomain: 0,
+                withoutDomain: 0,
+            },
+        };
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // ORCHESTRATOR — full pipeline
 // ────────────────────────────────────────────────────────────────
@@ -1181,6 +1323,12 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             { message, history, userProfile, onProgress, options }
         );
 
+        const domainExtraction = await generateDomainExtraction(
+            searchController,
+            understanding,
+            { message, history, userProfile, onProgress, options }
+        );
+
         const reply = buildReply(
             understanding,
             plan,
@@ -1190,7 +1338,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             separation,
             verification,
             searchGeneration,
-            searchController
+            searchController,
+            domainExtraction
         );
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
@@ -1207,6 +1356,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 verification,
                 searchGeneration,
                 searchController,
+                domainExtraction,
             },
         };
     } catch (error) {
@@ -1233,5 +1383,6 @@ module.exports = {
     generateVerification,
     generateSearchGeneration,
     generateSearchController,
+    generateDomainExtraction,
     buildReply,
 };
