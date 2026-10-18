@@ -10,6 +10,7 @@ const verificationRequest      = require('./VerificationCompany');
 const searchGenerationRequest  = require('./SearchGeneration');
 const searchControllerRequest  = require('./SearchController');
 const domainExtractionRequest  = require('./DomainExtraction');
+const searchingCompanyRequest  = require('./SearchingCompany');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -158,6 +159,28 @@ const DOMAIN_EXTRACTION_LABELS = {
     summary:   { icon: '📊', label: 'Summary' },
     companies: { icon: '🏢', label: 'Companies' },
     message:   { icon: '💬', label: 'Message' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// SEARCHING COMPANY FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const SEARCHING_COMPANY_ORDER = [
+    'completed',
+    'companiesProcessed',
+    'companiesSearched',
+    'companiesSkipped',
+    'companiesFailed',
+    'reason',
+];
+
+const SEARCHING_COMPANY_LABELS = {
+    completed:          { icon: '✅', label: 'Completed' },
+    companiesProcessed: { icon: '🔢', label: 'Companies Processed' },
+    companiesSearched:  { icon: '🔍', label: 'Companies Searched' },
+    companiesSkipped:   { icon: '⏭️', label: 'Companies Skipped' },
+    companiesFailed:    { icon: '⚠️', label: 'Companies Failed' },
+    reason:             { icon: '💬', label: 'Reason' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -973,16 +996,6 @@ function renderDomainExtraction(domainExtraction) {
                 lines.push('   🌐 Domain: (not identified)');
             }
 
-            const urls = c.urls && typeof c.urls === 'object' ? c.urls : {};
-
-            if (typeof urls.contact === 'string' && urls.contact.trim()) {
-                lines.push(`   📧 Contact URL: ${urls.contact.trim()}`);
-            }
-
-            if (typeof urls.about === 'string' && urls.about.trim()) {
-                lines.push(`   ℹ️ About URL: ${urls.about.trim()}`);
-            }
-
             if (i < companies.length - 1) {
                 lines.push('');
             }
@@ -1006,7 +1019,59 @@ function renderDomainExtraction(domainExtraction) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 10 SECTIONS
+// RENDER: SEARCHING COMPANY
+// ────────────────────────────────────────────────────────────────
+
+function renderSearchingCompany(searchingCompany) {
+    if (!searchingCompany || typeof searchingCompany !== 'object') {
+        return 'Searching Company\n⚠️ No searching company data.';
+    }
+
+    const lines = [];
+
+    for (const key of SEARCHING_COMPANY_ORDER) {
+        const value = searchingCompany[key];
+        if (value === undefined || value === null) continue;
+
+        const meta = SEARCHING_COMPANY_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'boolean' || typeof value === 'number') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    const extras = Object.keys(searchingCompany).filter(k => !SEARCHING_COMPANY_ORDER.includes(k));
+    for (const key of extras) {
+        const value = searchingCompany[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return 'Searching Company\n⚠️ No searching company data.';
+    return ['Searching Company', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 11 SECTIONS
 // ────────────────────────────────────────────────────────────────
 
 function buildReply(
@@ -1019,7 +1084,8 @@ function buildReply(
     verification,
     searchGeneration,
     searchController,
-    domainExtraction
+    domainExtraction,
+    searchingCompany
 ) {
     const sections = [
         renderUnderstanding(understanding),
@@ -1056,6 +1122,10 @@ function buildReply(
 
     if (domainExtraction) {
         sections.push(renderDomainExtraction(domainExtraction));
+    }
+
+    if (searchingCompany) {
+        sections.push(renderSearchingCompany(searchingCompany));
     }
 
     return sections.join('\n\n');
@@ -1275,6 +1345,36 @@ async function generateDomainExtraction(searchController, understanding, options
     }
 }
 
+// Stage 11 — Searching Company
+async function generateSearchingCompany(domainExtraction, options = {}) {
+    console.log('[Orchestrator] Stage 11: Searching Company');
+
+    try {
+        const searchingCompany = await searchingCompanyRequest(
+            domainExtraction,
+            options
+        );
+
+        console.log('[Orchestrator] SearchingCompany result:', searchingCompany);
+
+        return searchingCompany;
+    } catch (searchingCompanyErr) {
+        console.error(
+            '[Orchestrator] SearchingCompanyRequest failed:',
+            searchingCompanyErr.message
+        );
+
+        return {
+            completed: false,
+            companiesProcessed: 0,
+            companiesSearched: 0,
+            companiesSkipped: 0,
+            companiesFailed: 0,
+            reason: searchingCompanyErr.message,
+        };
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // ORCHESTRATOR — full pipeline
 // ────────────────────────────────────────────────────────────────
@@ -1329,6 +1429,11 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             { message, history, userProfile, onProgress, options }
         );
 
+        const searchingCompany = await generateSearchingCompany(
+            domainExtraction,
+            { message, history, userProfile, onProgress, options }
+        );
+
         const reply = buildReply(
             understanding,
             plan,
@@ -1339,7 +1444,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             verification,
             searchGeneration,
             searchController,
-            domainExtraction
+            domainExtraction,
+            searchingCompany
         );
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
@@ -1357,6 +1463,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 searchGeneration,
                 searchController,
                 domainExtraction,
+                searchingCompany,
             },
         };
     } catch (error) {
@@ -1384,5 +1491,6 @@ module.exports = {
     generateSearchGeneration,
     generateSearchController,
     generateDomainExtraction,
+    generateSearchingCompany,
     buildReply,
 };
