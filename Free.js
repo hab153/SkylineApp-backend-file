@@ -5,30 +5,34 @@
 // ────────────────────────────────────────────────────────────────
 
 const generateAndSearch = require('./generateAndSearch');
+const domainFinder      = require('./domainFinder');
 
 // ────────────────────────────────────────────────────────────────
 // ORCHESTRATOR
 // ────────────────────────────────────────────────────────────────
 
-// Free.js is now a thin orchestrator.
+// Free.js is a thin orchestrator.
 //
-// Its only job is to receive the user request and hand it to
-// generateAndSearch.js, which does the actual work:
+// Its job:
 //
-//   1. Understand the request (AI)
-//   2. Generate exactly 2 high-yield searches (AI)
-//   3. Run Tavily search 1
-//   4. Run Tavily search 2
-//   5. Return the full result
+//   1. Hand the user request to generateAndSearch.js
+//      → produces companies + understanding
 //
-// Free.js adds nothing else — no formatting, no transformation,
-// no extra stages. It simply delegates.
+//   2. Extract the companies and the city from that output
+//      → pass them to domainFinder.js
+//
+//   3. Merge both results into one response
+//      → return to the caller (frontend)
+//
+// Free.js adds nothing else — no formatting, no transformation
+// beyond extraction and merging.
 
 async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
 
     try {
+        // ── STEP 1: generateAndSearch ──
         const result = await generateAndSearch(message, {
             history,
             userProfile,
@@ -38,7 +42,53 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
 
         console.log('[Orchestrator] generateAndSearch result:', result);
 
-        return result;
+        // ── STEP 2: extract companies + city ──
+        const companies = Array.isArray(result?.companies)
+            ? result.companies
+            : [];
+
+        const city =
+            (result?.understanding &&
+                result.understanding.location &&
+                result.understanding.location.city) ||
+            '';
+
+        console.log(
+            '[Orchestrator] Extracted companies:',
+            companies.length
+        );
+        console.log('[Orchestrator] Extracted city:', city);
+
+        // ── STEP 3: domainFinder ──
+        let domainResults = null;
+
+        try {
+            domainResults = await domainFinder(companies, city);
+
+            console.log(
+                '[Orchestrator] domainFinder result:',
+                domainResults
+            );
+        } catch (domainErr) {
+            console.error(
+                '[Orchestrator] domainFinder failed:',
+                domainErr && domainErr.message ? domainErr.message : domainErr
+            );
+
+            domainResults = {
+                searches: [],
+            };
+        }
+
+        // ── STEP 4: merge and return ──
+        const finalResult = {
+            ...result,
+            domainResults,
+        };
+
+        console.log('[Orchestrator] Final result ready');
+
+        return finalResult;
     } catch (error) {
         console.error('[Orchestrator] Request failed');
         console.error('[Orchestrator] Error name:', error.name);
