@@ -8,6 +8,7 @@ const controllingRequest      = require('./Controlling');
 const separationRequest       = require('./Separation');
 const verificationRequest     = require('./VerificationCompany');
 const searchGenerationRequest = require('./SearchGeneration');
+const searchControllerRequest = require('./SearchController');
 
 // ────────────────────────────────────────────────────────────────
 // UNDERSTANDING FIELDS
@@ -124,6 +125,22 @@ const SEARCH_GENERATION_ORDER = [
 const SEARCH_GENERATION_LABELS = {
     searches: { icon: '🔎', label: 'Searches' },
     message:  { icon: '💬', label: 'Message' },
+};
+
+// ────────────────────────────────────────────────────────────────
+// SEARCH CONTROLLER FIELDS
+// ────────────────────────────────────────────────────────────────
+
+const SEARCH_CONTROLLER_ORDER = [
+    'completed',
+    'searchesProcessed',
+    'reason',
+];
+
+const SEARCH_CONTROLLER_LABELS = {
+    completed:         { icon: '✅', label: 'Completed' },
+    searchesProcessed: { icon: '🔢', label: 'Searches Processed' },
+    reason:            { icon: '💬', label: 'Reason' },
 };
 
 const DEFAULT_FIELD_ICON = '📝';
@@ -831,7 +848,59 @@ function renderSearchGeneration(searchGeneration) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// COMPOSE FINAL REPLY — 8 SECTIONS
+// RENDER: SEARCH CONTROLLER
+// ────────────────────────────────────────────────────────────────
+
+function renderSearchController(searchController) {
+    if (!searchController || typeof searchController !== 'object') {
+        return 'Search Controller\n⚠️ No search controller data.';
+    }
+
+    const lines = [];
+
+    for (const key of SEARCH_CONTROLLER_ORDER) {
+        const value = searchController[key];
+        if (value === undefined || value === null) continue;
+
+        const meta = SEARCH_CONTROLLER_LABELS[key] || { icon: DEFAULT_FIELD_ICON, label: titleCase(key) };
+
+        if (typeof value === 'string' && value.trim()) {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+
+        if (typeof value === 'boolean' || typeof value === 'number') {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+            continue;
+        }
+    }
+
+    const extras = Object.keys(searchController).filter(k => !SEARCH_CONTROLLER_ORDER.includes(k));
+    for (const key of extras) {
+        const value = searchController[key];
+        if (value === undefined || value === null || value === '') continue;
+        const meta = { icon: DEFAULT_FIELD_ICON, label: humanizeKey(key) };
+        if (Array.isArray(value)) {
+            const items = value.filter(Boolean);
+            if (items.length === 0) continue;
+            lines.push(`${meta.icon} ${meta.label}: ${items.join(', ')}`);
+        } else if (typeof value === 'object') {
+            lines.push(`${meta.icon} ${meta.label}:`);
+            for (const [k, v] of Object.entries(value)) {
+                if (v === undefined || v === null || v === '') continue;
+                lines.push(`   • ${humanizeKey(k)}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+            }
+        } else {
+            lines.push(`${meta.icon} ${meta.label}: ${value}`);
+        }
+    }
+
+    if (lines.length === 0) return 'Search Controller\n⚠️ No search controller data.';
+    return ['Search Controller', ...lines].join('\n');
+}
+
+// ────────────────────────────────────────────────────────────────
+// COMPOSE FINAL REPLY — 9 SECTIONS
 // ────────────────────────────────────────────────────────────────
 
 function buildReply(
@@ -842,7 +911,8 @@ function buildReply(
     controlling,
     separation,
     verification,
-    searchGeneration
+    searchGeneration,
+    searchController
 ) {
     const sections = [
         renderUnderstanding(understanding),
@@ -871,6 +941,10 @@ function buildReply(
 
     if (searchGeneration) {
         sections.push(renderSearchGeneration(searchGeneration));
+    }
+
+    if (searchController) {
+        sections.push(renderSearchController(searchController));
     }
 
     return sections.join('\n\n');
@@ -1032,6 +1106,33 @@ async function generateSearchGeneration(verification, understanding, options = {
     }
 }
 
+// Stage 9 — Search Controller
+async function generateSearchController(searchGeneration, options = {}) {
+    console.log('[Orchestrator] Stage 9: Search Controller');
+
+    try {
+        const searchController = await searchControllerRequest(
+            searchGeneration,
+            options
+        );
+
+        console.log('[Orchestrator] SearchController result:', searchController);
+
+        return searchController;
+    } catch (searchControllerErr) {
+        console.error(
+            '[Orchestrator] SearchControllerRequest failed:',
+            searchControllerErr.message
+        );
+
+        return {
+            completed: false,
+            searchesProcessed: 0,
+            reason: searchControllerErr.message,
+        };
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // ORCHESTRATOR — full pipeline
 // ────────────────────────────────────────────────────────────────
@@ -1075,6 +1176,11 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             { message, history, userProfile, onProgress, options }
         );
 
+        const searchController = await generateSearchController(
+            searchGeneration,
+            { message, history, userProfile, onProgress, options }
+        );
+
         const reply = buildReply(
             understanding,
             plan,
@@ -1083,7 +1189,8 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
             controlling,
             separation,
             verification,
-            searchGeneration
+            searchGeneration,
+            searchController
         );
         console.log('[Orchestrator] Rendered reply:\n' + reply);
 
@@ -1099,6 +1206,7 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
                 separation,
                 verification,
                 searchGeneration,
+                searchController,
             },
         };
     } catch (error) {
@@ -1124,5 +1232,6 @@ module.exports = {
     generateSeparation,
     generateVerification,
     generateSearchGeneration,
+    generateSearchController,
     buildReply,
 };
