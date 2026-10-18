@@ -407,7 +407,7 @@ async function runTavilySearch(searchPhrase) {
 // MAIN FUNCTION
 // ────────────────────────────────────────────────────────────────
 
-async function generateAndSearch(message, options = {}) {
+async function generateAndSearch(message, options = {}, onStage = () => {}) {
     console.log('[generateAndSearch] Started');
     console.log('[generateAndSearch] Received message:', message);
 
@@ -416,7 +416,11 @@ async function generateAndSearch(message, options = {}) {
         throw new Error('[generateAndSearch] message must be a non-empty string');
     }
 
-    // ── AI call 1 — Understanding ──
+    const safeOnStage = typeof onStage === 'function' ? onStage : () => {};
+
+    // ── STAGE s1 — Understanding ──
+    safeOnStage('s1', { status: 'processing' });
+
     const rawUnderstanding = await callAI(
         UNDERSTANDING_INSTRUCTIONS,
         `User request:\n${message}`,
@@ -427,7 +431,11 @@ async function generateAndSearch(message, options = {}) {
 
     console.log('[generateAndSearch] Understanding:', understanding);
 
-    // ── AI call 2 — Search Generation ──
+    safeOnStage('s1', { status: 'completed', data: understanding });
+
+    // ── STAGE s2 — Discovery ──
+    safeOnStage('s2', { status: 'processing' });
+
     const rawSearchGeneration = await callAI(
         SEARCH_GENERATION_INSTRUCTIONS,
         `Understanding output:\n${JSON.stringify(understanding, null, 2)}`,
@@ -459,6 +467,12 @@ async function generateAndSearch(message, options = {}) {
     } else {
         console.warn('[generateAndSearch] Search 2 failed — skipping');
     }
+
+    // ── STAGE s2 completed ──
+    safeOnStage('s2', {
+        status: 'completed',
+        data: { searches, tavilyResults },
+    });
 
     // ── Return ──
     const result = {
