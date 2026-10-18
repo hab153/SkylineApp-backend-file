@@ -45,15 +45,12 @@ You are given:
 Your only task is to identify, for each company, its OFFICIAL WEBSITE
 DOMAIN from the search results.
 
-For each company you must produce one block:
+For each company you must produce one block with exactly two fields:
 
 - name — the company name exactly as it appears in the search phrase
 - domain — the company's official website domain (for example:
   "chicagomedicalexchange.com"). Do NOT include the protocol
-  ("https://") or any path.
-- urls — an object with exactly two keys:
-    - contact — "https://<domain>/contact"
-    - about   — "https://<domain>/about"
+  ("https://"), any path, or a trailing slash.
 
 Rules for identifying the official domain:
 
@@ -79,7 +76,7 @@ Rules for identifying the official domain:
   "chicagomedicalexchange").
 - Ignore the protocol, path, query, and fragment when reading a URL.
 - If you cannot clearly identify an official domain for a company,
-  set domain to null and both urls to null.
+  set domain to null.
 
 Example of a good output:
 
@@ -87,19 +84,11 @@ Example of a good output:
   "companies": [
     {
       "name": "Chicago Medical Exchange",
-      "domain": "chicagomedicalexchange.com",
-      "urls": {
-        "contact": "https://chicagomedicalexchange.com/contact",
-        "about": "https://chicagomedicalexchange.com/about"
-      }
+      "domain": "chicagomedicalexchange.com"
     },
     {
       "name": "Unknown Company",
-      "domain": null,
-      "urls": {
-        "contact": null,
-        "about": null
-      }
+      "domain": null
     }
   ]
 }
@@ -119,11 +108,7 @@ Return only valid JSON using exactly this format:
   "companies": [
     {
       "name": "the company name",
-      "domain": "the identified domain or null",
-      "urls": {
-        "contact": "https://<domain>/contact or null",
-        "about": "https://<domain>/about or null"
-      }
+      "domain": "the identified domain or null"
     }
   ]
 }
@@ -180,10 +165,6 @@ function buildFallbackBlock(name) {
     return {
         name: typeof name === 'string' ? name : '',
         domain: null,
-        urls: {
-            contact: null,
-            about: null,
-        },
     };
 }
 
@@ -193,7 +174,7 @@ function buildFallbackBlock(name) {
 
 // Takes a raw company result from the AI (or from the chunk's
 // original data if the AI dropped the entry) and returns a normalized
-// block with all fields validated.
+// block with the name and domain only.
 
 function normalizeCompanyBlock(raw, fallbackName) {
     const name =
@@ -206,8 +187,8 @@ function normalizeCompanyBlock(raw, fallbackName) {
     const rawDomain =
         raw && typeof raw.domain === 'string' ? raw.domain.trim() : '';
 
-    // Clean the domain: strip any protocol or path if the AI returned
-    // a full URL by mistake.
+    // Clean the domain: strip any protocol, path, or trailing slash
+    // if the AI returned a full URL by mistake.
     let domain = '';
 
     if (rawDomain.length > 0) {
@@ -226,26 +207,9 @@ function normalizeCompanyBlock(raw, fallbackName) {
         return buildFallbackBlock(name);
     }
 
-    const rawUrls =
-        raw && raw.urls && typeof raw.urls === 'object' ? raw.urls : {};
-
-    const contact =
-        typeof rawUrls.contact === 'string' && rawUrls.contact.trim().length > 0
-            ? rawUrls.contact.trim()
-            : `https://${domain}/contact`;
-
-    const about =
-        typeof rawUrls.about === 'string' && rawUrls.about.trim().length > 0
-            ? rawUrls.about.trim()
-            : `https://${domain}/about`;
-
     return {
         name,
         domain,
-        urls: {
-            contact,
-            about,
-        },
     };
 }
 
@@ -391,8 +355,7 @@ async function extractChunk(chunk, understanding) {
 // Receives the SearchController output and the Understanding output.
 // Calls Handling.getAll() to take all accumulated Tavily results.
 // Chunks them (CHUNK_SIZE per call), sends each chunk to the AI,
-// and returns one block per company with the official domain and
-// two derived URLs (/contact and /about).
+// and returns one block per company with the official domain.
 //
 // Retries up to MAX_ATTEMPTS per chunk. On total failure for a chunk,
 // the companies in that chunk are returned with domain: null.
