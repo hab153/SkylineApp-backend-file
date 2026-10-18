@@ -4,8 +4,8 @@
 // IMPORTS
 // ────────────────────────────────────────────────────────────────
 
-const generateAndSearch = require('./generateAndSearch');
-const domainFinder      = require('./domainFinder');
+const streamPipeline = require('./stream').streamPipeline;
+const domainFinder   = require('./domainFinder');
 
 // ────────────────────────────────────────────────────────────────
 // ORCHESTRATOR
@@ -15,8 +15,11 @@ const domainFinder      = require('./domainFinder');
 //
 // Its job:
 //
-//   1. Hand the user request to generateAndSearch.js
-//      → produces companies + understanding
+//   1. Hand the user request to stream.js → streamPipeline()
+//      → streamPipeline passes the onStage callback through to
+//        generateAndSearch, so real stage events (s1, s2) reach
+//        the caller as the work happens
+//      → returns the final result (searches + tavilyResults)
 //
 //   2. Extract the companies and the city from that output
 //      → pass them to domainFinder.js
@@ -27,20 +30,45 @@ const domainFinder      = require('./domainFinder');
 // Free.js adds nothing else — no formatting, no transformation
 // beyond extraction and merging.
 
-async function generateFreeResponse(message, history, userProfile, onProgress, options = {}) {
+async function generateFreeResponse(
+    message,
+    history,
+    userProfile,
+    onProgress,
+    options = {}
+) {
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
 
     try {
-        // ── STEP 1: generateAndSearch ──
-        const result = await generateAndSearch(message, {
-            history,
-            userProfile,
-            onProgress,
-            options,
-        });
+        // ── Resolve the stage callback ──
+        //
+        // The caller may pass an onStage function via options.
+        // If they do, stage events will reach them in real time.
+        // If they don't, we pass a no-op so streamPipeline has a
+        // valid function to call.
+        const onStage =
+            options && typeof options.onStage === 'function'
+                ? options.onStage
+                : () => {};
 
-        console.log('[Orchestrator] generateAndSearch result:', result);
+        // ── STEP 1: streamPipeline ──
+        //
+        // streamPipeline wires the onStage callback through to
+        // generateAndSearch so s1 and s2 fire at the real moment
+        // each stage starts and finishes.
+        const result = await streamPipeline(
+            message,
+            {
+                history,
+                userProfile,
+                onProgress,
+                options,
+            },
+            onStage
+        );
+
+        console.log('[Orchestrator] streamPipeline result:', result);
 
         // ── STEP 2: extract companies + city ──
         const companies = Array.isArray(result?.companies)
@@ -72,7 +100,9 @@ async function generateFreeResponse(message, history, userProfile, onProgress, o
         } catch (domainErr) {
             console.error(
                 '[Orchestrator] domainFinder failed:',
-                domainErr && domainErr.message ? domainErr.message : domainErr
+                domainErr && domainErr.message
+                    ? domainErr.message
+                    : domainErr
             );
 
             domainResults = {
