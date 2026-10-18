@@ -13,6 +13,7 @@ const {
     generateSeparation,
     generateVerification,
     generateSearchGeneration,
+    generateSearchController,
 } = require('./Free');
 
 // ────────────────────────────────────────────────────────────────
@@ -30,6 +31,7 @@ const {
 //   s6 — Search System
 //   s7 — Verification
 //   s8 — Search Generation
+//   s9 — Search Controller
 //
 // The frontend maps these IDs to display labels.
 
@@ -42,6 +44,7 @@ const STAGE_IDS = {
     SEARCH_SYSTEM:     's6',
     VERIFICATION:      's7',
     SEARCH_GENERATION: 's8',
+    SEARCH_CONTROLLER: 's9',
     DONE:              'done',
     ERROR:             'error',
 };
@@ -49,15 +52,6 @@ const STAGE_IDS = {
 // ────────────────────────────────────────────────────────────────
 // STREAM PIPELINE
 // ────────────────────────────────────────────────────────────────
-
-// Runs the full pipeline stage by stage.
-//
-// After each stage completes, it calls onStage(stageId, data).
-//
-// The label is a neutral identifier — "s1", "s2", etc. — so the
-// wire never reveals the internal stage names.
-//
-// The function returns the full pipeline result at the end.
 
 async function streamPipeline(message, options, onStage) {
     console.log('[Stream] Pipeline started');
@@ -122,31 +116,17 @@ async function streamPipeline(message, options, onStage) {
     console.log('[Stream] s4 complete — Generation');
 
     // ── s5 + s6 — Controlling (with Search System inside) ──
-    //
-    // Controlling contains the search loop. We signal:
-    //   s5 processing  → Controlling starts
-    //   s6 processing  → Search System starts (first search begins)
-    //   s6 completed   → Search System finishes (all searches done)
-    //   s5 completed   → Controlling finishes
-    //
-    // Stream.js does not know which search is running — Controlling
-    // runs internally. The frontend stepper shows a single rotating
-    // icon for s6 while it's active.
-
     onStage(STAGE_IDS.CONTROLLING, { status: 'processing' });
 
-    // Signal that Search System is about to begin
     onStage(STAGE_IDS.SEARCH_SYSTEM, { status: 'processing' });
 
     const controlling = await generateControlling(generation, safeOptions);
 
-    // Search System finished with Controlling
     onStage(STAGE_IDS.SEARCH_SYSTEM, {
         status: 'completed',
         data: controlling,
     });
 
-    // Controlling finished too
     onStage(STAGE_IDS.CONTROLLING, {
         status: 'completed',
         data: controlling,
@@ -160,8 +140,7 @@ async function streamPipeline(message, options, onStage) {
 
     const separation = await generateSeparation(controlling, safeOptions);
 
-    // Separation is not a visible stage — it runs silently between
-    // Controlling and Verification.
+    // Separation runs silently between Controlling and Verification.
 
     const verification = await generateVerification(
         separation,
@@ -177,11 +156,6 @@ async function streamPipeline(message, options, onStage) {
     console.log('[Stream] s7 complete — Verification');
 
     // ── s8 — Search Generation ──
-    //
-    // Takes the verified companies and generates one search phrase
-    // per company. Those searches will be executed by a future layer
-    // to find each company's official website domain.
-
     onStage(STAGE_IDS.SEARCH_GENERATION, { status: 'processing' });
 
     const searchGeneration = await generateSearchGeneration(
@@ -197,6 +171,26 @@ async function streamPipeline(message, options, onStage) {
 
     console.log('[Stream] s8 complete — Search Generation');
 
+    // ── s9 — Search Controller ──
+    //
+    // Takes the generated searches and runs each one via SearchHandler.
+    // Results are accumulated in Handling.js for a future layer to
+    // extract each company's official domain.
+
+    onStage(STAGE_IDS.SEARCH_CONTROLLER, { status: 'processing' });
+
+    const searchController = await generateSearchController(
+        searchGeneration,
+        safeOptions
+    );
+
+    onStage(STAGE_IDS.SEARCH_CONTROLLER, {
+        status: 'completed',
+        data: searchController,
+    });
+
+    console.log('[Stream] s9 complete — Search Controller');
+
     // ── Done ──
     onStage(STAGE_IDS.DONE, { completed: true });
 
@@ -211,6 +205,7 @@ async function streamPipeline(message, options, onStage) {
         separation,
         verification,
         searchGeneration,
+        searchController,
     };
 }
 
