@@ -14,6 +14,7 @@ const {
     generateVerification,
     generateSearchGeneration,
     generateSearchController,
+    generateDomainExtraction,
 } = require('./Free');
 
 // ────────────────────────────────────────────────────────────────
@@ -23,30 +24,32 @@ const {
 // Neutral stage identifiers. The wire only carries these IDs —
 // no internal names ever leave the server.
 //
-//   s1 — Understand
-//   s2 — Planning
-//   s3 — Summary
-//   s4 — Generation
-//   s5 — Controlling
-//   s6 — Search System
-//   s7 — Verification
-//   s8 — Search Generation
-//   s9 — Search Controller
+//   s1  — Understand
+//   s2  — Planning
+//   s3  — Summary
+//   s4  — Generation
+//   s5  — Controlling
+//   s6  — Search System
+//   s7  — Verification
+//   s8  — Search Generation
+//   s9  — Search Controller
+//   s10 — Domain Extraction
 //
 // The frontend maps these IDs to display labels.
 
 const STAGE_IDS = {
-    UNDERSTAND:        's1',
-    PLANNING:          's2',
-    SUMMARY:           's3',
-    GENERATION:        's4',
-    CONTROLLING:       's5',
-    SEARCH_SYSTEM:     's6',
-    VERIFICATION:      's7',
-    SEARCH_GENERATION: 's8',
-    SEARCH_CONTROLLER: 's9',
-    DONE:              'done',
-    ERROR:             'error',
+    UNDERSTAND:         's1',
+    PLANNING:           's2',
+    SUMMARY:            's3',
+    GENERATION:         's4',
+    CONTROLLING:        's5',
+    SEARCH_SYSTEM:      's6',
+    VERIFICATION:       's7',
+    SEARCH_GENERATION:  's8',
+    SEARCH_CONTROLLER:  's9',
+    DOMAIN_EXTRACTION:  's10',
+    DONE:               'done',
+    ERROR:              'error',
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -174,8 +177,7 @@ async function streamPipeline(message, options, onStage) {
     // ── s9 — Search Controller ──
     //
     // Takes the generated searches and runs each one via SearchHandler.
-    // Results are accumulated in Handling.js for a future layer to
-    // extract each company's official domain.
+    // Results are accumulated in Handling.js.
 
     onStage(STAGE_IDS.SEARCH_CONTROLLER, { status: 'processing' });
 
@@ -190,6 +192,27 @@ async function streamPipeline(message, options, onStage) {
     });
 
     console.log('[Stream] s9 complete — Search Controller');
+
+    // ── s10 — Domain Extraction ──
+    //
+    // Takes the accumulated Tavily results from Handling and asks the AI
+    // to identify each company's official domain. Builds two URLs per
+    // company (/contact and /about) that a future layer will visit.
+
+    onStage(STAGE_IDS.DOMAIN_EXTRACTION, { status: 'processing' });
+
+    const domainExtraction = await generateDomainExtraction(
+        searchController,
+        understanding,
+        safeOptions
+    );
+
+    onStage(STAGE_IDS.DOMAIN_EXTRACTION, {
+        status: 'completed',
+        data: domainExtraction,
+    });
+
+    console.log('[Stream] s10 complete — Domain Extraction');
 
     // ── Done ──
     onStage(STAGE_IDS.DONE, { completed: true });
@@ -206,6 +229,7 @@ async function streamPipeline(message, options, onStage) {
         verification,
         searchGeneration,
         searchController,
+        domainExtraction,
     };
 }
 
