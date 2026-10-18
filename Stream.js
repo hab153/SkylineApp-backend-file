@@ -12,6 +12,7 @@ const {
     generateControlling,
     generateSeparation,
     generateVerification,
+    generateSearchGeneration,
 } = require('./Free');
 
 // ────────────────────────────────────────────────────────────────
@@ -28,19 +29,21 @@ const {
 //   s5 — Controlling
 //   s6 — Search System
 //   s7 — Verification
+//   s8 — Search Generation
 //
 // The frontend maps these IDs to display labels.
 
 const STAGE_IDS = {
-    UNDERSTAND:    's1',
-    PLANNING:      's2',
-    SUMMARY:       's3',
-    GENERATION:    's4',
-    CONTROLLING:   's5',
-    SEARCH_SYSTEM: 's6',
-    VERIFICATION:  's7',
-    DONE:          'done',
-    ERROR:         'error',
+    UNDERSTAND:        's1',
+    PLANNING:          's2',
+    SUMMARY:           's3',
+    GENERATION:        's4',
+    CONTROLLING:       's5',
+    SEARCH_SYSTEM:     's6',
+    VERIFICATION:      's7',
+    SEARCH_GENERATION: 's8',
+    DONE:              'done',
+    ERROR:             'error',
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -173,6 +176,27 @@ async function streamPipeline(message, options, onStage) {
 
     console.log('[Stream] s7 complete — Verification');
 
+    // ── s8 — Search Generation ──
+    //
+    // Takes the verified companies and generates one search phrase
+    // per company. Those searches will be executed by a future layer
+    // to find each company's official website domain.
+
+    onStage(STAGE_IDS.SEARCH_GENERATION, { status: 'processing' });
+
+    const searchGeneration = await generateSearchGeneration(
+        verification,
+        understanding,
+        safeOptions
+    );
+
+    onStage(STAGE_IDS.SEARCH_GENERATION, {
+        status: 'completed',
+        data: searchGeneration,
+    });
+
+    console.log('[Stream] s8 complete — Search Generation');
+
     // ── Done ──
     onStage(STAGE_IDS.DONE, { completed: true });
 
@@ -186,6 +210,7 @@ async function streamPipeline(message, options, onStage) {
         controlling,
         separation,
         verification,
+        searchGeneration,
     };
 }
 
