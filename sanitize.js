@@ -38,6 +38,9 @@ function sanitizeUsername(username) {
 
 /**
  * Sanitize an entire object (recursive)
+ * ✅ CRITICAL FIX: 
+ *   - `identifier` is preserved exactly (can be email OR username)
+ *   - `password` fields are NEVER modified
  */
 function sanitizeObject(obj, exclude = []) {
     if (!obj || typeof obj !== 'object') return obj;
@@ -50,17 +53,31 @@ function sanitizeObject(obj, exclude = []) {
         }
         
         if (typeof value === 'string') {
+            // ✅ Email fields — lowercase and trim only
             if (key === 'email' || key === 'newEmail') {
                 result[key] = sanitizeEmail(value);
-            } else if (key === 'username' || key === 'identifier') {
+            }
+            // ✅ Username field — strict alphanumeric + _ + .
+            else if (key === 'username') {
                 result[key] = sanitizeUsername(value);
-            } else {
+            }
+            // ✅ CRITICAL FIX: identifier can be email OR username
+            // Never strip @ or . — preserve exactly as typed
+            else if (key === 'identifier') {
+                result[key] = String(value).trim();
+            }
+            // ✅ CRITICAL FIX: passwords must NEVER be modified
+            else if (key === 'password' || key === 'currentPassword' || key === 'newPassword') {
+                result[key] = value;
+            }
+            // ✅ Everything else — escape HTML entities
+            else {
                 result[key] = sanitizeString(value);
             }
         } else if (Array.isArray(value)) {
             result[key] = value.map(item => {
                 if (typeof item === 'string') return sanitizeString(item);
-                if (typeof item === 'object') return sanitizeObject(item, exclude);
+                if (typeof item === 'object' && item !== null) return sanitizeObject(item, exclude);
                 return item;
             });
         } else if (typeof value === 'object' && value !== null) {
@@ -192,9 +209,6 @@ function hasNoSQLInjection(input) {
     if (!input || typeof input !== 'string') return false;
 
     // ✅ Only flag actual JSON-like injection patterns
-    // NOT fields that happen to have "in" or "or" in them (like "main", "information")
-    
-    // Check for operators embedded in strings with quotes (JSON injection)
     if (/\{\s*"\$[a-z]+"\s*:/.test(input)) return true;
     if (/\$where\s*:/.test(input)) return true;
     if (/\$regex\s*:/.test(input)) return true;
@@ -213,8 +227,6 @@ function hasNoSQLInjection(input) {
  * The previous version stripped ALL keys starting with '$', which
  * destroyed `$or` queries. This turned `{ $or: [...] }` into `{}`,
  * which made `User.findOne({})` return the FIRST user in the DB.
- *
- * That's why logging in as "saygmail.com" returned "saa@gmail.com"!
  */
 function sanitizeQuery(query) {
     if (!query || typeof query !== 'object') return query;
@@ -228,7 +240,6 @@ function sanitizeQuery(query) {
                 const sanitizedArray = value
                     .map(item => sanitizeQuery(item))
                     .filter(item => item && Object.keys(item).length > 0);
-                // ✅ Only keep if there's at least one valid clause
                 if (sanitizedArray.length > 0) {
                     sanitized[key] = sanitizedArray;
                 }
@@ -236,14 +247,14 @@ function sanitizeQuery(query) {
             continue;
         }
 
-        // ✅ ALLOW: Safe comparison operators ($gt, $lt, etc.) — used for dates
+        // ✅ ALLOW: Safe comparison operators
         const SAFE_COMPARISON_OPS = ['$gt', '$gte', '$lt', '$lte', '$eq', '$ne', '$in', '$nin', '$exists'];
         if (SAFE_COMPARISON_OPS.includes(key)) {
             sanitized[key] = value;
             continue;
         }
 
-        // ❌ BLOCK: Dangerous operators (code execution / regex DoS)
+        // ❌ BLOCK: Dangerous operators
         const DANGEROUS_OPS = ['$where', '$function', '$accumulator', '$expr', '$regex', '$text', '$jsonSchema'];
         if (DANGEROUS_OPS.includes(key)) {
             continue;
@@ -254,17 +265,16 @@ function sanitizeQuery(query) {
             continue;
         }
 
-        // Handle nested objects (e.g., { resetTokenExpiry: { $gt: Date } })
+        // Handle nested objects
         if (value && typeof value === 'object' && !Array.isArray(value)) {
             const sanitizedValue = sanitizeQuery(value);
-            // ✅ Only skip if it's truly empty (would match everything)
             if (Object.keys(sanitizedValue).length > 0) {
                 sanitized[key] = sanitizedValue;
             }
             continue;
         }
 
-        // Handle strings — reject if they contain actual injection patterns
+        // Handle strings
         if (typeof value === 'string') {
             if (!hasNoSQLInjection(value)) {
                 sanitized[key] = value;
