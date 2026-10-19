@@ -1,5 +1,5 @@
 // ────────────────────────────────────────────────────────────────
-// Free.js — Orchestrator
+// Free.js — Orchestrator (fires all stage events)
 // ────────────────────────────────────────────────────────────────
 'use strict';
 
@@ -7,14 +7,22 @@ const seekerRequest = require('./Seeker');
 const finderRequest = require('./Finder');
 
 // ────────────────────────────────────────────────────────────────
+// STAGE IDs
+// ────────────────────────────────────────────────────────────────
+
+const STAGE_IDS = {
+    UNDERSTANDING: 's1',
+    DISCOVERY:     's2',
+    DOMAIN:        's3',
+    DONE:          'done',
+    ERROR:         'error',
+};
+
+// ────────────────────────────────────────────────────────────────
 // FORMAT REPLY
 // ────────────────────────────────────────────────────────────────
 
-// Builds a human-readable reply from Finder's output.
-// Only Finder's output is shown — Seeker's raw results are not exposed.
-
 function formatReply(finderOutput) {
-    // ── Fallback message ──
     if (
         finderOutput &&
         typeof finderOutput.message === 'string' &&
@@ -76,12 +84,19 @@ async function generateFreeResponse(
     history,
     userProfile,
     onProgress,
-    options = {}
+    options = {},
+    onStage = () => {}
 ) {
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
 
+    // ── Ensure onStage is callable ──
+    const emit = typeof onStage === 'function' ? onStage : () => {};
+
     try {
+        // ── s1 — Understanding (processing) ──
+        emit(STAGE_IDS.UNDERSTANDING, { status: 'processing' });
+
         // ── STEP 1: Seeker ──
         let seekerOutput = null;
 
@@ -101,6 +116,31 @@ async function generateFreeResponse(
                     'Our server is currently experiencing high traffic. Please try again shortly.',
             };
         }
+
+        // ── s1 completed + s2 processing — Seeker returned ──
+        // Seeker internally does Understanding + Discovery in one call.
+        // From Free.js's view, both complete at this moment.
+        emit(STAGE_IDS.UNDERSTANDING, {
+            status: 'completed',
+            data: { message },
+        });
+
+        emit(STAGE_IDS.DISCOVERY, { status: 'processing' });
+
+        emit(STAGE_IDS.DISCOVERY, {
+            status: 'completed',
+            data: {
+                searches: Array.isArray(seekerOutput?.searches)
+                    ? seekerOutput.searches
+                    : [],
+                results: Array.isArray(seekerOutput?.results)
+                    ? seekerOutput.results
+                    : [],
+            },
+        });
+
+        // ── s3 — Domain (Finder) ──
+        emit(STAGE_IDS.DOMAIN, { status: 'processing' });
 
         // ── STEP 2: Finder ──
         let finderOutput = null;
@@ -122,18 +162,31 @@ async function generateFreeResponse(
             };
         }
 
-        // ── STEP 3: Build reply from Finder's output ──
+        // ── s3 completed ──
+        emit(STAGE_IDS.DOMAIN, {
+            status: 'completed',
+            data: {
+                companies: Array.isArray(finderOutput?.companies)
+                    ? finderOutput.companies
+                    : [],
+                message:
+                    typeof finderOutput?.message === 'string'
+                        ? finderOutput.message
+                        : null,
+            },
+        });
+
+        // ── STEP 3: Build reply ──
         const reply = formatReply(finderOutput);
 
-        // ── STEP 4: Build meta — only Finder's output ──
+        // ── STEP 4: Build meta — Finder only ──
         const meta =
             finderOutput && Array.isArray(finderOutput.companies)
-                ? {
-                      companies: finderOutput.companies,
-                  }
-                : {
-                      companies: [],
-                  };
+                ? { companies: finderOutput.companies }
+                : { companies: [] };
+
+        // ── Done ──
+        emit(STAGE_IDS.DONE, { completed: true });
 
         console.log('[Orchestrator] Final result ready');
 
@@ -146,6 +199,15 @@ async function generateFreeResponse(
         console.error('[Orchestrator] Error name:', error.name);
         console.error('[Orchestrator] Error message:', error.message);
         console.error('[Orchestrator] Full error:', error);
+
+        // ── Fire error event ──
+        emit(STAGE_IDS.ERROR, {
+            message:
+                error && error.message
+                    ? error.message
+                    : 'Pipeline failed',
+        });
+
         throw error;
     }
 }
@@ -156,4 +218,5 @@ async function generateFreeResponse(
 
 module.exports = {
     generateFreeResponse,
+    STAGE_IDS,
 };
