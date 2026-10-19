@@ -4,91 +4,64 @@
 'use strict';
 
 const seekerRequest = require('./Seeker');
+const finderRequest = require('./Finder');
 
 // ────────────────────────────────────────────────────────────────
 // FORMAT REPLY
 // ────────────────────────────────────────────────────────────────
 
-// Builds a human-readable reply from Seeker's output.
-// The meta object is returned alongside so the frontend can use
-// the raw data programmatically if it needs to.
+// Builds a human-readable reply from Finder's output.
+// Only Finder's output is shown — Seeker's raw results are not exposed.
 
-function formatReply(seekerOutput) {
-    // ── Fallback message — Seeker failed entirely ──
+function formatReply(finderOutput) {
+    // ── Fallback message ──
     if (
-        seekerOutput &&
-        typeof seekerOutput.message === 'string' &&
-        seekerOutput.message.trim().length > 0
+        finderOutput &&
+        typeof finderOutput.message === 'string' &&
+        finderOutput.message.trim().length > 0
     ) {
-        return `💬 ${seekerOutput.message}`;
+        return `💬 ${finderOutput.message}`;
     }
 
-    const searches = Array.isArray(seekerOutput?.searches)
-        ? seekerOutput.searches
+    const companies = Array.isArray(finderOutput?.companies)
+        ? finderOutput.companies
         : [];
 
-    const results = Array.isArray(seekerOutput?.results)
-        ? seekerOutput.results
-        : [];
+    if (companies.length === 0) {
+        return '⚠️ No company results were returned.';
+    }
 
     const lines = [];
 
-    // ── Searches generated ──
-    if (searches.length > 0) {
-        lines.push('**🔎 SEARCHES GENERATED**');
-        lines.push('');
-        for (let i = 0; i < searches.length; i++) {
-            lines.push(`${i + 1}. ${searches[i]}`);
+    lines.push('**🏢 COMPANIES DISCOVERED**');
+    lines.push('');
+
+    for (let i = 0; i < companies.length; i++) {
+        const c = companies[i];
+        const name = c?.name || `Company ${i + 1}`;
+        const query = c?.query || '';
+        const tavilyResults = Array.isArray(c?.results?.results)
+            ? c.results.results
+            : [];
+
+        lines.push(`**${i + 1}. ${name}**`);
+        if (query) lines.push(`🔎 Query: ${query}`);
+        lines.push(`📄 ${tavilyResults.length} result(s)`);
+
+        const top = tavilyResults.slice(0, 5);
+        for (const item of top) {
+            const title = item?.title ? item.title.trim() : null;
+            const url = item?.url ? item.url.trim() : null;
+
+            if (title) lines.push(`• ${title}`);
+            if (url) lines.push(`  🔗 ${url}`);
         }
-        lines.push('');
-    }
 
-    // ── Results per search ──
-    if (results.length > 0) {
-        let totalResults = 0;
-        for (const entry of results) {
-            if (entry?.response?.results && Array.isArray(entry.response.results)) {
-                totalResults += entry.response.results.length;
-            }
+        if (tavilyResults.length > 5) {
+            lines.push(`… and ${tavilyResults.length - 5} more`);
         }
 
-        lines.push('---');
         lines.push('');
-        lines.push('**📦 SEARCH RESULTS**');
-        lines.push('');
-        lines.push(
-            `📊 ${results.length} search(es) returned ${totalResults} result(s)`
-        );
-        lines.push('');
-
-        for (let s = 0; s < results.length; s++) {
-            const entry = results[s];
-            const query = entry.search || `Search ${s + 1}`;
-            const items = Array.isArray(entry?.response?.results)
-                ? entry.response.results
-                : [];
-
-            lines.push(`**${s + 1}. ${query}**`);
-            lines.push(`📄 ${items.length} result(s)`);
-
-            const top = items.slice(0, 5);
-            for (const item of top) {
-                const title = item?.title ? item.title.trim() : null;
-                const url = item?.url ? item.url.trim() : null;
-
-                if (title) lines.push(`• ${title}`);
-                if (url) lines.push(`  🔗 ${url}`);
-            }
-
-            if (items.length > 5) {
-                lines.push(`… and ${items.length - 5} more`);
-            }
-
-            lines.push('');
-        }
-    } else {
-        lines.push('');
-        lines.push('⚠️ No search results were returned.');
     }
 
     return lines.join('\n');
@@ -109,7 +82,7 @@ async function generateFreeResponse(
     console.log('[Orchestrator] Message:', message);
 
     try {
-        // ── STEP 1: Call Seeker ──
+        // ── STEP 1: Seeker ──
         let seekerOutput = null;
 
         try {
@@ -118,7 +91,9 @@ async function generateFreeResponse(
         } catch (seekerErr) {
             console.error(
                 '[Orchestrator] Seeker failed:',
-                seekerErr && seekerErr.message ? seekerErr.message : seekerErr
+                seekerErr && seekerErr.message
+                    ? seekerErr.message
+                    : seekerErr
             );
 
             seekerOutput = {
@@ -127,21 +102,37 @@ async function generateFreeResponse(
             };
         }
 
-        // ── STEP 2: Build reply ──
-        const reply = formatReply(seekerOutput);
+        // ── STEP 2: Finder ──
+        let finderOutput = null;
 
-        // ── STEP 3: Build meta ──
+        try {
+            finderOutput = await finderRequest(seekerOutput, message);
+            console.log('[Orchestrator] Finder output:', finderOutput);
+        } catch (finderErr) {
+            console.error(
+                '[Orchestrator] Finder failed:',
+                finderErr && finderErr.message
+                    ? finderErr.message
+                    : finderErr
+            );
+
+            finderOutput = {
+                message:
+                    'Our server is currently experiencing high traffic. Please try again shortly.',
+            };
+        }
+
+        // ── STEP 3: Build reply from Finder's output ──
+        const reply = formatReply(finderOutput);
+
+        // ── STEP 4: Build meta — only Finder's output ──
         const meta =
-            seekerOutput && Array.isArray(seekerOutput.searches)
+            finderOutput && Array.isArray(finderOutput.companies)
                 ? {
-                      searches: seekerOutput.searches,
-                      results: Array.isArray(seekerOutput.results)
-                          ? seekerOutput.results
-                          : [],
+                      companies: finderOutput.companies,
                   }
                 : {
-                      searches: [],
-                      results: [],
+                      companies: [],
                   };
 
         console.log('[Orchestrator] Final result ready');
