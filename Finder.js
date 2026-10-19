@@ -30,6 +30,74 @@ const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
 // ────────────────────────────────────────────────────────────────
+// BLOCKED DOMAINS
+// ────────────────────────────────────────────────────────────────
+
+// Social media and profile sites that must never appear in results.
+// Matching is case-insensitive and covers subdomains.
+const BLOCKED_DOMAINS = [
+    'linkedin.com',
+    'lnkd.in',
+    'x.com',
+    'twitter.com',
+    'facebook.com',
+    'fb.com',
+];
+
+// ────────────────────────────────────────────────────────────────
+// DOMAIN FILTER
+// ────────────────────────────────────────────────────────────────
+
+// Returns true if the URL points to a blocked domain (or any of its
+// subdomains). Safe against invalid URLs — treats them as blocked so
+// broken entries never leak through.
+
+function isBlockedUrl(url) {
+    if (typeof url !== 'string' || url.trim().length === 0) {
+        return true;
+    }
+
+    let hostname;
+
+    try {
+        hostname = new URL(url.trim()).hostname.toLowerCase();
+    } catch (_) {
+        return true;
+    }
+
+    for (const blocked of BLOCKED_DOMAINS) {
+        if (hostname === blocked || hostname.endsWith('.' + blocked)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Filters a Tavily response object's results array.
+// Returns a new response object with only non-blocked URLs.
+// If every result is blocked, returns an empty results array.
+
+function filterTavilyResponse(response) {
+    if (!response || typeof response !== 'object') {
+        return response;
+    }
+
+    const originalResults = Array.isArray(response.results)
+        ? response.results
+        : [];
+
+    const cleanResults = originalResults.filter(
+        (item) => item && !isBlockedUrl(item.url)
+    );
+
+    return {
+        ...response,
+        results: cleanResults,
+    };
+}
+
+// ────────────────────────────────────────────────────────────────
 // AI INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
@@ -277,7 +345,7 @@ async function finderRequest(seekerOutput, message) {
         };
     }
 
-    // ── Step 2: Run the searches sequentially ──
+    // ── Step 2: Run the searches sequentially and filter results ──
     const results = [];
 
     for (let i = 0; i < companies.length; i++) {
@@ -288,17 +356,20 @@ async function finderRequest(seekerOutput, message) {
             `[Finder] Running search ${i + 1}/${companies.length} for: ${company.name}`
         );
 
-        const response = await runTavilySearch(company.query);
+        const rawResponse = await runTavilySearch(company.query);
         const searchMs = Date.now() - searchStart;
 
-        if (response) {
+        if (rawResponse) {
+            const filteredResponse = filterTavilyResponse(rawResponse);
+
             results.push({
                 name: company.name,
                 query: company.query,
-                results: response,
+                results: filteredResponse,
             });
+
             console.log(
-                `[Finder] Search ${i + 1} succeeded (${searchMs}ms)`
+                `[Finder] Search ${i + 1} succeeded (${searchMs}ms) — ${filteredResponse.results.length} clean result(s)`
             );
         } else {
             console.warn(
