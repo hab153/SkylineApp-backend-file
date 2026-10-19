@@ -1,48 +1,20 @@
+// ────────────────────────────────────────────────────────────────
+// Stream.js — Thin wrapper around Free.js
+// ────────────────────────────────────────────────────────────────
 'use strict';
 
-// ────────────────────────────────────────────────────────────────
-// IMPORTS
-// ────────────────────────────────────────────────────────────────
-
-const seekerRequest = require('./Seeker');
-
-// ────────────────────────────────────────────────────────────────
-// STAGE IDs
-// ────────────────────────────────────────────────────────────────
-
-// Neutral stage identifiers. The wire only carries these IDs —
-// no internal names ever leave the server.
-//
-//   s1 — Understanding
-//   s2 — Discovery
-//
-// The frontend maps these IDs to display labels.
-
-const STAGE_IDS = {
-    UNDERSTANDING: 's1',
-    DISCOVERY:     's2',
-    DONE:          'done',
-    ERROR:         'error',
-};
+const { generateFreeResponse } = require('./Free');
 
 // ────────────────────────────────────────────────────────────────
 // STREAM PIPELINE
 // ────────────────────────────────────────────────────────────────
 
-// Runs the pipeline.
+// Runs the full pipeline by calling Free.js, which fires all
+// stage events (s1, s2, s3, done, error) through the onStage
+// callback that Stream.js passes in.
 //
-// The work is done by Seeker.js. This file:
-//   1. Fires "s1 processing" before Seeker starts (Understanding)
-//   2. Calls Seeker (which internally understands, generates 2
-//      queries, runs search 1, runs search 2)
-//   3. Fires "s1 completed" and "s2 processing" as Seeker's work
-//      hits those boundaries
-//   4. Fires "s2 completed" with the search results
-//   5. Fires "done" when the whole pipeline finishes
-//
-// The frontend stepper shows 2 stages:
-//   s1 — Understanding
-//   s2 — Discovery
+// Stream.js adds nothing else — it just wraps Free.js and
+// forwards the caller's onStage callback.
 
 async function streamPipeline(message, options, onStage) {
     console.log('[Stream] Pipeline started');
@@ -60,7 +32,7 @@ async function streamPipeline(message, options, onStage) {
 
     const safeOptions = options && typeof options === 'object' ? options : {};
 
-    // ── Wrap the caller's onStage so we can log locally as well ──
+    // ── Wrap the caller's onStage so we can log locally ──
     const stagePassThrough = (stageId, payload) => {
         try {
             console.log(`[Stream] Stage event — ${stageId}:`, payload);
@@ -77,44 +49,17 @@ async function streamPipeline(message, options, onStage) {
     };
 
     try {
-        // ── s1 — Understanding starts ──
-        stagePassThrough(STAGE_IDS.UNDERSTANDING, {
-            status: 'processing',
-        });
+        // ── Delegate to Free.js, passing the stage callback ──
+        const result = await generateFreeResponse(
+            message,
+            safeOptions.history || [],
+            safeOptions.userProfile || null,
+            safeOptions.onProgress || null,
+            safeOptions,
+            stagePassThrough
+        );
 
-        // ── s1 completed — s2 starts ──
-        // Seeker internally handles understanding → query generation,
-        // then runs both searches. We mark s1 as done and s2 as
-        // processing before the actual search calls begin.
-        stagePassThrough(STAGE_IDS.UNDERSTANDING, {
-            status: 'completed',
-            data: { message },
-        });
-
-        stagePassThrough(STAGE_IDS.DISCOVERY, {
-            status: 'processing',
-        });
-
-        // ── Delegate to Seeker ──
-        const result = await seekerRequest(message);
-
-        console.log('[Stream] Seeker returned:', result);
-
-        // ── s2 completed — with the search results ──
-        stagePassThrough(STAGE_IDS.DISCOVERY, {
-            status: 'completed',
-            data: {
-                searches: Array.isArray(result?.searches)
-                    ? result.searches
-                    : [],
-                results: Array.isArray(result?.results)
-                    ? result.results
-                    : [],
-            },
-        });
-
-        // ── Fire the final "done" event ──
-        stagePassThrough(STAGE_IDS.DONE, { completed: true });
+        console.log('[Stream] Free.js returned:', result);
 
         console.log('[Stream] Pipeline finished');
 
@@ -124,14 +69,6 @@ async function streamPipeline(message, options, onStage) {
             '[Stream] Pipeline failed:',
             error && error.message ? error.message : error
         );
-
-        // ── Fire an error event so the frontend can show it ──
-        stagePassThrough(STAGE_IDS.ERROR, {
-            message:
-                error && error.message
-                    ? error.message
-                    : 'Pipeline failed',
-        });
 
         throw error;
     }
@@ -143,5 +80,4 @@ async function streamPipeline(message, options, onStage) {
 
 module.exports = {
     streamPipeline,
-    STAGE_IDS,
 };
