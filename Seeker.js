@@ -29,6 +29,9 @@ const TAVILY_PARAMS = {
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
+// LinkedIn is forbidden in generated queries — no exception.
+const FORBIDDEN_WORDS = ['linkedin'];
+
 // ────────────────────────────────────────────────────────────────
 // AI INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
@@ -65,7 +68,6 @@ mentioned at once, such as:
 
 - Business directories (e.g., "fintech companies London directory")
 - Company databases (e.g., "site:crunchbase.com fintech companies London")
-- Professional profiles (e.g., "fintech companies London linkedin")
 - Broad discovery searches (e.g., "fintech companies London")
 - Industry listings (e.g., "list of fintech companies London")
 - News and reports that mention many companies
@@ -85,12 +87,15 @@ Forbidden phrasing — never use these:
 - companies needing
 - companies requiring
 - looking for
+- linkedin
+
+The word "linkedin" is strictly forbidden. Do not include it in any
+query, in any form, for any reason.
 
 Preferred phrasing — use these where they fit:
 
 - directory
 - list of
-- linkedin
 - crunchbase
 - news
 - companies in
@@ -119,6 +124,24 @@ Do not explain your answer.
 Do not add extra fields.
 Do not remove any fields.
 `;
+
+// ────────────────────────────────────────────────────────────────
+// FORBIDDEN WORD CHECK
+// ────────────────────────────────────────────────────────────────
+
+function containsForbiddenWord(query) {
+    if (typeof query !== 'string') return true;
+
+    const lower = query.toLowerCase();
+
+    for (const word of FORBIDDEN_WORDS) {
+        if (lower.includes(word)) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 // ────────────────────────────────────────────────────────────────
 // AI QUERY GENERATION — WITH RETRIES
@@ -159,6 +182,16 @@ async function generateQueries(message) {
             const searches = rawSearches
                 .filter((s) => typeof s === 'string' && s.trim().length > 0)
                 .map((s) => s.trim());
+
+            // ── Reject any query that contains a forbidden word ──
+            const anyForbidden = searches.some((s) => containsForbiddenWord(s));
+
+            if (anyForbidden) {
+                console.warn(
+                    '[Seeker] AI returned a query containing a forbidden word. Retrying.'
+                );
+                continue;
+            }
 
             if (searches.length >= 2) {
                 console.log('[Seeker] AI generated queries:', searches.slice(0, 2));
