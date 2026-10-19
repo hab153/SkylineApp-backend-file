@@ -4,31 +4,27 @@
 // IMPORTS
 // ────────────────────────────────────────────────────────────────
 
-const streamPipeline = require('./stream').streamPipeline;
-const domainFinder   = require('./domainFinder');
+const generateAndSearch = require('./generateAndSearch');
+const domainFinder      = require('./domainFinder');
 
 // ────────────────────────────────────────────────────────────────
 // ORCHESTRATOR
 // ────────────────────────────────────────────────────────────────
 
-// Free.js is a thin orchestrator.
+// Free.js is used by the /api/chat route (via chatController).
 //
 // Its job:
 //
-//   1. Hand the user request to stream.js → streamPipeline()
-//      → streamPipeline passes the onStage callback through to
-//        generateAndSearch, so real stage events (s1, s2) reach
-//        the caller as the work happens
-//      → returns the final result (searches + tavilyResults)
+//   1. Call generateAndSearch directly — no stream layer involved
+//   2. Extract companies + city from the result
+//   3. Call domainFinder(companies, city)
+//   4. Merge and return
 //
-//   2. Extract the companies and the city from that output
-//      → pass them to domainFinder.js
+// The SSE / streaming path is separate:
+//   page.js → /api/stream/pipeline → streamRoutes.js → Stream.js
+//   → generateAndSearch.js
 //
-//   3. Merge both results into one response
-//      → return to the caller (frontend)
-//
-// Free.js adds nothing else — no formatting, no transformation
-// beyond extraction and merging.
+// Free.js is NOT part of that chain.
 
 async function generateFreeResponse(
     message,
@@ -41,34 +37,18 @@ async function generateFreeResponse(
     console.log('[Orchestrator] Message:', message);
 
     try {
-        // ── Resolve the stage callback ──
-        //
-        // The caller may pass an onStage function via options.
-        // If they do, stage events will reach them in real time.
-        // If they don't, we pass a no-op so streamPipeline has a
-        // valid function to call.
-        const onStage =
-            options && typeof options.onStage === 'function'
-                ? options.onStage
-                : () => {};
-
-        // ── STEP 1: streamPipeline ──
-        //
-        // streamPipeline wires the onStage callback through to
-        // generateAndSearch so s1 and s2 fire at the real moment
-        // each stage starts and finishes.
-        const result = await streamPipeline(
+        // ── STEP 1: generateAndSearch ──
+        const result = await generateAndSearch(
             message,
             {
                 history,
                 userProfile,
                 onProgress,
                 options,
-            },
-            onStage
+            }
         );
 
-        console.log('[Orchestrator] streamPipeline result:', result);
+        console.log('[Orchestrator] generateAndSearch result:', result);
 
         // ── STEP 2: extract companies + city ──
         const companies = Array.isArray(result?.companies)
