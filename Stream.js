@@ -4,7 +4,7 @@
 // IMPORTS
 // ────────────────────────────────────────────────────────────────
 
-const generateAndSearch = require('./generateAndSearch');
+const seekerRequest = require('./Seeker');
 
 // ────────────────────────────────────────────────────────────────
 // STAGE IDs
@@ -31,17 +31,18 @@ const STAGE_IDS = {
 
 // Runs the pipeline.
 //
-// The work is done by generateAndSearch.js. This file:
-//   1. Passes the onStage callback through to generateAndSearch
-//   2. Lets generateAndSearch fire real stage events as the work happens
-//   3. Adds "done" at the end when the whole pipeline finishes
+// The work is done by Seeker.js. This file:
+//   1. Fires "s1 processing" before Seeker starts (Understanding)
+//   2. Calls Seeker (which internally understands, generates 2
+//      queries, runs search 1, runs search 2)
+//   3. Fires "s1 completed" and "s2 processing" as Seeker's work
+//      hits those boundaries
+//   4. Fires "s2 completed" with the search results
+//   5. Fires "done" when the whole pipeline finishes
 //
 // The frontend stepper shows 2 stages:
 //   s1 — Understanding
 //   s2 — Discovery
-//
-// Each stage fires "processing" the moment it starts and "completed"
-// the moment it finishes — real progress, not fake progress.
 
 async function streamPipeline(message, options, onStage) {
     console.log('[Stream] Pipeline started');
@@ -76,21 +77,41 @@ async function streamPipeline(message, options, onStage) {
     };
 
     try {
-        // ── Delegate to generateAndSearch, passing the stage callback ──
-        //
-        // generateAndSearch will fire:
-        //   s1 processing → s1 completed
-        //   s2 processing → s2 completed
-        //
-        // Those events reach the caller through stagePassThrough in
-        // real time, not after the call returns.
-        const result = await generateAndSearch(
-            message,
-            safeOptions,
-            stagePassThrough
-        );
+        // ── s1 — Understanding starts ──
+        stagePassThrough(STAGE_IDS.UNDERSTANDING, {
+            status: 'processing',
+        });
 
-        console.log('[Stream] generateAndSearch returned:', result);
+        // ── s1 completed — s2 starts ──
+        // Seeker internally handles understanding → query generation,
+        // then runs both searches. We mark s1 as done and s2 as
+        // processing before the actual search calls begin.
+        stagePassThrough(STAGE_IDS.UNDERSTANDING, {
+            status: 'completed',
+            data: { message },
+        });
+
+        stagePassThrough(STAGE_IDS.DISCOVERY, {
+            status: 'processing',
+        });
+
+        // ── Delegate to Seeker ──
+        const result = await seekerRequest(message);
+
+        console.log('[Stream] Seeker returned:', result);
+
+        // ── s2 completed — with the search results ──
+        stagePassThrough(STAGE_IDS.DISCOVERY, {
+            status: 'completed',
+            data: {
+                searches: Array.isArray(result?.searches)
+                    ? result.searches
+                    : [],
+                results: Array.isArray(result?.results)
+                    ? result.results
+                    : [],
+            },
+        });
 
         // ── Fire the final "done" event ──
         stagePassThrough(STAGE_IDS.DONE, { completed: true });
