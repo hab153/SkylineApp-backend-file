@@ -5,6 +5,7 @@
 
 const seekerRequest = require('./Seeker');
 const finderRequest = require('./Finder');
+const contactPagesRequest = require('./ContactPages');
 
 // ────────────────────────────────────────────────────────────────
 // STAGE IDs
@@ -14,6 +15,7 @@ const STAGE_IDS = {
     UNDERSTANDING: 's1',
     DISCOVERY:     's2',
     DOMAIN:        's3',
+    CONTACT_PAGES: 's4',
     DONE:          'done',
     ERROR:         'error',
 };
@@ -22,51 +24,46 @@ const STAGE_IDS = {
 // FORMAT REPLY
 // ────────────────────────────────────────────────────────────────
 
-function formatReply(finderOutput) {
+function formatReply(contactPagesOutput) {
     if (
-        finderOutput &&
-        typeof finderOutput.message === 'string' &&
-        finderOutput.message.trim().length > 0
+        contactPagesOutput &&
+        typeof contactPagesOutput.message === 'string' &&
+        contactPagesOutput.message.trim().length > 0
     ) {
-        return `💬 ${finderOutput.message}`;
+        return `💬 ${contactPagesOutput.message}`;
     }
 
-    const companies = Array.isArray(finderOutput?.companies)
-        ? finderOutput.companies
+    const pages = Array.isArray(contactPagesOutput?.pages)
+        ? contactPagesOutput.pages
         : [];
 
-    if (companies.length === 0) {
-        return '⚠️ No company results were returned.';
+    if (pages.length === 0) {
+        return '⚠️ No company page results were returned.';
     }
 
     const lines = [];
 
-    lines.push('**🏢 COMPANIES DISCOVERED**');
+    lines.push('**🏢 COMPANY PAGES DISCOVERED**');
     lines.push('');
 
-    for (let i = 0; i < companies.length; i++) {
-        const c = companies[i];
-        const name = c?.name || `Company ${i + 1}`;
-        const query = c?.query || '';
-        const tavilyResults = Array.isArray(c?.results?.results)
-            ? c.results.results
+    for (let i = 0; i < pages.length; i++) {
+        const p = pages[i];
+        const name = p?.name || `Company ${i + 1}`;
+        const domain = p?.domain || '';
+        const urls = Array.isArray(p?.mapResponse?.results)
+            ? p.mapResponse.results
             : [];
 
         lines.push(`**${i + 1}. ${name}**`);
-        if (query) lines.push(`🔎 Query: ${query}`);
-        lines.push(`📄 ${tavilyResults.length} result(s)`);
+        if (domain) lines.push(`🌐 Domain: ${domain}`);
+        lines.push(`🔗 ${urls.length} page URL(s) found`);
+        lines.push('');
 
-        const top = tavilyResults.slice(0, 5);
-        for (const item of top) {
-            const title = item?.title ? item.title.trim() : null;
-            const url = item?.url ? item.url.trim() : null;
-
-            if (title) lines.push(`• ${title}`);
-            if (url) lines.push(`  🔗 ${url}`);
-        }
-
-        if (tavilyResults.length > 5) {
-            lines.push(`… and ${tavilyResults.length - 5} more`);
+        for (let u = 0; u < urls.length; u++) {
+            const url = urls[u];
+            if (typeof url === 'string' && url.trim().length > 0) {
+                lines.push(`  • ${url.trim()}`);
+            }
         }
 
         lines.push('');
@@ -118,8 +115,6 @@ async function generateFreeResponse(
         }
 
         // ── s1 completed + s2 processing — Seeker returned ──
-        // Seeker internally does Understanding + Discovery in one call.
-        // From Free.js's view, both complete at this moment.
         emit(STAGE_IDS.UNDERSTANDING, {
             status: 'completed',
             data: { message },
@@ -176,14 +171,54 @@ async function generateFreeResponse(
             },
         });
 
-        // ── STEP 3: Build reply ──
-        const reply = formatReply(finderOutput);
+        // ── s4 — Contact Pages ──
+        emit(STAGE_IDS.CONTACT_PAGES, { status: 'processing' });
 
-        // ── STEP 4: Build meta — Finder only ──
+        // ── STEP 3: ContactPages ──
+        let contactPagesOutput = null;
+
+        try {
+            contactPagesOutput = await contactPagesRequest(finderOutput);
+            console.log(
+                '[Orchestrator] ContactPages output:',
+                contactPagesOutput
+            );
+        } catch (contactPagesErr) {
+            console.error(
+                '[Orchestrator] ContactPages failed:',
+                contactPagesErr && contactPagesErr.message
+                    ? contactPagesErr.message
+                    : contactPagesErr
+            );
+
+            contactPagesOutput = {
+                message:
+                    'Our server is currently experiencing high traffic. Please try again shortly.',
+            };
+        }
+
+        // ── s4 completed ──
+        emit(STAGE_IDS.CONTACT_PAGES, {
+            status: 'completed',
+            data: {
+                pages: Array.isArray(contactPagesOutput?.pages)
+                    ? contactPagesOutput.pages
+                    : [],
+                message:
+                    typeof contactPagesOutput?.message === 'string'
+                        ? contactPagesOutput.message
+                        : null,
+            },
+        });
+
+        // ── STEP 4: Build reply ──
+        const reply = formatReply(contactPagesOutput);
+
+        // ── STEP 5: Build meta — ContactPages only ──
         const meta =
-            finderOutput && Array.isArray(finderOutput.companies)
-                ? { companies: finderOutput.companies }
-                : { companies: [] };
+            contactPagesOutput && Array.isArray(contactPagesOutput.pages)
+                ? { pages: contactPagesOutput.pages }
+                : { pages: [] };
 
         // ── Done ──
         emit(STAGE_IDS.DONE, { completed: true });
