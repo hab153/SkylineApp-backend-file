@@ -6,70 +6,94 @@
 const seekerRequest = require('./Seeker');
 const finderRequest = require('./Finder');
 const contactPagesRequest = require('./ContactPages');
+const searchingRequest = require('./Searching');
 
 // ────────────────────────────────────────────────────────────────
 // STAGE IDs
 // ────────────────────────────────────────────────────────────────
 
 const STAGE_IDS = {
-    UNDERSTANDING: 's1',
-    DISCOVERY:     's2',
-    DOMAIN:        's3',
-    CONTACT_PAGES: 's4',
-    DONE:          'done',
-    ERROR:         'error',
+    UNDERSTANDING:  's1',
+    DISCOVERY:      's2',
+    DOMAIN:         's3',
+    CONTACT_PAGES:  's4',
+    COMPANY_DATA:   's5',
+    DONE:           'done',
+    ERROR:          'error',
 };
 
 // ────────────────────────────────────────────────────────────────
 // FORMAT REPLY
 // ────────────────────────────────────────────────────────────────
 
-function formatReply(contactPagesOutput) {
+// Reads from Searching's output — { companies: [...] }.
+// Renders exactly 4 labeled fields per company, nothing else.
+
+function formatReply(searchingOutput) {
     if (
-        contactPagesOutput &&
-        typeof contactPagesOutput.message === 'string' &&
-        contactPagesOutput.message.trim().length > 0
+        searchingOutput &&
+        typeof searchingOutput.message === 'string' &&
+        searchingOutput.message.trim().length > 0
     ) {
-        return `💬 ${contactPagesOutput.message}`;
+        return `💬 ${searchingOutput.message}`;
     }
 
-    const pages = Array.isArray(contactPagesOutput?.pages)
-        ? contactPagesOutput.pages
+    const companies = Array.isArray(searchingOutput?.companies)
+        ? searchingOutput.companies
         : [];
 
-    if (pages.length === 0) {
-        return '⚠️ No company page results were returned.';
+    if (companies.length === 0) {
+        return '⚠️ No company data was returned.';
     }
 
-    const lines = [];
+    const blocks = [];
 
-    lines.push('**🏢 COMPANY PAGES DISCOVERED**');
-    lines.push('');
+    for (let i = 0; i < companies.length; i++) {
+        const c = companies[i] || {};
 
-    for (let i = 0; i < pages.length; i++) {
-        const p = pages[i];
-        const name = p?.name || `Company ${i + 1}`;
-        const domain = p?.domain || '';
-        const urls = Array.isArray(p?.mapResponse?.results)
-            ? p.mapResponse.results
-            : [];
+        const name =
+            typeof c.companyName === 'string' && c.companyName.trim()
+                ? c.companyName.trim()
+                : `Company ${i + 1}`;
 
-        lines.push(`**${i + 1}. ${name}**`);
-        if (domain) lines.push(`🌐 Domain: ${domain}`);
-        lines.push(`🔗 ${urls.length} page URL(s) found`);
-        lines.push('');
-
-        for (let u = 0; u < urls.length; u++) {
-            const url = urls[u];
-            if (typeof url === 'string' && url.trim().length > 0) {
-                lines.push(`  • ${url.trim()}`);
+        // ── Email ──
+        let emailDisplay = 'Not found';
+        if (c.email) {
+            if (c.emailStatus === 'predicted') {
+                emailDisplay = `${c.email} (predicted — not verified)`;
+            } else {
+                emailDisplay = c.email;
             }
         }
 
-        lines.push('');
+        // ── Company information ──
+        let infoDisplay = 'Not available';
+        if (typeof c.companyInformation === 'string' && c.companyInformation.trim()) {
+            infoDisplay =
+                c.informationStatus === 'estimated'
+                    ? `${c.companyInformation.trim()} (AI estimate)`
+                    : c.companyInformation.trim();
+        }
+
+        // ── Phone ──
+        const phoneDisplay =
+            typeof c.phoneNumber === 'string' && c.phoneNumber.trim()
+                ? c.phoneNumber.trim()
+                : 'Not found';
+
+        const block = [
+            `**Company ${i + 1}**`,
+            '',
+            `Company name: ${name}`,
+            `Company email: ${emailDisplay}`,
+            `Company phone number: ${phoneDisplay}`,
+            `Company information: ${infoDisplay}`,
+        ].join('\n');
+
+        blocks.push(block);
     }
 
-    return lines.join('\n');
+    return blocks.join('\n\n');
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -87,160 +111,111 @@ async function generateFreeResponse(
     console.log('[Orchestrator] Request received');
     console.log('[Orchestrator] Message:', message);
 
-    // ── Ensure onStage is callable ──
     const emit = typeof onStage === 'function' ? onStage : () => {};
 
     try {
-        // ── s1 — Understanding (processing) ──
+        // ── s1 — Understanding ──
         emit(STAGE_IDS.UNDERSTANDING, { status: 'processing' });
 
-        // ── STEP 1: Seeker ──
         let seekerOutput = null;
 
         try {
             seekerOutput = await seekerRequest(message);
-            console.log('[Orchestrator] Seeker output:', seekerOutput);
-        } catch (seekerErr) {
-            console.error(
-                '[Orchestrator] Seeker failed:',
-                seekerErr && seekerErr.message
-                    ? seekerErr.message
-                    : seekerErr
-            );
-
-            seekerOutput = {
-                message:
-                    'Our server is currently experiencing high traffic. Please try again shortly.',
-            };
+        } catch (err) {
+            console.error('[Orchestrator] Seeker failed:', err?.message || err);
+            seekerOutput = { message: 'Our server is currently experiencing high traffic. Please try again shortly.' };
         }
 
-        // ── s1 completed + s2 processing — Seeker returned ──
-        emit(STAGE_IDS.UNDERSTANDING, {
-            status: 'completed',
-            data: { message },
-        });
+        emit(STAGE_IDS.UNDERSTANDING, { status: 'completed', data: { message } });
 
+        // ── s2 — Discovery ──
         emit(STAGE_IDS.DISCOVERY, { status: 'processing' });
-
         emit(STAGE_IDS.DISCOVERY, {
             status: 'completed',
             data: {
-                searches: Array.isArray(seekerOutput?.searches)
-                    ? seekerOutput.searches
-                    : [],
-                results: Array.isArray(seekerOutput?.results)
-                    ? seekerOutput.results
-                    : [],
+                searches: Array.isArray(seekerOutput?.searches) ? seekerOutput.searches : [],
+                results: Array.isArray(seekerOutput?.results) ? seekerOutput.results : [],
             },
         });
 
-        // ── s3 — Domain (Finder) ──
+        // ── s3 — Domain Finder ──
         emit(STAGE_IDS.DOMAIN, { status: 'processing' });
 
-        // ── STEP 2: Finder ──
         let finderOutput = null;
 
         try {
             finderOutput = await finderRequest(seekerOutput, message);
-            console.log('[Orchestrator] Finder output:', finderOutput);
-        } catch (finderErr) {
-            console.error(
-                '[Orchestrator] Finder failed:',
-                finderErr && finderErr.message
-                    ? finderErr.message
-                    : finderErr
-            );
-
-            finderOutput = {
-                message:
-                    'Our server is currently experiencing high traffic. Please try again shortly.',
-            };
+        } catch (err) {
+            console.error('[Orchestrator] Finder failed:', err?.message || err);
+            finderOutput = { message: 'Our server is currently experiencing high traffic. Please try again shortly.' };
         }
 
-        // ── s3 completed ──
         emit(STAGE_IDS.DOMAIN, {
             status: 'completed',
             data: {
-                companies: Array.isArray(finderOutput?.companies)
-                    ? finderOutput.companies
-                    : [],
-                message:
-                    typeof finderOutput?.message === 'string'
-                        ? finderOutput.message
-                        : null,
+                companies: Array.isArray(finderOutput?.companies) ? finderOutput.companies : [],
+                message: typeof finderOutput?.message === 'string' ? finderOutput.message : null,
             },
         });
 
         // ── s4 — Contact Pages ──
         emit(STAGE_IDS.CONTACT_PAGES, { status: 'processing' });
 
-        // ── STEP 3: ContactPages ──
         let contactPagesOutput = null;
 
         try {
             contactPagesOutput = await contactPagesRequest(finderOutput);
-            console.log(
-                '[Orchestrator] ContactPages output:',
-                contactPagesOutput
-            );
-        } catch (contactPagesErr) {
-            console.error(
-                '[Orchestrator] ContactPages failed:',
-                contactPagesErr && contactPagesErr.message
-                    ? contactPagesErr.message
-                    : contactPagesErr
-            );
-
-            contactPagesOutput = {
-                message:
-                    'Our server is currently experiencing high traffic. Please try again shortly.',
-            };
+        } catch (err) {
+            console.error('[Orchestrator] ContactPages failed:', err?.message || err);
+            contactPagesOutput = { message: 'Our server is currently experiencing high traffic. Please try again shortly.' };
         }
 
-        // ── s4 completed ──
         emit(STAGE_IDS.CONTACT_PAGES, {
             status: 'completed',
             data: {
-                pages: Array.isArray(contactPagesOutput?.pages)
-                    ? contactPagesOutput.pages
-                    : [],
-                message:
-                    typeof contactPagesOutput?.message === 'string'
-                        ? contactPagesOutput.message
-                        : null,
+                pages: Array.isArray(contactPagesOutput?.pages) ? contactPagesOutput.pages : [],
+                message: typeof contactPagesOutput?.message === 'string' ? contactPagesOutput.message : null,
             },
         });
 
-        // ── STEP 4: Build reply ──
-        const reply = formatReply(contactPagesOutput);
+        // ── s5 — Company Data ──
+        emit(STAGE_IDS.COMPANY_DATA, { status: 'processing' });
 
-        // ── STEP 5: Build meta — ContactPages only ──
+        let searchingOutput = null;
+
+        try {
+            searchingOutput = await searchingRequest(contactPagesOutput);
+        } catch (err) {
+            console.error('[Orchestrator] Searching failed:', err?.message || err);
+            searchingOutput = { message: 'Our server is currently experiencing high traffic. Please try again shortly.' };
+        }
+
+        emit(STAGE_IDS.COMPANY_DATA, {
+            status: 'completed',
+            data: {
+                companies: Array.isArray(searchingOutput?.companies) ? searchingOutput.companies : [],
+                message: typeof searchingOutput?.message === 'string' ? searchingOutput.message : null,
+            },
+        });
+
+        // ── Build reply + meta ──
+        const reply = formatReply(searchingOutput);
+
         const meta =
-            contactPagesOutput && Array.isArray(contactPagesOutput.pages)
-                ? { pages: contactPagesOutput.pages }
-                : { pages: [] };
+            searchingOutput && Array.isArray(searchingOutput.companies)
+                ? { companies: searchingOutput.companies }
+                : { companies: [] };
 
-        // ── Done ──
         emit(STAGE_IDS.DONE, { completed: true });
 
         console.log('[Orchestrator] Final result ready');
 
-        return {
-            reply,
-            meta,
-        };
+        return { reply, meta };
     } catch (error) {
-        console.error('[Orchestrator] Request failed');
-        console.error('[Orchestrator] Error name:', error.name);
-        console.error('[Orchestrator] Error message:', error.message);
-        console.error('[Orchestrator] Full error:', error);
+        console.error('[Orchestrator] Request failed:', error?.message || error);
 
-        // ── Fire error event ──
         emit(STAGE_IDS.ERROR, {
-            message:
-                error && error.message
-                    ? error.message
-                    : 'Pipeline failed',
+            message: error?.message || 'Pipeline failed',
         });
 
         throw error;
