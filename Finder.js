@@ -33,8 +33,6 @@ const FALLBACK_MESSAGE =
 // BLOCKED DOMAINS
 // ────────────────────────────────────────────────────────────────
 
-// Social media and profile sites that must never appear in results.
-// Matching is case-insensitive and covers subdomains.
 const BLOCKED_DOMAINS = [
     'linkedin.com',
     'lnkd.in',
@@ -47,10 +45,6 @@ const BLOCKED_DOMAINS = [
 // ────────────────────────────────────────────────────────────────
 // DOMAIN FILTER
 // ────────────────────────────────────────────────────────────────
-
-// Returns true if the URL points to a blocked domain (or any of its
-// subdomains). Safe against invalid URLs — treats them as blocked so
-// broken entries never leak through.
 
 function isBlockedUrl(url) {
     if (typeof url !== 'string' || url.trim().length === 0) {
@@ -73,10 +67,6 @@ function isBlockedUrl(url) {
 
     return false;
 }
-
-// Filters a Tavily response object's results array.
-// Returns a new response object with only non-blocked URLs.
-// If every result is blocked, returns an empty results array.
 
 function filterTavilyResponse(response) {
     if (!response || typeof response !== 'object') {
@@ -105,22 +95,38 @@ const SYSTEM_INSTRUCTIONS = `
 You are given the raw search results from a previous stage of a
 lead-generation pipeline, plus the original user request.
 
-Your only task is to:
+Your tasks:
 
 1. Read the raw search results carefully.
-2. Identify exactly 2 real companies mentioned in those results.
-3. For each company, write ONE search query designed to find that
-   company's official website.
+2. Identify the companies mentioned in those results.
+3. Rate each company from 1 to 10 based on how well it matches
+   the user's request.
+4. Pick the 2 highest-rated companies.
+5. For each picked company, write ONE search query designed to
+   find that company's official website.
 
-Company selection rules:
+Rating rules:
 
-- The 2 companies must come from the raw search results you were
-  given. Do not invent company names.
-- The 2 companies must be different from each other.
-- If you can find fewer than 2 real companies, return only the ones
-  you found.
+- 10 = perfect match. Real company of the correct target entity
+  type, in the correct location, in the correct industry, and
+  satisfying every stated requirement and exclusion.
+- 7-9 = strong match. Real company of the correct type with minor
+  gaps or uncertainty on one requirement.
+- 4-6 = partial match. Real company of the correct type but missing
+  some requirements or with notable uncertainty.
+- 1-3 = weak match. Does not fit the request well.
+- 0 = not a company at all, or clearly invalid for the request
+  (for example, a directory, a news site, an article, a job board,
+  a Wikipedia page, a review platform, or an entity that violates
+  an exclusion).
 
-Query format — follow exactly:
+Only rate companies that are clearly identified in the raw results.
+Do not invent companies. Do not rate pages, articles, directories,
+or generic topics — only real companies.
+
+After rating, pick the 2 companies with the highest ratings.
+
+Query format for each picked company — follow exactly:
 
 "{Company Name}" {City} official website
 
@@ -148,12 +154,15 @@ Return only valid JSON using exactly this format:
   "companies": [
     {
       "name": "the company name",
+      "rating": 9,
+      "reason": "short reason for the rating",
       "query": "\"the company name\" the city official website"
     }
   ]
 }
 
-The companies array must contain 1 or 2 entries.
+The companies array must contain 1 or 2 entries — the highest-rated
+companies from the results.
 
 Do not explain your answer.
 Do not add extra fields.
@@ -161,7 +170,7 @@ Do not remove any fields.
 `;
 
 // ────────────────────────────────────────────────────────────────
-// AI COMPANY + QUERY GENERATION — WITH RETRIES
+// AI COMPANY RATING + SELECTION — WITH RETRIES
 // ────────────────────────────────────────────────────────────────
 
 async function generateCompanies(seekerOutput, message) {
@@ -210,7 +219,8 @@ async function generateCompanies(seekerOutput, message) {
                 continue;
             }
 
-            const companies = rawCompanies
+            // Normalize: keep name, query, rating, reason.
+            const normalized = rawCompanies
                 .filter(
                     (c) =>
                         c &&
@@ -223,18 +233,47 @@ async function generateCompanies(seekerOutput, message) {
                 .map((c) => ({
                     name: c.name.trim(),
                     query: c.query.trim(),
-                }))
-                .slice(0, 2);
+                    rating:
+                        Number.isInteger(c.rating) &&
+                        c.rating >= 0 &&
+                        c.rating <= 10
+                            ? c.rating
+                            : null,
+                    reason:
+                        typeof c.reason === 'string' ? c.reason.trim() : '',
+                }));
 
-            if (companies.length === 0) {
+            if (normalized.length === 0) {
                 console.warn('[Finder] AI returned 0 valid companies');
                 continue;
             }
 
+            // Sort by rating descending (null ratings last),
+            // then take the top 2.
+            normalized.sort((a, b) => {
+                const aR = typeof a.rating === 'number' ? a.rating : -1;
+                const bR = typeof b.rating === 'number' ? b.rating : -1;
+                return bR - aR;
+            });
+
+            const top = normalized.slice(0, 2);
+
             console.log(
-                `[Finder] AI returned ${companies.length} compan${companies.length === 1 ? 'y' : 'ies'}`
+                '[Finder] Rated companies:',
+                normalized.map(
+                    (c) => `${c.name} (${c.rating ?? '?'}/10)`
+                )
             );
-            return companies;
+            console.log(
+                '[Finder] Top 2 picked:',
+                top.map((c) => `${c.name} (${c.rating ?? '?'}/10)`)
+            );
+
+            // Return only { name, query } — rating and reason stripped.
+            return top.map((c) => ({
+                name: c.name,
+                query: c.query,
+            }));
         } catch (error) {
             console.error(
                 `[Finder] AI attempt ${attempt} failed:`,
@@ -331,7 +370,7 @@ async function finderRequest(seekerOutput, message) {
         };
     }
 
-    // ── Step 1: AI extracts 2 companies + queries ──
+    // ── Step 1: AI rates companies and picks top 2 ──
     const companies = await generateCompanies(seekerOutput, message);
 
     if (!companies) {
