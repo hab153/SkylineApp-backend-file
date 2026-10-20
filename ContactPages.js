@@ -23,6 +23,16 @@ const TAVILY_MAP_ENDPOINT = 'https://api.tavily.com/map';
 const MAP_INSTRUCTIONS =
     'Find the contact page, about page, locations page, and careers page. Return only page URLs, not blog posts.';
 
+// Tuned Map parameters — reduce crawl depth and breadth for speed.
+const TAVILY_MAP_PARAMS = {
+    max_depth: 1,
+    max_breadth: 5,
+    limit: 15,
+    timeout: 25,
+    allow_external: false,
+    include_usage: true,
+};
+
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
@@ -88,7 +98,6 @@ async function identifyDomain(companyName, tavilyResults) {
         );
 
         try {
-            // Build a compact list of the search results for the AI.
             const resultsForAI = (tavilyResults || []).map((item) => ({
                 title: item.title || '',
                 url: item.url || '',
@@ -159,9 +168,6 @@ async function identifyDomain(companyName, tavilyResults) {
 // DOMAIN NORMALIZATION
 // ────────────────────────────────────────────────────────────────
 
-// Normalizes a URL to its base origin — scheme + hostname only.
-// Returns null if the input cannot be parsed as a URL.
-
 function normalizeDomain(rawUrl) {
     if (typeof rawUrl !== 'string' || rawUrl.trim().length === 0) {
         return null;
@@ -169,7 +175,6 @@ function normalizeDomain(rawUrl) {
 
     let input = rawUrl.trim();
 
-    // If no scheme, assume https
     if (!/^https?:\/\//i.test(input)) {
         input = 'https://' + input;
     }
@@ -183,7 +188,7 @@ function normalizeDomain(rawUrl) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// TAVILY MAP REQUEST — WITH RETRIES
+// TAVILY MAP REQUEST — WITH RETRIES AND TUNED PARAMETERS
 // ────────────────────────────────────────────────────────────────
 
 async function runTavilyMap(domain) {
@@ -195,6 +200,8 @@ async function runTavilyMap(domain) {
     }
 
     for (let attempt = 1; attempt <= MAX_MAP_ATTEMPTS; attempt++) {
+        const startMs = Date.now();
+
         console.log(
             `[ContactPages] Map attempt ${attempt}/${MAX_MAP_ATTEMPTS} for: ${domain}`
         );
@@ -209,10 +216,15 @@ async function runTavilyMap(domain) {
                 body: JSON.stringify({
                     url: domain,
                     instructions: MAP_INSTRUCTIONS,
+                    ...TAVILY_MAP_PARAMS,
                 }),
             });
 
-            console.log('[ContactPages] Map HTTP status:', response.status);
+            const elapsedMs = Date.now() - startMs;
+
+            console.log(
+                `[ContactPages] Map HTTP status: ${response.status} (${elapsedMs}ms)`
+            );
 
             if (!response.ok) {
                 const errorBody = await response.text().catch(() => '');
@@ -233,8 +245,9 @@ async function runTavilyMap(domain) {
 
             return mapResponse;
         } catch (error) {
+            const elapsedMs = Date.now() - startMs;
             console.error(
-                `[ContactPages] Map attempt ${attempt} failed:`,
+                `[ContactPages] Map attempt ${attempt} failed (${elapsedMs}ms):`,
                 error && error.message ? error.message : error
             );
         }
@@ -252,7 +265,6 @@ async function contactPagesRequest(finderOutput) {
     const startedAt = Date.now();
     console.log('[ContactPages] Started');
 
-    // ── Guard: Finder failed → return the same friendly message ──
     if (
         !finderOutput ||
         typeof finderOutput !== 'object' ||
@@ -282,7 +294,6 @@ async function contactPagesRequest(finderOutput) {
         };
     }
 
-    // ── Process each company sequentially ──
     const pages = [];
 
     for (let i = 0; i < companies.length; i++) {
@@ -293,7 +304,6 @@ async function contactPagesRequest(finderOutput) {
             `[ContactPages] Processing company ${i + 1}/${companies.length}: ${company.name}`
         );
 
-        // Extract Tavily search results for this company.
         const tavilyResults = Array.isArray(company.results?.results)
             ? company.results.results
             : [];
@@ -305,7 +315,6 @@ async function contactPagesRequest(finderOutput) {
             continue;
         }
 
-        // Step 1: AI identifies the domain.
         const domain = await identifyDomain(company.name, tavilyResults);
 
         if (!domain) {
@@ -315,7 +324,6 @@ async function contactPagesRequest(finderOutput) {
             continue;
         }
 
-        // Step 2: Tavily Map request.
         const mapResponse = await runTavilyMap(domain);
 
         if (!mapResponse) {
@@ -325,7 +333,6 @@ async function contactPagesRequest(finderOutput) {
             continue;
         }
 
-        // Step 3: Collect.
         pages.push({
             name: company.name,
             domain,
@@ -337,7 +344,6 @@ async function contactPagesRequest(finderOutput) {
         );
     }
 
-    // ── If no companies succeeded, fallback ──
     if (pages.length === 0) {
         const elapsed = Date.now() - startedAt;
         console.warn(
@@ -349,7 +355,6 @@ async function contactPagesRequest(finderOutput) {
         };
     }
 
-    // ── Return ──
     const elapsed = Date.now() - startedAt;
 
     const output = {
