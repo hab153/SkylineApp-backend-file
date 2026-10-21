@@ -228,6 +228,10 @@ function normalizeDomain(rawUrl) {
 // company websites. These are ALWAYS included in the extraction list,
 // regardless of what Tavily Map returns — because even if the crawler
 // missed them, the pages still exist.
+//
+// Privacy, Terms, and Legal pages are included because they almost
+// always contain a real contact email (legal@, dpo@, or privacy@)
+// — a high-yield source for email discovery.
 function buildExpectedContactUrls(domain) {
     const base = domain.replace(/\/$/, '');
 
@@ -239,6 +243,9 @@ function buildExpectedContactUrls(domain) {
         `${base}/about-us`,
         `${base}/locations`,
         `${base}/careers`,
+        `${base}/privacy`,        // often contains legal@ or dpo@
+        `${base}/terms`,          // often contains legal@
+        `${base}/legal`,          // often contains legal@ or privacy@
     ];
 }
 
