@@ -18,12 +18,11 @@ const MAX_AI_ATTEMPTS = 4;
 const MAX_EXTRACT_ATTEMPTS = 4;
 const MAX_SEARCH_FALLBACK_ATTEMPTS = 4;
 
+const MAX_CONTENT_CHARS = 120000;
+
 const TAVILY_EXTRACT_ENDPOINT = 'https://api.tavily.com/extract';
 const TAVILY_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
 
-// Extract params — Improvement 3:
-//   chunks_per_source: 5 (max) — more chunks, higher chance of contact data
-//   timeout: 60 (max) — slow pages get more time
 const TAVILY_EXTRACT_PARAMS = {
     extract_depth: 'advanced',
     format: 'markdown',
@@ -33,9 +32,6 @@ const TAVILY_EXTRACT_PARAMS = {
     chunks_per_source: 5,
 };
 
-// Search fallback params — Improvement 1:
-//   include_raw_content: true — returns page content in one call
-//   max_results: 5 — top 5 pages only
 const TAVILY_SEARCH_FALLBACK_PARAMS = {
     search_depth: 'advanced',
     max_results: 5,
@@ -49,12 +45,97 @@ const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
 // ────────────────────────────────────────────────────────────────
+// REGEX PRE-SCAN FOR CONTACT CANDIDATES
+// ────────────────────────────────────────────────────────────────
+
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+const PHONE_REGEXES = [
+    /\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}/g,
+    /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}/g,
+    /\d{3}[-.\s]\d{3}[-.\s]\d{4}/g,
+];
+
+const EMAIL_BLACKLIST_SUBSTRINGS = [
+    'example.com',
+    'sentry.io',
+    'wixpress.com',
+    'placeholder',
+    'your-email',
+    'youremail',
+    'your.name',
+    'name@',
+    'email@',
+    'domain.com',
+];
+
+const PHONE_BLACKLIST_SUBSTRINGS = [
+    '000-000-0000',
+    '123-456-7890',
+    '111-111-1111',
+];
+
+function scanForContactCandidates(content) {
+    if (typeof content !== 'string' || content.length === 0) {
+        return { emails: [], phones: [] };
+    }
+
+    const emailSet = new Set();
+    const rawEmails = content.match(EMAIL_REGEX) || [];
+
+    for (const raw of rawEmails) {
+        const email = raw.trim().toLowerCase();
+
+        if (email.length > 80) continue;
+
+        const isBlacklisted = EMAIL_BLACKLIST_SUBSTRINGS.some((b) =>
+            email.includes(b)
+        );
+        if (isBlacklisted) continue;
+
+        emailSet.add(email);
+        if (emailSet.size >= 10) break;
+    }
+
+    const phoneSet = new Set();
+
+    for (const regex of PHONE_REGEXES) {
+        const matches = content.match(regex) || [];
+
+        for (const raw of matches) {
+            const phone = raw.trim();
+
+            if (phone.includes('@')) continue;
+
+            const digitCount = (phone.match(/\d/g) || []).length;
+            if (digitCount < 10 || digitCount > 15) continue;
+
+            const isBlacklisted = PHONE_BLACKLIST_SUBSTRINGS.some((b) =>
+                phone.includes(b)
+            );
+            if (isBlacklisted) continue;
+
+            phoneSet.add(phone);
+            if (phoneSet.size >= 10) break;
+        }
+
+        if (phoneSet.size >= 10) break;
+    }
+
+    return {
+        emails: Array.from(emailSet),
+        phones: Array.from(phoneSet),
+    };
+}
+
+// ────────────────────────────────────────────────────────────────
 // AI INSTRUCTIONS
 // ────────────────────────────────────────────────────────────────
 
 const SYSTEM_INSTRUCTIONS = `
 You are given the extracted content from several pages of a single
-company's official website.
+company's official website, plus a list of contact-data candidates
+that were pre-scanned from that content using regular expressions.
 
 Your task is to identify four pieces of information about the company:
 
@@ -66,6 +147,14 @@ Your task is to identify four pieces of information about the company:
 Read all the extracted content carefully. The pages belong to one
 company. Do not mix in information about any other company.
 
+Pre-scanned candidates:
+
+The pre-scanned email list contains every literal email address that
+appears in the content. The pre-scanned phone list contains every
+literal phone number that appears in the content.
+
+These are literal matches from the content — not predictions.
+
 Rules:
 
 Company name:
@@ -74,14 +163,16 @@ Company name:
 - If the name cannot be identified, return null.
 
 Company email:
-- If a real email address is found in the content, return it, and set
-  emailStatus to "verified".
-- If no email is found but the company's domain and any naming patterns
-  in the content make a reasonable prediction possible, return the
-  predicted email, and set emailStatus to "predicted".
-- If no email is found and no reasonable prediction is possible,
-  return null, and set emailStatus to "not_found".
-- Never present a prediction as if it were a confirmed email.
+- If a pre-scanned email candidate exists and belongs to the company's
+  own domain, return it and set emailStatus to "verified".
+- If a pre-scanned email candidate exists but belongs to a third-party
+  domain (a vendor, a webmail, a different company), do not return it.
+  Prefer a candidate on the company's own domain if one exists.
+- If no pre-scanned email candidate belongs to the company's own
+  domain, return null and set emailStatus to "not_found".
+- Never predict, guess, or invent an email address.
+- Never return an email address that does not appear literally in the
+  pre-scanned candidates.
 
 Company information:
 - If the content describes the company, write a short description
@@ -92,8 +183,9 @@ Company information:
 - Do not invent specific facts.
 
 Company phone number:
-- If a phone number is found in the content, return it.
-- If no phone number is found, return "Not found".
+- If a pre-scanned phone candidate exists and is plausible for the
+  company, return it.
+- If no pre-scanned phone candidate exists, return "Not found".
 - Never guess or invent a phone number.
 
 Return only valid JSON using exactly this format:
@@ -101,7 +193,7 @@ Return only valid JSON using exactly this format:
 {
   "companyName": "the official company name or null",
   "email": "the email address or null",
-  "emailStatus": "verified" | "predicted" | "not_found",
+  "emailStatus": "verified" | "not_found",
   "companyInformation": "short description",
   "informationStatus": "verified" | "estimated",
   "phoneNumber": "the phone number or Not found"
@@ -190,13 +282,8 @@ async function runTavilyExtract(urls) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// TAVILY SEARCH FALLBACK — IMPROVEMENT 1
+// TAVILY SEARCH FALLBACK
 // ────────────────────────────────────────────────────────────────
-
-// Runs a Tavily Search with include_raw_content to recover contact
-// pages that Map/Extract failed to reach. The search is scoped to
-// the company's own domain so the results come from the site we
-// already know belongs to the company.
 
 async function runTavilySearchFallback(domain) {
     const apiKey = process.env.TAVILY_API_KEY;
@@ -275,6 +362,23 @@ async function runTavilySearchFallback(domain) {
 // ────────────────────────────────────────────────────────────────
 
 async function extractCompanyData(companyName, rawContent) {
+    const candidates = scanForContactCandidates(rawContent);
+
+    console.log(
+        `[Searching] Pre-scan candidates for ${companyName} — emails: ${candidates.emails.length}, phones: ${candidates.phones.length}`
+    );
+    if (candidates.emails.length > 0) {
+        console.log('[Searching]   email candidates:', candidates.emails);
+    }
+    if (candidates.phones.length > 0) {
+        console.log('[Searching]   phone candidates:', candidates.phones);
+    }
+
+    const content =
+        rawContent.length > MAX_CONTENT_CHARS
+            ? rawContent.slice(0, MAX_CONTENT_CHARS)
+            : rawContent;
+
     for (let attempt = 1; attempt <= MAX_AI_ATTEMPTS; attempt++) {
         console.log(
             `[Searching] AI attempt ${attempt}/${MAX_AI_ATTEMPTS} for: ${companyName}`
@@ -289,20 +393,30 @@ async function extractCompanyData(companyName, rawContent) {
                     { role: 'system', content: SYSTEM_INSTRUCTIONS },
                     {
                         role: 'user',
-                        content: `Company hint: ${companyName}\n\nExtracted content:\n${rawContent}`,
+                        content:
+                            `Company hint: ${companyName}\n\n` +
+                            `Pre-scanned email candidates:\n` +
+                            (candidates.emails.length > 0
+                                ? candidates.emails.map((e) => `- ${e}`).join('\n')
+                                : '(none)') +
+                            `\n\nPre-scanned phone candidates:\n` +
+                            (candidates.phones.length > 0
+                                ? candidates.phones.map((p) => `- ${p}`).join('\n')
+                                : '(none)') +
+                            `\n\nExtracted content:\n${content}`,
                     },
                 ],
             });
 
-            const content = completion.choices?.[0]?.message?.content;
-            console.log('[Searching] AI raw response:', content);
+            const output = completion.choices?.[0]?.message?.content;
+            console.log('[Searching] AI raw response:', output);
 
-            if (!content) {
+            if (!output) {
                 console.error('[Searching] AI returned empty content');
                 continue;
             }
 
-            const parsed = JSON.parse(content);
+            const parsed = JSON.parse(output);
 
             const companyNameOut =
                 typeof parsed?.companyName === 'string' &&
@@ -316,15 +430,8 @@ async function extractCompanyData(companyName, rawContent) {
                     ? parsed.email.trim()
                     : null;
 
-            const rawStatus = parsed?.emailStatus;
-            const emailStatus =
-                rawStatus === 'verified' ||
-                rawStatus === 'predicted' ||
-                rawStatus === 'not_found'
-                    ? rawStatus
-                    : email
-                    ? 'verified'
-                    : 'not_found';
+            // emailStatus: only 'verified' or 'not_found' — no prediction.
+            const emailStatus = email ? 'verified' : 'not_found';
 
             const companyInformation =
                 typeof parsed?.companyInformation === 'string'
@@ -426,7 +533,6 @@ async function searchingRequest(contactPagesOutput) {
         let usedSearchFallback = false;
 
         if (urls.length > 0) {
-            // ── Step 1: Extract all URLs for this company (one call) ──
             const extractResponse = await runTavilyExtract(urls);
 
             if (extractResponse) {
@@ -434,8 +540,6 @@ async function searchingRequest(contactPagesOutput) {
                     ? extractResponse.results
                     : [];
 
-                // ── Improvement 1: if Extract failed on any URL,
-                //    run a Search fallback with include_raw_content ──
                 const failedCount = Array.isArray(
                     extractResponse.failed_results
                 )
@@ -472,7 +576,6 @@ async function searchingRequest(contactPagesOutput) {
                     }
                 }
 
-                // Add the content from the successful Extracts.
                 for (const r of successfulResults) {
                     const raw =
                         typeof r.raw_content === 'string' ? r.raw_content : '';
@@ -482,7 +585,6 @@ async function searchingRequest(contactPagesOutput) {
                 }
             }
         } else {
-            // ── Improvement 1: no URLs from Map — go straight to Search fallback ──
             console.warn(
                 `[Searching] No URLs for ${name} — running Search fallback`
             );
@@ -513,7 +615,6 @@ async function searchingRequest(contactPagesOutput) {
             continue;
         }
 
-        // ── Step 2: AI extracts the 4 fields ──
         const record = await extractCompanyData(name, combinedContent);
 
         if (!record) {
