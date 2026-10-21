@@ -185,7 +185,7 @@ Company information:
 Company phone number:
 - If a pre-scanned phone candidate exists and is plausible for the
   company, return it.
-- If no pre-scanned phone candidate exists, return "Not found".
+- If no pre-scanned phone candidate exists, return null.
 - Never guess or invent a phone number.
 
 Return only valid JSON using exactly this format:
@@ -196,7 +196,7 @@ Return only valid JSON using exactly this format:
   "emailStatus": "verified" | "not_found",
   "companyInformation": "short description",
   "informationStatus": "verified" | "estimated",
-  "phoneNumber": "the phone number or Not found"
+  "phoneNumber": "the phone number or null"
 }
 
 Do not explain your answer.
@@ -430,7 +430,6 @@ async function extractCompanyData(companyName, rawContent) {
                     ? parsed.email.trim()
                     : null;
 
-            // emailStatus: only 'verified' or 'not_found' — no prediction.
             const emailStatus = email ? 'verified' : 'not_found';
 
             const companyInformation =
@@ -444,11 +443,13 @@ async function extractCompanyData(companyName, rawContent) {
                     ? rawInfoStatus
                     : 'verified';
 
+            // phoneNumber returns null when no phone was found. The
+            // display layer decides how to phrase it for the user.
             const phoneNumber =
                 typeof parsed?.phoneNumber === 'string' &&
                 parsed.phoneNumber.trim().length > 0
                     ? parsed.phoneNumber.trim()
-                    : 'Not found';
+                    : null;
 
             return {
                 companyName: companyNameOut,
