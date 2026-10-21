@@ -19,11 +19,23 @@ const MAX_EXTRACT_ATTEMPTS = 4;
 
 const TAVILY_EXTRACT_ENDPOINT = 'https://api.tavily.com/extract';
 
+// Extract params tuned to prioritise contact data.
+//
+// - query: reranks extracted chunks by relevance to contact details,
+//   so the AI receives the most useful chunks first. Works together
+//   with chunks_per_source.
+// - chunks_per_source: 3 (max) — extract only the most relevant
+//   chunks per page instead of the whole page.
+// - extract_depth: 'advanced' — retrieves more content including
+//   tables and JS-rendered sections, which is where contact details
+//   often live.
 const TAVILY_EXTRACT_PARAMS = {
-    extract_depth: 'basic',
+    extract_depth: 'advanced',
     format: 'markdown',
     timeout: 20,
     include_usage: true,
+    query: 'contact email phone number address company information',
+    chunks_per_source: 3,
 };
 
 const FALLBACK_MESSAGE =
