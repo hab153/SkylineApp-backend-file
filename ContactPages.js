@@ -17,7 +17,12 @@ const MODEL = 'gpt-4o-mini';
 const MAX_AI_ATTEMPTS = 4;
 const MAX_MAP_ATTEMPTS = 4;
 
+// Tavily Extract accepts up to 20 URLs per batch. We cap the merged
+// URL list at 20 so the downstream stage can extract them in one call.
+const MAX_EXTRACT_URLS = 20;
+
 const TAVILY_MAP_ENDPOINT = 'https://api.tavily.com/map';
+const TAVILY_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
 
 // Mandatory instruction — never omitted, never rewritten.
 const MAP_INSTRUCTIONS =
@@ -30,10 +35,8 @@ const MAP_INSTRUCTIONS =
 //   directly from the homepage.
 // limit: 25 — enough URLs to cover contact/about/locations/careers
 //   without over-crawling large sites.
-// select_paths — Improvement 2: focuses the crawler on the exact
-//   path patterns that contain contact data. The crawler no longer
-//   wanders the whole site; it goes straight to /contact, /about,
-//   /locations, /careers and their close variants.
+// select_paths — focuses the crawler on the exact path patterns
+//   that contain contact data.
 const TAVILY_MAP_PARAMS = {
     max_depth: 2,
     max_breadth: 5,
@@ -51,6 +54,16 @@ const TAVILY_MAP_PARAMS = {
         '/careers.*',
         '/career.*',
     ],
+};
+
+// Search fallback parameters — used only when Map fails or returns 0.
+const TAVILY_SEARCH_PARAMS = {
+    search_depth: 'basic',
+    max_results: 10,
+    topic: 'general',
+    include_answer: false,
+    include_raw_content: false,
+    include_favicon: false,
 };
 
 const FALLBACK_MESSAGE =
@@ -208,6 +221,62 @@ function normalizeDomain(rawUrl) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// EXPECTED CONTACT URLS
+// ────────────────────────────────────────────────────────────────
+
+// Standard contact-related paths that exist on the vast majority of
+// company websites. These are ALWAYS included in the extraction list,
+// regardless of what Tavily Map returns — because even if the crawler
+// missed them, the pages still exist.
+function buildExpectedContactUrls(domain) {
+    const base = domain.replace(/\/$/, '');
+
+    return [
+        base,                     // homepage (footer usually has contact)
+        `${base}/contact`,
+        `${base}/contact-us`,
+        `${base}/about`,
+        `${base}/about-us`,
+        `${base}/locations`,
+        `${base}/careers`,
+    ];
+}
+
+// Merges the standard expected URLs with whatever Map / Search
+// returned. Dedupes and caps at MAX_EXTRACT_URLS.
+// Priority: expected standard paths first (most likely to contain
+// contact data), then Map / Search results.
+function mergeContactUrls(domain, extraUrls) {
+    const expected = buildExpectedContactUrls(domain);
+    const seen = new Set();
+    const result = [];
+
+    // Priority 1: standard contact paths
+    for (const url of expected) {
+        if (result.length >= MAX_EXTRACT_URLS) break;
+        if (!seen.has(url)) {
+            seen.add(url);
+            result.push(url);
+        }
+    }
+
+    // Priority 2: Map / Search URLs
+    for (const url of extraUrls) {
+        if (result.length >= MAX_EXTRACT_URLS) break;
+        if (typeof url !== 'string' || url.trim().length === 0) continue;
+
+        const normalized = url.trim();
+
+        if (!seen.has(normalized)) {
+            seen.add(normalized);
+            result.push(normalized);
+        }
+    }
+
+    return result;
+}
+
+// ────────────────────────────────────────────────────────────────
 // TAVILY MAP REQUEST — WITH RETRIES AND TUNED PARAMETERS
 // ────────────────────────────────────────────────────────────────
 
@@ -256,11 +325,13 @@ async function runTavilyMap(domain) {
 
             const mapResponse = await response.json();
 
+            const urlCount = Array.isArray(mapResponse && mapResponse.results)
+                ? mapResponse.results.length
+                : 0;
+
             console.log(
                 '[ContactPages] Map response received. URLs found:',
-                Array.isArray(mapResponse && mapResponse.results)
-                    ? mapResponse.results.length
-                    : 0
+                urlCount
             );
 
             return mapResponse;
@@ -274,6 +345,100 @@ async function runTavilyMap(domain) {
     }
 
     console.warn('[ContactPages] All Map attempts failed for:', domain);
+    return null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// TAVILY SEARCH FALLBACK — WHEN MAP RETURNS 0 URLS
+// ────────────────────────────────────────────────────────────────
+
+// Runs a Tavily Search restricted to the company's own domain to find
+// contact/about pages. Used only when Map failed or returned 0 URLs.
+async function runTavilySearchFallback(domain) {
+    const apiKey = process.env.TAVILY_API_KEY;
+
+    if (!apiKey) {
+        console.error('[ContactPages] TAVILY_API_KEY is not set');
+        return null;
+    }
+
+    // Strip protocol and leading www for include_domains.
+    let hostname;
+    try {
+        hostname = new URL(domain).hostname.replace(/^www\./i, '');
+    } catch (_) {
+        return null;
+    }
+
+    for (let attempt = 1; attempt <= MAX_MAP_ATTEMPTS; attempt++) {
+        const startMs = Date.now();
+
+        console.log(
+            `[ContactPages] Search fallback attempt ${attempt}/${MAX_MAP_ATTEMPTS} for: ${domain}`
+        );
+
+        try {
+            const response = await fetch(TAVILY_SEARCH_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    query: 'contact about locations',
+                    include_domains: [hostname],
+                    ...TAVILY_SEARCH_PARAMS,
+                }),
+            });
+
+            const elapsedMs = Date.now() - startMs;
+
+            console.log(
+                `[ContactPages] Search fallback HTTP status: ${response.status} (${elapsedMs}ms)`
+            );
+
+            if (!response.ok) {
+                const errorBody = await response.text().catch(() => '');
+                console.error(
+                    `[ContactPages] Search fallback failed with status ${response.status}: ${errorBody}`
+                );
+                continue;
+            }
+
+            const searchResponse = await response.json();
+
+            const urls = Array.isArray(searchResponse && searchResponse.results)
+                ? searchResponse.results
+                      .map((r) => (r && typeof r.url === 'string' ? r.url : null))
+                      .filter((u) => u && u.trim().length > 0)
+                : [];
+
+            console.log(
+                '[ContactPages] Search fallback received URLs:',
+                urls.length
+            );
+
+            if (urls.length === 0) {
+                continue;
+            }
+
+            return {
+                base_url: domain,
+                results: urls,
+            };
+        } catch (error) {
+            const elapsedMs = Date.now() - startMs;
+            console.error(
+                `[ContactPages] Search fallback attempt ${attempt} failed (${elapsedMs}ms):`,
+                error && error.message ? error.message : error
+            );
+        }
+    }
+
+    console.warn(
+        '[ContactPages] All Search fallback attempts failed for:',
+        domain
+    );
     return null;
 }
 
@@ -344,11 +509,49 @@ async function contactPagesRequest(finderOutput) {
             continue;
         }
 
+        // ── Step 1: Try Map first ──
         const mapResponse = await runTavilyMap(domain);
 
-        if (!mapResponse) {
+        let mapUrls =
+            mapResponse && Array.isArray(mapResponse.results)
+                ? mapResponse.results
+                : [];
+
+        console.log(
+            `[ContactPages] Map produced ${mapUrls.length} URL(s) for ${company.name}`
+        );
+
+        // ── Step 2: If Map failed or returned 0 URLs, try Search ──
+        let searchFallbackUrls = [];
+
+        if (mapUrls.length === 0) {
+            console.log(
+                `[ContactPages] Map returned 0 URLs for ${company.name} — trying Search fallback`
+            );
+
+            const searchFallback = await runTavilySearchFallback(domain);
+
+            if (searchFallback && Array.isArray(searchFallback.results)) {
+                searchFallbackUrls = searchFallback.results;
+                console.log(
+                    `[ContactPages] Search fallback produced ${searchFallbackUrls.length} URL(s) for ${company.name}`
+                );
+            }
+        }
+
+        // ── Step 3: Merge standard contact paths + Map + Search ──
+        const mergedUrls = mergeContactUrls(domain, [
+            ...mapUrls,
+            ...searchFallbackUrls,
+        ]);
+
+        console.log(
+            `[ContactPages] Merged URL list for ${company.name}: ${mergedUrls.length} URL(s)`
+        );
+
+        if (mergedUrls.length === 0) {
             console.warn(
-                `[ContactPages] Map failed for ${company.name} — skipping`
+                `[ContactPages] No usable URLs for ${company.name} — skipping`
             );
             continue;
         }
@@ -356,7 +559,10 @@ async function contactPagesRequest(finderOutput) {
         pages.push({
             name: company.name,
             domain,
-            mapResponse,
+            mapResponse: {
+                base_url: domain,
+                results: mergedUrls,
+            },
         });
 
         console.log(
