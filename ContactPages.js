@@ -23,11 +23,16 @@ const TAVILY_MAP_ENDPOINT = 'https://api.tavily.com/map';
 const MAP_INSTRUCTIONS =
     'Find the contact page, about page, locations page, and careers page. Return only page URLs, not blog posts.';
 
-// Tuned Map parameters — reduce crawl depth and breadth for speed.
+// Tuned Map parameters.
+// max_depth: 2 — allows the crawler to go one level deeper, which
+// recovers companies whose contact/about pages aren't linked directly
+// from the homepage.
+// limit: 25 — enough URLs to cover contact/about/locations/careers
+// without over-crawling large sites.
 const TAVILY_MAP_PARAMS = {
-    max_depth: 1,
+    max_depth: 2,
     max_breadth: 5,
-    limit: 15,
+    limit: 25,
     timeout: 25,
     allow_external: false,
     include_usage: true,
