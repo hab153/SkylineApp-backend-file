@@ -16,26 +16,33 @@ const openai = new OpenAI({
 const MODEL = 'gpt-4o-mini';
 const MAX_AI_ATTEMPTS = 4;
 const MAX_EXTRACT_ATTEMPTS = 4;
+const MAX_SEARCH_FALLBACK_ATTEMPTS = 4;
 
 const TAVILY_EXTRACT_ENDPOINT = 'https://api.tavily.com/extract';
+const TAVILY_SEARCH_ENDPOINT = 'https://api.tavily.com/search';
 
-// Extract params tuned to prioritise contact data.
-//
-// - query: reranks extracted chunks by relevance to contact details,
-//   so the AI receives the most useful chunks first. Works together
-//   with chunks_per_source.
-// - chunks_per_source: 3 (max) — extract only the most relevant
-//   chunks per page instead of the whole page.
-// - extract_depth: 'advanced' — retrieves more content including
-//   tables and JS-rendered sections, which is where contact details
-//   often live.
+// Extract params — Improvement 3:
+//   chunks_per_source: 5 (max) — more chunks, higher chance of contact data
+//   timeout: 60 (max) — slow pages get more time
 const TAVILY_EXTRACT_PARAMS = {
     extract_depth: 'advanced',
     format: 'markdown',
-    timeout: 20,
+    timeout: 60,
     include_usage: true,
     query: 'contact email phone number address company information',
-    chunks_per_source: 3,
+    chunks_per_source: 5,
+};
+
+// Search fallback params — Improvement 1:
+//   include_raw_content: true — returns page content in one call
+//   max_results: 5 — top 5 pages only
+const TAVILY_SEARCH_FALLBACK_PARAMS = {
+    search_depth: 'advanced',
+    max_results: 5,
+    include_raw_content: true,
+    include_answer: false,
+    include_favicon: false,
+    topic: 'general',
 };
 
 const FALLBACK_MESSAGE =
@@ -183,6 +190,87 @@ async function runTavilyExtract(urls) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// TAVILY SEARCH FALLBACK — IMPROVEMENT 1
+// ────────────────────────────────────────────────────────────────
+
+// Runs a Tavily Search with include_raw_content to recover contact
+// pages that Map/Extract failed to reach. The search is scoped to
+// the company's own domain so the results come from the site we
+// already know belongs to the company.
+
+async function runTavilySearchFallback(domain) {
+    const apiKey = process.env.TAVILY_API_KEY;
+
+    if (!apiKey) {
+        console.error('[Searching] TAVILY_API_KEY is not set');
+        return null;
+    }
+
+    if (!domain || typeof domain !== 'string' || domain.trim().length === 0) {
+        console.warn('[Searching] No domain for Search fallback');
+        return null;
+    }
+
+    for (let attempt = 1; attempt <= MAX_SEARCH_FALLBACK_ATTEMPTS; attempt++) {
+        const startMs = Date.now();
+
+        console.log(
+            `[Searching] Search fallback attempt ${attempt}/${MAX_SEARCH_FALLBACK_ATTEMPTS} for: ${domain}`
+        );
+
+        try {
+            const query = `site:${new URL(domain).hostname} contact email phone`;
+
+            const response = await fetch(TAVILY_SEARCH_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    query,
+                    ...TAVILY_SEARCH_FALLBACK_PARAMS,
+                }),
+            });
+
+            const elapsedMs = Date.now() - startMs;
+
+            console.log(
+                `[Searching] Search fallback HTTP status: ${response.status} (${elapsedMs}ms)`
+            );
+
+            if (!response.ok) {
+                const errorBody = await response.text().catch(() => '');
+                console.error(
+                    `[Searching] Search fallback failed with status ${response.status}: ${errorBody}`
+                );
+                continue;
+            }
+
+            const searchResponse = await response.json();
+
+            console.log(
+                '[Searching] Search fallback response — results:',
+                Array.isArray(searchResponse.results)
+                    ? searchResponse.results.length
+                    : 0
+            );
+
+            return searchResponse;
+        } catch (error) {
+            const elapsedMs = Date.now() - startMs;
+            console.error(
+                `[Searching] Search fallback attempt ${attempt} failed (${elapsedMs}ms):`,
+                error && error.message ? error.message : error
+            );
+        }
+    }
+
+    console.warn('[Searching] All Search fallback attempts failed');
+    return null;
+}
+
+// ────────────────────────────────────────────────────────────────
 // AI EXTRACTION — ONE CALL PER COMPANY
 // ────────────────────────────────────────────────────────────────
 
@@ -216,7 +304,6 @@ async function extractCompanyData(companyName, rawContent) {
 
             const parsed = JSON.parse(content);
 
-            // Validate and normalize.
             const companyNameOut =
                 typeof parsed?.companyName === 'string' &&
                 parsed.companyName.trim().length > 0
@@ -284,7 +371,6 @@ async function searchingRequest(contactPagesOutput) {
     const startedAt = Date.now();
     console.log('[Searching] Started');
 
-    // ── Guard: ContactPages failed → return the same message ──
     if (
         !contactPagesOutput ||
         typeof contactPagesOutput !== 'object' ||
@@ -315,7 +401,6 @@ async function searchingRequest(contactPagesOutput) {
         };
     }
 
-    // ── Process each company sequentially ──
     const companies = [];
 
     for (let i = 0; i < pages.length; i++) {
@@ -331,51 +416,99 @@ async function searchingRequest(contactPagesOutput) {
             `[Searching] Processing company ${i + 1}/${pages.length}: ${name}`
         );
 
-        // Extract URLs from the mapResponse.
         const urls = Array.isArray(page?.mapResponse?.results)
             ? page.mapResponse.results.filter(
                   (u) => typeof u === 'string' && u.trim().length > 0
               )
             : [];
 
-        if (urls.length === 0) {
+        let combinedContent = '';
+        let usedSearchFallback = false;
+
+        if (urls.length > 0) {
+            // ── Step 1: Extract all URLs for this company (one call) ──
+            const extractResponse = await runTavilyExtract(urls);
+
+            if (extractResponse) {
+                const successfulResults = Array.isArray(extractResponse.results)
+                    ? extractResponse.results
+                    : [];
+
+                // ── Improvement 1: if Extract failed on any URL,
+                //    run a Search fallback with include_raw_content ──
+                const failedCount = Array.isArray(
+                    extractResponse.failed_results
+                )
+                    ? extractResponse.failed_results.length
+                    : 0;
+
+                if (failedCount > 0) {
+                    console.warn(
+                        `[Searching] ${failedCount} URL(s) failed to extract for ${name} — running Search fallback`
+                    );
+
+                    const searchFallback = await runTavilySearchFallback(
+                        page.domain
+                    );
+
+                    if (searchFallback) {
+                        usedSearchFallback = true;
+
+                        const searchResults = Array.isArray(
+                            searchFallback.results
+                        )
+                            ? searchFallback.results
+                            : [];
+
+                        for (const r of searchResults) {
+                            const raw =
+                                typeof r.raw_content === 'string'
+                                    ? r.raw_content
+                                    : '';
+                            if (raw.trim().length > 0) {
+                                combinedContent += `\n\n----- ${r.url || 'search result'} -----\n${raw}`;
+                            }
+                        }
+                    }
+                }
+
+                // Add the content from the successful Extracts.
+                for (const r of successfulResults) {
+                    const raw =
+                        typeof r.raw_content === 'string' ? r.raw_content : '';
+                    if (raw.trim().length > 0) {
+                        combinedContent += `\n\n----- ${r.url || 'page'} -----\n${raw}`;
+                    }
+                }
+            }
+        } else {
+            // ── Improvement 1: no URLs from Map — go straight to Search fallback ──
             console.warn(
-                `[Searching] No URLs for ${name} — skipping`
+                `[Searching] No URLs for ${name} — running Search fallback`
             );
-            continue;
-        }
 
-        // ── Step 1: Extract all URLs for this company (one call) ──
-        const extractResponse = await runTavilyExtract(urls);
+            const searchFallback = await runTavilySearchFallback(page.domain);
 
-        if (!extractResponse) {
-            console.warn(
-                `[Searching] Extract failed for ${name} — skipping`
-            );
-            continue;
-        }
+            if (searchFallback) {
+                usedSearchFallback = true;
 
-        // Combine the raw_content of every successfully extracted URL.
-        const rawContentParts = [];
+                const searchResults = Array.isArray(searchFallback.results)
+                    ? searchFallback.results
+                    : [];
 
-        const successfulResults = Array.isArray(extractResponse.results)
-            ? extractResponse.results
-            : [];
-
-        for (const r of successfulResults) {
-            const raw = typeof r.raw_content === 'string' ? r.raw_content : '';
-            if (raw.trim().length > 0) {
-                rawContentParts.push(
-                    `----- ${r.url || 'page'} -----\n${raw}`
-                );
+                for (const r of searchResults) {
+                    const raw =
+                        typeof r.raw_content === 'string' ? r.raw_content : '';
+                    if (raw.trim().length > 0) {
+                        combinedContent += `\n\n----- ${r.url || 'search result'} -----\n${raw}`;
+                    }
+                }
             }
         }
 
-        const combinedContent = rawContentParts.join('\n\n');
-
         if (combinedContent.trim().length === 0) {
             console.warn(
-                `[Searching] No usable content extracted for ${name} — skipping`
+                `[Searching] No usable content for ${name} — skipping`
             );
             continue;
         }
@@ -390,7 +523,6 @@ async function searchingRequest(contactPagesOutput) {
             continue;
         }
 
-        // Use the hint name if AI returned null.
         if (!record.companyName) {
             record.companyName = name;
         }
@@ -398,11 +530,10 @@ async function searchingRequest(contactPagesOutput) {
         companies.push(record);
 
         console.log(
-            `[Searching] Company ${i + 1} completed (${Date.now() - companyStart}ms)`
+            `[Searching] Company ${i + 1} completed (${Date.now() - companyStart}ms)${usedSearchFallback ? ' [used Search fallback]' : ''}`
         );
     }
 
-    // ── If no companies succeeded → fallback ──
     if (companies.length === 0) {
         const elapsed = Date.now() - startedAt;
         console.warn(
@@ -414,7 +545,6 @@ async function searchingRequest(contactPagesOutput) {
         };
     }
 
-    // ── Return ──
     const elapsed = Date.now() - startedAt;
 
     console.log(
