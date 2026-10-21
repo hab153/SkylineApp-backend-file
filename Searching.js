@@ -41,6 +41,17 @@ const TAVILY_SEARCH_FALLBACK_PARAMS = {
     topic: 'general',
 };
 
+// Narrow search used ONLY when Extract succeeded but no email was
+// found. Targets email-like content on the company's own domain.
+const TAVILY_EMAIL_SEARCH_PARAMS = {
+    search_depth: 'advanced',
+    max_results: 5,
+    include_raw_content: true,
+    include_answer: false,
+    include_favicon: false,
+    topic: 'general',
+};
+
 const FALLBACK_MESSAGE =
     'Our server is currently experiencing high traffic. Please try again shortly.';
 
@@ -48,7 +59,20 @@ const FALLBACK_MESSAGE =
 // REGEX PRE-SCAN FOR CONTACT CANDIDATES
 // ────────────────────────────────────────────────────────────────
 
-const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+// Plain emails — the base case.
+const EMAIL_REGEX_PLAIN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+// Obfuscated emails — "info [at] domain [dot] com"
+const EMAIL_REGEX_OBFUSCATED =
+    /[a-zA-Z0-9._%+-]+\s*[\[\(\{]\s*at\s*[\]\)\}]\s*[a-zA-Z0-9.-]+\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*[a-zA-Z]{2,}/gi;
+
+// HTML entity emails — "info&#64;domain.com"
+const EMAIL_REGEX_HTML_ENTITY =
+    /[a-zA-Z0-9._%+-]+&#64;[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+// mailto: links that were embedded in the HTML but not decoded
+const EMAIL_REGEX_MAILTO =
+    /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
 
 const PHONE_REGEXES = [
     /\+?\d{1,3}[\s.-]?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}/g,
@@ -75,31 +99,81 @@ const PHONE_BLACKLIST_SUBSTRINGS = [
     '111-111-1111',
 ];
 
+// Normalizes an obfuscated / HTML-entity / mailto email to a plain
+// email string. Returns null if the input cannot be normalized.
+function normalizeEmail(raw) {
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+        return null;
+    }
+
+    let email = raw.trim();
+
+    // mailto: prefix — strip it
+    if (/^mailto:/i.test(email)) {
+        email = email.replace(/^mailto:/i, '');
+    }
+
+    // Obfuscated [at] / (at) / {at} + [dot] / (dot) / {dot}
+    email = email.replace(/\s*[\[\(\{]\s*at\s*[\]\)\}]\s*/gi, '@');
+    email = email.replace(/\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*/gi, '.');
+
+    // HTML entity
+    email = email.replace(/&#64;/g, '@');
+
+    // Strip whitespace
+    email = email.replace(/\s+/g, '');
+
+    // Final sanity: must look like a plain email
+    if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email)) {
+        return null;
+    }
+
+    return email.toLowerCase();
+}
+
 function scanForContactCandidates(content) {
     if (typeof content !== 'string' || content.length === 0) {
         return { emails: [], phones: [] };
     }
 
     const emailSet = new Set();
-    const rawEmails = content.match(EMAIL_REGEX) || [];
 
-    for (const raw of rawEmails) {
-        const email = raw.trim().toLowerCase();
+    // Try every email pattern — plain, obfuscated, HTML entity, mailto.
+    const emailPatterns = [
+        EMAIL_REGEX_PLAIN,
+        EMAIL_REGEX_OBFUSCATED,
+        EMAIL_REGEX_HTML_ENTITY,
+        EMAIL_REGEX_MAILTO,
+    ];
 
-        if (email.length > 80) continue;
+    for (const pattern of emailPatterns) {
+        // Reset lastIndex — the /g flag makes the regex stateful
+        pattern.lastIndex = 0;
 
-        const isBlacklisted = EMAIL_BLACKLIST_SUBSTRINGS.some((b) =>
-            email.includes(b)
-        );
-        if (isBlacklisted) continue;
+        const matches = content.match(pattern) || [];
 
-        emailSet.add(email);
-        if (emailSet.size >= 10) break;
+        for (const raw of matches) {
+            const email = normalizeEmail(raw);
+
+            if (!email) continue;
+            if (email.length > 80) continue;
+
+            const isBlacklisted = EMAIL_BLACKLIST_SUBSTRINGS.some((b) =>
+                email.includes(b)
+            );
+            if (isBlacklisted) continue;
+
+            emailSet.add(email);
+            if (emailSet.size >= 15) break;
+        }
+
+        if (emailSet.size >= 15) break;
     }
 
     const phoneSet = new Set();
 
     for (const regex of PHONE_REGEXES) {
+        regex.lastIndex = 0;
         const matches = content.match(regex) || [];
 
         for (const raw of matches) {
@@ -150,8 +224,9 @@ company. Do not mix in information about any other company.
 Pre-scanned candidates:
 
 The pre-scanned email list contains every literal email address that
-appears in the content. The pre-scanned phone list contains every
-literal phone number that appears in the content.
+appears in the content, including obfuscated forms normalized to plain
+email. The pre-scanned phone list contains every literal phone number
+that appears in the content.
 
 These are literal matches from the content — not predictions.
 
@@ -282,7 +357,7 @@ async function runTavilyExtract(urls) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// TAVILY SEARCH FALLBACK
+// TAVILY SEARCH FALLBACK — GENERAL FALLBACK
 // ────────────────────────────────────────────────────────────────
 
 async function runTavilySearchFallback(domain) {
@@ -354,6 +429,91 @@ async function runTavilySearchFallback(domain) {
     }
 
     console.warn('[Searching] All Search fallback attempts failed');
+    return null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// TAVILY EMAIL-TARGETED SEARCH FALLBACK
+// ────────────────────────────────────────────────────────────────
+
+// Runs ONLY when Extract succeeded but produced no email candidates.
+// Searches for email-like content on the company's own domain.
+async function runTavilyEmailSearch(domain) {
+    const apiKey = process.env.TAVILY_API_KEY;
+
+    if (!apiKey) {
+        console.error('[Searching] TAVILY_API_KEY is not set');
+        return null;
+    }
+
+    if (!domain || typeof domain !== 'string' || domain.trim().length === 0) {
+        console.warn('[Searching] No domain for email search');
+        return null;
+    }
+
+    let hostname;
+    try {
+        hostname = new URL(domain).hostname.replace(/^www\./i, '');
+    } catch (_) {
+        return null;
+    }
+
+    for (let attempt = 1; attempt <= MAX_SEARCH_FALLBACK_ATTEMPTS; attempt++) {
+        const startMs = Date.now();
+
+        console.log(
+            `[Searching] Email search attempt ${attempt}/${MAX_SEARCH_FALLBACK_ATTEMPTS} for: ${domain}`
+        );
+
+        try {
+            const query = `site:${hostname} "@${hostname}"`;
+
+            const response = await fetch(TAVILY_SEARCH_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify({
+                    query,
+                    ...TAVILY_EMAIL_SEARCH_PARAMS,
+                }),
+            });
+
+            const elapsedMs = Date.now() - startMs;
+
+            console.log(
+                `[Searching] Email search HTTP status: ${response.status} (${elapsedMs}ms)`
+            );
+
+            if (!response.ok) {
+                const errorBody = await response.text().catch(() => '');
+                console.error(
+                    `[Searching] Email search failed with status ${response.status}: ${errorBody}`
+                );
+                continue;
+            }
+
+            const searchResponse = await response.json();
+
+            console.log(
+                '[Searching] Email search response — results:',
+                Array.isArray(searchResponse.results)
+                    ? searchResponse.results.length
+                    : 0
+            );
+
+            return searchResponse;
+        } catch (error) {
+            const elapsedMs = Date.now() - startMs;
+            console.error(
+                `[Searching] Email search attempt ${attempt} failed (${elapsedMs}ms):`,
+                error && error.message ? error.message : error
+            );
+        }
+    }
+
+    console.warn('[Searching] All email search attempts failed for:', domain);
     return null;
 }
 
@@ -443,8 +603,6 @@ async function extractCompanyData(companyName, rawContent) {
                     ? rawInfoStatus
                     : 'verified';
 
-            // phoneNumber returns null when no phone was found. The
-            // display layer decides how to phrase it for the user.
             const phoneNumber =
                 typeof parsed?.phoneNumber === 'string' &&
                 parsed.phoneNumber.trim().length > 0
@@ -532,6 +690,7 @@ async function searchingRequest(contactPagesOutput) {
 
         let combinedContent = '';
         let usedSearchFallback = false;
+        let usedEmailSearch = false;
 
         if (urls.length > 0) {
             const extractResponse = await runTavilyExtract(urls);
@@ -616,6 +775,44 @@ async function searchingRequest(contactPagesOutput) {
             continue;
         }
 
+        // ── NEW: If Extract worked but found no email, run a targeted
+        //         email search before calling the AI. ──
+        const initialCandidates = scanForContactCandidates(combinedContent);
+
+        if (initialCandidates.emails.length === 0) {
+            console.log(
+                `[Searching] No email candidates for ${name} — running targeted email search`
+            );
+
+            const emailSearch = await runTavilyEmailSearch(page.domain);
+
+            if (emailSearch) {
+                usedEmailSearch = true;
+
+                const emailSearchResults = Array.isArray(
+                    emailSearch.results
+                )
+                    ? emailSearch.results
+                    : [];
+
+                for (const r of emailSearchResults) {
+                    const raw =
+                        typeof r.raw_content === 'string' ? r.raw_content : '';
+                    if (raw.trim().length > 0) {
+                        combinedContent += `\n\n----- ${r.url || 'email search result'} -----\n${raw}`;
+                    }
+                }
+
+                const secondCandidates = scanForContactCandidates(
+                    combinedContent
+                );
+
+                console.log(
+                    `[Searching] After email search — emails: ${secondCandidates.emails.length}`
+                );
+            }
+        }
+
         const record = await extractCompanyData(name, combinedContent);
 
         if (!record) {
@@ -631,8 +828,12 @@ async function searchingRequest(contactPagesOutput) {
 
         companies.push(record);
 
+        const flags = [];
+        if (usedSearchFallback) flags.push('Search fallback');
+        if (usedEmailSearch) flags.push('Email search');
+
         console.log(
-            `[Searching] Company ${i + 1} completed (${Date.now() - companyStart}ms)${usedSearchFallback ? ' [used Search fallback]' : ''}`
+            `[Searching] Company ${i + 1} completed (${Date.now() - companyStart}ms)${flags.length ? ` [${flags.join(', ')}]` : ''}`
         );
     }
 
