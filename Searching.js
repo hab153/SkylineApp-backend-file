@@ -41,8 +41,6 @@ const TAVILY_SEARCH_FALLBACK_PARAMS = {
     topic: 'general',
 };
 
-// Narrow search used ONLY when Extract succeeded but no email was
-// found. Targets email-like content on the company's own domain.
 const TAVILY_EMAIL_SEARCH_PARAMS = {
     search_depth: 'advanced',
     max_results: 5,
@@ -59,18 +57,14 @@ const FALLBACK_MESSAGE =
 // REGEX PRE-SCAN FOR CONTACT CANDIDATES
 // ────────────────────────────────────────────────────────────────
 
-// Plain emails — the base case.
 const EMAIL_REGEX_PLAIN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
-// Obfuscated emails — "info [at] domain [dot] com"
 const EMAIL_REGEX_OBFUSCATED =
     /[a-zA-Z0-9._%+-]+\s*[\[\(\{]\s*at\s*[\]\)\}]\s*[a-zA-Z0-9.-]+\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*[a-zA-Z]{2,}/gi;
 
-// HTML entity emails — "info&#64;domain.com"
 const EMAIL_REGEX_HTML_ENTITY =
     /[a-zA-Z0-9._%+-]+&#64;[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
-// mailto: links that were embedded in the HTML but not decoded
 const EMAIL_REGEX_MAILTO =
     /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
 
@@ -79,6 +73,12 @@ const PHONE_REGEXES = [
     /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}/g,
     /\d{3}[-.\s]\d{3}[-.\s]\d{4}/g,
 ];
+
+// Vanity phone numbers — 1-800-FLOWERS, (800) CALL-NOW, 800-GOT-JUNK.
+// Matches a phone-shaped pattern with 2+ letter groups separated by
+// dashes, dots, spaces, or parens.
+const VANITY_PHONE_REGEX =
+    /\b(?:1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?[A-Za-z]{2,}[\s.-]?[A-Za-z]{2,}(?:[\s.-]?[A-Za-z]{2,})?\b/g;
 
 const EMAIL_BLACKLIST_SUBSTRINGS = [
     'example.com',
@@ -99,8 +99,40 @@ const PHONE_BLACKLIST_SUBSTRINGS = [
     '111-111-1111',
 ];
 
-// Normalizes an obfuscated / HTML-entity / mailto email to a plain
-// email string. Returns null if the input cannot be normalized.
+// ────────────────────────────────────────────────────────────────
+// VANITY PHONE → DIGITS
+// ────────────────────────────────────────────────────────────────
+
+// Standard phone keypad mapping.
+const LETTER_TO_DIGIT = {
+    A: '2', B: '2', C: '2',
+    D: '3', E: '3', F: '3',
+    G: '4', H: '4', I: '4',
+    J: '5', K: '5', L: '5',
+    M: '6', N: '6', O: '6',
+    P: '7', Q: '7', R: '7', S: '7',
+    T: '8', U: '8', V: '8',
+    W: '9', X: '9', Y: '9', Z: '9',
+};
+
+// Converts every letter in a phone string to its dialable digit.
+// Leaves digits, dashes, dots, spaces, parens, plus, and other
+// non-letter characters unchanged.
+function convertVanityPhoneToDigits(phone) {
+    if (typeof phone !== 'string' || phone.length === 0) {
+        return phone;
+    }
+
+    return phone.replace(/[A-Za-z]/g, (ch) => {
+        const digit = LETTER_TO_DIGIT[ch.toUpperCase()];
+        return digit || ch;
+    });
+}
+
+// ────────────────────────────────────────────────────────────────
+// EMAIL NORMALIZATION
+// ────────────────────────────────────────────────────────────────
+
 function normalizeEmail(raw) {
     if (typeof raw !== 'string' || raw.trim().length === 0) {
         return null;
@@ -108,28 +140,25 @@ function normalizeEmail(raw) {
 
     let email = raw.trim();
 
-    // mailto: prefix — strip it
     if (/^mailto:/i.test(email)) {
         email = email.replace(/^mailto:/i, '');
     }
 
-    // Obfuscated [at] / (at) / {at} + [dot] / (dot) / {dot}
     email = email.replace(/\s*[\[\(\{]\s*at\s*[\]\)\}]\s*/gi, '@');
     email = email.replace(/\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*/gi, '.');
-
-    // HTML entity
     email = email.replace(/&#64;/g, '@');
-
-    // Strip whitespace
     email = email.replace(/\s+/g, '');
 
-    // Final sanity: must look like a plain email
     if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email)) {
         return null;
     }
 
     return email.toLowerCase();
 }
+
+// ────────────────────────────────────────────────────────────────
+// CONTACT SCAN
+// ────────────────────────────────────────────────────────────────
 
 function scanForContactCandidates(content) {
     if (typeof content !== 'string' || content.length === 0) {
@@ -138,7 +167,6 @@ function scanForContactCandidates(content) {
 
     const emailSet = new Set();
 
-    // Try every email pattern — plain, obfuscated, HTML entity, mailto.
     const emailPatterns = [
         EMAIL_REGEX_PLAIN,
         EMAIL_REGEX_OBFUSCATED,
@@ -147,9 +175,7 @@ function scanForContactCandidates(content) {
     ];
 
     for (const pattern of emailPatterns) {
-        // Reset lastIndex — the /g flag makes the regex stateful
         pattern.lastIndex = 0;
-
         const matches = content.match(pattern) || [];
 
         for (const raw of matches) {
@@ -172,6 +198,7 @@ function scanForContactCandidates(content) {
 
     const phoneSet = new Set();
 
+    // ── Pass 1: numeric phone numbers ──
     for (const regex of PHONE_REGEXES) {
         regex.lastIndex = 0;
         const matches = content.match(regex) || [];
@@ -194,6 +221,28 @@ function scanForContactCandidates(content) {
         }
 
         if (phoneSet.size >= 10) break;
+    }
+
+    // ── Pass 2: vanity phone numbers → convert to digits ──
+    if (phoneSet.size < 10) {
+        VANITY_PHONE_REGEX.lastIndex = 0;
+        const vanityMatches = content.match(VANITY_PHONE_REGEX) || [];
+
+        for (const raw of vanityMatches) {
+            const converted = convertVanityPhoneToDigits(raw.trim());
+
+            // Sanity: converted form must have 10–15 digits.
+            const digitCount = (converted.match(/\d/g) || []).length;
+            if (digitCount < 10 || digitCount > 15) continue;
+
+            const isBlacklisted = PHONE_BLACKLIST_SUBSTRINGS.some((b) =>
+                converted.includes(b)
+            );
+            if (isBlacklisted) continue;
+
+            phoneSet.add(converted);
+            if (phoneSet.size >= 10) break;
+        }
     }
 
     return {
@@ -226,7 +275,8 @@ Pre-scanned candidates:
 The pre-scanned email list contains every literal email address that
 appears in the content, including obfuscated forms normalized to plain
 email. The pre-scanned phone list contains every literal phone number
-that appears in the content.
+that appears in the content. Vanity phone numbers have already been
+converted to digits.
 
 These are literal matches from the content — not predictions.
 
@@ -436,8 +486,6 @@ async function runTavilySearchFallback(domain) {
 // TAVILY EMAIL-TARGETED SEARCH FALLBACK
 // ────────────────────────────────────────────────────────────────
 
-// Runs ONLY when Extract succeeded but produced no email candidates.
-// Searches for email-like content on the company's own domain.
 async function runTavilyEmailSearch(domain) {
     const apiKey = process.env.TAVILY_API_KEY;
 
@@ -603,11 +651,17 @@ async function extractCompanyData(companyName, rawContent) {
                     ? rawInfoStatus
                     : 'verified';
 
-            const phoneNumber =
+            // Apply vanity→digits conversion as a safety net in case
+            // the AI returned a letter form directly.
+            const rawPhone =
                 typeof parsed?.phoneNumber === 'string' &&
                 parsed.phoneNumber.trim().length > 0
                     ? parsed.phoneNumber.trim()
                     : null;
+
+            const phoneNumber = rawPhone
+                ? convertVanityPhoneToDigits(rawPhone)
+                : null;
 
             return {
                 companyName: companyNameOut,
@@ -775,8 +829,6 @@ async function searchingRequest(contactPagesOutput) {
             continue;
         }
 
-        // ── NEW: If Extract worked but found no email, run a targeted
-        //         email search before calling the AI. ──
         const initialCandidates = scanForContactCandidates(combinedContent);
 
         if (initialCandidates.emails.length === 0) {
