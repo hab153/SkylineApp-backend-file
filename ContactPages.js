@@ -24,11 +24,16 @@ const MAP_INSTRUCTIONS =
     'Find the contact page, about page, locations page, and careers page. Return only page URLs, not blog posts.';
 
 // Tuned Map parameters.
+//
 // max_depth: 2 — allows the crawler to go one level deeper, which
-// recovers companies whose contact/about pages aren't linked directly
-// from the homepage.
+//   recovers companies whose contact/about pages aren't linked
+//   directly from the homepage.
 // limit: 25 — enough URLs to cover contact/about/locations/careers
-// without over-crawling large sites.
+//   without over-crawling large sites.
+// select_paths — Improvement 2: focuses the crawler on the exact
+//   path patterns that contain contact data. The crawler no longer
+//   wanders the whole site; it goes straight to /contact, /about,
+//   /locations, /careers and their close variants.
 const TAVILY_MAP_PARAMS = {
     max_depth: 2,
     max_breadth: 5,
@@ -36,6 +41,16 @@ const TAVILY_MAP_PARAMS = {
     timeout: 25,
     allow_external: false,
     include_usage: true,
+    select_paths: [
+        '/contact.*',
+        '/contact-us.*',
+        '/about.*',
+        '/about-us.*',
+        '/locations.*',
+        '/location.*',
+        '/careers.*',
+        '/career.*',
+    ],
 };
 
 const FALLBACK_MESSAGE =
