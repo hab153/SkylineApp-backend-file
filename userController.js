@@ -274,6 +274,54 @@ const getDeletionStatusHandler = async (req, res) => {
     }
 };
 
+// ─── ✅ GET /api/users/me/usage ───
+const getUserUsage = async (req, res) => {
+    try {
+        if (!isValidObjectId(req.userId)) {
+            return res.status(400).json({ message: 'Invalid user ID' });
+        }
+        
+        const limits = await getRemainingLimits(req.userId);
+        const user = await User.findById(req.userId).select('subscriptionTier').lean();
+        const tier = user?.subscriptionTier || 'free';
+
+        // Define max limits per tier for calculation
+        const planLimits = {
+            free: { emails: 30, research: 4, chats: 30 },
+            go: { emails: 70, research: 10, chats: 90 },
+            pro: { emails: 120, research: 20, chats: 150 }
+        };
+        
+        const max = planLimits[tier] || planLimits.free;
+
+        res.json({
+            limits: {
+                email: { 
+                    used: max.emails - limits.emails, 
+                    max: max.emails, 
+                    remaining: limits.emails 
+                },
+                research: { 
+                    used: max.research - limits.research, 
+                    max: max.research, 
+                    remaining: limits.research 
+                },
+                chat: { 
+                    used: max.chats - limits.chats, 
+                    max: max.chats, 
+                    remaining: limits.chats 
+                }
+            },
+            tier: tier,
+            resetAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+        });
+
+    } catch (err) {
+        console.error('[getUserUsage] Error:', err.message);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 // Wrappers for authController functions (they expect (req, res) signatures)
 const changeEmailWrapper = (req, res) => changeEmail(req, res);
 const verifyAgeWrapper = (req, res) => verifyAge(req, res);
@@ -288,5 +336,6 @@ module.exports = {
     deactivateUserAccount,
     restoreUserAccount,
     getDeletionStatus: getDeletionStatusHandler,
-    getDashboardData
+    getDashboardData,
+    getUserUsage // ✅ Added
 };
