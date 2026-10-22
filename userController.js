@@ -3,6 +3,7 @@ const User = require('./User');
 const { changeEmail, verifyAge } = require('./authController');
 const { isValidObjectId, sanitizeObject } = require('./sanitize');
 const { deleteAccount, deactivateAccount, restoreAccount, getDeletionStatus } = require('./deleteAccount');
+const { getRemainingLimits } = require('./limitService'); // ✅ Import new service
 
 // ─── ✅ GET /api/user/dashboard-data ───
 // Combines user profile, subscription, and email status into ONE call
@@ -42,6 +43,9 @@ const getDashboardData = async (req, res) => {
             }
         }
 
+        // ✅ Get Real Limits
+        const limits = await getRemainingLimits(userId);
+
         // ✅ Build response
         const dashboardData = {
             subscription: {
@@ -55,11 +59,7 @@ const getDashboardData = async (req, res) => {
                 username: user.username,
                 fullName: user.fullName || user.username
             },
-            limits: {
-                chat: user.subscriptionTier === 'pro' ? 150 : user.subscriptionTier === 'go' ? 50 : 10,
-                email: user.subscriptionTier === 'pro' ? 100 : user.subscriptionTier === 'go' ? 25 : 5,
-                hints: user.subscriptionTier === 'pro' ? 300 : user.subscriptionTier === 'go' ? 20 : 3
-            }
+            limits: limits // ✅ Send real calculated limits
         };
 
         console.log(`✅ [DASHBOARD] Data fetched for user: ${userId}`);
@@ -86,7 +86,16 @@ const getUserProfile = async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
         
-        res.json(user);
+        // ✅ Get Real Limits to include in profile response
+        const limits = await getRemainingLimits(req.userId);
+        
+        // Attach limits to the user object for the frontend
+        const userProfile = {
+            ...user,
+            remainingLimits: limits
+        };
+        
+        res.json(userProfile);
     } catch (err) {
         console.error('[getUserProfile] Error:', err.message);
         res.status(500).json({ message: 'Server Error' });
