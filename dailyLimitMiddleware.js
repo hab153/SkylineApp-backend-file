@@ -13,10 +13,13 @@ function getLimitMessage(type) {
 
 // ─── CHECK DAILY LIMIT (Research/Page) ───
 const checkDailyLimit = async (req, res, next) => {
+    console.log('🛡️ [MIDDLEWARE] checkDailyLimit called for user:', req.userId);
     try {
         const result = await checkAndIncrement(req.userId, 'research');
+        console.log('🛡️ [MIDDLEWARE] Limit Check Result:', result);
         
         if (!result.allowed) {
+            console.log('🚫 [MIDDLEWARE] Limit reached! Blocking request.');
             return res.status(429).json({ 
                 success: false, 
                 message: getLimitMessage('research'),
@@ -26,9 +29,10 @@ const checkDailyLimit = async (req, res, next) => {
         }
         
         req.remainingLimits = result;
+        console.log('✅ [MIDDLEWARE] Limit passed. Remaining:', result.remaining);
         next();
     } catch (error) {
-        console.error('❌ [RESEARCH LIMIT] Error:', error.message);
+        console.error('❌ [MIDDLEWARE] Error in checkDailyLimit:', error.message);
         res.status(500).json({ message: 'Server error checking research limit' });
     }
 };
@@ -37,15 +41,10 @@ const checkDailyLimit = async (req, res, next) => {
 const checkAndIncrementSendLimit = async (userId) => {
     try {
         const result = await checkAndIncrement(userId, 'email');
-        
         if (!result.allowed) {
             throw new Error(getLimitMessage('email'));
         }
-        
-        return { 
-            remaining: result.remaining,
-            limit: result.limit
-        };
+        return { remaining: result.remaining, limit: result.limit };
     } catch (error) {
         throw error;
     }
@@ -55,7 +54,6 @@ const checkAndIncrementSendLimit = async (userId) => {
 const checkAssistantLimit = async (req, res, next) => {
     try {
         const result = await checkAndIncrement(req.userId, 'chat');
-        
         if (!result.allowed) {
             return res.status(429).json({ 
                 success: false, 
@@ -64,7 +62,6 @@ const checkAssistantLimit = async (req, res, next) => {
                 remaining: 0
             });
         }
-        
         req.remainingLimits = result;
         next();
     } catch (error) {
@@ -74,7 +71,6 @@ const checkAssistantLimit = async (req, res, next) => {
 };
 
 // ─── PLACEHOLDERS FOR EXISTING MIDDLEWARE CALLS ───
-// These are kept to prevent server.js from crashing if they are still referenced
 const checkHintLimit = async (req, res, next) => next();
 const checkSuggestFollowUpLimit = async (req, res, next) => next();
 const checkAutoFollowUpLimit = async (req, res, next) => next();
