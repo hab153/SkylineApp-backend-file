@@ -1,22 +1,15 @@
+// streamRoutes.js
 'use strict';
-
-// ────────────────────────────────────────────────────────────────
-// IMPORTS
-// ────────────────────────────────────────────────────────────────
 
 const express = require('express');
 const router = express.Router();
 
 const { streamPipeline } = require('./Stream');
 
-// Middleware — imported from the same files server.js uses.
+// Middleware
 const { verifyToken } = require('./authMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
-const { checkDailyLimit } = require('./dailyLimitMiddleware');
-
-// ────────────────────────────────────────────────────────────────
-// SSE HEADERS
-// ────────────────────────────────────────────────────────────────
+const { checkDailyLimit } = require('./dailyLimitMiddleware'); // ✅ Import the new limiter
 
 function setSSEHeaders(res) {
     res.writeHead(200, {
@@ -33,18 +26,10 @@ function setSSEHeaders(res) {
     }
 }
 
-// ────────────────────────────────────────────────────────────────
-// EVENT WRITER
-// ────────────────────────────────────────────────────────────────
-
 function writeSSEEvent(res, payload) {
     res.write('event: stage\n');
     res.write('data: ' + JSON.stringify(payload) + '\n\n');
 }
-
-// ────────────────────────────────────────────────────────────────
-// QUERY-STRING TOKEN BRIDGE
-// ────────────────────────────────────────────────────────────────
 
 function bridgeQueryToken(req, res, next) {
     if (
@@ -54,20 +39,16 @@ function bridgeQueryToken(req, res, next) {
     ) {
         req.headers.authorization = 'Bearer ' + req.query.token;
     }
-
     next();
 }
 
-// ────────────────────────────────────────────────────────────────
-// PIPELINE STREAM ROUTE
-// ────────────────────────────────────────────────────────────────
-
+// ✅ UPDATED ROUTE: Added checkDailyLimit middleware
 router.get(
     '/pipeline',
     bridgeQueryToken,
     verifyToken,
     checkSubscriptionExpiry,
-    checkDailyLimit,
+    checkDailyLimit, // ✅ This will now check/increment research limit
     async function (req, res) {
         const message = typeof req.query.message === 'string'
             ? req.query.message.trim()
@@ -82,7 +63,11 @@ router.get(
 
         console.log('[StreamRoutes] Pipeline stream opened');
         console.log('[StreamRoutes] User:', req.userId);
-        console.log('[StreamRoutes] Message length:', message.length);
+        
+        // Optional: Log remaining limits for debugging
+        if (req.remainingLimits) {
+            console.log('[StreamRoutes] Remaining Research:', req.remainingLimits.remaining);
+        }
 
         setSSEHeaders(res);
 
@@ -90,24 +75,17 @@ router.get(
 
         req.on('close', function () {
             closed = true;
-            console.log('[StreamRoutes] Client disconnected');
         });
 
         req.on('error', function () {
             closed = true;
-            console.log('[StreamRoutes] Client connection error');
         });
 
         function onStage(label, data) {
             if (closed) return;
-
             try {
                 writeSSEEvent(res, { stage: label, data });
             } catch (writeErr) {
-                console.error(
-                    '[StreamRoutes] Failed to write SSE event:',
-                    writeErr && writeErr.message ? writeErr.message : writeErr
-                );
                 closed = true;
             }
         }
@@ -115,37 +93,21 @@ router.get(
         try {
             await streamPipeline(message, { userId: req.userId }, onStage);
         } catch (pipelineErr) {
-            console.error(
-                '[StreamRoutes] Pipeline failed:',
-                pipelineErr && pipelineErr.message
-                    ? pipelineErr.message
-                    : pipelineErr
-            );
-
+            console.error('[StreamRoutes] Pipeline failed:', pipelineErr.message);
             if (!closed) {
                 try {
                     writeSSEEvent(res, {
                         stage: 'error',
-                        data: {
-                            message: 'Something went wrong while processing your request. Please try again.',
-                        },
+                        data: { message: 'Something went wrong.' },
                     });
                 } catch (_) {}
             }
         } finally {
             if (!closed) {
-                try {
-                    res.end();
-                } catch (_) {}
+                try { res.end(); } catch (_) {}
             }
-
-            console.log('[StreamRoutes] Pipeline stream closed');
         }
     }
 );
-
-// ────────────────────────────────────────────────────────────────
-// EXPORTS
-// ────────────────────────────────────────────────────────────────
 
 module.exports = router;
