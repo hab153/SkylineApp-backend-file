@@ -477,6 +477,10 @@ app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.ge
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
 
+// ─── USER USAGE ROUTE ───
+app.get('/api/users/me/usage', verifyToken, userController.getUserUsage);
+console.log('✅ [SERVER] User usage route registered');
+
 // ─── GDPR ACCOUNT DELETION ROUTES ───
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserAccount);
