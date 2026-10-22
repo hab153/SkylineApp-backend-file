@@ -16,15 +16,16 @@ async function checkAndIncrement(userId, type) {
     if (!user) throw new Error('User not found');
 
     const now = new Date();
+    // Handle null/undefined lastLimitReset by defaulting to 0
     const lastReset = new Date(user.usage.lastLimitReset || 0);
     const hoursSinceReset = (now - lastReset) / (1000 * 60 * 60);
 
-    // Reset counts if 24 hours have passed
-    if (hoursSinceReset >= 24) {
+    // ✅ FIX: Reset if 24h passed OR if lastLimitReset was never set (0/null)
+    if (!user.usage.lastLimitReset || hoursSinceReset >= 24) {
         user.usage.dailyEmailCount = 0;
         user.usage.dailyResearchCount = 0;
         user.usage.dailyChatCount = 0;
-        user.usage.lastLimitReset = now;
+        user.usage.lastLimitReset = now; // ✅ Set it now so it doesn't reset again next time
     }
 
     const tier = user.subscriptionTier || 'free';
@@ -68,8 +69,17 @@ async function getRemainingLimits(userId) {
     const tier = user.subscriptionTier || 'free';
     const limitConfig = LIMITS[tier] || LIMITS.free;
 
-    // If reset time has passed, return full limits
-    if ((now - lastReset) / (1000 * 60 * 60) >= 24) {
+    // ✅ FIX: Only reset if lastLimitReset exists AND 24h passed
+    if (user.usage.lastLimitReset && (now - lastReset) / (1000 * 60 * 60) >= 24) {
+        return {
+            emails: limitConfig.emails,
+            research: limitConfig.research,
+            chats: limitConfig.chats
+        };
+    }
+    
+    // ✅ If no lastLimitReset, counts should be as-is (not reset to full)
+    if (!user.usage.lastLimitReset) {
         return {
             emails: limitConfig.emails,
             research: limitConfig.research,
