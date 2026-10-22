@@ -9,7 +9,7 @@ const { streamPipeline } = require('./Stream');
 // Middleware
 const { verifyToken } = require('./authMiddleware');
 const { checkSubscriptionExpiry } = require('./subscriptionMiddleware');
-const { checkDailyLimit } = require('./dailyLimitMiddleware'); // ✅ Import the new limiter
+const { researchLimitMiddleware } = require('./researchLimitMiddleware'); // ⭐ NEW
 
 function setSSEHeaders(res) {
     res.writeHead(200, {
@@ -42,13 +42,13 @@ function bridgeQueryToken(req, res, next) {
     next();
 }
 
-// ✅ UPDATED ROUTE: Added checkDailyLimit middleware
+// ⭐ UPDATED ROUTE: Now uses researchLimitMiddleware
 router.get(
     '/pipeline',
     bridgeQueryToken,
     verifyToken,
     checkSubscriptionExpiry,
-    checkDailyLimit, // ✅ This will now check/increment research limit
+    researchLimitMiddleware, // ⭐ NEW — attaches req.remainingResearch
     async function (req, res) {
         const message = typeof req.query.message === 'string'
             ? req.query.message.trim()
@@ -64,9 +64,9 @@ router.get(
         console.log('[StreamRoutes] Pipeline stream opened');
         console.log('[StreamRoutes] User:', req.userId);
         
-        // Optional: Log remaining limits for debugging
-        if (req.remainingLimits) {
-            console.log('[StreamRoutes] Remaining Research:', req.remainingLimits.remaining);
+        // Log remaining research (attached by researchLimitMiddleware)
+        if (req.remainingResearch) {
+            console.log('[StreamRoutes] Remaining Research:', req.remainingResearch.remaining);
         }
 
         setSSEHeaders(res);
@@ -84,7 +84,16 @@ router.get(
         function onStage(label, data) {
             if (closed) return;
             try {
-                writeSSEEvent(res, { stage: label, data });
+                // ⭐ If this is the final 'done' or 's5' stage, attach remaining limits
+                if (label === 'done' || label === 's5') {
+                    const enrichedData = {
+                        ...(data || {}),
+                        remainingLimits: req.remainingResearch || null
+                    };
+                    writeSSEEvent(res, { stage: label, data: enrichedData });
+                } else {
+                    writeSSEEvent(res, { stage: label, data });
+                }
             } catch (writeErr) {
                 closed = true;
             }
@@ -98,7 +107,10 @@ router.get(
                 try {
                     writeSSEEvent(res, {
                         stage: 'error',
-                        data: { message: 'Something went wrong.' },
+                        data: {
+                            message: 'Something went wrong.',
+                            remainingLimits: req.remainingResearch || null
+                        },
                     });
                 } catch (_) {}
             }
