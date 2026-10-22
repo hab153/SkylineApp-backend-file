@@ -10,9 +10,6 @@ const LIMITS = {
 
 /**
  * Checks if the user has reached their daily limit and increments the count if allowed.
- * @param {string} userId - The user's ID
- * @param {string} type - 'email', 'research', or 'chat'
- * @returns {object} - { allowed: boolean, remaining: number, limit: number }
  */
 async function checkAndIncrement(userId, type) {
     const user = await User.findById(userId);
@@ -44,11 +41,12 @@ async function checkAndIncrement(userId, type) {
         return { allowed: false, remaining: 0, limit: limit };
     }
 
-    // Increment the specific counter
+    // Increment the specific counter directly on the object
     if (type === 'email') user.usage.dailyEmailCount += 1;
     if (type === 'research') user.usage.dailyResearchCount += 1;
     if (type === 'chat') user.usage.dailyChatCount += 1;
     
+    // Save the user document to persist the change
     await user.save();
 
     return { 
@@ -60,7 +58,6 @@ async function checkAndIncrement(userId, type) {
 
 /**
  * Gets the remaining limits for the user without incrementing.
- * Used for the dashboard UI.
  */
 async function getRemainingLimits(userId) {
     const user = await User.findById(userId);
