@@ -118,7 +118,14 @@ const UserSchema = new mongoose.Schema({
         dailyAutoFollowUpCount: { type: Number, default: 0 },
         lastAutoFollowUpDate: { type: Date, default: null },
         assistantCount: { type: Number, default: 0 },
-        assistantLastDate: { type: Date, default: null }
+        assistantLastDate: { type: Date, default: null },
+
+        // ⭐ CRITICAL FIX: These 4 fields were MISSING.
+        // limitService.js and researchLimitService.js rely on them.
+        dailyEmailCount:    { type: Number, default: 0 },
+        dailyResearchCount: { type: Number, default: 0 },
+        dailyChatCount:     { type: Number, default: 0 },
+        lastLimitReset:     { type: Date,   default: null }
     },
 
     // --- SUBSCRIPTION FIELDS ---
