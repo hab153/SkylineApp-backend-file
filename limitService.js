@@ -1,4 +1,6 @@
 // limitService.js
+// UPDATED: Fixed 24h reset logic (same fix as researchLimitService.js)
+
 const User = require('./User');
 
 // Define limits per plan tier
@@ -8,13 +10,18 @@ const LIMITS = {
     pro:  { emails: 120, research: 20, chats: 150 }
 };
 
-// ─── Helper: check if 24h have passed since last reset ───
-function needsReset(lastLimitReset) {
-    if (!lastLimitReset) return true; // never set → reset needed
-    const now = new Date();
-    const last = new Date(lastLimitReset);
-    const hoursSinceReset = (now - last) / (1000 * 60 * 60);
-    return hoursSinceReset >= 24;
+// ─── WINDOW: 24 hours in milliseconds ───
+const RESET_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Check if 24h have passed since last reset
+ * Returns TRUE if reset should happen
+ */
+function shouldReset(lastLimitReset) {
+    if (!lastLimitReset) return true;
+    const now = Date.now();
+    const last = new Date(lastLimitReset).getTime();
+    return (now - last) >= RESET_WINDOW_MS;
 }
 
 /**
@@ -24,24 +31,23 @@ async function checkAndIncrement(userId, type) {
     const user = await User.findById(userId);
     if (!user) throw new Error('User not found');
 
-    const now = new Date();
-
     // ─── Ensure usage object exists ───
     if (!user.usage) user.usage = {};
 
-    // ✅ FIX: If no lastLimitReset OR 24h passed → reset counters
-    if (needsReset(user.usage.lastLimitReset)) {
+    const now = new Date();
+
+    // ─── Reset counters if 24h passed OR first-ever use ───
+    if (shouldReset(user.usage.lastLimitReset)) {
+        console.log(`🔄 [LIMITS] Resetting counters for user ${userId}`);
         user.usage.dailyEmailCount = 0;
         user.usage.dailyResearchCount = 0;
         user.usage.dailyChatCount = 0;
         user.usage.lastLimitReset = now;
-        console.log(`🔄 [LIMITS] Reset counters for user ${userId} (24h window)`);
     }
 
     const tier = user.subscriptionTier || 'free';
     const limitConfig = LIMITS[tier] || LIMITS.free;
 
-    // ─── Read current count for this type ───
     let currentCount = 0;
     if (type === 'email')    currentCount = user.usage.dailyEmailCount    || 0;
     if (type === 'research') currentCount = user.usage.dailyResearchCount || 0;
@@ -50,10 +56,10 @@ async function checkAndIncrement(userId, type) {
     const limitKey = type === 'email' ? 'emails' : type === 'research' ? 'research' : 'chats';
     const limit = limitConfig[limitKey];
 
-    // ─── Check limit reached ───
     if (currentCount >= limit) {
         console.log(`🚫 [LIMITS] ${type} limit reached for user ${userId} (${currentCount}/${limit})`);
-        // Still save to persist any reset
+        // Save in case we reset
+        user.markModified('usage');
         await user.save();
         return { allowed: false, remaining: 0, limit: limit, used: currentCount };
     }
@@ -63,7 +69,7 @@ async function checkAndIncrement(userId, type) {
     if (type === 'research') user.usage.dailyResearchCount = currentCount + 1;
     if (type === 'chat')     user.usage.dailyChatCount     = currentCount + 1;
 
-    // ✅ Mark as modified (Mongoose sometimes misses nested updates)
+    // ─── CRITICAL: Tell Mongoose nested field changed ───
     user.markModified('usage');
 
     await user.save();
@@ -89,8 +95,8 @@ async function getRemainingLimits(userId) {
     const tier = user.subscriptionTier || 'free';
     const limitConfig = LIMITS[tier] || LIMITS.free;
 
-    // ✅ FIX: If no lastLimitReset OR 24h passed → user has full limits
-    if (needsReset(user.usage?.lastLimitReset)) {
+    // ✅ FIX: If reset needed OR no lastLimitReset → full limits
+    if (shouldReset(user.usage?.lastLimitReset)) {
         return {
             emails: limitConfig.emails,
             research: limitConfig.research,
@@ -98,7 +104,6 @@ async function getRemainingLimits(userId) {
         };
     }
 
-    // ✅ Return remaining = limit - used (never negative)
     return {
         emails:   Math.max(0, limitConfig.emails   - (user.usage?.dailyEmailCount    || 0)),
         research: Math.max(0, limitConfig.research - (user.usage?.dailyResearchCount || 0)),
@@ -106,39 +111,4 @@ async function getRemainingLimits(userId) {
     };
 }
 
-/**
- * Returns full usage breakdown for a user.
- */
-async function getUsageDetails(userId) {
-    const user = await User.findById(userId).select('usage subscriptionTier').lean();
-    if (!user) return null;
-
-    const tier = user.subscriptionTier || 'free';
-    const limitConfig = LIMITS[tier] || LIMITS.free;
-
-    if (needsReset(user.usage?.lastLimitReset)) {
-        return {
-            tier,
-            limits: {
-                email:    { used: 0, max: limitConfig.emails,   remaining: limitConfig.emails },
-                research: { used: 0, max: limitConfig.research, remaining: limitConfig.research },
-                chat:     { used: 0, max: limitConfig.chats,    remaining: limitConfig.chats }
-            }
-        };
-    }
-
-    const usedEmails   = user.usage?.dailyEmailCount    || 0;
-    const usedResearch = user.usage?.dailyResearchCount || 0;
-    const usedChats    = user.usage?.dailyChatCount     || 0;
-
-    return {
-        tier,
-        limits: {
-            email:    { used: usedEmails,   max: limitConfig.emails,   remaining: Math.max(0, limitConfig.emails   - usedEmails) },
-            research: { used: usedResearch, max: limitConfig.research, remaining: Math.max(0, limitConfig.research - usedResearch) },
-            chat:     { used: usedChats,    max: limitConfig.chats,    remaining: Math.max(0, limitConfig.chats    - usedChats) }
-        }
-    };
-}
-
-module.exports = { checkAndIncrement, getRemainingLimits, getUsageDetails, LIMITS };
+module.exports = { checkAndIncrement, getRemainingLimits, LIMITS };
