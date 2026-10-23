@@ -205,6 +205,16 @@ const UserSchema = new mongoose.Schema({
     }],
     // ============================================================
 
+    // ⭐ NEW: SAVED LEADS STORAGE
+    savedLeads: [{
+        companyName: { type: String },
+        email: { type: String },
+        emailStatus: { type: String },
+        phoneNumber: { type: String },
+        companyInformation: { type: String },
+        savedAt: { type: Date, default: Date.now }
+    }],
+
     createdAt: {
         type: Date,
         default: Date.now
