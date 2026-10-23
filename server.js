@@ -510,10 +510,15 @@ app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadCo
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
 
-// ⭐ NEW: SAVED LEADS ROUTES
+// ⭐ SAVED LEADS ROUTES
 app.post('/api/leads/save', verifyToken, leadController.saveLeads);
 app.delete('/api/leads/:leadId', verifyToken, leadController.deleteLead);
 app.get('/api/leads/saved', verifyToken, leadController.getSavedLeads);
+
+// ⭐ NEW: DRAFTED MESSAGES ROUTES
+app.post('/api/leads/draft', verifyToken, leadController.saveDraft);
+app.get('/api/leads/drafts', verifyToken, leadController.getDrafts);
+app.delete('/api/leads/draft', verifyToken, leadController.deleteDraft);
 
 console.log('✅ [SERVER] All lead routes registered');
 
