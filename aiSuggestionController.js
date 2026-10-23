@@ -1,6 +1,6 @@
 // aiSuggestionController.js
 const { checkAndIncrement } = require('./limitService');
-const { generateSuggestion } = require('./aiReplyGenerator');
+const aiReplyGenerator = require('./aiReplyGenerator'); // Import the whole module
 
 const suggestOutreach = async (req, res) => {
     try {
@@ -28,7 +28,11 @@ const suggestOutreach = async (req, res) => {
         const suggestions = [];
         for (const lead of leads) {
             const prompt = `Generate a personalized outreach email for ${lead.companyName} in the ${lead.industry || 'general'} industry. Contact: ${lead.email}. Keep it professional and concise.`;
-            const suggestion = await generateSuggestion(prompt);
+            
+            // ✅ Safe access to the function regardless of export style
+            const suggestionFn = aiReplyGenerator.generateSuggestion || aiReplyGenerator;
+            const suggestion = await suggestionFn(prompt);
+            
             suggestions.push({
                 email: lead.email,
                 companyName: lead.companyName,
