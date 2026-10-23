@@ -1,6 +1,6 @@
 const Lead = require('./Lead');
 const ChatMessage = require('./ChatMessage');
-const User = require('./User'); // ✅ Import User Model
+const User = require('./User');
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
@@ -129,7 +129,6 @@ function decryptEmail(email) {
 // ✅ UNREAD COUNT HELPER FUNCTIONS
 // ============================================================
 
-// ─── ✅ INCREMENT UNREAD COUNT ───
 const incrementUnreadCount = async (leadId, userId) => {
     try {
         const result = await Lead.findOneAndUpdate(
@@ -144,7 +143,6 @@ const incrementUnreadCount = async (leadId, userId) => {
     }
 };
 
-// ─── ✅ RESET UNREAD COUNT ───
 const resetUnreadCount = async (leadId, userId) => {
     try {
         const result = await Lead.findOneAndUpdate(
@@ -159,7 +157,6 @@ const resetUnreadCount = async (leadId, userId) => {
     }
 };
 
-// ─── ✅ GET TOTAL UNREAD COUNT FOR USER ───
 const getTotalUnreadCount = async (userId) => {
     try {
         const mongoose = require('mongoose');
@@ -178,7 +175,6 @@ const getTotalUnreadCount = async (userId) => {
 // ✅ SAVED LEADS FUNCTIONS
 // ============================================================
 
-// ─── ✅ SAVE LEADS TO DATABASE ───
 const saveLeads = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -193,7 +189,6 @@ const saveLeads = async (req, res) => {
         const user = await User.findById(req.userId);
         if (!user) return res.status(404).json({ message: 'User not found' });
 
-        // Filter out duplicates based on email or companyName
         const existingEmails = new Set(user.savedLeads.map(l => l.email));
         const existingNames = new Set(user.savedLeads.map(l => l.companyName));
 
@@ -205,7 +200,6 @@ const saveLeads = async (req, res) => {
             return res.json({ success: true, message: 'All leads are already saved', count: 0 });
         }
 
-        // Add new leads with a timestamp
         const leadsToSave = newLeads.map(lead => ({
             ...lead,
             savedAt: new Date()
@@ -226,15 +220,12 @@ const saveLeads = async (req, res) => {
     }
 };
 
-// ─── ✅ DELETE LEAD FROM DATABASE ───
 const deleteLead = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        const { leadId } = req.params; 
-        
         const { email, companyName } = req.body;
         if (!email && !companyName) {
             return res.status(400).json({ message: 'Email or Company Name required to delete' });
@@ -263,7 +254,6 @@ const deleteLead = async (req, res) => {
     }
 };
 
-// ─── ✅ GET SAVED LEADS ───
 const getSavedLeads = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -282,8 +272,110 @@ const getSavedLeads = async (req, res) => {
 };
 
 // ============================================================
-// ✅ FIXED: GET /api/conversations — PAGINATION RESTORED (15 per page)
+// ✅ DRAFTED MESSAGES FUNCTIONS
 // ============================================================
+
+// ─── ✅ SAVE DRAFT TO DATABASE ───
+const saveDraft = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const { companyName, email, subject, message } = req.body;
+
+        if (!companyName || !email) {
+            return res.status(400).json({ message: 'Company name and email are required' });
+        }
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        // Check if draft already exists for this email
+        const existingDraftIndex = user.draftedMessages.findIndex(d => d.email === email);
+
+        if (existingDraftIndex !== -1) {
+            // Update existing draft
+            user.draftedMessages[existingDraftIndex].subject = subject || '';
+            user.draftedMessages[existingDraftIndex].message = message || '';
+            user.draftedMessages[existingDraftIndex].draftedAt = new Date();
+        } else {
+            // Add new draft
+            user.draftedMessages.push({
+                companyName,
+                email,
+                subject: subject || '',
+                message: message || '',
+                draftedAt: new Date()
+            });
+        }
+
+        await user.save();
+
+        res.json({ 
+            success: true, 
+            message: 'Draft saved successfully' 
+        });
+
+    } catch (err) {
+        console.error('❌ [saveDraft] Error:', err.message);
+        res.status(500).json({ message: 'Server Error saving draft' });
+    }
+};
+
+// ─── ✅ GET ALL DRAFTS ───
+const getDrafts = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const user = await User.findById(req.userId).select('draftedMessages').lean();
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        res.json({ success: true, data: user.draftedMessages || [] });
+
+    } catch (err) {
+        console.error('❌ [getDrafts] Error:', err.message);
+        res.status(500).json({ message: 'Server Error fetching drafts' });
+    }
+};
+
+// ─── ✅ DELETE DRAFT FROM DATABASE ───
+const deleteDraft = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required to delete draft' });
+        }
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const initialLength = user.draftedMessages.length;
+        user.draftedMessages = user.draftedMessages.filter(draft => draft.email !== email);
+
+        if (user.draftedMessages.length === initialLength) {
+            return res.status(404).json({ message: 'Draft not found' });
+        }
+
+        await user.save();
+        res.json({ success: true, message: 'Draft deleted successfully' });
+
+    } catch (err) {
+        console.error('❌ [deleteDraft] Error:', err.message);
+        res.status(500).json({ message: 'Server Error deleting draft' });
+    }
+};
+
+// ============================================================
+// ✅ CONVERSATIONS
+// ============================================================
+
 const getConversations = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -353,9 +445,6 @@ const getConversations = async (req, res) => {
     }
 };
 
-// ============================================================
-// ✅ OPTIMIZED: GET /api/conversations/:leadId WITH CACHE + DECRYPTED EMAILS
-// ============================================================
 const conversationCache = new Map();
 const CONVERSATION_CACHE_TTL = 30000;
 
@@ -444,9 +533,6 @@ const getConversationById = async (req, res) => {
     }
 };
 
-// ─────────────────────────────────────────────────────────────
-//  PUT /api/leads/:leadId/rename
-// ─────────────────────────────────────────────────────────────
 const renameLead = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
@@ -478,9 +564,6 @@ const renameLead = async (req, res) => {
     }
 };
 
-// ============================================================
-// ✅ DEBUG: PUT /api/leads/:leadId/auto-reply — WITH FULL LOGGING
-// ============================================================
 const updateAutoReply = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
@@ -521,9 +604,6 @@ const updateAutoReply = async (req, res) => {
     }
 };
 
-// ============================================================
-// ✅ DEBUG: GET /api/leads/:leadId/auto-reply — WITH FULL LOGGING
-// ============================================================
 const getAutoReply = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId) || !isValidObjectId(req.params.leadId)) {
@@ -573,7 +653,7 @@ const batchSend = async (req, res) => {
         const { leads, leadId, allowNewLead = true } = req.body;
 
         const MAX_BATCH_SIZE = 100;
-        const CONCURRENCY_LIMIT = 5; // Send 5 emails at a time
+        const CONCURRENCY_LIMIT = 5;
 
         if (!Array.isArray(leads)) {
             return res.status(400).json({ success: false, message: 'Leads must be an array' });
@@ -653,7 +733,6 @@ const batchSend = async (req, res) => {
         }
 
         if (leadId) {
-            // ... (Existing single-lead logic remains the same) ...
             if (!isValidObjectId(leadId)) {
                 return res.status(400).json({ success: false, message: 'Invalid lead ID' });
             }
@@ -723,7 +802,6 @@ const batchSend = async (req, res) => {
 
             let results = [];
             
-            // Helper function to process a single lead
             const processLead = async (leadData) => {
                 const now = new Date();
                 const leadEmail = leadData.email;
@@ -741,7 +819,6 @@ const batchSend = async (req, res) => {
                     if (lastReply && String(lastReply.content || '') === leadData.messages[0].body) {
                         return { email: leadEmail, name: leadData.name, success: true, alreadyProcessed: true, message: 'Email already sent' };
                     }
-                    // Update existing lead
                     await Lead.findOneAndUpdate(
                         { _id: String(lead._id), userId: safeUserId },
                         {
@@ -750,7 +827,6 @@ const batchSend = async (req, res) => {
                         }
                     );
                 } else {
-                    // Create new lead
                     lead = new Lead({
                         userId: safeUserId,
                         name: leadData.name || leadData.company || 'Unknown',
@@ -803,7 +879,6 @@ const batchSend = async (req, res) => {
                 return { leadId: lead._id, email: leadEmail, sent: emailSent, error: emailError };
             };
 
-            // Process leads in parallel batches
             for (let i = 0; i < sanitizedLeads.length; i += CONCURRENCY_LIMIT) {
                 const batch = sanitizedLeads.slice(i, i + CONCURRENCY_LIMIT);
                 const batchPromises = batch.map(leadData => processLead(leadData));
@@ -827,9 +902,6 @@ const batchSend = async (req, res) => {
     }
 };
 
-// ──────────────────────────────────────────────────────────────
-//  POST /api/reconnect-and-send
-// ──────────────────────────────────────────────────────────────
 const reconnectAndSend = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -895,9 +967,6 @@ const reconnectAndSend = async (req, res) => {
     }
 };
 
-// ──────────────────────────────────────────────────────────────
-//  GET /api/leads
-// ─────────────────────────────────────────────────────────────
 const getAllLeads = async (req, res) => {
     try {
         if (!req.userId || !isValidObjectId(req.userId)) {
@@ -931,7 +1000,10 @@ module.exports = {
     incrementUnreadCount,
     resetUnreadCount,
     getTotalUnreadCount,
-    saveLeads,      // ✅ New Export
-    deleteLead,     // ✅ New Export
-    getSavedLeads   // ✅ New Export
+    saveLeads,
+    deleteLead,
+    getSavedLeads,
+    saveDraft,      // ✅ New Export
+    getDrafts,      // ✅ New Export
+    deleteDraft     // ✅ New Export
 };
