@@ -509,6 +509,12 @@ console.log('✅ [SERVER] PUT /api/leads/:leadId/auto-reply registered');
 app.post('/api/leads/batch-send', verifyToken, validate(batchSendSchema), leadController.batchSend);
 app.post('/api/reconnect-and-send', verifyToken, leadController.reconnectAndSend);
 app.get('/api/leads', verifyToken, leadController.getAllLeads);
+
+// ⭐ NEW: SAVED LEADS ROUTES
+app.post('/api/leads/save', verifyToken, leadController.saveLeads);
+app.delete('/api/leads/:leadId', verifyToken, leadController.deleteLead);
+app.get('/api/leads/saved', verifyToken, leadController.getSavedLeads);
+
 console.log('✅ [SERVER] All lead routes registered');
 
 // ─── FOLLOW-UP ROUTES ───
