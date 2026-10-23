@@ -1,6 +1,6 @@
 // aiSuggestionController.js
 const { checkAndIncrement } = require('./limitService');
-const { generateAIReply } = require('./aiReplyGenerator');
+const { generateOutreachSuggestion } = require('./outreachSuggestionService');
 
 const suggestOutreach = async (req, res) => {
     try {
@@ -11,7 +11,7 @@ const suggestOutreach = async (req, res) => {
             return res.status(400).json({ message: 'Leads array is required' });
         }
 
-        // ✅ Check and increment AI suggestion limit via limitService
+        // ✅ Check plan-based daily limit BEFORE calling AI
         const limitResult = await checkAndIncrement(userId, 'aiSuggestion');
 
         if (!limitResult.allowed) {
@@ -23,25 +23,19 @@ const suggestOutreach = async (req, res) => {
             });
         }
 
-        // Generate suggestions using your existing production v6.0 engine
+        // ✅ Generate suggestions using dedicated outreach service
         const suggestions = [];
         for (const lead of leads) {
-            // Craft a focused instruction set for outreach generation
-            const instructions = `Generate a personalized, professional outreach email for ${lead.companyName} in the ${lead.industry || 'general'} industry. Contact: ${lead.email}. Keep it concise, value-driven, and end with a clear call to action.`;
-            
-            // Call your existing engine with minimal context to get a clean reply
-            const result = await generateAIReply(
-                `Draft an initial outreach message for this lead.`, 
-                instructions,
-                lead.companyName,
-                [], // Empty history for fresh outreach
-                { mode: 'draft', tone: 'professional' }
-            );
+            const message = await generateOutreachSuggestion({
+                companyName: lead.companyName,
+                email: lead.email,
+                industry: lead.industry || ''
+            });
 
             suggestions.push({
                 email: lead.email,
                 companyName: lead.companyName,
-                suggestedMessage: result.reply || result.reasoning || 'Unable to generate suggestion at this time.'
+                suggestedMessage: message
             });
         }
 
@@ -53,7 +47,7 @@ const suggestOutreach = async (req, res) => {
         });
 
     } catch (err) {
-        console.error('AI Suggestion Error:', err.message);
+        console.error('AI Suggestion Controller Error:', err.message);
         res.status(500).json({ message: 'Failed to generate suggestions' });
     }
 };
