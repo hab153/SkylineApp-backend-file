@@ -62,7 +62,7 @@ const UserSchema = new mongoose.Schema({
     },
     // ============================================================
 
-    // ─── ✅ ADMIN SECURITY FIELDS (UPDATED) ───
+    // ─── ✅ ADMIN SECURITY FIELDS (UPDATED) ──
     isAdmin: {
         type: Boolean,
         default: false
@@ -125,7 +125,11 @@ const UserSchema = new mongoose.Schema({
         dailyEmailCount:    { type: Number, default: 0 },
         dailyResearchCount: { type: Number, default: 0 },
         dailyChatCount:     { type: Number, default: 0 },
-        lastLimitReset:     { type: Date,   default: null }
+        lastLimitReset:     { type: Date,   default: null },
+
+        // ⭐ NEW: AI Suggestion Tracking Fields
+        dailyAiSuggestionCount: { type: Number, default: 0 },
+        lastAiSuggestionDate:   { type: Date,   default: null }
     },
 
     // --- SUBSCRIPTION FIELDS ---
@@ -205,7 +209,7 @@ const UserSchema = new mongoose.Schema({
     }],
     // ============================================================
 
-    // ⭐ SAVED LEADS STORAGE
+    //  SAVED LEADS STORAGE
     savedLeads: [{
         companyName: { type: String },
         email: { type: String },
