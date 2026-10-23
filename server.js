@@ -81,7 +81,8 @@ const {
     autoFollowUpSchema,
     assistantSchema,
     dreamSchema,
-    dreamRefineSchema
+    dreamRefineSchema,
+    aiSuggestionSchema // ⭐ NEW: Added for AI suggestion validation
 } = require('./validationSchemas');
 
 // XSS protection
@@ -111,6 +112,9 @@ const composeController = require('./composeController');
 // ✅ STREAM ROUTES — SSE pipeline streaming
 const streamRoutes = require('./streamRoutes');
 
+// ⭐ NEW: AI Suggestion Routes
+const aiSuggestionRoutes = require('./aiSuggestionRoutes');
+
 dotenv.config();
 const app = express();
 
@@ -122,7 +126,7 @@ console.log('🚀 [SERVER] PORT:', process.env.PORT || 5001);
 //  ✅ JWT SECRET VALIDATION (ENHANCED - HARD FAILS)
 // ──────────────────────────────────────────────────────────────
 
-console.log('\n🔐 [SECURITY] Validating JWT secrets...');
+console.log('\n [SECURITY] Validating JWT secrets...');
 
 function getEntropyRecommendation() {
     return '\n   💡 RECOMMENDED: Run this command to generate a secure secret:\n   node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"';
@@ -148,7 +152,7 @@ console.log('✅ [SECURITY] JWT_SECRET is configured and validated');
 
 const adminJwtSecret = process.env.ADMIN_JWT_SECRET;
 if (!adminJwtSecret) {
-    console.error('❌ [SECURITY] ADMIN_JWT_SECRET is not defined!');
+    console.error(' [SECURITY] ADMIN_JWT_SECRET is not defined!');
     process.exit(1);
 }
 if (adminJwtSecret.length < 32) {
@@ -169,7 +173,7 @@ console.log('✅ [SECURITY] ADMIN_JWT_SECRET is configured and distinct.');
 const requiredEnvVars = ['NYLAS_CLIENT_ID', 'NYLAS_API_KEY', 'FLUTTERWAVE_SECRET_KEY', 'FLUTTERWAVE_SECRET_HASH', 'MONGODB_URI'];
 const missingEnvVars = requiredEnvVars.filter(varName => { const value = process.env[varName]; return !value || value.trim() === ''; });
 if (missingEnvVars.length > 0) {
-    console.error('❌ CRITICAL ERROR: Missing required environment variables:', missingEnvVars.join(', '));
+    console.error(' CRITICAL ERROR: Missing required environment variables:', missingEnvVars.join(', '));
     process.exit(1);
 }
 console.log('✅ All required environment variables are configured');
@@ -292,7 +296,7 @@ app.get('/api/events/stream', verifyToken, function(req, res) {
     res.write('data: ' + JSON.stringify({ type: 'connected', time: Date.now() }) + '\n\n');
 
     sseManager.addClient(userId, res);
-    console.log('📡 [SSE] Client connected: ' + userId + ' (total: ' + sseManager.getClientCount() + ')');
+    console.log(' [SSE] Client connected: ' + userId + ' (total: ' + sseManager.getClientCount() + ')');
 
     req.on('close', function() {
         sseManager.removeClient(userId);
@@ -316,14 +320,14 @@ console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ─── XSS PROTECTION ───
+// ─── XSS PROTECTION ──
 app.use(xssProtection);
 app.use(xssOutputProtection);
 
 // ============================================================
 // ✅ FIXED: MONGODB CONNECTION — INCREASED POOL + TIMEOUTS
 // ============================================================
-console.log('🔗 [SERVER] Connecting to MongoDB...');
+console.log(' [SERVER] Connecting to MongoDB...');
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 100,
     minPoolSize: 2,
@@ -335,7 +339,7 @@ mongoose.connect(process.env.MONGODB_URI, {
 .then(async () => {
     console.log('✅ MongoDB Connected');
     try {
-        console.log('🔧 [SERVER] Creating database indexes...');
+        console.log(' [SERVER] Creating database indexes...');
         const ChatMessage = require('./ChatMessage');
         await ChatMessage.collection.createIndex({ userId: 1, sessionId: 1 });
         await ChatMessage.collection.createIndex({ userId: 1, createdAt: -1 });
@@ -372,7 +376,7 @@ mongoose.connect(process.env.MONGODB_URI, {
     console.log('❌ MongoDB Connection Error:', err.message);
     console.log('⚠️ [SERVER] Will retry connection in 10 seconds...');
     setTimeout(function() {
-        console.log('🔄 [SERVER] Retrying MongoDB connection...');
+        console.log(' [SERVER] Retrying MongoDB connection...');
         mongoose.connect(process.env.MONGODB_URI, {
             maxPoolSize: 100,
             minPoolSize: 2,
@@ -430,7 +434,7 @@ app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ─── NYLAS AUTH ROUTES ───
+// ─── NYLAS AUTH ROUTES ──
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
@@ -460,11 +464,11 @@ app.get('/api/auth/nylas/test-callback', (req, res) => {
     });
 });
 
-// ─── PAYMENT ROUTE ───
+// ─── PAYMENT ROUTE ──
 app.post('/api/create-flutterwave-payment', verifyToken, createFlutterwavePayment);
 console.log('✅ [SERVER] Payment route registered');
 
-// ─── AUTH ROUTES ───
+// ── AUTH ROUTES ───
 app.post('/api/auth/register', registerLimiter, validate(registerSchema), register);
 app.post('/api/auth/login', loginLimiter, validate(loginSchema), login);
 app.put('/api/auth/change-email', verifyToken, validate(changeEmailSchema), userController.changeEmail);
@@ -490,7 +494,7 @@ app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletion
 // ─── DATA EXPORT ROUTES ───
 app.use('/api/data', dataExportRoutes);
 
-// ─── LEAD / CONVERSATION ROUTES ───
+// ── LEAD / CONVERSATION ROUTES ───
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
@@ -523,7 +527,7 @@ app.delete('/api/leads/draft', verifyToken, leadController.deleteDraft);
 console.log('✅ [SERVER] All lead routes registered');
 
 // ─── FOLLOW-UP ROUTES ───
-console.log('🔧 [SERVER] Registering follow-up routes...');
+console.log(' [SERVER] Registering follow-up routes...');
 app.get('/api/leads/:leadId/follow-up-status', verifyToken, followUpController.getFollowUpStatus);
 app.post('/api/leads/:leadId/suggest-follow-up', verifyToken, checkSuggestFollowUpLimit, followUpController.suggestFollowUp);
 app.post('/api/leads/:leadId/auto-follow-up', verifyToken, checkAutoFollowUpLimit, validate(autoFollowUpSchema), followUpController.toggleAutoFollowUp);
@@ -573,7 +577,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 console.log('✅ [SERVER] Dreams routes registered');
 
-// ─── AI SUGGESTION ROUTE ───
+// ─── EXISTING AI SUGGESTION ROUTE (CHAT CONTEXT) ───
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     console.log('💡 [AI SUGGEST] Request received');
     try {
@@ -588,6 +592,10 @@ app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     }
 });
 console.log('✅ [SERVER] AI suggestion route registered');
+
+// ⭐ NEW: OUTREACH AI SUGGESTION ROUTES (WITH PLAN-BASED LIMITS)
+app.use('/api/ai/suggest-outreach', verifyToken, validate(aiSuggestionSchema), aiSuggestionRoutes);
+console.log('✅ [SERVER] Outreach AI suggestion routes registered at /api/ai/suggest-outreach');
 
 // ─── ADMIN ROUTES ───
 app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
@@ -645,7 +653,7 @@ app.post('/api/reports', verifyToken, validate(reportSchema), reportController.s
 console.log('✅ [SERVER] Report routes registered');
 
 // ─── HISTORY ROUTES ───
-console.log('🔧 [SERVER] Registering history routes...');
+console.log(' [SERVER] Registering history routes...');
 app.get('/api/history/sessions', verifyToken, checkSubscriptionExpiry, sessionController.getSessions);
 app.get('/api/history/messages/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
 app.get('/api/history/:sessionId', verifyToken, checkSubscriptionExpiry, chatController.getHistory);
@@ -707,9 +715,9 @@ console.log('   📋 GET  /api/unread/leads       - Get leads with unread');
 console.log('   📋 GET  /api/unread/lead/:id    - Get unread for lead');
 console.log('   📋 POST /api/unread/reset/:id   - Reset unread for lead');
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  ✅ FAST DASHBOARD DATA
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 
 app.get('/api/user/dashboard-data', verifyToken, userController.getDashboardData);
 
@@ -738,7 +746,7 @@ console.log('✅ [COMPOSE] GET /api/compose/recent-leads registered');
 //  ✅ STREAM ROUTES (NEW — SSE pipeline)
 // ════════════════════════════════════════════
 
-console.log('📡 [STREAM] Registering stream routes...');
+console.log(' [STREAM] Registering stream routes...');
 
 app.use('/api/stream', streamRoutes);
 
