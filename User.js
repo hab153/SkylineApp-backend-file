@@ -205,7 +205,7 @@ const UserSchema = new mongoose.Schema({
     }],
     // ============================================================
 
-    // ⭐ NEW: SAVED LEADS STORAGE
+    // ⭐ SAVED LEADS STORAGE
     savedLeads: [{
         companyName: { type: String },
         email: { type: String },
@@ -213,6 +213,15 @@ const UserSchema = new mongoose.Schema({
         phoneNumber: { type: String },
         companyInformation: { type: String },
         savedAt: { type: Date, default: Date.now }
+    }],
+
+    // ⭐ NEW: DRAFTED MESSAGES STORAGE
+    draftedMessages: [{
+        companyName: { type: String, required: true },
+        email: { type: String, required: true },
+        subject: { type: String, default: '' },
+        message: { type: String, default: '' },
+        draftedAt: { type: Date, default: Date.now }
     }],
 
     createdAt: {
