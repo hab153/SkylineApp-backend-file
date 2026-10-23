@@ -1,13 +1,12 @@
 // aiSuggestionController.js
 const { checkAndIncrement } = require('./limitService');
-const aiReplyGenerator = require('./aiReplyGenerator'); // Import the whole module
+const { generateAIReply } = require('./aiReplyGenerator');
 
 const suggestOutreach = async (req, res) => {
     try {
         const userId = req.userId;
-
-        // ✅ Validate request body first
         const { leads } = req.body;
+
         if (!leads || !Array.isArray(leads) || leads.length === 0) {
             return res.status(400).json({ message: 'Leads array is required' });
         }
@@ -24,19 +23,25 @@ const suggestOutreach = async (req, res) => {
             });
         }
 
-        // Generate suggestions for each lead
+        // Generate suggestions using your existing production v6.0 engine
         const suggestions = [];
         for (const lead of leads) {
-            const prompt = `Generate a personalized outreach email for ${lead.companyName} in the ${lead.industry || 'general'} industry. Contact: ${lead.email}. Keep it professional and concise.`;
+            // Craft a focused instruction set for outreach generation
+            const instructions = `Generate a personalized, professional outreach email for ${lead.companyName} in the ${lead.industry || 'general'} industry. Contact: ${lead.email}. Keep it concise, value-driven, and end with a clear call to action.`;
             
-            // ✅ Safe access to the function regardless of export style
-            const suggestionFn = aiReplyGenerator.generateSuggestion || aiReplyGenerator;
-            const suggestion = await suggestionFn(prompt);
-            
+            // Call your existing engine with minimal context to get a clean reply
+            const result = await generateAIReply(
+                `Draft an initial outreach message for this lead.`, 
+                instructions,
+                lead.companyName,
+                [], // Empty history for fresh outreach
+                { mode: 'draft', tone: 'professional' }
+            );
+
             suggestions.push({
                 email: lead.email,
                 companyName: lead.companyName,
-                suggestedMessage: suggestion
+                suggestedMessage: result.reply || result.reasoning || 'Unable to generate suggestion at this time.'
             });
         }
 
