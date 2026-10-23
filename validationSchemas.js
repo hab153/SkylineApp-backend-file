@@ -170,6 +170,20 @@ const dreamRefineSchema = Joi.object({
     sessionId: Joi.string().allow(null, '')
 });
 
+// ============================================================
+//  NEW: AI OUTREACH SUGGESTION VALIDATION
+// ============================================================
+
+const aiSuggestionSchema = Joi.object({
+    leads: Joi.array().items(
+        Joi.object({
+            companyName: Joi.string().min(1).max(100).required(),
+            email: Joi.string().email({ tlds: { allow: false } }).max(255).required(),
+            industry: Joi.string().max(100).allow('')
+        })
+    ).min(1).max(50).required()
+});
+
 module.exports = {
     registerSchema,
     loginSchema,
@@ -188,5 +202,6 @@ module.exports = {
     autoFollowUpSchema,
     assistantSchema,
     dreamSchema,
-    dreamRefineSchema
+    dreamRefineSchema,
+    aiSuggestionSchema // ⭐ NEW EXPORT
 };
