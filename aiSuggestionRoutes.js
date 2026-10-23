@@ -7,6 +7,9 @@ const { aiSuggestionSchema } = require('./validationSchemas');
 const { suggestOutreach } = require('./aiSuggestionController');
 
 // POST /api/ai/suggest-outreach
-router.post('/suggest-outreach', verifyToken, validate(aiSuggestionSchema), suggestOutreach);
+// Note: server.js registers this as app.use('/api/ai/suggest-outreach', ...)
+// So the full path becomes POST /api/ai/suggest-outreach/suggest-outreach
+// We should use '/' here since the prefix is already applied in server.js
+router.post('/', verifyToken, validate(aiSuggestionSchema), suggestOutreach);
 
 module.exports = router;
