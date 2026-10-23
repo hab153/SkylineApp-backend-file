@@ -1,5 +1,6 @@
 const Lead = require('./Lead');
 const ChatMessage = require('./ChatMessage');
+const User = require('./User'); // ✅ Import User Model
 const { sendEmail, getThreads } = require('./nylasService');
 const { isValidObjectId, sanitizeQuery, sanitizeObject, sanitizeEmail } = require('./sanitize');
 const { checkAndIncrementSendLimit } = require('./dailyLimitMiddleware');
@@ -170,6 +171,116 @@ const getTotalUnreadCount = async (userId) => {
     } catch (error) {
         console.error('❌ [getTotalUnreadCount] Error:', error.message);
         return 0;
+    }
+};
+
+// ============================================================
+// ✅ SAVED LEADS FUNCTIONS
+// ============================================================
+
+// ─── ✅ SAVE LEADS TO DATABASE ───
+const saveLeads = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const { leads } = req.body;
+        if (!Array.isArray(leads) || leads.length === 0) {
+            return res.status(400).json({ message: 'No leads provided' });
+        }
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        // Filter out duplicates based on email or companyName
+        const existingEmails = new Set(user.savedLeads.map(l => l.email));
+        const existingNames = new Set(user.savedLeads.map(l => l.companyName));
+
+        const newLeads = leads.filter(lead => {
+            return !existingEmails.has(lead.email) && !existingNames.has(lead.companyName);
+        });
+
+        if (newLeads.length === 0) {
+            return res.json({ success: true, message: 'All leads are already saved', count: 0 });
+        }
+
+        // Add new leads with a timestamp
+        const leadsToSave = newLeads.map(lead => ({
+            ...lead,
+            savedAt: new Date()
+        }));
+
+        user.savedLeads.push(...leadsToSave);
+        await user.save();
+
+        res.json({ 
+            success: true, 
+            message: `${leadsToSave.length} leads saved successfully`, 
+            count: leadsToSave.length 
+        });
+
+    } catch (err) {
+        console.error('❌ [saveLeads] Error:', err.message);
+        res.status(500).json({ message: 'Server Error saving leads' });
+    }
+};
+
+// ─── ✅ DELETE LEAD FROM DATABASE ───
+const deleteLead = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const { leadId } = req.params; // We will use the index or a unique identifier
+        // For simplicity, we'll use the index passed in the body or params
+        // But since savedLeads is an array, we need to find it.
+        // Let's assume we pass the email or companyName to identify it.
+        
+        const { email, companyName } = req.body;
+        if (!email && !companyName) {
+            return res.status(400).json({ message: 'Email or Company Name required to delete' });
+        }
+
+        const user = await User.findById(req.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const initialLength = user.savedLeads.length;
+        user.savedLeads = user.savedLeads.filter(lead => {
+            if (email) return lead.email !== email;
+            if (companyName) return lead.companyName !== companyName;
+            return true;
+        });
+
+        if (user.savedLeads.length === initialLength) {
+            return res.status(404).json({ message: 'Lead not found in saved list' });
+        }
+
+        await user.save();
+        res.json({ success: true, message: 'Lead deleted successfully' });
+
+    } catch (err) {
+        console.error('❌ [deleteLead] Error:', err.message);
+        res.status(500).json({ message: 'Server Error deleting lead' });
+    }
+};
+
+// ─── ✅ GET SAVED LEADS ───
+const getSavedLeads = async (req, res) => {
+    try {
+        if (!req.userId || !isValidObjectId(req.userId)) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        const user = await User.findById(req.userId).select('savedLeads').lean();
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        res.json({ success: true, data: user.savedLeads || [] });
+
+    } catch (err) {
+        console.error('❌ [getSavedLeads] Error:', err.message);
+        res.status(500).json({ message: 'Server Error fetching saved leads' });
     }
 };
 
@@ -986,5 +1097,8 @@ module.exports = {
     getAllLeads,
     incrementUnreadCount,
     resetUnreadCount,
-    getTotalUnreadCount
+    getTotalUnreadCount,
+    saveLeads,      // ✅ New Export
+    deleteLead,     // ✅ New Export
+    getSavedLeads   // ✅ New Export
 };
