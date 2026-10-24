@@ -1,17 +1,40 @@
 // aiSuggestionController.js
+// UPDATED: Accepts count, batch generation, returns flat array
+
 const { checkAndIncrement } = require('./limitService');
-const { generateOutreachSuggestion } = require('./outreachSuggestionService');
+const { generateOutreachSuggestions } = require('./outreachSuggestionService');
 
 const suggestOutreach = async (req, res) => {
     try {
         const userId = req.userId;
-        const { leads } = req.body;
+        const { leads, count } = req.body;
 
+        // ─── Validate ───
         if (!leads || !Array.isArray(leads) || leads.length === 0) {
-            return res.status(400).json({ message: 'Leads array is required' });
+            return res.status(400).json({ 
+                success: false,
+                message: 'Leads array is required' 
+            });
         }
 
-        // ✅ Check plan-based daily limit BEFORE calling AI
+        // If count not provided, default to leads.length
+        const requestedCount = Number(count) || leads.length;
+        
+        if (requestedCount !== leads.length) {
+            return res.status(400).json({
+                success: false,
+                message: `count (${requestedCount}) must match leads length (${leads.length})`
+            });
+        }
+
+        if (requestedCount > 50) {
+            return res.status(400).json({
+                success: false,
+                message: 'Maximum 50 leads per request'
+            });
+        }
+
+        // ─── Check plan-based daily limit ───
         const limitResult = await checkAndIncrement(userId, 'aiSuggestion');
 
         if (!limitResult.allowed) {
@@ -23,32 +46,24 @@ const suggestOutreach = async (req, res) => {
             });
         }
 
-        // ✅ Generate suggestions using dedicated outreach service
-        const suggestions = [];
-        for (const lead of leads) {
-            const message = await generateOutreachSuggestion({
-                companyName: lead.companyName,
-                email: lead.email,
-                industry: lead.industry || ''
-            });
+        // ─── Generate in ONE call ───
+        const drafts = await generateOutreachSuggestions(leads, requestedCount);
 
-            suggestions.push({
-                email: lead.email,
-                companyName: lead.companyName,
-                suggestedMessage: message
-            });
-        }
-
+        // ─── Return flat structure ───
         res.json({
             success: true,
-            suggestions,
+            count: drafts.length,
+            drafts: drafts,  // [{leadEmail, subject, message}]
             remainingCalls: limitResult.remaining,
             plan: req.user?.subscriptionTier || 'free'
         });
 
     } catch (err) {
-        console.error('AI Suggestion Controller Error:', err.message);
-        res.status(500).json({ message: 'Failed to generate suggestions' });
+        console.error('❌ [AI Suggestion Controller] Error:', err.message);
+        res.status(500).json({ 
+            success: false,
+            message: err.message || 'Failed to generate suggestions' 
+        });
     }
 };
 
