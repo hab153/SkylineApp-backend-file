@@ -1,14 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const { createSchedule, getPendingSchedules, toggleApproval } = require('./scheduleController');
-const { validate } = require('./validationMiddleware'); // <--- Ensure this is imported
+const { validate } = require('./validationMiddleware');
 const { scheduleSchema } = require('./validationSchemas');
-const authMiddleware = require('./authMiddleware');
+const { verifyToken } = require('./authMiddleware');  // ⭐ DESTRUCTURED
 
-// ✅ THIS LINE MUST HAVE validate(scheduleSchema)
-router.post('/schedule', authMiddleware, validate(scheduleSchema), createSchedule);
-
-router.get('/schedules/pending', authMiddleware, getPendingSchedules);
-router.put('/schedules/:id/approve', authMiddleware, toggleApproval);
+router.post('/schedule', verifyToken, validate(scheduleSchema), createSchedule);
+router.get('/schedules/pending', verifyToken, getPendingSchedules);
+router.put('/schedules/:id/approve', verifyToken, toggleApproval);
 
 module.exports = router;
