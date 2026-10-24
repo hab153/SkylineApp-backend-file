@@ -184,6 +184,32 @@ const aiSuggestionSchema = Joi.object({
     ).min(1).max(50).required()
 });
 
+// ============================================================
+// ⭐ NEW: SCHEDULE VALIDATION SCHEMA
+// ============================================================
+
+const scheduleSchema = Joi.object({
+    scheduledAt: Joi.string().isoDate().required().messages({
+        'string.isoDate': 'scheduledAt must be a valid ISO 8601 date string'
+    }),
+    timezone: Joi.string().min(1).max(50).required(),
+    paceMinutes: Joi.number().integer().min(1).max(1440).default(5),
+    safetyRules: Joi.object({
+        stopOnReply: Joi.boolean().default(true),
+        stopOnUnsubscribe: Joi.boolean().default(true),
+        skipMissingEmail: Joi.boolean().default(true)
+    }).default({}),
+    leads: Joi.array().items(
+        Joi.object({
+            companyName: Joi.string().min(1).max(100).required(),
+            email: Joi.string().email({ tlds: { allow: false } }).max(255).required(),
+            subject: Joi.string().min(1).max(200).required(),
+            body: Joi.string().min(1).max(10000).required(),
+            approved: Joi.boolean().required()
+        })
+    ).min(1).max(100).required()
+});
+
 module.exports = {
     registerSchema,
     loginSchema,
@@ -203,5 +229,6 @@ module.exports = {
     assistantSchema,
     dreamSchema,
     dreamRefineSchema,
-    aiSuggestionSchema // ⭐ NEW EXPORT
+    aiSuggestionSchema,
+    scheduleSchema // ⭐ NEW EXPORT
 };
