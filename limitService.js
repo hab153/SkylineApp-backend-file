@@ -10,7 +10,7 @@ const LIMITS = {
     pro:  { emails: 120, research: 20, chats: 150, aiSuggestions: 35 }
 };
 
-// ── WINDOW: 24 hours in milliseconds ──
+// ─ WINDOW: 24 hours in milliseconds ──
 const RESET_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -31,12 +31,12 @@ async function checkAndIncrement(userId, type) {
     const user = await User.findById(userId);
     if (!user) throw new Error('User not found');
 
-    // ─── Ensure usage object exists ──
+    // ── Ensure usage object exists ──
     if (!user.usage) user.usage = {};
 
     const now = new Date();
 
-    // ─── Reset counters if 24h passed OR first-ever use ───
+    // ─── Reset counters if 24h passed OR first-ever use ──
     if (shouldReset(user.usage.lastLimitReset)) {
         console.log(`🔄 [LIMITS] Resetting counters for user ${userId}`);
         user.usage.dailyEmailCount = 0;
@@ -63,7 +63,7 @@ async function checkAndIncrement(userId, type) {
     const limit = limitConfig[limitKey];
 
     if (currentCount >= limit) {
-        console.log(` [LIMITS] ${type} limit reached for user ${userId} (${currentCount}/${limit})`);
+        console.log(`🚫 [LIMITS] ${type} limit reached for user ${userId} (${currentCount}/${limit})`);
         user.markModified('usage');
         await user.save();
         return { allowed: false, remaining: 0, limit: limit, used: currentCount };
