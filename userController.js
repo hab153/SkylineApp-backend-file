@@ -1,12 +1,12 @@
 // userController.js
-// UPDATED: Uses researchLimitService for accurate research limits
+// UPDATED: Includes AI Suggestions in usage response
 
 const bcrypt = require('bcryptjs');
 const User = require('./User');
 const { changeEmail, verifyAge } = require('./authController');
 const { isValidObjectId, sanitizeObject } = require('./sanitize');
 const { deleteAccount, deactivateAccount, restoreAccount, getDeletionStatus } = require('./deleteAccount');
-const { getRemainingLimits } = require('./limitService');           // For emails + chats
+const { getRemainingLimits } = require('./limitService');           // For emails + chats + aiSuggestions
 const { getRemaining: getResearchRemaining } = require('./researchLimitService'); // ⭐ For research
 
 // ─── ✅ GET /api/user/dashboard-data ───
@@ -44,14 +44,15 @@ const getDashboardData = async (req, res) => {
             }
         }
 
-        // ⭐ Get real limits — research from NEW service, emails/chats from OLD
+        // ⭐ Get real limits — research from NEW service, emails/chats/aiSuggestions from OLD
         const generalLimits = await getRemainingLimits(userId);
         const researchData = await getResearchRemaining(userId);
 
         const limits = {
             emails: generalLimits.emails,
             research: researchData.research,  // ⭐ From new service
-            chats: generalLimits.chats
+            chats: generalLimits.chats,
+            aiSuggestions: generalLimits.aiSuggestions // ⭐ NEW
         };
 
         const dashboardData = {
@@ -101,7 +102,8 @@ const getUserProfile = async (req, res) => {
         const remainingLimits = {
             emails: generalLimits.emails,
             research: researchData.research,  // ⭐ From new service
-            chats: generalLimits.chats
+            chats: generalLimits.chats,
+            aiSuggestions: generalLimits.aiSuggestions // ⭐ NEW
         };
 
         console.log(`✅ [getUserProfile] User: ${req.userId} | Limits:`, remainingLimits);
@@ -271,14 +273,14 @@ const getDeletionStatusHandler = async (req, res) => {
     }
 };
 
-// ─── ⭐ GET /api/users/me/usage (UPDATED) ───
+// ─── ⭐ GET /api/users/me/usage (UPDATED WITH AI SUGGESTIONS) ───
 const getUserUsage = async (req, res) => {
     try {
         if (!isValidObjectId(req.userId)) {
             return res.status(400).json({ message: 'Invalid user ID' });
         }
 
-        // ⭐ Use new service for research
+        // ⭐ Use new service for research, old service for everything else including AI
         const generalLimits = await getRemainingLimits(req.userId);
         const researchData = await getResearchRemaining(req.userId);
 
@@ -286,13 +288,14 @@ const getUserUsage = async (req, res) => {
         const tier = user?.subscriptionTier || 'free';
 
         const planLimits = {
-            free: { emails: 30, research: 4, chats: 30 },
-            go: { emails: 70, research: 10, chats: 90 },
-            pro: { emails: 120, research: 20, chats: 150 }
+            free: { emails: 30, research: 4, chats: 30, aiSuggestions: 7 },
+            go: { emails: 70, research: 10, chats: 90, aiSuggestions: 15 },
+            pro: { emails: 120, research: 20, chats: 150, aiSuggestions: 35 }
         };
 
         const max = planLimits[tier] || planLimits.free;
 
+        // ⭐ Response matches EXACTLY what alert.js expects: data.limits.{type}.{remaining, max}
         res.json({
             limits: {
                 email: {
@@ -301,7 +304,7 @@ const getUserUsage = async (req, res) => {
                     remaining: generalLimits.emails
                 },
                 research: {
-                    used: max.research - researchData.research,  // ⭐ Uses new value
+                    used: max.research - researchData.research,
                     max: max.research,
                     remaining: researchData.research
                 },
@@ -309,6 +312,12 @@ const getUserUsage = async (req, res) => {
                     used: max.chats - generalLimits.chats,
                     max: max.chats,
                     remaining: generalLimits.chats
+                },
+                // ⭐ NEW: AI Suggestions added to match frontend contract
+                aiSuggestions: {
+                    used: max.aiSuggestions - generalLimits.aiSuggestions,
+                    max: max.aiSuggestions,
+                    remaining: generalLimits.aiSuggestions
                 }
             },
             tier: tier,
