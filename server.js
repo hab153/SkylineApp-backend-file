@@ -82,7 +82,8 @@ const {
     assistantSchema,
     dreamSchema,
     dreamRefineSchema,
-    aiSuggestionSchema // ⭐ NEW: Added for AI suggestion validation
+    aiSuggestionSchema, // ⭐ NEW: Added for AI suggestion validation
+    scheduleSchema      // ⭐ NEW: Added for schedule validation
 } = require('./validationSchemas');
 
 // XSS protection
@@ -114,6 +115,10 @@ const streamRoutes = require('./streamRoutes');
 
 // ⭐ NEW: AI Suggestion Routes
 const aiSuggestionRoutes = require('./aiSuggestionRoutes');
+
+// ⭐ NEW: Schedule Routes & Dispatcher
+const scheduleRoutes = require('./scheduleRoutes');
+const { startScheduleDispatcher } = require('./scheduleDispatcher');
 
 dotenv.config();
 const app = express();
@@ -316,7 +321,7 @@ console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
 
 // ════════════════════════════════════════════
 //  ✅ JSON PARSER — INCREASED LIMIT FOR LARGE SEARCH RESULTS
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -354,6 +359,12 @@ mongoose.connect(process.env.MONGODB_URI, {
         await Notification.collection.createIndex({ userId: 1, isRead: 1 });
         console.log('✅ [SERVER] Notification indexes created');
         
+        // ⭐ NEW: Create ScheduledMessage indexes
+        const ScheduledMessage = require('./ScheduledMessage');
+        await ScheduledMessage.collection.createIndex({ scheduledAt: 1, status: 1 });
+        await ScheduledMessage.collection.createIndex({ userId: 1 });
+        console.log('✅ [SERVER] ScheduledMessage indexes created');
+        
         console.log('✅ [SERVER] All database indexes created');
     } catch (indexErr) { console.warn('⚠️ [SERVER] Index creation warning:', indexErr.message); }
     
@@ -371,10 +382,14 @@ mongoose.connect(process.env.MONGODB_URI, {
     // ✅ START SSE HEARTBEAT (every 30 seconds)
     sseManager.startHeartbeat();
     console.log('✅ [SERVER] SSE heartbeat started (every 30 seconds)');
+    
+    // ⭐ NEW: Start schedule dispatcher cron job
+    startScheduleDispatcher();
+    console.log('✅ [SERVER] Schedule dispatcher started');
 })
 .catch(function(err) {
     console.log('❌ MongoDB Connection Error:', err.message);
-    console.log('⚠️ [SERVER] Will retry connection in 10 seconds...');
+    console.log('️ [SERVER] Will retry connection in 10 seconds...');
     setTimeout(function() {
         console.log(' [SERVER] Retrying MongoDB connection...');
         mongoose.connect(process.env.MONGODB_URI, {
@@ -387,7 +402,7 @@ mongoose.connect(process.env.MONGODB_URI, {
         }).then(function() {
             console.log('✅ MongoDB Connected (retry successful)');
         }).catch(function(retryErr) {
-            console.error('❌ MongoDB Connection failed on retry:', retryErr.message);
+            console.error(' MongoDB Connection failed on retry:', retryErr.message);
         });
     }, 10000);
 });
@@ -402,7 +417,7 @@ async function verifyWebhookRegistration() {
 }
 
 async function startTokenRefreshJob() {
-    console.log('⏰ [TOKEN REFRESH] Starting background token refresh job...');
+    console.log(' [TOKEN REFRESH] Starting background token refresh job...');
     setInterval(async () => {
         try {
             const EmailAccount = require('./EmailAccount');
@@ -438,7 +453,7 @@ app.use('/api', sessionRoutes);
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
-    console.log('📝 [NYLAS ROUTE] Method:', req.method);
+    console.log(' [NYLAS ROUTE] Method:', req.method);
     next();
 }, nylasAuthController.getAuthUrl);
 
@@ -476,7 +491,7 @@ app.post('/api/auth/forgot-password', resetLimiter, validate(forgotPasswordSchem
 app.post('/api/auth/reset-password', resetLimiter, validate(resetPasswordSchema), resetPassword);
 app.put('/api/users/verify-age', verifyToken, validate(verifyAgeSchema), userController.verifyAge);
 
-// ─── USER PROFILE ROUTES ───
+// ─── USER PROFILE ROUTES ──
 app.get('/api/users/me', verifyToken, checkSubscriptionExpiry, userController.getUserProfile);
 app.put('/api/users/me', verifyToken, checkSubscriptionExpiry, validate(updateProfileSchema), userController.updateUserProfile);
 app.put('/api/auth/change-password', verifyToken, userController.changePassword);
@@ -491,10 +506,10 @@ app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserA
 app.post('/api/users/me/restore', verifyToken, userController.restoreUserAccount);
 app.get('/api/users/me/deletion-status', verifyToken, userController.getDeletionStatus);
 
-// ─── DATA EXPORT ROUTES ───
+// ── DATA EXPORT ROUTES ───
 app.use('/api/data', dataExportRoutes);
 
-// ── LEAD / CONVERSATION ROUTES ───
+// ── LEAD / CONVERSATION ROUTES ──
 console.log('🔧 [SERVER] Registering lead/conversation routes...');
 app.get('/api/conversations', verifyToken, leadController.getConversations);
 console.log('✅ [SERVER] GET /api/conversations registered');
@@ -524,6 +539,10 @@ app.post('/api/leads/draft', verifyToken, leadController.saveDraft);
 app.get('/api/leads/drafts', verifyToken, leadController.getDrafts);
 app.delete('/api/leads/draft', verifyToken, leadController.deleteDraft);
 
+// ⭐ NEW: SCHEDULE ROUTES
+app.use('/api/leads', scheduleRoutes);
+console.log('✅ [SERVER] Schedule routes registered');
+
 console.log('✅ [SERVER] All lead routes registered');
 
 // ─── FOLLOW-UP ROUTES ───
@@ -549,7 +568,7 @@ console.log('✅ [SERVER] Notification routes registered');
 
 // ✅ Request logging middleware for /api/chat
 const logChatRequest = function(req, res, next) {
-    console.log('📥 [SERVER] /api/chat request received');
+    console.log(' [SERVER] /api/chat request received');
     console.log('📥 [SERVER] Request body:', JSON.stringify(req.body, null, 2));
     console.log('📥 [SERVER] User ID:', req.userId);
     console.log('📥 [SERVER] Headers:', {
@@ -577,7 +596,7 @@ app.post('/api/dreams/analyze', verifyToken, checkSubscriptionExpiry, checkDaily
 app.post('/api/dreams/refine', verifyToken, checkSubscriptionExpiry, checkDailyLimit, validate(dreamRefineSchema), chatController.refineDream);
 console.log('✅ [SERVER] Dreams routes registered');
 
-// ─── EXISTING AI SUGGESTION ROUTE (CHAT CONTEXT) ───
+// ─── EXISTING AI SUGGESTION ROUTE (CHAT CONTEXT) ──
 app.post('/api/ai/suggest', verifyToken, checkHintLimit, async (req, res) => {
     console.log('💡 [AI SUGGEST] Request received');
     try {
@@ -712,7 +731,7 @@ console.log('✅ [UNREAD] Endpoints registered:');
 console.log('   📋 GET  /api/unread/status      - Get unread status');
 console.log('   📋 POST /api/unread/clear       - Clear all unread');
 console.log('   📋 GET  /api/unread/leads       - Get leads with unread');
-console.log('   📋 GET  /api/unread/lead/:id    - Get unread for lead');
+console.log('    GET  /api/unread/lead/:id    - Get unread for lead');
 console.log('   📋 POST /api/unread/reset/:id   - Reset unread for lead');
 
 // ═══════════════════════════════════════════
@@ -724,11 +743,11 @@ app.get('/api/user/dashboard-data', verifyToken, userController.getDashboardData
 console.log('✅ [DASHBOARD] Endpoint registered: GET /api/user/dashboard-data');
 console.log('   📋 Combines: user profile + subscription + email status');
 
-// ════════════════════════════════════════════
+// ═══════════════════════════════════════════
 //  ✅ COMPOSE ROUTES (NEW)
 // ════════════════════════════════════════════
 
-console.log('📧 [COMPOSE] Registering compose routes...');
+console.log(' [COMPOSE] Registering compose routes...');
 
 // Send compose email
 app.post('/api/compose/send', verifyToken, composeController.sendComposeEmail);
@@ -751,7 +770,7 @@ console.log(' [STREAM] Registering stream routes...');
 app.use('/api/stream', streamRoutes);
 
 console.log('✅ [STREAM] Routes registered at /api/stream');
-console.log('   📋 GET /api/stream/pipeline  - Stream pipeline stages via SSE');
+console.log('    GET /api/stream/pipeline  - Stream pipeline stages via SSE');
 
 // ════════════════════════════════════════════
 //  START SERVER
