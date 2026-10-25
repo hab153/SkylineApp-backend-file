@@ -7,7 +7,7 @@ const {
     cancelAllSchedules 
 } = require('./scheduleController');
 
-// All automation routes require valid JWT
+// All automation routes require valid JWT token
 router.put('/pause', verifyToken, pauseAllSchedules);
 router.put('/resume', verifyToken, resumeAllSchedules);
 router.delete('/cancel', verifyToken, cancelAllSchedules);
