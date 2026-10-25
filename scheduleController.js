@@ -1,5 +1,5 @@
 const ScheduledMessage = require('./ScheduledMessage');
-const Lead = require('./Lead'); // ✅ Import for clearing schedule fields on delete
+const Lead = require('./Lead');
 
 /**
  * POST /api/leads/schedule
@@ -103,22 +103,25 @@ const createSchedule = async (req, res) => {
 /**
  * GET /api/leads/schedules/pending
  * Returns pending AND paused schedules for the current user
- * ✅ Includes paused so frontend can show them with frozen state
+ * ✅ FIXED: Uses .lean() + explicit .toString() to guarantee string IDs
  */
 const getPendingSchedules = async (req, res) => {
     try {
         const userId = req.userId;
 
+        // ✅ CRITICAL FIX: Add .lean() to return plain JS objects instead of Mongoose documents
         const schedules = await ScheduledMessage.find({
             userId,
             status: { $in: ['pending', 'paused'] }
-        }).sort({ scheduledAt: 1 });
+        }).sort({ scheduledAt: 1 }).lean();
 
         res.json({
             success: true,
             count: schedules.length,
             schedules: schedules.map(s => ({
-                id: s._id,
+                // ✅ CRITICAL FIX: Explicitly convert ObjectId to hex string
+                id: s._id.toString(),
+                _id: s._id.toString(),
                 leadEmail: s.leadEmail,
                 companyName: s.companyName,
                 subject: s.subject,
@@ -190,7 +193,7 @@ const toggleApproval = async (req, res) => {
 
 // ═════════════════════════════════════════════════════════
 // ✅ AUTOMATION CONTROL HANDLERS (BULK)
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
 
 /**
  * PUT /api/automation/pause
@@ -201,7 +204,7 @@ const pauseAllSchedules = async (req, res) => {
     try {
         const userId = req.userId;
         
-        // ✅ Aggregation pipeline array allows field references like '$scheduledAt'
+        // Aggregation pipeline array allows field references like '$scheduledAt'
         const result = await ScheduledMessage.updateMany(
             { userId, status: 'pending' },
             [
@@ -215,7 +218,7 @@ const pauseAllSchedules = async (req, res) => {
             ]
         );
 
-        console.log(`⏸️ [AUTOMATION] Paused ${result.modifiedCount} schedules for user ${userId}`);
+        console.log(`️ [AUTOMATION] Paused ${result.modifiedCount} schedules for user ${userId}`);
         
         res.json({
             success: true,
@@ -223,7 +226,7 @@ const pauseAllSchedules = async (req, res) => {
             pausedCount: result.modifiedCount
         });
     } catch (err) {
-        console.error('❌ [AUTOMATION] Pause error:', err.message);
+        console.error(' [AUTOMATION] Pause error:', err.message);
         res.status(500).json({ success: false, message: 'Failed to pause schedules' });
     }
 };
@@ -347,14 +350,14 @@ const pauseSingleSchedule = async (req, res) => {
             success: true,
             message: 'Schedule paused successfully',
             schedule: {
-                id: message._id,
+                id: message._id.toString(),
                 status: message.status,
                 pausedAt: message.pausedAt.toISOString(),
                 originalScheduledAt: message.originalScheduledAt.toISOString()
             }
         });
     } catch (err) {
-        console.error('❌ [SCHEDULE] Pause single error:', err.message);
+        console.error(' [SCHEDULE] Pause single error:', err.message);
         res.status(500).json({ success: false, message: 'Failed to pause schedule' });
     }
 };
@@ -407,13 +410,13 @@ const resumeSingleSchedule = async (req, res) => {
             success: true,
             message: 'Schedule resumed successfully',
             schedule: {
-                id: message._id,
+                id: message._id.toString(),
                 status: message.status,
                 scheduledAt: message.scheduledAt.toISOString()
             }
         });
     } catch (err) {
-        console.error('❌ [SCHEDULE] Resume single error:', err.message);
+        console.error(' [SCHEDULE] Resume single error:', err.message);
         res.status(500).json({ success: false, message: 'Failed to resume schedule' });
     }
 };
