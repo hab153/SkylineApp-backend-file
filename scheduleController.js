@@ -1,5 +1,5 @@
 const ScheduledMessage = require('./ScheduledMessage');
-const Lead = require('./Lead'); // ✅ NEW: Import for clearing schedule fields on delete
+const Lead = require('./Lead'); // ✅ Import for clearing schedule fields on delete
 
 /**
  * POST /api/leads/schedule
@@ -16,7 +16,7 @@ const createSchedule = async (req, res) => {
             leads 
         } = req.body;
 
-        //  Validate atomic approval ──
+        // Validate atomic approval
         const unapprovedLeads = leads.filter(lead => !lead.approved);
         
         if (unapprovedLeads.length > 0) {
@@ -34,7 +34,7 @@ const createSchedule = async (req, res) => {
             });
         }
 
-        // ── Parse and validate scheduledAt ──
+        // Parse and validate scheduledAt
         const scheduleDate = new Date(scheduledAt);
         if (isNaN(scheduleDate.getTime())) {
             return res.status(400).json({
@@ -50,7 +50,7 @@ const createSchedule = async (req, res) => {
             });
         }
 
-        //  Save all scheduled messages atomically ──
+        // Save all scheduled messages atomically
         const savedMessages = await Promise.all(
             leads.map(lead => {
                 return ScheduledMessage.create({
@@ -75,7 +75,7 @@ const createSchedule = async (req, res) => {
 
         console.log(`✅ [SCHEDULE] Created ${savedMessages.length} scheduled messages for user ${userId}`);
 
-        //  Return enriched lead data with scheduledAt for frontend countdown ─
+        // Return enriched lead data with scheduledAt for frontend countdown
         const enrichedLeads = savedMessages.map(msg => ({
             email: msg.leadEmail,
             companyName: msg.companyName,
@@ -103,7 +103,7 @@ const createSchedule = async (req, res) => {
 /**
  * GET /api/leads/schedules/pending
  * Returns pending AND paused schedules for the current user
- * ✅ UPDATED: Includes paused so frontend can show them with frozen state
+ * ✅ Includes paused so frontend can show them with frozen state
  */
 const getPendingSchedules = async (req, res) => {
     try {
@@ -111,7 +111,7 @@ const getPendingSchedules = async (req, res) => {
 
         const schedules = await ScheduledMessage.find({
             userId,
-            status: { $in: ['pending', 'paused'] } // ✅ Include paused
+            status: { $in: ['pending', 'paused'] }
         }).sort({ scheduledAt: 1 });
 
         res.json({
@@ -128,8 +128,8 @@ const getPendingSchedules = async (req, res) => {
                 paceMinutes: s.paceMinutes,
                 safetyRules: s.safetyRules,
                 approved: s.approved,
-                status: s.status,          // ✅ Expose status for frontend
-                originalScheduledAt: s.originalScheduledAt?.toISOString() || null, // ✅ For resume calc
+                status: s.status,
+                originalScheduledAt: s.originalScheduledAt?.toISOString() || null,
                 pausedAt: s.pausedAt?.toISOString() || null
             }))
         });
@@ -188,27 +188,31 @@ const toggleApproval = async (req, res) => {
     }
 };
 
-// ══════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
 // ✅ AUTOMATION CONTROL HANDLERS (BULK)
 // ══════════════════════════════════════════════════════════
 
 /**
  * PUT /api/automation/pause
  * Freezes all pending schedules for current user without deleting them
+ * ✅ FIXED: Uses aggregation pipeline to correctly reference $scheduledAt field
  */
 const pauseAllSchedules = async (req, res) => {
     try {
         const userId = req.userId;
         
+        // ✅ Aggregation pipeline array allows field references like '$scheduledAt'
         const result = await ScheduledMessage.updateMany(
             { userId, status: 'pending' },
-            { 
-                $set: { 
-                    status: 'paused',
-                    pausedAt: new Date(),
-                    originalScheduledAt: '$scheduledAt'
+            [
+                {
+                    $set: { 
+                        status: 'paused',
+                        pausedAt: new Date(),
+                        originalScheduledAt: '$scheduledAt'
+                    }
                 }
-            }
+            ]
         );
 
         console.log(`⏸️ [AUTOMATION] Paused ${result.modifiedCount} schedules for user ${userId}`);
@@ -304,7 +308,7 @@ const cancelAllSchedules = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════
-// ✅ NEW: PER-SCHEDULE HANDLERS
+// ✅ PER-SCHEDULE HANDLERS
 // ═══════════════════════════════════════════════════════════
 
 /**
@@ -438,8 +442,7 @@ const deleteSingleSchedule = async (req, res) => {
         // Delete the schedule record
         await ScheduledMessage.deleteOne({ _id: id, userId });
 
-        // ✅ CRITICAL: Clear schedule fields from the matching Lead document
-        // so the leads page countdown badge disappears
+        // Clear schedule fields from the matching Lead document
         await Lead.updateMany(
             { userId, email: leadEmail },
             { 
@@ -473,7 +476,7 @@ module.exports = {
     pauseAllSchedules,
     resumeAllSchedules,
     cancelAllSchedules,
-    pauseSingleSchedule,   // ✅ NEW
-    resumeSingleSchedule,  // ✅ NEW
-    deleteSingleSchedule   // ✅ NEW
+    pauseSingleSchedule,
+    resumeSingleSchedule,
+    deleteSingleSchedule
 };
