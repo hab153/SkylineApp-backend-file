@@ -82,8 +82,8 @@ const {
     assistantSchema,
     dreamSchema,
     dreamRefineSchema,
-    aiSuggestionSchema, // ⭐ NEW: Added for AI suggestion validation
-    scheduleSchema      // ⭐ NEW: Added for schedule validation
+    aiSuggestionSchema,
+    scheduleSchema
 } = require('./validationSchemas');
 
 // XSS protection
@@ -119,6 +119,9 @@ const aiSuggestionRoutes = require('./aiSuggestionRoutes');
 // ⭐ NEW: Schedule Routes & Dispatcher
 const scheduleRoutes = require('./scheduleRoutes');
 const { startScheduleDispatcher } = require('./scheduleDispatcher');
+
+// ⭐ NEW: Automation Routes
+const automationRoutes = require('./automationRoutes');
 
 dotenv.config();
 const app = express();
@@ -273,7 +276,7 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 console.log('✅ [SERVER] Security middleware applied');
 
-// ─── HEALTH CHECK ───
+// ── HEALTH CHECK ───
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
 });
@@ -314,7 +317,7 @@ app.get('/api/events/stream', verifyToken, function(req, res) {
 });
 
 // ─── WEBHOOKS ───
-console.log('🔧 [SERVER] Registering webhook routes...');
+console.log(' [SERVER] Registering webhook routes...');
 app.post('/api/flutterwave-webhook', express.raw({ type: 'application/json', limit: '10mb' }), flutterwaveWebhook);
 app.all('/api/nylas/webhook', express.raw({ type: 'application/json', limit: '10mb' }), handleWebhook);
 console.log('✅ [SERVER] Webhook routes registered at /api/nylas/webhook');
@@ -363,6 +366,7 @@ mongoose.connect(process.env.MONGODB_URI, {
         const ScheduledMessage = require('./ScheduledMessage');
         await ScheduledMessage.collection.createIndex({ scheduledAt: 1, status: 1 });
         await ScheduledMessage.collection.createIndex({ userId: 1 });
+        await ScheduledMessage.collection.createIndex({ userId: 1, status: 1 });
         console.log('✅ [SERVER] ScheduledMessage indexes created');
         
         console.log('✅ [SERVER] All database indexes created');
@@ -411,7 +415,7 @@ async function verifyWebhookRegistration() {
     try {
         console.log('🔍 [WEBHOOK] Verifying webhook registration...');
         console.log('✅ [WEBHOOK] Endpoint ready at /api/nylas/webhook');
-        console.log('🔗 [WEBHOOK] Register this URL in Nylas Dashboard → Webhooks');
+        console.log(' [WEBHOOK] Register this URL in Nylas Dashboard → Webhooks');
         console.log('   → Triggers: message.created, message.sent, grant.expired, grant.refreshed');
     } catch (error) { console.error('❌ [WEBHOOK] Verification error:', error.message); }
 }
@@ -449,7 +453,7 @@ app.post('/api/auth/revoke-tokens', verifyToken, revokeAllTokens);
 app.use('/api', assistantRoutes);
 app.use('/api', sessionRoutes);
 
-// ─── NYLAS AUTH ROUTES ──
+// ─── NYLAS AUTH ROUTES ─
 app.get('/api/auth/nylas/connect', verifyToken, (req, res, next) => {
     console.log('🔐 [NYLAS ROUTE] /api/auth/nylas/connect called');
     console.log('📝 [NYLAS ROUTE] User ID:', req.userId);
@@ -500,7 +504,7 @@ app.put('/api/auth/change-password', verifyToken, userController.changePassword)
 app.get('/api/users/me/usage', verifyToken, userController.getUserUsage);
 console.log('✅ [SERVER] User usage route registered');
 
-// ─── GDPR ACCOUNT DELETION ROUTES ───
+// ─── GDPR ACCOUNT DELETION ROUTES ──
 app.delete('/api/users/me', verifyToken, userController.deleteUserAccount);
 app.post('/api/users/me/deactivate', verifyToken, userController.deactivateUserAccount);
 app.post('/api/users/me/restore', verifyToken, userController.restoreUserAccount);
@@ -543,6 +547,10 @@ app.delete('/api/leads/draft', verifyToken, leadController.deleteDraft);
 app.use('/api/leads', scheduleRoutes);
 console.log('✅ [SERVER] Schedule routes registered');
 
+// ⭐ NEW: AUTOMATION ROUTES
+app.use('/api/automation', automationRoutes);
+console.log('✅ [SERVER] Automation routes registered at /api/automation');
+
 console.log('✅ [SERVER] All lead routes registered');
 
 // ─── FOLLOW-UP ROUTES ───
@@ -571,7 +579,7 @@ const logChatRequest = function(req, res, next) {
     console.log(' [SERVER] /api/chat request received');
     console.log('📥 [SERVER] Request body:', JSON.stringify(req.body, null, 2));
     console.log('📥 [SERVER] User ID:', req.userId);
-    console.log('📥 [SERVER] Headers:', {
+    console.log(' [SERVER] Headers:', {
         authorization: req.headers.authorization ? 'Bearer [REDACTED]' : 'none',
         'content-type': req.headers['content-type']
     });
