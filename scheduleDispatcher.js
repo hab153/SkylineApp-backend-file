@@ -14,7 +14,8 @@ function startScheduleDispatcher() {
         try {
             const now = new Date();
             
-            // Find all pending messages due at or before now
+            // ✅ UPDATED: Only process active 'pending' messages
+            // Paused and cancelled messages are automatically excluded
             const dueMessages = await ScheduledMessage.find({
                 status: 'pending',
                 scheduledAt: { $lte: now }
@@ -63,7 +64,7 @@ async function processUserQueue(userId, messages) {
             }
         }
 
-        // ── Daily Limit Check BEFORE Sending ──
+        // ─ Daily Limit Check BEFORE Sending ──
         const limitCheck = await checkAndIncrement(userId, 'email');
         
         if (!limitCheck.allowed) {
