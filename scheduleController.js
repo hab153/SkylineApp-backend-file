@@ -1,4 +1,5 @@
 const ScheduledMessage = require('./ScheduledMessage');
+const Lead = require('./Lead'); // ✅ NEW: Import for clearing schedule fields on delete
 
 /**
  * POST /api/leads/schedule
@@ -15,7 +16,7 @@ const createSchedule = async (req, res) => {
             leads 
         } = req.body;
 
-        // ─ Validate atomic approval ──
+        //  Validate atomic approval ──
         const unapprovedLeads = leads.filter(lead => !lead.approved);
         
         if (unapprovedLeads.length > 0) {
@@ -101,7 +102,8 @@ const createSchedule = async (req, res) => {
 
 /**
  * GET /api/leads/schedules/pending
- * Returns pending schedules for the current user (for loading into Review Sheet)
+ * Returns pending AND paused schedules for the current user
+ * ✅ UPDATED: Includes paused so frontend can show them with frozen state
  */
 const getPendingSchedules = async (req, res) => {
     try {
@@ -109,7 +111,7 @@ const getPendingSchedules = async (req, res) => {
 
         const schedules = await ScheduledMessage.find({
             userId,
-            status: 'pending'
+            status: { $in: ['pending', 'paused'] } // ✅ Include paused
         }).sort({ scheduledAt: 1 });
 
         res.json({
@@ -125,15 +127,18 @@ const getPendingSchedules = async (req, res) => {
                 timezone: s.timezone,
                 paceMinutes: s.paceMinutes,
                 safetyRules: s.safetyRules,
-                approved: s.approved
+                approved: s.approved,
+                status: s.status,          // ✅ Expose status for frontend
+                originalScheduledAt: s.originalScheduledAt?.toISOString() || null, // ✅ For resume calc
+                pausedAt: s.pausedAt?.toISOString() || null
             }))
         });
 
     } catch (err) {
-        console.error('❌ [SCHEDULE] Error fetching pending schedules:', err.message);
+        console.error('❌ [SCHEDULE] Error fetching schedules:', err.message);
         res.status(500).json({
             success: false,
-            message: 'Failed to fetch pending schedules',
+            message: 'Failed to fetch schedules',
             error: err.message
         });
     }
@@ -183,9 +188,9 @@ const toggleApproval = async (req, res) => {
     }
 };
 
-// ═══════════════════════════════════════════════════════════
-// ✅ NEW: AUTOMATION CONTROL HANDLERS
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
+// ✅ AUTOMATION CONTROL HANDLERS (BULK)
+// ══════════════════════════════════════════════════════════
 
 /**
  * PUT /api/automation/pause
@@ -201,7 +206,7 @@ const pauseAllSchedules = async (req, res) => {
                 $set: { 
                     status: 'paused',
                     pausedAt: new Date(),
-                    originalScheduledAt: '$scheduledAt' // Preserve original time
+                    originalScheduledAt: '$scheduledAt'
                 }
             }
         );
@@ -228,7 +233,6 @@ const resumeAllSchedules = async (req, res) => {
         const userId = req.userId;
         const now = new Date();
         
-        // Find all paused messages and calculate offset
         const pausedMessages = await ScheduledMessage.find({ 
             userId, 
             status: 'paused',
@@ -248,7 +252,7 @@ const resumeAllSchedules = async (req, res) => {
                             status: 'pending',
                             scheduledAt: newScheduledAt,
                             pausedAt: null,
-                            originalScheduledAt: null // Clean up after resume
+                            originalScheduledAt: null
                         }
                     }
                 }
@@ -299,12 +303,177 @@ const cancelAllSchedules = async (req, res) => {
     }
 };
 
+// ═══════════════════════════════════════════════════════════
+// ✅ NEW: PER-SCHEDULE HANDLERS
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * PUT /api/automation/schedule/:id/pause
+ * Pauses a SINGLE scheduled message
+ */
+const pauseSingleSchedule = async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { id } = req.params;
+
+        const message = await ScheduledMessage.findOne({ _id: id, userId });
+
+        if (!message) {
+            return res.status(404).json({
+                success: false,
+                message: 'Scheduled message not found'
+            });
+        }
+
+        if (message.status !== 'pending') {
+            return res.status(400).json({
+                success: false,
+                message: 'Can only pause pending schedules'
+            });
+        }
+
+        message.status = 'paused';
+        message.pausedAt = new Date();
+        message.originalScheduledAt = message.scheduledAt;
+        await message.save();
+
+        console.log(`⏸️ [SCHEDULE] Paused single schedule ${id} for user ${userId}`);
+
+        res.json({
+            success: true,
+            message: 'Schedule paused successfully',
+            schedule: {
+                id: message._id,
+                status: message.status,
+                pausedAt: message.pausedAt.toISOString(),
+                originalScheduledAt: message.originalScheduledAt.toISOString()
+            }
+        });
+    } catch (err) {
+        console.error('❌ [SCHEDULE] Pause single error:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to pause schedule' });
+    }
+};
+
+/**
+ * PUT /api/automation/schedule/:id/resume
+ * Resumes a SINGLE paused schedule with adjusted timing
+ */
+const resumeSingleSchedule = async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { id } = req.params;
+        const now = new Date();
+
+        const message = await ScheduledMessage.findOne({ _id: id, userId });
+
+        if (!message) {
+            return res.status(404).json({
+                success: false,
+                message: 'Scheduled message not found'
+            });
+        }
+
+        if (message.status !== 'paused') {
+            return res.status(400).json({
+                success: false,
+                message: 'Can only resume paused schedules'
+            });
+        }
+
+        if (!message.originalScheduledAt) {
+            return res.status(400).json({
+                success: false,
+                message: 'Cannot resume: missing original scheduled time'
+            });
+        }
+
+        const pauseDurationMs = now.getTime() - message.pausedAt.getTime();
+        const newScheduledAt = new Date(message.originalScheduledAt.getTime() + pauseDurationMs);
+
+        message.status = 'pending';
+        message.scheduledAt = newScheduledAt;
+        message.pausedAt = null;
+        message.originalScheduledAt = null;
+        await message.save();
+
+        console.log(`▶️ [SCHEDULE] Resumed single schedule ${id} for user ${userId}`);
+
+        res.json({
+            success: true,
+            message: 'Schedule resumed successfully',
+            schedule: {
+                id: message._id,
+                status: message.status,
+                scheduledAt: message.scheduledAt.toISOString()
+            }
+        });
+    } catch (err) {
+        console.error('❌ [SCHEDULE] Resume single error:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to resume schedule' });
+    }
+};
+
+/**
+ * DELETE /api/automation/schedule/:id
+ * Removes a SINGLE schedule AND clears schedule fields from the matching Lead
+ */
+const deleteSingleSchedule = async (req, res) => {
+    try {
+        const userId = req.userId;
+        const { id } = req.params;
+
+        const message = await ScheduledMessage.findOne({ _id: id, userId });
+
+        if (!message) {
+            return res.status(404).json({
+                success: false,
+                message: 'Scheduled message not found'
+            });
+        }
+
+        const leadEmail = message.leadEmail;
+        const companyName = message.companyName;
+
+        // Delete the schedule record
+        await ScheduledMessage.deleteOne({ _id: id, userId });
+
+        // ✅ CRITICAL: Clear schedule fields from the matching Lead document
+        // so the leads page countdown badge disappears
+        await Lead.updateMany(
+            { userId, email: leadEmail },
+            { 
+                $unset: { 
+                    scheduledAt: '', 
+                    scheduleStatus: '' 
+                } 
+            }
+        );
+
+        console.log(`🗑️ [SCHEDULE] Deleted schedule ${id} for ${companyName} (${leadEmail}) and cleared Lead fields`);
+
+        res.json({
+            success: true,
+            message: `Schedule for ${companyName} removed successfully`,
+            deletedId: id,
+            leadEmail: leadEmail,
+            companyName: companyName
+        });
+    } catch (err) {
+        console.error('❌ [SCHEDULE] Delete single error:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to remove schedule' });
+    }
+};
+
 // ✅ UPDATED EXPORTS
 module.exports = {
     createSchedule,
     getPendingSchedules,
     toggleApproval,
-    pauseAllSchedules,   // NEW
-    resumeAllSchedules,  // NEW
-    cancelAllSchedules   // NEW
+    pauseAllSchedules,
+    resumeAllSchedules,
+    cancelAllSchedules,
+    pauseSingleSchedule,   // ✅ NEW
+    resumeSingleSchedule,  // ✅ NEW
+    deleteSingleSchedule   // ✅ NEW
 };
