@@ -15,7 +15,7 @@ const createSchedule = async (req, res) => {
             leads 
         } = req.body;
 
-        // ── Validate atomic approval ──
+        // ─ Validate atomic approval ──
         const unapprovedLeads = leads.filter(lead => !lead.approved);
         
         if (unapprovedLeads.length > 0) {
@@ -49,7 +49,7 @@ const createSchedule = async (req, res) => {
             });
         }
 
-        // ─ Save all scheduled messages atomically ──
+        //  Save all scheduled messages atomically ──
         const savedMessages = await Promise.all(
             leads.map(lead => {
                 return ScheduledMessage.create({
@@ -74,7 +74,7 @@ const createSchedule = async (req, res) => {
 
         console.log(`✅ [SCHEDULE] Created ${savedMessages.length} scheduled messages for user ${userId}`);
 
-        // ─ Return enriched lead data with scheduledAt for frontend countdown ──
+        //  Return enriched lead data with scheduledAt for frontend countdown ─
         const enrichedLeads = savedMessages.map(msg => ({
             email: msg.leadEmail,
             companyName: msg.companyName,
@@ -183,8 +183,128 @@ const toggleApproval = async (req, res) => {
     }
 };
 
+// ═══════════════════════════════════════════════════════════
+// ✅ NEW: AUTOMATION CONTROL HANDLERS
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * PUT /api/automation/pause
+ * Freezes all pending schedules for current user without deleting them
+ */
+const pauseAllSchedules = async (req, res) => {
+    try {
+        const userId = req.userId;
+        
+        const result = await ScheduledMessage.updateMany(
+            { userId, status: 'pending' },
+            { 
+                $set: { 
+                    status: 'paused',
+                    pausedAt: new Date(),
+                    originalScheduledAt: '$scheduledAt' // Preserve original time
+                }
+            }
+        );
+
+        console.log(`⏸️ [AUTOMATION] Paused ${result.modifiedCount} schedules for user ${userId}`);
+        
+        res.json({
+            success: true,
+            message: `${result.modifiedCount} schedules paused successfully`,
+            pausedCount: result.modifiedCount
+        });
+    } catch (err) {
+        console.error('❌ [AUTOMATION] Pause error:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to pause schedules' });
+    }
+};
+
+/**
+ * PUT /api/automation/resume
+ * Recalculates send times based on elapsed pause duration
+ */
+const resumeAllSchedules = async (req, res) => {
+    try {
+        const userId = req.userId;
+        const now = new Date();
+        
+        // Find all paused messages and calculate offset
+        const pausedMessages = await ScheduledMessage.find({ 
+            userId, 
+            status: 'paused',
+            originalScheduledAt: { $ne: null }
+        });
+
+        let resumedCount = 0;
+        const bulkOps = pausedMessages.map(msg => {
+            const pauseDurationMs = now.getTime() - msg.pausedAt.getTime();
+            const newScheduledAt = new Date(msg.originalScheduledAt.getTime() + pauseDurationMs);
+            
+            return {
+                updateOne: {
+                    filter: { _id: msg._id },
+                    update: {
+                        $set: {
+                            status: 'pending',
+                            scheduledAt: newScheduledAt,
+                            pausedAt: null,
+                            originalScheduledAt: null // Clean up after resume
+                        }
+                    }
+                }
+            };
+        });
+
+        if (bulkOps.length > 0) {
+            const result = await ScheduledMessage.bulkWrite(bulkOps);
+            resumedCount = result.modifiedCount;
+        }
+
+        console.log(`▶️ [AUTOMATION] Resumed ${resumedCount} schedules for user ${userId}`);
+        
+        res.json({
+            success: true,
+            message: `${resumedCount} schedules resumed with adjusted timing`,
+            resumedCount
+        });
+    } catch (err) {
+        console.error('❌ [AUTOMATION] Resume error:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to resume schedules' });
+    }
+};
+
+/**
+ * DELETE /api/automation/cancel
+ * Permanently removes all pending/paused schedules after confirmation
+ */
+const cancelAllSchedules = async (req, res) => {
+    try {
+        const userId = req.userId;
+        
+        const result = await ScheduledMessage.deleteMany({
+            userId,
+            status: { $in: ['pending', 'paused'] }
+        });
+
+        console.log(`🗑️ [AUTOMATION] Cancelled ${result.deletedCount} schedules for user ${userId}`);
+        
+        res.json({
+            success: true,
+            message: `${result.deletedCount} schedules permanently cancelled`,
+            cancelledCount: result.deletedCount
+        });
+    } catch (err) {
+        console.error('❌ [AUTOMATION] Cancel error:', err.message);
+        res.status(500).json({ success: false, message: 'Failed to cancel schedules' });
+    }
+};
+
+// ✅ UPDATED EXPORTS
 module.exports = {
     createSchedule,
     getPendingSchedules,
-    toggleApproval
+    toggleApproval,
+    pauseAllSchedules,   // NEW
+    resumeAllSchedules,  // NEW
+    cancelAllSchedules   // NEW
 };
