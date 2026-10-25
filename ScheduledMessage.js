@@ -26,7 +26,7 @@ const scheduledMessageSchema = new mongoose.Schema({
     scheduledAt: {
         type: Date,
         required: true,
-        index: true // Indexed for efficient cron queries by time
+        index: true
     },
     timezone: {
         type: String,
@@ -42,11 +42,12 @@ const scheduledMessageSchema = new mongoose.Schema({
         stopOnUnsubscribe: { type: Boolean, default: true },
         skipMissingEmail: { type: Boolean, default: true }
     },
+    // ✅ UPDATED: Expanded enum to support pause/cancel states
     status: {
         type: String,
-        enum: ['pending', 'sending', 'sent', 'failed', 'cancelled'],
+        enum: ['pending', 'sending', 'sent', 'failed', 'cancelled', 'paused'],
         default: 'pending',
-        index: true // Composite index with scheduledAt for cron lookups
+        index: true
     },
     approved: {
         type: Boolean,
@@ -55,12 +56,24 @@ const scheduledMessageSchema = new mongoose.Schema({
     failureReason: {
         type: String,
         default: null
+    },
+    // ✅ NEW: Preserves original send time when paused for accurate resume calculation
+    originalScheduledAt: {
+        type: Date,
+        default: null
+    },
+    // ✅ NEW: Audit trail for pause duration and debugging
+    pausedAt: {
+        type: Date,
+        default: null
     }
 }, {
-    timestamps: true // Adds createdAt and updatedAt automatically
+    timestamps: true
 });
 
 // Compound index for efficient cron job queries: find pending messages due now
 scheduledMessageSchema.index({ scheduledAt: 1, status: 1 });
+// ✅ NEW: Index for fast user-level automation queries
+scheduledMessageSchema.index({ userId: 1, status: 1 });
 
 module.exports = mongoose.model('ScheduledMessage', scheduledMessageSchema);
