@@ -4,12 +4,20 @@ const { verifyToken } = require('./authMiddleware');
 const { 
     pauseAllSchedules, 
     resumeAllSchedules, 
-    cancelAllSchedules 
+    cancelAllSchedules,
+    pauseSingleSchedule,    // ✅ NEW
+    resumeSingleSchedule,   // ✅ NEW
+    deleteSingleSchedule    // ✅ NEW
 } = require('./scheduleController');
 
-// All automation routes require valid JWT token
+// Bulk automation routes
 router.put('/pause', verifyToken, pauseAllSchedules);
 router.put('/resume', verifyToken, resumeAllSchedules);
 router.delete('/cancel', verifyToken, cancelAllSchedules);
+
+// ✅ NEW: Per-schedule routes
+router.put('/schedule/:id/pause', verifyToken, pauseSingleSchedule);
+router.put('/schedule/:id/resume', verifyToken, resumeSingleSchedule);
+router.delete('/schedule/:id', verifyToken, deleteSingleSchedule);
 
 module.exports = router;
